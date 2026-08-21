@@ -20,10 +20,18 @@ from .extract_vendored_native_payload import (
     verify_installed_payload,
 )
 from .vendored_native_payloads import (
+    ArchiveView,
     DEFAULT_MANIFEST,
+    PROMOTION_CLAIMS_PATH,
+    PROMOTION_VERIFIER_SURFACES,
     PayloadIntegrityError,
     _binary_identity,
+    _canonical_sha256,
     _git_tracked_artifacts,
+    _manifest_promotion_binding,
+    _payload_promotion_identity,
+    _promotion_approval_body,
+    _validate_promotion_verifier_unchanged,
     _validate_archive,
     _validate_consumer_claim,
     _validate_policy,
@@ -123,6 +131,11 @@ class VendoredNativePayloadTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.policy = copy.deepcopy(self.manifest["integrity_policy"])
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        claims_path = self.root / PROMOTION_CLAIMS_PATH
+        claims_path.parent.mkdir(parents=True, exist_ok=True)
+        claims_path.write_text('{"schema_version":1,"claims":[]}\n', encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.root), "add", "--", PROMOTION_CLAIMS_PATH.as_posix()], check=True)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -212,6 +225,21 @@ class VendoredNativePayloadTests(unittest.TestCase):
         self.assertEqual(result["redistribution_readiness"], "blocked")
         self.assertEqual(result["redistribution_enforcement"], "advisory")
         self.assertGreaterEqual(len(result["redistribution_blockers"]), 4)
+        self.assertEqual(self.manifest["redistribution_readiness"]["promotion_receipts"], [])
+        self.assertEqual(
+            json.loads((ROOT / PROMOTION_CLAIMS_PATH).read_text(encoding="utf-8")),
+            {"schema_version": 1, "claims": []},
+        )
+        schema = json.loads(
+            (ROOT / "tools" / "gates" / "payload-provenance-promotion-receipt.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            schema["properties"]["schema"]["const"],
+            "mlvapp.payload-provenance-promotion-receipt.v1",
+        )
+        self.assertEqual(schema["properties"]["authority"]["const"]["automatic_launch_gate"], "CLOSED")
 
     def test_manifest_keeps_unknown_raw2mlv_provenance_and_arm64_ffmpeg_debt_explicit(self) -> None:
         raw_records = [record for record in self.manifest["payloads"] if record["id"].startswith("raw2mlv-")]
@@ -376,9 +404,16 @@ class VendoredNativePayloadTests(unittest.TestCase):
             self.assertEqual(main([]), 0)
             self.assertEqual(main(["--require-redistribution-ready"]), 2)
 
-    def test_redistribution_readiness_has_a_reachable_fully_verified_transition(self) -> None:
+    def test_manifest_strings_cannot_promote_redistribution_without_receipts(self) -> None:
         ready_payload = {
             "id": "verified-tool",
+            "path": "verified-tool.zip",
+            "archive_format": "zip",
+            "bytes": 1,
+            "sha256": "a" * 64,
+            "member_summary": {},
+            "selected_members": [],
+            "consumers": [{"fixture": True}],
             "redistribution_readiness": "ready",
             "provenance": {
                 "status": "verified",
@@ -392,8 +427,36 @@ class VendoredNativePayloadTests(unittest.TestCase):
                 "license_notice_in_archive": True,
             },
         }
-        ready = {"status": "ready", "enforcement": "required", "blockers": []}
-        _validate_readiness(ready, [ready_payload])
+        manifest = {
+            "schema_version": 1,
+            "integrity_policy": copy.deepcopy(self.policy),
+            "inactive_artifacts": [],
+            "payloads": [ready_payload],
+            "redistribution_readiness": {
+                "status": "ready",
+                "enforcement": "required",
+                "blockers": [],
+                "promotion_receipts": [],
+            },
+        }
+        with self.assertRaisesRegex(PayloadIntegrityError, "requires registered promotion claims"):
+            _validate_readiness(self.root, manifest)
+
+        claims_path = self.root / PROMOTION_CLAIMS_PATH
+        claims_path.write_text(
+            json.dumps({"schema_version": 1, "claims": [{"kind": "fixture-claim"}]}),
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "-C", str(self.root), "add", "--", PROMOTION_CLAIMS_PATH.as_posix()],
+            check=True,
+        )
+        candidate = copy.deepcopy(manifest)
+        candidate["redistribution_readiness"]["promotion_receipts"] = [
+            {"payload_id": "verified-tool", "approval_kind": "fixture-claim"}
+        ]
+        with self.assertRaisesRegex(PayloadIntegrityError, "target-owned isolated promotion verifier"):
+            _validate_readiness(self.root, candidate)
 
         falsifiers = (
             ("redistribution_readiness", "blocked-unverified", "not redistribution-ready"),
@@ -414,10 +477,79 @@ class VendoredNativePayloadTests(unittest.TestCase):
                     payload[field] = value
                 else:
                     payload["provenance"][field] = value
-                with self.assertRaisesRegex(PayloadIntegrityError, expected_error):
-                    _validate_readiness(ready, [payload])
+                candidate = copy.deepcopy(manifest)
+                candidate["payloads"] = [payload]
+                candidate["redistribution_readiness"]["promotion_receipts"] = [
+                    {"payload_id": "verified-tool", "approval_kind": "fixture-claim"}
+                ]
+                with mock.patch(
+                    "tools.repo_hygiene.vendored_native_payloads._validate_promotion_verifier_unchanged"
+                ), mock.patch(
+                    "tools.repo_hygiene.vendored_native_payloads.PROMOTION_PROVIDER_AUTHORITY_STATE",
+                    "INSTALLED_TARGET_OWNED",
+                ), self.assertRaisesRegex(PayloadIntegrityError, expected_error):
+                    _validate_readiness(self.root, candidate)
 
     def test_full_validator_can_reach_ready_after_all_integrity_evidence_is_verified(self) -> None:
+        executable = _fake_pe()
+        notice = b"GPL-3.0-or-later fixture notice\n"
+        archive_path = self._write_zip([
+            ("tool.exe", executable, stat.S_IFREG | 0o755),
+            ("LICENSE.txt", notice, stat.S_IFREG | 0o644),
+        ])
+        archive_path.rename(self.root / "verified-tool.zip")
+        archive_path = self.root / "verified-tool.zip"
+        archive_bytes = archive_path.read_bytes()
+        evidence_dir = self.root / "evidence"
+        evidence_dir.mkdir()
+        evidence_specs = {}
+        for name, content in {
+            "upstream.sha256": hashlib.sha256(archive_bytes).hexdigest().encode("ascii") + b"\n",
+            "build-recipe.txt": b"reproducible fixture recipe\n",
+            "license-review.txt": b"GPL-3.0-or-later reviewed fixture\n",
+        }.items():
+            path = evidence_dir / name
+            path.write_bytes(content)
+            evidence_specs[name] = {
+                "path": path.relative_to(self.root).as_posix(),
+                "bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        payload_record = {
+            "id": "verified-tool",
+            "path": "verified-tool.zip",
+            "archive_format": "zip",
+            "bytes": len(archive_bytes),
+            "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+            "member_summary": {
+                "entries": 2,
+                "file_entries": 2,
+                "directory_entries": 0,
+                "total_uncompressed_bytes": len(executable) + len(notice),
+            },
+            "selected_members": [{
+                "path": "tool.exe",
+                "output_name": "tool.exe",
+                "kind": "executable",
+                "bytes": len(executable),
+                "sha256": hashlib.sha256(executable).hexdigest(),
+                "executable": True,
+                "binary": {"format": "pe", "machine": "x86_64"},
+            }],
+            "consumers": [{"fixture": True}],
+            "redistribution_readiness": "ready",
+            "provenance": {
+                "status": "verified",
+                "version": "1.2.3",
+                "source": "https://example.invalid/source",
+                "source_evidence": evidence_specs["upstream.sha256"]["path"],
+                "build_recipe": evidence_specs["build-recipe.txt"]["path"],
+                "upstream_checksum_verified": True,
+                "license": "GPL-3.0-or-later",
+                "license_evidence": evidence_specs["license-review.txt"]["path"],
+                "license_notice_in_archive": True,
+            },
+        }
         ready_manifest = {
             "schema_version": 1,
             "integrity_policy": copy.deepcopy(self.policy),
@@ -425,37 +557,192 @@ class VendoredNativePayloadTests(unittest.TestCase):
                 "status": "ready",
                 "enforcement": "required",
                 "blockers": [],
+                "promotion_receipts": [],
             },
             "inactive_artifacts": [],
-            "payloads": [
-                {
-                    "id": "verified-tool",
-                    "path": "verified-tool.zip",
-                    "consumers": [{"fixture": True}],
-                    "redistribution_readiness": "ready",
-                    "provenance": {
-                        "status": "verified",
-                        "version": "1.2.3",
-                        "source": "https://example.invalid/source",
-                        "source_evidence": "reviewed signed release metadata",
-                        "build_recipe": "reproducible-build.v1",
-                        "upstream_checksum_verified": True,
-                        "license": "GPL-3.0-or-later",
-                        "license_evidence": "reviewed upstream license at pinned source revision",
-                        "license_notice_in_archive": True,
-                    },
-                }
-            ],
+            "payloads": [payload_record],
         }
-        manifest_path = self.root / "ready.json"
+        receipt = {
+            "schema": "mlvapp.payload-provenance-promotion-receipt.v1",
+            "payload": {
+                "id": "verified-tool",
+                "identity_sha256": _canonical_sha256(_payload_promotion_identity(payload_record)),
+            },
+            "manifest": {"binding_sha256": _manifest_promotion_binding(ready_manifest)},
+            "upstream": {
+                "source": payload_record["provenance"]["source"],
+                "version": payload_record["provenance"]["version"],
+                "checksum_evidence": {
+                    "algorithm": "sha256",
+                    "expected_archive_sha256": payload_record["sha256"],
+                    "evidence": evidence_specs["upstream.sha256"],
+                },
+            },
+            "build": {
+                "basis": "reproducible-recipe",
+                "evidence": evidence_specs["build-recipe.txt"],
+            },
+            "license": {
+                "expression": "GPL-3.0-or-later",
+                "evidence": evidence_specs["license-review.txt"],
+                "notice_members": [{
+                    "path": "LICENSE.txt",
+                    "bytes": len(notice),
+                    "sha256": hashlib.sha256(notice).hexdigest(),
+                }],
+            },
+            "authority": {
+                "repository_owner_approval_required": True,
+                "grants_release_publication": False,
+                "grants_provider_activation": False,
+                "automatic_launch_gate": "CLOSED",
+            },
+        }
+        receipt_dir = self.root / "tools" / "gates" / "payload-provenance"
+        receipt_dir.mkdir(parents=True)
+        receipt_path = receipt_dir / "verified-tool.json"
+        receipt_bytes = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        receipt_path.write_bytes(receipt_bytes)
+        receipt_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
+        approval_kind = "verified-tool-owner-approval"
+        ready_manifest["redistribution_readiness"]["promotion_receipts"] = [{
+            "payload_id": "verified-tool",
+            "path": receipt_path.relative_to(self.root).as_posix(),
+            "sha256": receipt_sha256,
+            "approval_kind": approval_kind,
+        }]
+        manifest_path = self.root / DEFAULT_MANIFEST
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(ready_manifest), encoding="utf-8")
-        with mock.patch(
-            "tools.repo_hygiene.vendored_native_payloads._git_tracked_artifacts",
-            return_value={"verified-tool.zip"},
-        ), mock.patch("tools.repo_hygiene.vendored_native_payloads._validate_archive"), mock.patch(
-            "tools.repo_hygiene.vendored_native_payloads._validate_consumer_claim"
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "add", "--", "."], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(self.root),
+                "-c", "user.name=Fixture",
+                "-c", "user.email=fixture@example.invalid",
+                "commit", "-qm", "fixture promotion subject",
+            ],
+            check=True,
+        )
+        reviewed_commit = subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        provider_response: dict = {}
+        claim: dict | None = None
+
+        def validate_fixture(*, live_response: dict | None = provider_response) -> dict:
+            if claim is not None:
+                claims_path = self.root / PROMOTION_CLAIMS_PATH
+                claims_path.write_text(
+                    json.dumps({"schema_version": 1, "claims": [claim]}),
+                    encoding="utf-8",
+                )
+                subprocess.run(
+                    ["git", "-C", str(self.root), "add", "--", PROMOTION_CLAIMS_PATH.as_posix()],
+                    check=True,
+                )
+            with mock.patch(
+                "tools.repo_hygiene.vendored_native_payloads._git_tracked_artifacts",
+                return_value={"verified-tool.zip"},
+            ), mock.patch(
+                "tools.repo_hygiene.vendored_native_payloads._validate_consumer_claim"
+            ), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance.live_github_issue_comment",
+                side_effect=OSError("provider unavailable") if live_response is None else None,
+                return_value=None if live_response is None else {"response": live_response},
+            ), mock.patch(
+                "tools.repo_hygiene.vendored_native_payloads._validate_promotion_verifier_unchanged"
+            ), mock.patch(
+                "tools.repo_hygiene.vendored_native_payloads.PROMOTION_PROVIDER_AUTHORITY_STATE",
+                "INSTALLED_TARGET_OWNED",
+            ):
+                return validate(self.root, manifest_path)
+
+        with self.assertRaisesRegex(
+            PayloadIntegrityError, "requires registered promotion claims"
         ):
-            result = validate(self.root, manifest_path)
+            validate_fixture()
+        claim = {
+            "schema_version": 1,
+            "kind": approval_kind,
+            "verdict": "APPROVE",
+            "payload_id": "verified-tool",
+            "receipt_path": receipt_path.relative_to(self.root).as_posix(),
+            "receipt_sha256": receipt_sha256,
+            "payload_identity_sha256": receipt["payload"]["identity_sha256"],
+            "manifest_binding_sha256": receipt["manifest"]["binding_sha256"],
+            "reviewed_commit": reviewed_commit,
+            "source": {
+                "kind": "github_issue_comment",
+                "repository": "layibabalola/MLV-App",
+                "pull_request": 1,
+                "comment_id": 2,
+                "html_url": "https://github.com/layibabalola/MLV-App/pull/1#issuecomment-2",
+                "created_at": "2026-08-20T12:00:00Z",
+                "reviewer": "repository-owner",
+                "author_association": "OWNER",
+                "body_sha256": "0" * 64,
+            },
+            "scope": {
+                "payload_redistribution": True,
+                "release_publication": False,
+                "provider_activation": False,
+                "automatic_launch_gate": "CLOSED",
+            },
+        }
+        comment_body = _promotion_approval_body(claim)
+        claim["source"]["body_sha256"] = hashlib.sha256(comment_body.encode("utf-8")).hexdigest()
+        provider_response.update({
+            "id": 2,
+            "html_url": "https://github.com/layibabalola/MLV-App/pull/1#issuecomment-2",
+            "issue_url": "https://api.github.com/repos/layibabalola/MLV-App/issues/1",
+            "created_at": "2026-08-20T12:00:00Z",
+            "user": {"login": "repository-owner"},
+            "author_association": "OWNER",
+            "body": comment_body,
+        })
+        claim["source"]["author_association"] = "MEMBER"
+        with self.assertRaisesRegex(PayloadIntegrityError, "must come from a repository OWNER"):
+            validate_fixture()
+        claim["source"]["author_association"] = "OWNER"
+
+        with self.assertRaisesRegex(PayloadIntegrityError, "could not be verified against canonical GitHub"):
+            validate_fixture(live_response=None)
+
+        forged_response = copy.deepcopy(provider_response)
+        forged_response["author_association"] = "MEMBER"
+        with self.assertRaisesRegex(PayloadIntegrityError, "not authored by a repository OWNER"):
+            validate_fixture(live_response=forged_response)
+
+        replayed_response = copy.deepcopy(provider_response)
+        replayed_response["body"] = "APPROVE an unrelated change"
+        claim["source"]["body_sha256"] = hashlib.sha256(
+            replayed_response["body"].encode("utf-8")
+        ).hexdigest()
+        with self.assertRaisesRegex(PayloadIntegrityError, "does not bind the exact promotion claim"):
+            validate_fixture(live_response=replayed_response)
+        claim["source"]["body_sha256"] = hashlib.sha256(comment_body.encode("utf-8")).hexdigest()
+
+        tampered = copy.deepcopy(receipt)
+        tampered["upstream"]["checksum_evidence"]["expected_archive_sha256"] = "0" * 64
+        tampered_bytes = (json.dumps(tampered, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        receipt_path.write_bytes(tampered_bytes)
+        tampered_sha256 = hashlib.sha256(tampered_bytes).hexdigest()
+        ready_manifest["redistribution_readiness"]["promotion_receipts"][0]["sha256"] = tampered_sha256
+        claim["receipt_sha256"] = tampered_sha256
+        manifest_path.write_text(json.dumps(ready_manifest), encoding="utf-8")
+        with self.assertRaisesRegex(PayloadIntegrityError, "does not bind the tracked archive"):
+            validate_fixture()
+
+        receipt_path.write_bytes(receipt_bytes)
+        ready_manifest["redistribution_readiness"]["promotion_receipts"][0]["sha256"] = receipt_sha256
+        claim["receipt_sha256"] = receipt_sha256
+        manifest_path.write_text(json.dumps(ready_manifest), encoding="utf-8")
+        result = validate_fixture()
         self.assertEqual(result["integrity"], "pass")
         self.assertEqual(result["redistribution_readiness"], "ready")
         self.assertEqual(result["redistribution_enforcement"], "required")
@@ -963,6 +1250,122 @@ class VendoredNativePayloadTests(unittest.TestCase):
         wrong_hash["sha256"] = "0" * 64
         with self.assertRaisesRegex(PayloadIntegrityError, "archive sha256 mismatch"):
             _validate_archive(self.root, wrong_hash, self.policy, selected=True)
+
+    def test_archive_validation_uses_one_authenticated_immutable_snapshot(self) -> None:
+        original_content = _fake_pe(fill=b"original")
+        archive_path = self._write_zip([
+            ("tool.exe", original_content, stat.S_IFREG | 0o755),
+            ("extra.txt", b"original extra", stat.S_IFREG | 0o644),
+        ])
+        original_bytes = archive_path.read_bytes()
+        record = self._record(archive_path, "tool.exe", original_content)
+        record["member_summary"] = {
+            "entries": 2,
+            "file_entries": 2,
+            "directory_entries": 0,
+            "total_uncompressed_bytes": len(original_content) + len(b"original extra"),
+        }
+        replacement_content = _fake_pe(fill=b"replaced")
+        self._write_zip([
+            ("tool.exe", replacement_content, stat.S_IFREG | 0o755),
+            ("extra.txt", b"replacement xx", stat.S_IFREG | 0o644),
+        ])
+        replacement_bytes = archive_path.read_bytes()
+        archive_path.write_bytes(original_bytes)
+        real_init = ArchiveView.__init__
+
+        def replace_path_before_parse(view: ArchiveView, source: Path | bytes, archive_format: str, label: str) -> None:
+            archive_path.write_bytes(replacement_bytes)
+            real_init(view, source, archive_format, label)
+
+        with mock.patch.object(ArchiveView, "__init__", new=replace_path_before_parse):
+            _validate_archive(self.root, record, self.policy, selected=True)
+
+        self.assertEqual(archive_path.read_bytes(), replacement_bytes)
+        self.assertNotEqual(hashlib.sha256(replacement_bytes).hexdigest(), record["sha256"])
+
+    def test_tracked_archive_rejects_reparse_paths_and_nonregular_index_modes(self) -> None:
+        content = _fake_pe()
+        archive_path = self._write_zip([("tool.exe", content, stat.S_IFREG | 0o755)])
+        record = self._record(archive_path, "tool.exe", content)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "add", "--", archive_path.name], check=True)
+
+        with mock.patch(
+            "tools.repo_hygiene.vendored_native_payloads.is_reparse_point",
+            side_effect=lambda candidate: candidate == archive_path,
+        ), self.assertRaisesRegex(PayloadIntegrityError, "reparse-backed"):
+            _validate_archive(self.root, record, self.policy, selected=True, require_tracked=True)
+
+        blob = subprocess.run(
+            ["git", "-C", str(self.root), "hash-object", "-w", "--", archive_path.name],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", str(self.root), "update-index", "--cacheinfo", f"120000,{blob},{archive_path.name}"],
+            check=True,
+        )
+        with self.assertRaisesRegex(PayloadIntegrityError, "stage-0 regular file"):
+            _validate_archive(self.root, record, self.policy, selected=True, require_tracked=True)
+
+    def test_tracked_archive_rejects_path_identity_swap_during_open(self) -> None:
+        content = _fake_pe()
+        archive_path = self._write_zip([("tool.exe", content, stat.S_IFREG | 0o755)])
+        record = self._record(archive_path, "tool.exe", content)
+        subprocess.run(["git", "-C", str(self.root), "add", "--", archive_path.name], check=True)
+        replacement = self.root / "replacement.zip"
+        replacement.write_bytes(archive_path.read_bytes())
+        real_open = os.open
+
+        def swap_before_open(candidate: os.PathLike[str] | str, flags: int, *args: object, **kwargs: object) -> int:
+            if Path(candidate) == archive_path:
+                os.replace(replacement, archive_path)
+            return real_open(candidate, flags, *args, **kwargs)
+
+        with mock.patch(
+            "tools.repo_hygiene.vendored_native_payloads.os.open",
+            side_effect=swap_before_open,
+        ), self.assertRaisesRegex(PayloadIntegrityError, "identity changed|identity differs"):
+            _validate_archive(self.root, record, self.policy, selected=True, require_tracked=True)
+
+    def test_ready_promotion_requires_verifier_bytes_from_canonical_target(self) -> None:
+        for relative in PROMOTION_VERIFIER_SURFACES:
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content = "{}\n" if relative == "closeout.config.json" else f"trusted target bytes for {relative}\n"
+            path.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.root), "add", "--", "."], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(self.root), "-c", "user.name=Fixture",
+                "-c", "user.email=fixture@example.invalid", "commit", "-qm", "trusted verifier baseline",
+            ],
+            check=True,
+        )
+        target = subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        with mock.patch(
+            "tools.repo_hygiene.candidate_acceptance.live_github_branch_head",
+            return_value=target,
+        ):
+            _validate_promotion_verifier_unchanged(self.root)
+
+            verifier = self.root / "tools" / "repo_hygiene" / "vendored_native_payloads.py"
+            baseline_bytes = verifier.read_bytes()
+            verifier.write_bytes(baseline_bytes + b"candidate drift\n")
+            with self.assertRaisesRegex(PayloadIntegrityError, "differs from the pinned target"):
+                _validate_promotion_verifier_unchanged(self.root)
+            verifier.write_bytes(baseline_bytes)
+
+            claims_path = self.root / PROMOTION_CLAIMS_PATH
+            claims_path.write_text('{"schema_version":1,"claims":[{"kind":"data-only"}]}\n', encoding="utf-8")
+            _validate_promotion_verifier_unchanged(self.root)
 
     def test_rejects_member_summary_size_and_hash_drift(self) -> None:
         content = _fake_pe()

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
+import os
 import re
 import stat
 import struct
@@ -23,9 +25,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Iterable
 
+from .core import is_reparse_point
+
 
 DEFAULT_MANIFEST = Path("tools/gates/vendored-native-payloads.json")
+PROMOTION_CLAIMS_PATH = Path("tools/gates/payload-provenance-promotion-claims.json")
+PROMOTION_PROVIDER_AUTHORITY_STATE = "NOT_INSTALLED"
+PROMOTION_RECEIPT_SCHEMA = "mlvapp.payload-provenance-promotion-receipt.v1"
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 INSPECTION_PREFIX_BYTES = 4 * 1024 * 1024
 EXPECTED_BINARY_KIND_POLICY = {
@@ -49,6 +57,14 @@ RELEASE_WORKFLOW_TARGETS = {
     ".github/workflows/macOS-Intel.yml": "macos-x86_64",
     ".github/workflows/Windows.yml": "windows-x86_64",
 }
+PROMOTION_VERIFIER_SURFACES = (
+    "closeout.config.json",
+    "tools/repo_hygiene/brokered_closeout.py",
+    "tools/repo_hygiene/candidate_acceptance.py",
+    "tools/repo_hygiene/core.py",
+    "tools/repo_hygiene/vendored_native_payloads.py",
+    "tools/gates/payload-provenance-promotion-receipt.schema.json",
+)
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -97,6 +113,25 @@ def _sha256_file(path: Path) -> tuple[int, str]:
     with path.open("rb") as handle:
         size, digest, _ = _sha256_stream(handle)
     return size, digest
+
+
+def _archive_bytes_snapshot(
+    repo_root: Path,
+    relative: str,
+    expected_bytes: int,
+    expected_sha256: str,
+    label: str,
+    *,
+    require_tracked: bool,
+) -> bytes:
+    """Capture and authenticate one immutable archive image for all subsequent reads."""
+
+    _, snapshot = _tracked_repo_file(repo_root, {
+        "path": relative,
+        "bytes": expected_bytes,
+        "sha256": expected_sha256,
+    }, f"{label} archive", require_tracked=require_tracked)
+    return snapshot
 
 
 def _safe_member_name(raw_name: str, label: str) -> str:
@@ -262,18 +297,25 @@ def _binary_identity(prefix: bytes) -> dict[str, str]:
 
 
 class ArchiveView:
-    def __init__(self, path: Path, archive_format: str, label: str):
-        self.path = path
+    def __init__(self, source: Path | bytes, archive_format: str, label: str):
+        self.source = source
         self.archive_format = archive_format
         self.label = label
         self._archive: zipfile.ZipFile | tarfile.TarFile | None = None
+        self._source_handle: io.BytesIO | None = None
         self.members: list[ArchiveMember] = []
         self.by_name: dict[str, ArchiveMember] = {}
 
     def __enter__(self) -> "ArchiveView":
         try:
+            archive_source: Path | io.BytesIO
+            if isinstance(self.source, bytes):
+                self._source_handle = io.BytesIO(self.source)
+                archive_source = self._source_handle
+            else:
+                archive_source = self.source
             if self.archive_format == "zip":
-                archive = zipfile.ZipFile(self.path)
+                archive = zipfile.ZipFile(archive_source)
                 self._archive = archive
                 for info in archive.infolist():
                     mode = (info.external_attr >> 16) & 0xFFFF
@@ -293,7 +335,11 @@ class ArchiveView:
                         ArchiveMember(info.filename, kind, info.file_size, mode, info.compress_size, info)
                     )
             elif self.archive_format == "tar.xz":
-                archive = tarfile.open(self.path, mode="r:xz")
+                archive = tarfile.open(
+                    archive_source if isinstance(archive_source, Path) else None,
+                    mode="r:xz",
+                    fileobj=None if isinstance(archive_source, Path) else archive_source,
+                )
                 self._archive = archive
                 for info in archive.getmembers():
                     if info.isfile():
@@ -330,6 +376,8 @@ class ArchiveView:
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         if self._archive is not None:
             self._archive.close()
+        if self._source_handle is not None:
+            self._source_handle.close()
 
     def open_member(self, member: ArchiveMember) -> BinaryIO:
         _require(member.kind == "file", f"{self.label} selected member {member.name!r} is not a regular file")
@@ -591,13 +639,581 @@ def _validate_consumer_claim(
                  f"{label} same-file gate boundary must equal the extraction operation_marker")
 
 
-def _validate_readiness(readiness: Any, payloads: list[dict[str, Any]]) -> None:
+def _canonical_sha256(value: Any) -> str:
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _payload_promotion_identity(record: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "id",
+        "path",
+        "archive_format",
+        "bytes",
+        "sha256",
+        "member_summary",
+        "selected_members",
+        "consumers",
+    )
+    _require(all(field in record for field in fields),
+             f"{record.get('id', 'payload')} is missing a promotion identity field")
+    return {field: record[field] for field in fields}
+
+
+def _manifest_promotion_binding(manifest: dict[str, Any]) -> str:
+    payloads = manifest.get("payloads")
+    inactive = manifest.get("inactive_artifacts")
+    _require(isinstance(payloads, list), "payload manifest payloads must be a list")
+    _require(isinstance(inactive, list), "payload manifest inactive_artifacts must be a list")
+    identities = [_payload_promotion_identity(record) for record in payloads]
+    identities.sort(key=lambda record: str(record["id"]))
+    return _canonical_sha256({
+        "schema_version": manifest.get("schema_version"),
+        "integrity_policy": manifest.get("integrity_policy"),
+        "payloads": identities,
+        "inactive_artifacts": inactive,
+    })
+
+
+def _load_promotion_claims(repo_root: Path) -> dict[str, dict[str, Any]]:
+    path = repo_root / PROMOTION_CLAIMS_PATH
+    try:
+        initial = path.read_bytes()
+    except OSError as exc:
+        raise PayloadIntegrityError(f"payload promotion claims registry is unavailable: {exc}") from exc
+    specification = {
+        "path": PROMOTION_CLAIMS_PATH.as_posix(),
+        "bytes": len(initial),
+        "sha256": hashlib.sha256(initial).hexdigest(),
+    }
+    _, raw = _tracked_repo_file(
+        repo_root,
+        specification,
+        "payload promotion claims registry",
+        require_tracked=False,
+    )
+    try:
+        registry = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PayloadIntegrityError(f"payload promotion claims registry is malformed: {exc}") from exc
+    _require(isinstance(registry, dict) and set(registry) == {"schema_version", "claims"},
+             "payload promotion claims registry fields are incomplete or unexpected")
+    _require(registry.get("schema_version") == 1,
+             "payload promotion claims registry schema_version is invalid")
+    rows = registry.get("claims")
+    _require(isinstance(rows, list), "payload promotion claims registry claims must be a list")
+    claims: dict[str, dict[str, Any]] = {}
+    for index, row in enumerate(rows):
+        _require(isinstance(row, dict), f"payload promotion claims[{index}] must be an object")
+        kind = row.get("kind")
+        _require(isinstance(kind, str) and kind,
+                 f"payload promotion claims[{index}].kind must be non-empty text")
+        _require(kind not in claims, f"payload promotion claims registry repeats kind {kind!r}")
+        claims[kind] = row
+    if claims:
+        _, tracked_raw = _tracked_repo_file(
+            repo_root,
+            specification,
+            "payload promotion claims registry",
+            require_tracked=True,
+        )
+        _require(tracked_raw == raw, "payload promotion claims registry changed during validation")
+    return claims
+
+
+def _canonical_promotion_target_head(repo_root: Path) -> str:
+    from .brokered_closeout import load_closeout_config
+    from .candidate_acceptance import live_github_branch_head
+    from .core import HygieneError
+
+    try:
+        return live_github_branch_head(
+            repo_root,
+            load_closeout_config(repo_root),
+            "layibabalola/MLV-App",
+            "master",
+        )
+    except (HygieneError, OSError, ValueError, TypeError) as exc:
+        raise PayloadIntegrityError(
+            f"payload promotion cannot verify the canonical GitHub target head: {exc}"
+        ) from exc
+
+
+def _validate_promotion_verifier_unchanged(repo_root: Path) -> None:
+    """Require ready claims to run under verifier bytes already landed on target."""
+
+    target_head = _canonical_promotion_target_head(repo_root)
+    ancestry = subprocess.run(
+        ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", target_head, "HEAD"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _require(ancestry.returncode == 0,
+             "payload promotion target head is not an ancestor of the candidate")
+    for relative in PROMOTION_VERIFIER_SURFACES:
+        current_path = repo_root / relative
+        _require(current_path.is_file() and not current_path.is_symlink() and not is_reparse_point(current_path),
+                 f"payload promotion verifier surface is unavailable or reparse-backed: {relative}")
+        target_blob = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", f"{target_head}:{relative}"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _require(target_blob.returncode == 0,
+                 f"payload promotion verifier surface is absent from the pinned target: {relative}")
+        current_blob = subprocess.run(
+            ["git", "-C", str(repo_root), "hash-object", f"--path={relative}", "--", relative],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _require(current_blob.returncode == 0 and current_blob.stdout.strip() == target_blob.stdout.strip(),
+                 f"payload promotion verifier surface differs from the pinned target: {relative}")
+
+
+def _tracked_repo_file(
+    repo_root: Path,
+    specification: Any,
+    label: str,
+    *,
+    require_tracked: bool = True,
+) -> tuple[Path, bytes]:
+    _require(isinstance(specification, dict), f"{label} must be an object")
+    _require(set(specification) == {"path", "bytes", "sha256"},
+             f"{label} must contain exactly path, bytes, and sha256")
+    relative = _manifest_path(specification.get("path"), label)
+    expected_bytes = _positive_int(specification.get("bytes"), f"{label}.bytes")
+    expected_sha256 = _hex_digest(specification.get("sha256"), label)
+    path = repo_root / Path(relative)
+    _require(path.is_file() and not path.is_symlink() and not is_reparse_point(path),
+             f"{label} is missing, reparse-backed, or is not a regular file: {relative}")
+    root_resolved = repo_root.resolve()
+    resolved = path.resolve(strict=True)
+    _require(resolved.is_relative_to(root_resolved), f"{label} resolves outside the repository: {relative}")
+    cursor = path
+    while cursor != repo_root:
+        _require(not cursor.is_symlink() and not is_reparse_point(cursor),
+                 f"{label} traverses a symbolic link or reparse point: {relative}")
+        cursor = cursor.parent
+    if require_tracked:
+        try:
+            tracked = subprocess.run(
+                ["git", "-C", str(repo_root), "ls-files", "--error-unmatch", "--stage", "--", relative],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as exc:
+            raise PayloadIntegrityError(f"{label} cannot verify Git tracking: {exc}") from exc
+        _require(tracked.returncode == 0, f"{label} must be Git-tracked: {relative}")
+        index_rows = [row for row in tracked.stdout.splitlines() if row]
+        _require(len(index_rows) == 1 and b"\t" in index_rows[0],
+                 f"{label} Git index entry is ambiguous: {relative}")
+        index_fields = index_rows[0].split(b"\t", 1)[0].split()
+        _require(len(index_fields) == 3 and index_fields[0] in {b"100644", b"100755"} and index_fields[2] == b"0",
+                 f"{label} must be a stage-0 regular file in the Git index: {relative}")
+    def chain_identity() -> tuple[tuple[str, int, int, int], ...]:
+        identities: list[tuple[str, int, int, int]] = []
+        cursor = path
+        while True:
+            info = cursor.lstat()
+            _require(not cursor.is_symlink() and not is_reparse_point(cursor),
+                     f"{label} traverses a symbolic link or reparse point: {relative}")
+            identities.append((str(cursor), int(info.st_dev), int(info.st_ino), int(info.st_mode)))
+            if cursor == repo_root:
+                break
+            cursor = cursor.parent
+        return tuple(identities)
+
+    before_chain = chain_identity()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PayloadIntegrityError(f"{label} cannot be read: {relative}: {exc}") from exc
+    try:
+        opened_before = os.fstat(descriptor)
+        _require(stat.S_ISREG(opened_before.st_mode),
+                 f"{label} opened object is not a regular file: {relative}")
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            raw = handle.read(expected_bytes + 1)
+        descriptor = -1
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    after_chain = chain_identity()
+    after_path = path.lstat()
+    _require(before_chain == after_chain,
+             f"{label} path identity changed while it was read: {relative}")
+    _require(
+        (int(opened_before.st_dev), int(opened_before.st_ino), int(opened_before.st_mode))
+        == (int(after_path.st_dev), int(after_path.st_ino), int(after_path.st_mode)),
+        f"{label} opened file identity differs from the validated path: {relative}",
+    )
+    actual_bytes = len(raw)
+    actual_sha256 = hashlib.sha256(raw).hexdigest()
+    _require(actual_bytes == expected_bytes,
+             f"{label} size mismatch: expected {expected_bytes}, got {actual_bytes}")
+    _require(actual_sha256 == expected_sha256,
+             f"{label} sha256 mismatch: expected {expected_sha256}, got {actual_sha256}")
+    return path, raw
+
+
+def _validate_notice_members(
+    repo_root: Path,
+    record: dict[str, Any],
+    notices: Any,
+    label: str,
+) -> None:
+    _require(isinstance(notices, list) and notices, f"{label} must list archive notice members")
+    archive_path = repo_root / Path(_manifest_path(record.get("path"), label))
+    archive_format = str(record.get("archive_format"))
+    expected_bytes = _positive_int(record.get("bytes"), f"{label}.archive_bytes")
+    expected_sha256 = _hex_digest(record.get("sha256"), f"{label}.archive")
+    archive_snapshot = _archive_bytes_snapshot(
+        repo_root,
+        archive_path.relative_to(repo_root).as_posix(),
+        expected_bytes,
+        expected_sha256,
+        label,
+        require_tracked=True,
+    )
+    with ArchiveView(archive_snapshot, archive_format, str(record.get("id") or "payload")) as archive:
+        seen: set[str] = set()
+        for index, notice in enumerate(notices):
+            item_label = f"{label}[{index}]"
+            _require(isinstance(notice, dict), f"{item_label} must be an object")
+            _require(set(notice) == {"path", "bytes", "sha256"},
+                     f"{item_label} must contain exactly path, bytes, and sha256")
+            member_name = _manifest_path(notice.get("path"), item_label)
+            _require(member_name not in seen, f"{label} repeats archive notice {member_name!r}")
+            seen.add(member_name)
+            member = archive.by_name.get(member_name)
+            _require(member is not None and member.kind == "file",
+                     f"{item_label} is not a regular archive member: {member_name!r}")
+            expected_bytes = _positive_int(notice.get("bytes"), f"{item_label}.bytes")
+            expected_sha256 = _hex_digest(notice.get("sha256"), item_label)
+            with archive.open_member(member) as handle:
+                actual_bytes, actual_sha256, _ = _sha256_stream(handle)
+            _require(actual_bytes == expected_bytes,
+                     f"{item_label} size mismatch: expected {expected_bytes}, got {actual_bytes}")
+            _require(actual_sha256 == expected_sha256,
+                     f"{item_label} sha256 mismatch: expected {expected_sha256}, got {actual_sha256}")
+
+
+def _validate_registered_promotion_claim(
+    repo_root: Path,
+    claims: dict[str, dict[str, Any]],
+    claim_kind: Any,
+    *,
+    payload_id: str,
+    receipt_path: str,
+    receipt_sha256: str,
+    payload_identity_sha256: str,
+    manifest_binding_sha256: str,
+) -> None:
+    _require(isinstance(claim_kind, str) and claim_kind,
+             f"{payload_id} promotion receipt approval_kind must be non-empty text")
+    claim = claims.get(claim_kind)
+    _require(claim is not None,
+             f"{payload_id} promotion receipt has no provider-verified repository-owner approval claim")
+    _require(isinstance(claim, dict), f"{payload_id} registered promotion claim must be an object")
+    expected = {
+        "schema_version": 1,
+        "kind": claim_kind,
+        "verdict": "APPROVE",
+        "payload_id": payload_id,
+        "receipt_path": receipt_path,
+        "receipt_sha256": receipt_sha256,
+        "payload_identity_sha256": payload_identity_sha256,
+        "manifest_binding_sha256": manifest_binding_sha256,
+    }
+    for key, value in expected.items():
+        _require(claim.get(key) == value, f"{payload_id} registered promotion claim {key} mismatch")
+    _require(set(claim) == set(expected) | {"reviewed_commit", "source", "scope"},
+             f"{payload_id} registered promotion claim fields are incomplete or unexpected")
+    _require(FULL_SHA.fullmatch(str(claim.get("reviewed_commit"))) is not None,
+             f"{payload_id} registered promotion reviewed_commit is invalid")
+    reviewed_commit = str(claim["reviewed_commit"])
+    commit_check = subprocess.run(
+        ["git", "-C", str(repo_root), "cat-file", "-e", f"{reviewed_commit}^{{commit}}"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _require(commit_check.returncode == 0,
+             f"{payload_id} registered promotion reviewed_commit is not a local commit")
+    ancestry = subprocess.run(
+        ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", reviewed_commit, "HEAD"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _require(ancestry.returncode == 0,
+             f"{payload_id} registered promotion reviewed_commit is not an ancestor of HEAD")
+    receipt_at_review = subprocess.run(
+        ["git", "-C", str(repo_root), "show", f"{reviewed_commit}:{receipt_path}"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _require(receipt_at_review.returncode == 0,
+             f"{payload_id} promotion receipt is absent at reviewed_commit")
+    _require(hashlib.sha256(receipt_at_review.stdout).hexdigest() == receipt_sha256,
+             f"{payload_id} promotion receipt at reviewed_commit does not match the approved receipt")
+    manifest_at_review = subprocess.run(
+        ["git", "-C", str(repo_root), "show", f"{reviewed_commit}:{DEFAULT_MANIFEST.as_posix()}"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _require(manifest_at_review.returncode == 0,
+             f"{payload_id} payload manifest is absent at reviewed_commit")
+    reviewed_manifest = _parse_manifest_bytes(
+        manifest_at_review.stdout, f"{DEFAULT_MANIFEST.as_posix()} at {reviewed_commit}"
+    )
+    _require(_manifest_promotion_binding(reviewed_manifest) == manifest_binding_sha256,
+             f"{payload_id} reviewed manifest binding does not match the approved receipt")
+    reviewed_payloads = reviewed_manifest.get("payloads")
+    reviewed_records = [
+        item for item in reviewed_payloads
+        if isinstance(item, dict) and item.get("id") == payload_id
+    ] if isinstance(reviewed_payloads, list) else []
+    _require(len(reviewed_records) == 1,
+             f"{payload_id} is not uniquely present in the reviewed manifest")
+    _require(_canonical_sha256(_payload_promotion_identity(reviewed_records[0])) == payload_identity_sha256,
+             f"{payload_id} reviewed payload identity does not match the approved receipt")
+    source = claim.get("source")
+    _require(isinstance(source, dict), f"{payload_id} registered promotion source must be an object")
+    _require(set(source) == {
+        "kind", "repository", "pull_request", "comment_id", "html_url",
+        "created_at", "reviewer", "author_association", "body_sha256",
+    }, f"{payload_id} registered promotion source fields are incomplete or unexpected")
+    _require(source.get("kind") == "github_issue_comment",
+             f"{payload_id} promotion approval source kind is invalid")
+    _require(source.get("repository") == "layibabalola/MLV-App",
+             f"{payload_id} promotion approval repository is invalid")
+    _require(isinstance(source.get("pull_request"), int) and source["pull_request"] > 0,
+             f"{payload_id} promotion approval pull_request is invalid")
+    _require(isinstance(source.get("comment_id"), int) and source["comment_id"] > 0,
+             f"{payload_id} promotion approval comment_id is invalid")
+    expected_url = (
+        f"https://github.com/{source['repository']}/pull/{source['pull_request']}"
+        f"#issuecomment-{source['comment_id']}"
+    )
+    _require(source.get("html_url") == expected_url,
+             f"{payload_id} promotion approval URL is invalid")
+    _require(re.fullmatch(r"20\d\d-[01]\d-[0-3]\dT[0-2]\d:[0-5]\d:[0-6]\dZ", str(source.get("created_at"))) is not None,
+             f"{payload_id} promotion approval timestamp is invalid")
+    _require(isinstance(source.get("reviewer"), str) and source["reviewer"],
+             f"{payload_id} promotion approval reviewer is invalid")
+    _require(source.get("author_association") == "OWNER",
+             f"{payload_id} promotion approval must come from a repository OWNER")
+    _require(HEX_SHA256.fullmatch(str(source.get("body_sha256"))) is not None,
+             f"{payload_id} promotion approval body_sha256 is invalid")
+    scope = claim.get("scope")
+    _require(scope == {
+        "payload_redistribution": True,
+        "release_publication": False,
+        "provider_activation": False,
+        "automatic_launch_gate": "CLOSED",
+    }, f"{payload_id} promotion approval scope must preserve non-publication authority boundaries")
+    _verify_provider_owner_claim(repo_root, claim, payload_id)
+
+
+def _promotion_approval_body(claim: dict[str, Any]) -> str:
+    """Return the exact owner-comment protocol for one immutable promotion claim."""
+
+    return "\n".join([
+        "APPROVE",
+        "Kind: payload_redistribution",
+        f"Payload: {claim['payload_id']}",
+        f"Reviewed-Commit: {claim['reviewed_commit']}",
+        f"Receipt: {claim['receipt_path']}",
+        f"Receipt-SHA256: {claim['receipt_sha256']}",
+        f"Payload-Identity-SHA256: {claim['payload_identity_sha256']}",
+        f"Manifest-Binding-SHA256: {claim['manifest_binding_sha256']}",
+        "Scope: payload_redistribution=true; release_publication=false; "
+        "provider_activation=false; automatic_launch_gate=CLOSED",
+    ])
+
+
+def _verify_provider_owner_claim(repo_root: Path, claim: dict[str, Any], payload_id: str) -> None:
+    """Revalidate the claimed owner verdict against canonical live GitHub state."""
+
+    from .brokered_closeout import load_closeout_config
+    from .candidate_acceptance import live_github_issue_comment
+    from .core import HygieneError
+
+    source = claim["source"]
+    try:
+        live = live_github_issue_comment(
+            repo_root,
+            load_closeout_config(repo_root),
+            str(source["repository"]),
+            int(source["comment_id"]),
+        )
+    except (HygieneError, OSError, ValueError, TypeError) as exc:
+        raise PayloadIntegrityError(
+            f"{payload_id} repository-owner approval could not be verified against canonical GitHub: {exc}"
+        ) from exc
+    response = live.get("response")
+    _require(isinstance(response, dict),
+             f"{payload_id} live promotion approval response is malformed")
+    user = response.get("user")
+    expected_issue_url = (
+        f"https://api.github.com/repos/{source['repository']}/issues/{source['pull_request']}"
+    )
+    _require(response.get("id") == source["comment_id"],
+             f"{payload_id} live promotion approval comment id mismatch")
+    _require(response.get("html_url") == source["html_url"],
+             f"{payload_id} live promotion approval URL mismatch")
+    _require(response.get("issue_url") == expected_issue_url,
+             f"{payload_id} live promotion approval pull request mismatch")
+    _require(response.get("created_at") == source["created_at"],
+             f"{payload_id} live promotion approval timestamp mismatch")
+    _require(isinstance(user, dict) and user.get("login") == source["reviewer"],
+             f"{payload_id} live promotion approval reviewer mismatch")
+    _require(response.get("author_association") == "OWNER",
+             f"{payload_id} live promotion approval is not authored by a repository OWNER")
+    body = response.get("body")
+    _require(isinstance(body, str), f"{payload_id} live promotion approval body is malformed")
+    _require(hashlib.sha256(body.encode("utf-8")).hexdigest() == source["body_sha256"],
+             f"{payload_id} live promotion approval body hash mismatch")
+    _require(body == _promotion_approval_body(claim),
+             f"{payload_id} live promotion approval body does not bind the exact promotion claim")
+
+
+def _validate_promotion_receipt(
+    repo_root: Path,
+    manifest: dict[str, Any],
+    record: dict[str, Any],
+    declaration: Any,
+    claims: dict[str, dict[str, Any]],
+) -> None:
+    payload_id = str(record.get("id") or "payload")
+    _require(isinstance(declaration, dict), f"{payload_id} promotion receipt declaration must be an object")
+    _require(set(declaration) == {"payload_id", "path", "sha256", "approval_kind"},
+             f"{payload_id} promotion receipt declaration fields are incomplete or unexpected")
+    _require(declaration.get("payload_id") == payload_id,
+             f"{payload_id} promotion receipt declaration payload_id mismatch")
+    receipt_path = _manifest_path(declaration.get("path"), f"{payload_id} promotion receipt")
+    _require(receipt_path.startswith("tools/gates/payload-provenance/"),
+             f"{payload_id} promotion receipt must live under tools/gates/payload-provenance")
+    receipt_sha256 = _hex_digest(declaration.get("sha256"), f"{payload_id} promotion receipt")
+    receipt_file = repo_root / Path(receipt_path)
+    receipt_specification = {
+        "path": receipt_path,
+        "bytes": receipt_file.stat().st_size if receipt_file.is_file() else 0,
+        "sha256": receipt_sha256,
+    }
+    _, receipt_bytes = _tracked_repo_file(
+        repo_root, receipt_specification, f"{payload_id} promotion receipt"
+    )
+    try:
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PayloadIntegrityError(f"{payload_id} cannot parse promotion receipt: {exc}") from exc
+    _require(isinstance(receipt, dict), f"{payload_id} promotion receipt root must be an object")
+    _require(set(receipt) == {"schema", "payload", "manifest", "upstream", "build", "license", "authority"},
+             f"{payload_id} promotion receipt fields are incomplete or unexpected")
+    _require(receipt.get("schema") == PROMOTION_RECEIPT_SCHEMA,
+             f"{payload_id} promotion receipt schema is invalid")
+    payload_identity_sha256 = _canonical_sha256(_payload_promotion_identity(record))
+    _require(receipt.get("payload") == {
+        "id": payload_id,
+        "identity_sha256": payload_identity_sha256,
+    }, f"{payload_id} promotion receipt payload binding mismatch")
+    manifest_binding_sha256 = _manifest_promotion_binding(manifest)
+    _require(receipt.get("manifest") == {"binding_sha256": manifest_binding_sha256},
+             f"{payload_id} promotion receipt manifest binding mismatch")
+    provenance = record.get("provenance")
+    _require(isinstance(provenance, dict), f"{payload_id} provenance must be an object")
+
+    upstream = receipt.get("upstream")
+    _require(isinstance(upstream, dict) and set(upstream) == {"source", "version", "checksum_evidence"},
+             f"{payload_id} promotion upstream fields are incomplete or unexpected")
+    _require(upstream.get("source") == provenance.get("source"),
+             f"{payload_id} promotion upstream source mismatch")
+    _require(upstream.get("version") == provenance.get("version"),
+             f"{payload_id} promotion upstream version mismatch")
+    checksum_evidence = upstream.get("checksum_evidence")
+    _require(isinstance(checksum_evidence, dict),
+             f"{payload_id} promotion checksum_evidence must be an object")
+    _require(set(checksum_evidence) == {"algorithm", "expected_archive_sha256", "evidence"},
+             f"{payload_id} promotion checksum_evidence fields are incomplete or unexpected")
+    _require(checksum_evidence.get("algorithm") == "sha256",
+             f"{payload_id} promotion checksum algorithm must be sha256")
+    _require(checksum_evidence.get("expected_archive_sha256") == record.get("sha256"),
+             f"{payload_id} promotion checksum does not bind the tracked archive")
+    checksum_file, _ = _tracked_repo_file(
+        repo_root, checksum_evidence.get("evidence"), f"{payload_id} upstream checksum evidence"
+    )
+    _require(provenance.get("source_evidence") == checksum_file.relative_to(repo_root).as_posix(),
+             f"{payload_id} provenance source_evidence does not name the bound checksum evidence")
+
+    build = receipt.get("build")
+    _require(isinstance(build, dict) and set(build) == {"basis", "evidence"},
+             f"{payload_id} promotion build fields are incomplete or unexpected")
+    _require(build.get("basis") in {"reproducible-recipe", "upstream-binary-provenance"},
+             f"{payload_id} promotion build basis is invalid")
+    build_file, _ = _tracked_repo_file(repo_root, build.get("evidence"), f"{payload_id} build evidence")
+    _require(provenance.get("build_recipe") == build_file.relative_to(repo_root).as_posix(),
+             f"{payload_id} provenance build_recipe does not name the bound build evidence")
+
+    license_record = receipt.get("license")
+    _require(isinstance(license_record, dict) and set(license_record) == {"expression", "evidence", "notice_members"},
+             f"{payload_id} promotion license fields are incomplete or unexpected")
+    _require(license_record.get("expression") == provenance.get("license"),
+             f"{payload_id} promotion license expression mismatch")
+    license_file, _ = _tracked_repo_file(
+        repo_root, license_record.get("evidence"), f"{payload_id} license evidence"
+    )
+    _require(provenance.get("license_evidence") == license_file.relative_to(repo_root).as_posix(),
+             f"{payload_id} provenance license_evidence does not name the bound license evidence")
+    _validate_notice_members(
+        repo_root,
+        record,
+        license_record.get("notice_members"),
+        f"{payload_id} promotion license notice_members",
+    )
+    _require(receipt.get("authority") == {
+        "repository_owner_approval_required": True,
+        "grants_release_publication": False,
+        "grants_provider_activation": False,
+        "automatic_launch_gate": "CLOSED",
+    }, f"{payload_id} promotion receipt authority boundaries are invalid")
+    _validate_registered_promotion_claim(
+        repo_root,
+        claims,
+        declaration.get("approval_kind"),
+        payload_id=payload_id,
+        receipt_path=receipt_path,
+        receipt_sha256=receipt_sha256,
+        payload_identity_sha256=payload_identity_sha256,
+        manifest_binding_sha256=manifest_binding_sha256,
+    )
+
+
+def _validate_readiness(repo_root: Path, manifest: dict[str, Any]) -> None:
+    readiness = manifest.get("redistribution_readiness")
+    payloads = manifest.get("payloads")
+    _require(isinstance(payloads, list), "payload manifest payloads must be a list")
     _require(isinstance(readiness, dict), "redistribution_readiness must be an object")
+    _require(set(readiness) == {"status", "enforcement", "blockers", "promotion_receipts"},
+             "redistribution_readiness fields are incomplete or unexpected")
     _require(readiness.get("status") in {"blocked", "ready"}, "redistribution_readiness status is invalid")
     _require(readiness.get("enforcement") in {"advisory", "required"},
              "redistribution_readiness enforcement is invalid")
     blockers = readiness.get("blockers")
     _require(isinstance(blockers, list), "redistribution_readiness blockers must be a list")
+    declarations = readiness.get("promotion_receipts")
+    _require(isinstance(declarations, list), "redistribution_readiness promotion_receipts must be a list")
+    claims = _load_promotion_claims(repo_root)
     if readiness["status"] == "blocked":
         _require(readiness["enforcement"] == "advisory",
                  "blocked redistribution readiness must remain advisory for this byte-integrity slice")
@@ -605,11 +1221,40 @@ def _validate_readiness(readiness: Any, payloads: list[dict[str, Any]]) -> None:
                  "blocked redistribution readiness must list explicit blockers")
         _require(all(str(record.get("redistribution_readiness", "")).startswith("blocked-") for record in payloads),
                  "every payload must remain explicitly blocked while top-level readiness is blocked")
+        _require(not declarations,
+                 "blocked redistribution readiness cannot carry authority-bearing promotion receipts")
+        _require(not claims,
+                 "blocked redistribution readiness requires an empty promotion claims registry")
         return
 
+    _require(claims, "ready redistribution requires registered promotion claims")
+    _require(
+        PROMOTION_PROVIDER_AUTHORITY_STATE == "INSTALLED_TARGET_OWNED",
+        "ready redistribution requires a separately activated target-owned isolated promotion verifier; "
+        "payload promotion provider authority is NOT_INSTALLED",
+    )
+    _validate_promotion_verifier_unchanged(repo_root)
     _require(readiness["enforcement"] == "required",
              "ready redistribution status must be enforced, not advisory")
     _require(not blockers, "ready redistribution status cannot retain blockers")
+    _require(len(declarations) == len(payloads),
+             "ready redistribution requires exactly one promotion receipt per payload")
+    declarations_by_id = {
+        declaration.get("payload_id"): declaration
+        for declaration in declarations
+        if isinstance(declaration, dict)
+    }
+    _require(len(declarations_by_id) == len(payloads),
+             "ready redistribution promotion receipts must have unique payload ids")
+    approval_kinds = {
+        declaration.get("approval_kind")
+        for declaration in declarations
+        if isinstance(declaration, dict) and isinstance(declaration.get("approval_kind"), str)
+    }
+    _require(len(approval_kinds) == len(declarations),
+             "ready redistribution promotion receipts must name unique approval kinds")
+    _require(set(claims) == approval_kinds,
+             "payload promotion claims registry must exactly equal referenced approval kinds")
     for record in payloads:
         record_id = str(record.get("id") or "payload")
         provenance = record.get("provenance")
@@ -626,6 +1271,9 @@ def _validate_readiness(readiness: Any, payloads: list[dict[str, Any]]) -> None:
                      f"{record_id} provenance {field} is not verified")
         _require(provenance.get("license_notice_in_archive") is True,
                  f"{record_id} does not carry its verified license notice")
+        declaration = declarations_by_id.get(record_id)
+        _require(declaration is not None, f"{record_id} promotion_receipt_missing")
+        _validate_promotion_receipt(repo_root, manifest, record, declaration, claims)
 
 
 def _machine_supports(machine: Any, required: str) -> bool:
@@ -792,7 +1440,14 @@ def _validate_provenance(record: dict[str, Any]) -> None:
                  f"{label} candidate source revisions must be full 40-character commit ids")
 
 
-def _validate_archive(repo_root: Path, record: dict[str, Any], policy: dict[str, Any], *, selected: bool) -> None:
+def _validate_archive(
+    repo_root: Path,
+    record: dict[str, Any],
+    policy: dict[str, Any],
+    *,
+    selected: bool,
+    require_tracked: bool = False,
+) -> None:
     label = str(record.get("id") or record.get("path") or "payload")
     relative = _manifest_path(record.get("path"), label)
     archive_path = repo_root / Path(relative)
@@ -801,11 +1456,15 @@ def _validate_archive(repo_root: Path, record: dict[str, Any], policy: dict[str,
     expected_hash = _hex_digest(record.get("sha256"), label)
     _require(expected_bytes <= policy["max_archive_bytes"],
              f"{label} declared archive bytes exceed max_archive_bytes")
-    actual_bytes, actual_hash = _sha256_file(archive_path)
-    _require(actual_bytes == expected_bytes,
-             f"{label} archive size mismatch: expected {expected_bytes}, got {actual_bytes}")
-    _require(actual_hash == expected_hash,
-             f"{label} archive sha256 mismatch: expected {expected_hash}, got {actual_hash}")
+    archive_snapshot = _archive_bytes_snapshot(
+        repo_root,
+        relative,
+        expected_bytes,
+        expected_hash,
+        label,
+        require_tracked=require_tracked,
+    )
+    actual_bytes = len(archive_snapshot)
 
     archive_format = record.get("archive_format")
     if archive_format is None:
@@ -814,7 +1473,7 @@ def _validate_archive(repo_root: Path, record: dict[str, Any], policy: dict[str,
     _require(relative.lower().endswith(".zip") if archive_format == "zip" else relative.lower().endswith(".tar.xz"),
              f"{label} archive_format does not match its path")
 
-    with ArchiveView(archive_path, archive_format, label) as archive:
+    with ArchiveView(archive_snapshot, archive_format, label) as archive:
         observed = _summary(archive.members)
         _validate_summary(record.get("member_summary"), observed, label)
         _require(observed["entries"] <= policy["max_members"], f"{label} exceeds max_members")
@@ -968,7 +1627,7 @@ def validate_manifest(repo_root: Path, manifest: dict[str, Any]) -> dict[str, An
              f"unmanifested={sorted(tracked - declared)}, missing_from_git={sorted(declared - tracked)}")
 
     for record in payloads:
-        _validate_archive(repo_root, record, policy, selected=True)
+        _validate_archive(repo_root, record, policy, selected=True, require_tracked=True)
         consumers = record.get("consumers")
         _require(isinstance(consumers, list) and consumers, f"{record['id']} consumers must be a non-empty list")
         for index, consumer in enumerate(consumers):
@@ -980,10 +1639,10 @@ def validate_manifest(repo_root: Path, manifest: dict[str, Any]) -> dict[str, An
             )
         _validate_provenance(record)
     for record in inactive:
-        _validate_archive(repo_root, record, policy, selected=False)
+        _validate_archive(repo_root, record, policy, selected=False, require_tracked=True)
 
     readiness = manifest.get("redistribution_readiness")
-    _validate_readiness(readiness, payloads)
+    _validate_readiness(repo_root, manifest)
     assert isinstance(readiness, dict)
     blockers = readiness["blockers"]
     return {

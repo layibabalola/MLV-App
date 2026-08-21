@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/layibabalola/MLV-App/tools/gates/payload-provenance-promotion-receipt.schema.json",
+  "title": "MLV-App payload provenance promotion receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "payload",
+    "manifest",
+    "upstream",
+    "build",
+    "license",
+    "authority"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mlvapp.payload-provenance-promotion-receipt.v1"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "identity_sha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "identity_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binding_sha256"],
+      "properties": {
+        "binding_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "upstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "version", "checksum_evidence"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "checksum_evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["algorithm", "expected_archive_sha256", "evidence"],
+          "properties": {
+            "algorithm": {"const": "sha256"},
+            "expected_archive_sha256": {"$ref": "#/$defs/sha256"},
+            "evidence": {"$ref": "#/$defs/boundFile"}
+          }
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "evidence"],
+      "properties": {
+        "basis": {
+          "enum": ["reproducible-recipe", "upstream-binary-provenance"]
+        },
+        "evidence": {"$ref": "#/$defs/boundFile"}
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expression", "evidence", "notice_members"],
+      "properties": {
+        "expression": {"type": "string", "minLength": 1},
+        "evidence": {"$ref": "#/$defs/boundFile"},
+        "notice_members": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/boundFile"}
+        }
+      }
+    },
+    "authority": {
+      "const": {
+        "repository_owner_approval_required": true,
+        "grants_release_publication": false,
+        "grants_provider_activation": false,
+        "automatic_launch_gate": "CLOSED"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "boundFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

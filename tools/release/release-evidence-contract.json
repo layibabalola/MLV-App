@@ -58,7 +58,9 @@
   "assurance_limits": {
     "redistribution_ready": false,
     "reproducibility_claim": false,
-    "required_blocker_source": "tools/gates/vendored-native-payloads.json#redistribution_readiness"
+    "payload_promotion_provider_authority": "NOT_INSTALLED",
+    "required_blocker_source": "tools/gates/vendored-native-payloads.json#redistribution_readiness",
+    "payload_promotion_gate": "The receipt and provider-verified repository-owner approval claim protocol is staged dormant. Readiness remains mechanically impossible while payload_promotion_provider_authority is NOT_INSTALLED. A later, separately reviewed activation must supply a target-owned isolated verifier outside candidate Python startup/import control; only then may it revalidate the exact structured owner comment against canonical GitHub and bind the payload, reviewed commit, receipt, manifest, closed scope, and unchanged verifier surfaces; agent reviews cannot grant redistribution or release-publication authority."
   },
   "workflow_targets": {
     "linux": {
