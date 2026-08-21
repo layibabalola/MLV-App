@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softwarefactory.invalid/schemas/universal-manual-canary-authorization-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "authorizationId", "issuedAt", "expiresAt", "requestBindingSha256", "quotaDomainId", "projectProfileSha256", "reviewerReceiptSha256", "oneUse", "authorizationHmacSha256"],
+  "properties": {
+    "schema": {"const": "fleet-universal-manual-canary-authorization/v1"},
+    "authorizationId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"},
+    "issuedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "requestBindingSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "quotaDomainId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}/hmac-sha256:[0-9a-f]{64}$"},
+    "projectProfileSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "reviewerReceiptSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "oneUse": {"const": true},
+    "authorizationHmacSha256": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"}
+  }
+}

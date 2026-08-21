@@ -1,0 +1,113 @@
+{
+  "schema": "mlv-universal-control-supervisor-integration/v1",
+  "status": "CANDIDATE_ZERO_AUTHORITY",
+  "integration": {
+    "firstParent": "a4bb0d7a2833e760ba1d0d6cfb53133d69f09c24",
+    "firstParentTree": "fd6de9b74a0a2ed48fa751048ad5e215849bf9c8",
+    "secondParent": "50db64d71bf62da041b9a6872c893382cd7cc79b",
+    "secondParentTree": "ab58ec53414ff889eaa41a6689dde1141cc687ed",
+    "mergeBase": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
+    "sourceProofTransferred": false,
+    "sourceCodeRevalidatedOnIntegratedTree": true
+  },
+  "integratedSubjects": [
+    {
+      "path": "tools/provider_control/vendor/universal_provider_control.py",
+      "gitBlobOid": "0e26b15f249f89972e2fc7807ccd0d98a0bd4954",
+      "bytes": 119196,
+      "sha256": "9A15DD34BC35A77E7F7AABA7952BC3712A25504EE52A213CFC64E4FC27F0E5C2"
+    },
+    {
+      "path": "tools/provider_control/mlv_lane_supervisor.py",
+      "gitBlobOid": "08d4792e5ab860a39358d091ea4f6f611ded3647",
+      "bytes": 43884,
+      "sha256": "0BD4116A29304C86FE124F692EFA81FE4904506731C58F1A1E05761AC9E9DA04"
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-control-request-v1.schema.json",
+      "gitBlobOid": "3d9f75ed871c453dd325424e71e43dd0948e8993",
+      "bytes": 4749,
+      "sha256": "5CE4B5BBD0CB7C3C02B404B86312F539603AD4FEAC364A51C5F72FA43FD30C57"
+    },
+    {
+      "path": "tools/provider_control/mlv-project-profile.candidate.json",
+      "gitBlobOid": "9a3059ed4cb0cdd830c6357881e7cbf5253d05d5",
+      "bytes": 1553,
+      "sha256": "2767DBC8E48E41BFCCA6101913DCB157B7EC05B6EF3BA1A8D4405B45F2010F2D"
+    },
+    {
+      "path": "tools/provider_control/lane-bindings.candidate.json",
+      "gitBlobOid": "13d13b3b9c37017c2e1dac1af066795ac5812979",
+      "bytes": 1515,
+      "sha256": "8F328778DA046D8348A7161CF95D31B843CD58AAF89EE7989D6F60C5360E18B6"
+    },
+    {
+      "path": "tools/provider_control/tests/test_mlv_lane_supervisor.py",
+      "gitBlobOid": "1593bf47feb0b57e11f26b1a11239b6b0142b8f2",
+      "bytes": 78757,
+      "sha256": "FC02B426F43FBBCD21EF6C4642CAAC1AD32BBA9637BC4E16CF1E13CB051834AF"
+    },
+    {
+      "path": ".github/workflows/provider-control-candidate.yml",
+      "gitBlobOid": "37c6137a15697cba8f8e203f19ef8e93f5278adb",
+      "bytes": 3715,
+      "sha256": "F07E87650C2C0F9CFAF607A288D4E8002E35433B6F54EC25AE2DBDAAE672E320"
+    }
+  ],
+  "preservedEvidence": {
+    "launcherActionGraphCommit": "38ed4bbf9068cac80140297c74facdf522577704",
+    "machineObservationCommit": "06ea3ea5eb1329f59d2e9fdf474485c30b0cc651",
+    "taskDefinitionCandidateCommit": "2ef9690649519d91197199d401d46fe3bb6d8dbb",
+    "taskDefinitionReviewCommit": "a4bb0d7a2833e760ba1d0d6cfb53133d69f09c24"
+  },
+  "verifiedControls": {
+    "integratedSupervisorTests": "PASS 45/45",
+    "productionTickGate": "CLOSED",
+    "productionProviderCalls": 0,
+    "productionProviderProcesses": 0,
+    "productionTokens": 0,
+    "requestEnvelopeSchemaIntegrated": true,
+    "exactModelEffortRoleRequirementsPresent": true,
+    "fakeProviderOnlyTestBoundary": true,
+    "proofTransferCredited": false
+  },
+  "acceptedBoundary": {
+    "functionalClosedSupervisorSourceIntegrated": true,
+    "universalRequestEnvelopeIntegrated": true,
+    "providerFreeControlSuiteIntegrated": true,
+    "productionLauncherWired": false,
+    "completeLauncherInventory": false,
+    "completeActionGraph": false,
+    "signedInstallation": false,
+    "runtimeActivation": false,
+    "currentClosedGateProductionReceipt": false,
+    "qualityEquivalence": false,
+    "functionalityEquivalence": false,
+    "projectOwnerDisposition": false,
+    "adoption": false
+  },
+  "remainingUncreditedProofs": [
+    "COMPLETE_LAUNCHER_INVENTORY",
+    "COMPLETE_ACTION_GRAPH",
+    "POSITIVE_DIRECT_LAUNCH_ENFORCEMENT",
+    "SIGNED_INSTALLATION_AND_ROLLBACK",
+    "CURRENT_CLOSED_GATE_PRODUCTION_RECEIPT",
+    "REQUEST_LEVEL_ACCOUNTING",
+    "ONE_THOUSAND_INSTALLED_IDLE_TICKS",
+    "FULL_CHILD_FENCING",
+    "QUALITY_EQUIVALENCE",
+    "FUNCTIONALITY_EQUIVALENCE",
+    "PROJECT_OWNER_DISPOSITION",
+    "ADOPTION"
+  ],
+  "authority": {
+    "projectDisposition": false,
+    "fleetAdoption": false,
+    "installation": false,
+    "runtime": false,
+    "providerExecution": false,
+    "authentication": false,
+    "taskOrGateMutation": false,
+    "pushOrMerge": false
+  }
+}

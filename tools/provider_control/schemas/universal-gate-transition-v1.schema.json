@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softwarefactory.invalid/schemas/universal-gate-transition-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "transitionId", "transitionEpoch", "issuedAt", "expiresAt", "from", "to", "cause", "doctrineCommitSha256", "brokerExecutableSha256", "projectProfileSha256", "inventorySha256", "brokerHealthSha256", "reviewReceiptSha256", "testReceiptSha256", "authorizationHmacSha256"],
+  "properties": {
+    "schema": {"const": "fleet-universal-gate-transition/v1"},
+    "transitionId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"},
+    "transitionEpoch": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "issuedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "from": {"enum": ["CLOSED", "SHADOW", "CANARY", "OPEN"]},
+    "to": {"enum": ["CLOSED", "SHADOW", "CANARY", "OPEN"]},
+    "cause": {"enum": ["INDEPENDENT_ADJUDICATION", "SAFETY_CLOSE"]},
+    "doctrineCommitSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "brokerExecutableSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "projectProfileSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "inventorySha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "brokerHealthSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "reviewReceiptSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "testReceiptSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "authorizationHmacSha256": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"}
+  }
+}

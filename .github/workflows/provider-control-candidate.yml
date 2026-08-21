@@ -1,0 +1,85 @@
+name: Provider control candidate
+on:
+  pull_request:
+    paths:
+      - ".gitattributes"
+      - "tools/provider_control/**"
+      - ".github/requirements/provider-control*"
+      - ".github/workflows/provider-control-candidate.yml"
+  push:
+    branches: [master]
+    paths:
+      - ".gitattributes"
+      - "tools/provider_control/**"
+      - ".github/requirements/provider-control*"
+      - ".github/workflows/provider-control-candidate.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: provider-control-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  queue: max
+  cancel-in-progress: false
+jobs:
+  closed-gate:
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: >-
+          python -m pip install --disable-pip-version-check --no-input
+          --only-binary=:all: --require-hashes
+          -r .github/requirements/provider-control.txt
+      - name: Run CLOSED gate and write evidence
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python tools/provider_control/tests/hosted_runner.py
+          --junit .claude-state/provider-control-results/junit.xml
+          --result .claude-state/provider-control-results/result.json
+          --manifest .claude-state/provider-control-results/evidence-manifest.json
+      - name: Verify CLOSED-gate evidence bundle
+        id: evidence-verify
+        if: ${{ always() }}
+        run: >-
+          python tools/provider_control/tests/hosted_runner.py
+          --verify-manifest .claude-state/provider-control-results/evidence-manifest.json
+      - name: Upload CLOSED-gate evidence
+        if: ${{ always() && steps.evidence-verify.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: provider-control-${{ matrix.os }}-py${{ matrix.python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .claude-state/provider-control-results/result.json
+            .claude-state/provider-control-results/junit.xml
+            .claude-state/provider-control-results/evidence-manifest.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
+      - name: Verify fatal runner diagnostic
+        id: fatal-verify
+        if: ${{ always() && steps.evidence-verify.outcome != 'success' }}
+        run: >-
+          python tools/provider_control/tests/hosted_runner.py
+          --verify-fatal .claude-state/provider-control-results/fatal-diagnostic.json
+      - name: Upload fatal runner diagnostic
+        if: ${{ always() && steps.evidence-verify.outcome != 'success' && steps.fatal-verify.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: provider-control-fatal-${{ matrix.os }}-py${{ matrix.python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .claude-state/provider-control-results/fatal-diagnostic.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30

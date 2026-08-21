@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softwarefactory.invalid/schemas/universal-project-profile-v1.schema.json",
+  "title": "Universal provider-control project profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "project", "profileVersion", "independenceClass", "coordination", "efficiency", "policy", "invariants"],
+  "properties": {
+    "schema": {"const": "fleet-universal-project-profile/v1"},
+    "project": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$"},
+    "profileVersion": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "independenceClass": {
+      "enum": ["SHARED_QUOTA_DOMAIN", "SEPARATE_ACCOUNT", "SEPARATE_PROVIDER", "UNKNOWN"]
+    },
+    "coordination": {
+      "type": "object", "additionalProperties": false,
+      "required": ["quotaDomainHostCount", "mode", "sharedBrokerIdentitySha256", "stateRootIdentity"],
+      "properties": {
+        "quotaDomainHostCount": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "mode": {"enum": ["HOST_LOCAL", "SHARED_BROKER"]},
+        "sharedBrokerIdentitySha256": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          ]
+        },
+        "stateRootIdentity": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "efficiency": {
+      "type": "object", "additionalProperties": false,
+      "required": ["maxTurns", "maxContextTokens", "milestoneCompactionRequired", "cacheAffinityRequired", "capsuleRequired", "qualityMayBeWeakened"],
+      "properties": {
+        "maxTurns": {"type": "integer", "minimum": 1, "maximum": 64},
+        "maxContextTokens": {"type": "integer", "minimum": 1024, "maximum": 1000000},
+        "milestoneCompactionRequired": {"const": true},
+        "cacheAffinityRequired": {"const": true},
+        "capsuleRequired": {"const": true},
+        "qualityMayBeWeakened": {"const": false}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxObservationAgeSeconds", "maxInventoryAgeSeconds", "maxBrokerHealthAgeSeconds", "maxRequestAgeSeconds", "maxRequestValiditySeconds",
+        "leaseMaxSeconds", "postResetQuietSeconds", "maxConcurrentPerQuotaDomain",
+        "evidenceCapsuleMaxBytes", "reserveFloorByPriority", "requiredCapacityDimensions"
+      ],
+      "properties": {
+        "maxObservationAgeSeconds": {"type": "integer", "minimum": 1, "maximum": 300},
+        "maxInventoryAgeSeconds": {"type": "integer", "minimum": 1, "maximum": 300},
+        "maxBrokerHealthAgeSeconds": {"type": "integer", "minimum": 1, "maximum": 120},
+        "maxRequestAgeSeconds": {"type": "integer", "minimum": 1, "maximum": 120},
+        "maxRequestValiditySeconds": {"type": "integer", "minimum": 1, "maximum": 900},
+        "leaseMaxSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "postResetQuietSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
+        "maxConcurrentPerQuotaDomain": {"const": 1},
+        "evidenceCapsuleMaxBytes": {"type": "integer", "minimum": 1024, "maximum": 262144},
+        "reserveFloorByPriority": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["OWNER_FOREGROUND", "REQUIRED_REVIEW", "PRODUCT_WORK", "ADJUDICATION", "MAINTENANCE"],
+          "properties": {
+            "OWNER_FOREGROUND": {"type": "number", "minimum": 0.05, "maximum": 0.95},
+            "REQUIRED_REVIEW": {"type": "number", "minimum": 0.15, "maximum": 0.95},
+            "PRODUCT_WORK": {"type": "number", "minimum": 0.25, "maximum": 0.95},
+            "ADJUDICATION": {"type": "number", "minimum": 0.30, "maximum": 0.95},
+            "MAINTENANCE": {"type": "number", "minimum": 0.40, "maximum": 0.95}
+          }
+        },
+        "requiredCapacityDimensions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["claude-code/1.0", "openai-responses/1.0", "kimi-code/1.0", "xai-api/1.0"],
+          "properties": {
+            "claude-code/1.0": {"$ref": "#/$defs/dimensions"},
+            "openai-responses/1.0": {"$ref": "#/$defs/dimensions"},
+            "kimi-code/1.0": {"$ref": "#/$defs/dimensions"},
+            "xai-api/1.0": {"$ref": "#/$defs/dimensions"}
+          }
+        }
+      }
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resetCanOpenGate", "authCanOpenGate", "capacityCanOpenGate", "unknownCanAdmit",
+        "directProviderInvocation", "exactLaunchBinding", "fullChildLifetimeLease",
+        "strictRuntimeSchemaEnforcement", "boundedStreamingEvidence", "deterministicNoWorkProof"
+      ],
+      "properties": {
+        "resetCanOpenGate": {"const": false},
+        "authCanOpenGate": {"const": false},
+        "capacityCanOpenGate": {"const": false},
+        "unknownCanAdmit": {"const": false},
+        "directProviderInvocation": {"const": false},
+        "exactLaunchBinding": {"const": true},
+        "fullChildLifetimeLease": {"const": true},
+        "strictRuntimeSchemaEnforcement": {"const": true},
+        "boundedStreamingEvidence": {"const": true},
+        "deterministicNoWorkProof": {"const": true}
+      }
+    }
+  },
+  "$defs": {
+    "dimensions": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,31}$"}
+    }
+  }
+}

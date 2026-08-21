@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softwarefactory.invalid/schemas/universal-broker-health-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "observedAt", "status", "brokerExecutableSha256", "projectProfileSha256", "inventorySha256", "observerQualified", "observerHmacSha256"],
+  "properties": {
+    "schema": {"const": "fleet-universal-broker-health/v1"},
+    "observedAt": {"type": "string", "format": "date-time"},
+    "status": {"const": "HEALTHY"},
+    "brokerExecutableSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "projectProfileSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "inventorySha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "observerQualified": {"const": true},
+    "observerHmacSha256": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"}
+  }
+}

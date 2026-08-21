@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softwarefactory.invalid/schemas/provider-native-capacity-evidence-v1.schema.json",
+  "title": "Version-bound native provider capacity evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "provider", "adapterVersion", "capturedAt", "quotaDomainId", "sourceArtifactSha256", "payload", "observerHmacSha256"],
+  "properties": {
+    "schema": {"const": "fleet-provider-native-capacity-evidence/v1"},
+    "provider": {"enum": ["claude", "openai", "kimi", "grok"]},
+    "adapterVersion": {"enum": ["claude-code/1.0", "openai-responses/1.0", "kimi-code/1.0", "xai-api/1.0"]},
+    "capturedAt": {"type": "string", "format": "date-time"},
+    "quotaDomainId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}/hmac-sha256:[0-9a-f]{64}$"},
+    "sourceArtifactSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "payload": {"type": "object"},
+    "observerHmacSha256": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "provider": {"const": "claude"},
+        "adapterVersion": {"const": "claude-code/1.0"},
+        "payload": {"$ref": "#/$defs/claudePayload"}
+      }
+    },
+    {
+      "properties": {
+        "provider": {"const": "openai"},
+        "adapterVersion": {"const": "openai-responses/1.0"},
+        "payload": {"$ref": "#/$defs/openaiPayload"}
+      }
+    },
+    {
+      "properties": {
+        "provider": {"const": "kimi"},
+        "adapterVersion": {"const": "kimi-code/1.0"},
+        "payload": {"$ref": "#/$defs/kimiPayload"}
+      }
+    },
+    {
+      "properties": {
+        "provider": {"const": "grok"},
+        "adapterVersion": {"const": "xai-api/1.0"},
+        "payload": {"$ref": "#/$defs/grokPayload"}
+      }
+    }
+  ],
+  "$defs": {
+    "fraction": {"type": "number", "minimum": 0, "maximum": 1},
+    "claudePayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sessionUtilization", "weeklyUtilization", "sessionResetAt", "weeklyResetAt", "sessionLastResetAt", "weeklyLastResetAt"],
+      "properties": {
+        "sessionUtilization": {"$ref": "#/$defs/fraction"},
+        "weeklyUtilization": {"$ref": "#/$defs/fraction"},
+        "sessionResetAt": {"type": "string", "format": "date-time"},
+        "weeklyResetAt": {"type": "string", "format": "date-time"},
+        "sessionLastResetAt": {"type": "string", "format": "date-time"},
+        "weeklyLastResetAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "openaiPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["primaryUtilization", "secondaryUtilization", "primaryResetAt", "secondaryResetAt", "primaryLastResetAt", "secondaryLastResetAt"],
+      "properties": {
+        "primaryUtilization": {"$ref": "#/$defs/fraction"},
+        "secondaryUtilization": {"$ref": "#/$defs/fraction"},
+        "primaryResetAt": {"type": "string", "format": "date-time"},
+        "secondaryResetAt": {"type": "string", "format": "date-time"},
+        "primaryLastResetAt": {"type": "string", "format": "date-time"},
+        "secondaryLastResetAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "kimiPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contextUtilization", "monthlyUtilization", "contextResetAt", "monthlyResetAt", "contextLastResetAt", "monthlyLastResetAt"],
+      "properties": {
+        "contextUtilization": {"$ref": "#/$defs/fraction"},
+        "monthlyUtilization": {"$ref": "#/$defs/fraction"},
+        "contextResetAt": {"type": "string", "format": "date-time"},
+        "monthlyResetAt": {"type": "string", "format": "date-time"},
+        "contextLastResetAt": {"type": "string", "format": "date-time"},
+        "monthlyLastResetAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "grokPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requestUtilization", "tokenUtilization", "requestResetAt", "tokenResetAt", "requestLastResetAt", "tokenLastResetAt"],
+      "properties": {
+        "requestUtilization": {"$ref": "#/$defs/fraction"},
+        "tokenUtilization": {"$ref": "#/$defs/fraction"},
+        "requestResetAt": {"type": "string", "format": "date-time"},
+        "tokenResetAt": {"type": "string", "format": "date-time"},
+        "requestLastResetAt": {"type": "string", "format": "date-time"},
+        "tokenLastResetAt": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

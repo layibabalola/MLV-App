@@ -1,0 +1,19 @@
+{
+  "schema": "mlv-provider-control-ci-platform-lock-evidence/v1",
+  "source": "https://pypi.org/",
+  "sourcePrecedentCommit": "5e01d5c35f8f468a07521e13c62b945be7bac7c5",
+  "pythonVersions": ["3.13", "3.14"],
+  "runnerPlatforms": ["ubuntu-latest-x86_64", "windows-latest-amd64"],
+  "universalWheels": [
+    {"filename": "attrs-26.1.0-py3-none-any.whl", "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", "bytes": 67548},
+    {"filename": "jsonschema-4.26.0-py3-none-any.whl", "sha256": "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce", "bytes": 90630},
+    {"filename": "jsonschema_specifications-2025.9.1-py3-none-any.whl", "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", "bytes": 18437},
+    {"filename": "referencing-0.37.0-py3-none-any.whl", "sha256": "381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231", "bytes": 26766}
+  ],
+  "platformWheels": [
+    {"python": "3.13", "runner": "ubuntu-latest-x86_64", "filename": "rpds_py-2026.6.3-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", "sha256": "acac386b453c2516111b50985d60ce46e7fadb5ea71ae7b25f4c946935bf27cf", "bytes": 365678},
+    {"python": "3.13", "runner": "windows-latest-amd64", "filename": "rpds_py-2026.6.3-cp313-cp313-win_amd64.whl", "sha256": "9250a9a0a6fd4648b3f868da8d91a4c52b5811a62df58e753d50ae4454a36f80", "bytes": 219454},
+    {"python": "3.14", "runner": "ubuntu-latest-x86_64", "filename": "rpds_py-2026.6.3-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", "sha256": "dc319e5a1de4b6913aac94bf6a2f9e847371e0a140a43dd4991db1a09bc2d504", "bytes": 367255},
+    {"python": "3.14", "runner": "windows-latest-amd64", "filename": "rpds_py-2026.6.3-cp314-cp314-win_amd64.whl", "sha256": "0be972be84cfcaf46c8c6edf690ca0f154ac17babf1f6a955a51579b34ad2dc5", "bytes": 220380}
+  ]
+}
