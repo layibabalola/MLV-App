@@ -74,6 +74,17 @@ class PrelaunchBoundaryTests(unittest.TestCase):
             ):
                 supervisor.enforce_prelaunch_stop(source)
 
+    def test_open_gate_result_is_refused(self):
+        source = {
+            "status": "REFUSED",
+            "reason": "AUTOMATIC_LAUNCH_GATE_CLOSED",
+            "automaticLaunchGate": "OPEN",
+            "demandFingerprint": FINGERPRINT,
+            **ZERO,
+        }
+        with self.assertRaisesRegex(ControlError, "PRELAUNCH_RESULT_INVALID"):
+            supervisor.enforce_prelaunch_stop(source)
+
     def test_native_zero_types_are_required(self):
         for field, value in (("providerCalls", False), ("providerProcesses", "0"),
                              ("inputTokens", 0.0)):
