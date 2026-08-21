@@ -127,6 +127,7 @@ static void df_unload( mlvObject_t* df_mlv )
     if(df_mlv->main_file_mutex) free(df_mlv->main_file_mutex);
     pthread_mutex_destroy(&df_mlv->g_mutexFind);
     pthread_mutex_destroy(&df_mlv->g_mutexCount);
+    pthread_mutex_destroy(&df_mlv->g_mutexCacheLifecycle);
     pthread_mutex_destroy(&df_mlv->llrawproc_mutex);
     pthread_mutex_destroy(&df_mlv->llrawproc_worker_mutex);
 }
@@ -138,6 +139,11 @@ static int df_load_ext(mlvObject_t * video, char * error_message)
     if(!video->llrawproc->dark_frame_filename) return 1;
     /* Parse dark frame MLV */
     mlvObject_t df_mlv = { 0 };
+    pthread_mutex_init(&df_mlv.g_mutexFind, NULL);
+    pthread_mutex_init(&df_mlv.g_mutexCount, NULL);
+    pthread_mutex_init(&df_mlv.g_mutexCacheLifecycle, NULL);
+    pthread_mutex_init(&df_mlv.llrawproc_mutex, NULL);
+    pthread_mutex_init(&df_mlv.llrawproc_worker_mutex, NULL);
     char err_msg[256] = { 0 };
     int ret = openMlvClip(&df_mlv, video->llrawproc->dark_frame_filename, 2, err_msg);
     if(ret != 0)
@@ -146,6 +152,7 @@ static int df_load_ext(mlvObject_t * video, char * error_message)
         printf("DF: %s\n", err_msg);
 #endif
         if(error_message != NULL) strcpy(error_message, err_msg);
+        df_unload(&df_mlv);
         return ret;
     }
 

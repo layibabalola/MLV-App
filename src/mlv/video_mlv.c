@@ -8022,6 +8022,7 @@ mlvObject_t * initMlvObject()
     /* Will avoid main file conflicts with audio and stuff */
     pthread_mutex_init(&video->g_mutexFind, NULL);
     pthread_mutex_init(&video->g_mutexCount, NULL);
+    pthread_mutex_init(&video->g_mutexCacheLifecycle, NULL);
     pthread_mutex_init(&video->llrawproc_mutex, NULL);
     pthread_mutex_init(&video->llrawproc_worker_mutex, NULL);
     pthread_mutex_init(&video->processed8_prefetch_mutex, NULL);
@@ -8154,6 +8155,7 @@ void freeMlvObject(mlvObject_t * video)
     if(video->main_file_mutex) free(video->main_file_mutex);
     pthread_mutex_destroy(&video->g_mutexFind);
     pthread_mutex_destroy(&video->g_mutexCount);
+    pthread_mutex_destroy(&video->g_mutexCacheLifecycle);
     pthread_mutex_destroy(&video->llrawproc_mutex);
     pthread_mutex_destroy(&video->llrawproc_worker_mutex);
     pthread_mutex_destroy(&video->processed8_prefetch_mutex);
@@ -9287,20 +9289,29 @@ short_cut:
     /* Calculate framerate */
     video->frame_rate = getMlvFramerateOrig(video);
 
-    /* Make sure frame cache number is up to date by rerunniinitLLRawProcObjectng thiz */
-    setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
-
     /* For frame cache */
     video->rgb_raw_frames = (uint16_t **)malloc( sizeof(uint16_t *) * video->frames );
     video->rgb_raw_current_frame_words = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
     video->rgb_raw_current_frame = (uint16_t *)malloc( video->rgb_raw_current_frame_words * sizeof(uint16_t) );
     video->cached_frames = (uint8_t *)calloc( sizeof(uint8_t), video->frames );
+    if (!video->rgb_raw_frames || !video->rgb_raw_current_frame || !video->cached_frames)
+    {
+        snprintf(error_message, 256, "Out of memory creating mcraw frame cache:  %.185s", video->path);
+        return MLV_ERR_OPEN;
+    }
 
     isMlvActive(video) = 5;
-
-    /* Start caching unless it was disabled already */
-    if (!mlvCacheShouldStop(video) && (open_mode != MLV_OPEN_PREVIEW))
+    const int cache_was_enabled = !mlvCacheShouldStop(video);
+    if (cache_was_enabled && (open_mode != MLV_OPEN_PREVIEW))
     {
+        mlvCacheSetStop(video, 1);
+        setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
+        mlvCacheSetStop(video, 0);
+        if (!video->cache_memory_block)
+        {
+            snprintf(error_message, 256, "Out of memory applying mcraw frame cache policy:  %.176s", video->path);
+            return MLV_ERR_OPEN;
+        }
         for (int i = 0; i < video->cpu_cores; ++i)
         {
             add_mlv_cache_thread(video);
@@ -9641,9 +9652,6 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     /* Calculate framerate. */
     video->frame_rate = getMlvFramerateOrig(video);
 
-    /* Make sure frame cache number is up to date. */
-    setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
-
     /* For frame cache. */
     if ((size_t)(video->frames ? video->frames : 1u) > SIZE_MAX / sizeof(uint16_t *)
         || dng_pixels > SIZE_MAX / 3u
@@ -9663,10 +9671,17 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     }
 
     isMlvActive(video) = 1;
-
-    /* Start caching unless it was disabled already. */
-    if (!mlvCacheShouldStop(video) && (open_mode != MLV_OPEN_PREVIEW))
+    const int cache_was_enabled = !mlvCacheShouldStop(video);
+    if (cache_was_enabled && (open_mode != MLV_OPEN_PREVIEW))
     {
+        mlvCacheSetStop(video, 1);
+        setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
+        mlvCacheSetStop(video, 0);
+        if (!video->cache_memory_block)
+        {
+            snprintf(error_message, 256, "Out of memory applying DNG frame cache policy:  %.178s", video->path);
+            return MLV_ERR_OPEN;
+        }
         for (int i = 0; i < video->cpu_cores; ++i)
         {
             add_mlv_cache_thread(video);
@@ -10078,20 +10093,29 @@ preview_out:
     /* Calculate framerate */
     video->frame_rate = getMlvFramerateOrig(video);
 
-    /* Make sure frame cache number is up to date by rerunniinitLLRawProcObjectng thiz */
-    setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
-
     /* For frame cache */
     video->rgb_raw_frames = (uint16_t **)malloc( sizeof(uint16_t *) * video->frames );
     video->rgb_raw_current_frame_words = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
     video->rgb_raw_current_frame = (uint16_t *)malloc( video->rgb_raw_current_frame_words * sizeof(uint16_t) );
     video->cached_frames = (uint8_t *)calloc( sizeof(uint8_t), video->frames );
+    if (!video->rgb_raw_frames || !video->rgb_raw_current_frame || !video->cached_frames)
+    {
+        snprintf(error_message, 256, "Out of memory creating MLV frame cache:  %.188s", video->path);
+        return MLV_ERR_OPEN;
+    }
 
     isMlvActive(video) = 1;
-
-    /* Start caching unless it was disabled already */
-    if (!mlvCacheShouldStop(video) && (open_mode != MLV_OPEN_PREVIEW))
+    const int cache_was_enabled = !mlvCacheShouldStop(video);
+    if (cache_was_enabled && (open_mode != MLV_OPEN_PREVIEW))
     {
+        mlvCacheSetStop(video, 1);
+        setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
+        mlvCacheSetStop(video, 0);
+        if (!video->cache_memory_block)
+        {
+            snprintf(error_message, 256, "Out of memory applying MLV frame cache policy:  %.178s", video->path);
+            return MLV_ERR_OPEN;
+        }
         for (int i = 0; i < video->cpu_cores; ++i)
         {
             add_mlv_cache_thread(video);

@@ -320,6 +320,8 @@ void mlvCacheSetAllocationFailureForTesting(int enabled);
 void mlvCacheSetWorkerStartPauseForTesting(int enabled);
 void mlvCacheSetWorkerBeforePublishPauseForTesting(int enabled);
 int mlvCacheWorkerBeforePublishPausedForTesting(void);
+void mlvCacheSetLifecyclePauseForTesting(int enabled);
+int mlvCacheLifecyclePausedForTesting(void);
 
 /* Test-only ordinal fault injection for cache resize allocations. */
 void mlvCacheSetResizeAllocationFailureForTesting(int allocation_index);

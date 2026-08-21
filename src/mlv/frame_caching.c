@@ -277,11 +277,22 @@ void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex)
 {
     if (!isMlvActive(video) || mlvCacheShouldStop(video) || getMlvRawCacheLimitFrames(video) == 0) return;
 
+    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
+    if (!isMlvActive(video) || mlvCacheShouldStop(video) || getMlvRawCacheLimitFrames(video) == 0)
+    {
+        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        return;
+    }
+
     pthread_mutex_lock( &video->g_mutexFind );
     int in_window = mlv_frame_in_cache_window(video, frameIndex);
     uint64_t desired_start = mlv_cache_desired_start_for_frame(video, frameIndex);
     pthread_mutex_unlock( &video->g_mutexFind );
-    if (in_window) return;
+    if (in_window)
+    {
+        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        return;
+    }
 
     mlvCacheSetStop(video, 1);
     while (mlvCacheWorkerCount(video)) usleep(100);
@@ -317,6 +328,7 @@ void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex)
     {
         add_mlv_cache_thread(video);
     }
+    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
 }
 
 void mlv_cache_request_playback_preroll(mlvObject_t * video,
@@ -408,28 +420,46 @@ void resetMlvCache(mlvObject_t * video)
 }
 
 static void mark_mlv_uncached_locked(mlvObject_t * video);
+static int mlv_cache_quiesce_workers(mlvObject_t * video);
+static void mlv_cache_restart_workers_if_needed(mlvObject_t * video, int restart);
+static void mlv_cache_pause_lifecycle_for_testing(void);
 
 void disableMlvCaching(mlvObject_t * video)
 {
-    /* Stop caching and make sure by waiting */
-    mlvCacheSetStop(video, 1);
-    while (isMlvObjectCaching(video)) usleep(100);
-    /* Remove the memory (it's a tradition in MLV App libraries to leave a couple of bytes) */
-    uint16_t * replacement = (uint16_t *)malloc(2);
+    if (!video) return;
+    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
+    (void)mlv_cache_quiesce_workers(video);
+    mlv_cache_pause_lifecycle_for_testing();
+    /* Remove the memory (it's a tradition in MLV App libraries to leave a couple of bytes). */
+    uint16_t * replacement = (uint16_t *)malloc(2u);
+    uint16_t ** replacement_frames = (uint16_t **)malloc(sizeof(uint16_t *));
     pthread_mutex_lock(&video->g_mutexFind);
     mark_mlv_uncached_locked(video);
-    if (replacement)
+    if (replacement && replacement_frames)
     {
         uint16_t * old_block = video->cache_memory_block;
+        uint16_t ** old_frames = video->rgb_raw_frames;
+        replacement_frames[0] = replacement;
         video->cache_memory_block = replacement;
+        video->rgb_raw_frames = replacement_frames;
+        video->cache_limit_frames = 0;
+        pthread_mutex_unlock(&video->g_mutexFind);
         free(old_block);
+        free(old_frames);
+        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        return;
     }
     pthread_mutex_unlock(&video->g_mutexFind);
+    free(replacement);
+    free(replacement_frames);
+    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
 }
 
 void enableMlvCaching(mlvObject_t * video)
 {
-    /* This will reset the memory and start cache thread */
+    if (!video) return;
+    /* The setter owns the serialized resize.  Make the requested final state
+     * running before entry so it restores workers after publication. */
     mlvCacheSetStop(video, 0);
     setMlvRawCacheLimitMegaBytes(video, video->cache_limit_mb);
 }
@@ -566,7 +596,14 @@ void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
         return;
     const uint64_t frame_limit = MIN(bytes_limit / frame_size, getMlvFrames(video));
 
+    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
+    if (!isMlvActive(video))
+    {
+        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        return;
+    }
     const int has_caching = mlv_cache_quiesce_workers(video);
+    mlv_cache_pause_lifecycle_for_testing();
     (void)mlv_cache_resize_transactional(video,
                                          frame_limit,
                                          bytes_limit,
@@ -574,6 +611,7 @@ void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
                                          frame_pix,
                                          frame_size);
     mlv_cache_restart_workers_if_needed(video, has_caching);
+    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
 }
 
 /* Not recommended */
@@ -592,7 +630,14 @@ void setMlvRawCacheLimitFrames(mlvObject_t * video, uint64_t frameLimit)
     const uint64_t bytes_limit = frame_size * frame_limit;
     const uint64_t mbyte_limit = bytes_limit / (1u << 20);
 
+    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
+    if (!isMlvActive(video))
+    {
+        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        return;
+    }
     const int has_caching = mlv_cache_quiesce_workers(video);
+    mlv_cache_pause_lifecycle_for_testing();
     (void)mlv_cache_resize_transactional(video,
                                          frame_limit,
                                          bytes_limit,
@@ -600,6 +645,7 @@ void setMlvRawCacheLimitFrames(mlvObject_t * video, uint64_t frameLimit)
                                          frame_pix,
                                          frame_size);
     mlv_cache_restart_workers_if_needed(video, has_caching);
+    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
 }
 
 /* Marks all frames as not cached */
@@ -614,7 +660,9 @@ void mark_mlv_uncached(mlvObject_t * video)
 void clear_mlv_cache(mlvObject_t * video)
 {
     if (!video) return;
+    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
     const int restart = mlv_cache_quiesce_workers(video);
+    mlv_cache_pause_lifecycle_for_testing();
     uint64_t frame_pixels = 0;
     uint64_t frame_size = 0;
     const uint64_t frame_limit = MIN(video->cache_limit_frames, getMlvFrames(video));
@@ -622,12 +670,14 @@ void clear_mlv_cache(mlvObject_t * video)
         || (frame_limit != 0 && frame_size > UINT64_MAX / frame_limit))
     {
         mlv_cache_restart_workers_if_needed(video, restart);
+        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
         return;
     }
     const uint64_t block_bytes_u64 = frame_size * frame_limit;
     if (block_bytes_u64 > SIZE_MAX)
     {
         mlv_cache_restart_workers_if_needed(video, restart);
+        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
         return;
     }
     const size_t bytes = block_bytes_u64 ? (size_t)block_bytes_u64 : 2u;
@@ -647,6 +697,7 @@ void clear_mlv_cache(mlvObject_t * video)
         free(old_block);
     }
     mlv_cache_restart_workers_if_needed(video, restart);
+    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
 }
 
 /* Returns 1 on success, or 0 if all are cached */
@@ -689,6 +740,10 @@ static pthread_mutex_t g_mlv_cache_publish_pause_mutex = PTHREAD_MUTEX_INITIALIZ
 static pthread_cond_t g_mlv_cache_publish_pause_condition = PTHREAD_COND_INITIALIZER;
 static int g_mlv_cache_publish_pause_for_testing = 0;
 static int g_mlv_cache_publish_paused_for_testing = 0;
+static pthread_mutex_t g_mlv_cache_lifecycle_pause_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_mlv_cache_lifecycle_pause_condition = PTHREAD_COND_INITIALIZER;
+static int g_mlv_cache_lifecycle_pause_for_testing = 0;
+static int g_mlv_cache_lifecycle_paused_for_testing = 0;
 
 void mlvCacheSetWorkerStartPauseForTesting(int enabled)
 {
@@ -714,6 +769,38 @@ int mlvCacheWorkerBeforePublishPausedForTesting(void)
     const int paused = g_mlv_cache_publish_paused_for_testing;
     pthread_mutex_unlock(&g_mlv_cache_publish_pause_mutex);
     return paused;
+}
+
+void mlvCacheSetLifecyclePauseForTesting(int enabled)
+{
+    pthread_mutex_lock(&g_mlv_cache_lifecycle_pause_mutex);
+    g_mlv_cache_lifecycle_pause_for_testing = enabled != 0;
+    if (!g_mlv_cache_lifecycle_pause_for_testing)
+        pthread_cond_broadcast(&g_mlv_cache_lifecycle_pause_condition);
+    pthread_mutex_unlock(&g_mlv_cache_lifecycle_pause_mutex);
+}
+
+int mlvCacheLifecyclePausedForTesting(void)
+{
+    pthread_mutex_lock(&g_mlv_cache_lifecycle_pause_mutex);
+    const int paused = g_mlv_cache_lifecycle_paused_for_testing;
+    pthread_mutex_unlock(&g_mlv_cache_lifecycle_pause_mutex);
+    return paused;
+}
+
+static void mlv_cache_pause_lifecycle_for_testing(void)
+{
+    pthread_mutex_lock(&g_mlv_cache_lifecycle_pause_mutex);
+    if (g_mlv_cache_lifecycle_pause_for_testing)
+    {
+        g_mlv_cache_lifecycle_paused_for_testing = 1;
+        pthread_cond_broadcast(&g_mlv_cache_lifecycle_pause_condition);
+        while (g_mlv_cache_lifecycle_pause_for_testing)
+            pthread_cond_wait(&g_mlv_cache_lifecycle_pause_condition,
+                              &g_mlv_cache_lifecycle_pause_mutex);
+        g_mlv_cache_lifecycle_paused_for_testing = 0;
+    }
+    pthread_mutex_unlock(&g_mlv_cache_lifecycle_pause_mutex);
 }
 
 static void mlv_cache_pause_before_publish_for_testing(void)
@@ -817,6 +904,7 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
     const size_t pixelsize = checked_width * checked_height;
     if (pixelsize < 10u
         || pixelsize > SIZE_MAX / 3u
+        || pixelsize > SIZE_MAX / (3u * sizeof(uint16_t))
         || pixelsize > SIZE_MAX / sizeof(float)
         || checked_height > SIZE_MAX / sizeof(float *))
     {
@@ -834,10 +922,14 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
     float ** __restrict green2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
     float  * __restrict blue1d = force_allocation_failure ? NULL : (float *)malloc(pixelsize * sizeof(float));
     float ** __restrict blue2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
+    const size_t publish_words = pixelsize * 3u;
+    uint16_t * __restrict publish_frame = force_allocation_failure
+        ? NULL
+        : (uint16_t *)malloc(publish_words * sizeof(uint16_t));
     if (!imagefloat1d || !imagefloat2d
         || !red1d || !red2d
         || !green1d || !green2d
-        || !blue1d || !blue2d)
+        || !blue1d || !blue2d || !publish_frame)
     {
         free(red1d);
         free(red2d);
@@ -847,6 +939,7 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
         free(blue2d);
         free(imagefloat2d);
         free(imagefloat1d);
+        free(publish_frame);
         mlv_cache_worker_count_release(video);
         return;
     }
@@ -915,34 +1008,39 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
             break;
         }
 
-        pthread_mutex_lock( &video->g_mutexFind );
-        int cache_still_valid = (cache_generation == video->cache_generation);
-        uint64_t cache_slot = mlv_cache_slot_for_frame(video, cache_frame);
-        pthread_mutex_unlock( &video->g_mutexFind );
-        if (!cache_still_valid) continue;
-
-        mlv_cache_pause_before_publish_for_testing();
-
-        /* To 16-bit */
-        uint16_t * out = video->rgb_raw_frames[cache_slot];
+        /* Convert into worker-private storage.  A generation change may make
+         * the former shared slot reusable, so no shared byte is touched until
+         * the final generation/status check under g_mutexFind. */
         for (size_t i = 0; i < pixelsize - 10u; i++)
         {
-            uint16_t * pix = out + (i * 3u);
+            uint16_t * pix = publish_frame + (i * 3u);
             pix[0] = (uint16_t)MIN(red1d[i], 65535);
             pix[1] = (uint16_t)MIN(green1d[i], 65535);
             pix[2] = (uint16_t)MIN(blue1d[i], 65535);
         }
+        mlv_cache_pause_before_publish_for_testing();
 
         pthread_mutex_lock( &video->g_mutexFind );
-        if (cache_generation == video->cache_generation)
+        const int stale_generation = cache_generation != video->cache_generation;
+        if (!stale_generation
+            && mlv_frame_in_cache_window(video, cache_frame)
+            && video->cached_frames[cache_frame] == MLV_FRAME_BEING_CACHED)
         {
+            const uint64_t cache_slot = mlv_cache_slot_for_frame(video, cache_frame);
+            memcpy(video->rgb_raw_frames[cache_slot],
+                   publish_frame,
+                   (pixelsize - 10u) * 3u * sizeof(uint16_t));
             video->cached_frames[cache_frame] = MLV_FRAME_IS_CACHED;
         }
-        else
+        else if (!stale_generation
+                 && video->cached_frames[cache_frame] == MLV_FRAME_BEING_CACHED)
         {
             video->cached_frames[cache_frame] = MLV_FRAME_NOT_CACHED;
         }
         pthread_mutex_unlock( &video->g_mutexFind );
+
+        if (stale_generation)
+            break;
 
         DEBUG( printf("Debayered frame %llu/%llu has been cached.\n", cache_frame+1, video->cache_limit_frames); )
     }
@@ -955,6 +1053,7 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
     free(blue2d);
     free(imagefloat2d);
     free(imagefloat1d);
+    free(publish_frame);
 
     mlv_cache_worker_count_release(video);
 }
