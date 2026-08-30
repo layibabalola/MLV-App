@@ -85,3 +85,8 @@ __pycache__/
 
 # Extracted local FFmpeg binary; release archives above remain tracked.
 platform/qt/FFmpeg/ffmpeg.exe
+
+# Fleet doctrine sync marker + fold notes written by the bus tool
+# (softwarefactory-fleet-doctrine tools/doctrine-sync.mjs). Consumer-local
+# state, per-machine, never work product - same treatment as .claude-state/.
+.codex-state/
