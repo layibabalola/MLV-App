@@ -14,6 +14,7 @@ from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Set
 
 from compact import process_runtime_identity_status, reap_stale_server_pids
 from core.processes import is_process_alive
+from core.win_process import native_probe_denied, native_process_entry
 from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths
 from core.runtime import build_runtime_breadcrumb
 from core.storage import StorageCapability
@@ -150,8 +151,100 @@ _BRIDGE_LAUNCHER_SCRIPT_PATHS = {
 }
 
 
+class _LazyWindowsProcessTable(dict):
+    """A process table that resolves entries on demand instead of up front.
+
+    Callers look up a handful of known pids -- a wrapper pid, a host pid, and a
+    short parent chain.  Enumerating all five hundred processes to answer that
+    cost a full ``Get-CimInstance Win32_Process`` on every supervisor poll.
+
+    The kernel answers for anything this user owns; CIM still answers for the
+    elevated processes it cannot open, so a parent-chain walk that crosses a
+    service boundary behaves exactly as before.  Iterating or sizing the table
+    still materializes the full snapshot: lazy, not lossy.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._materialized = False
+        self._absent: set = set()
+
+    def _resolve(self, pid: int) -> Optional[Dict[str, Any]]:
+        entry = native_process_entry(pid)
+        if entry is not None:
+            return entry
+        # Pay for a CIM query only when the kernel said "alive but protected";
+        # a pid that is simply gone needs no second opinion.
+        if native_probe_denied(pid):
+            # _process_entry_from_system falls through to CIM when the native
+            # probe returns None, which it just did -- so this is the CIM query.
+            return _process_entry_from_system(pid)
+        return None
+
+    def get(self, key: Any, default: Any = None) -> Any:  # type: ignore[override]
+        try:
+            pid = int(key)
+        except (TypeError, ValueError):
+            return default
+        if dict.__contains__(self, pid):
+            return dict.__getitem__(self, pid)
+        if self._materialized or pid in self._absent or pid <= 0:
+            return default
+        entry = self._resolve(pid)
+        if entry is None:
+            self._absent.add(pid)
+            return default
+        self[pid] = entry
+        return entry
+
+    def __getitem__(self, key: Any) -> Any:
+        sentinel: Dict[str, Any] = {}
+        found = self.get(key, sentinel)
+        if found is sentinel:
+            raise KeyError(key)
+        return found
+
+    def __contains__(self, key: Any) -> bool:
+        return self.get(key) is not None
+
+    def _materialize(self) -> None:
+        if self._materialized:
+            return
+        self._materialized = True
+        for pid, entry in _cim_process_table_from_system().items():
+            if not dict.__contains__(self, pid):
+                self[pid] = entry
+
+    def __iter__(self):
+        self._materialize()
+        return dict.__iter__(self)
+
+    def __len__(self) -> int:
+        self._materialize()
+        return dict.__len__(self)
+
+    def keys(self):
+        self._materialize()
+        return dict.keys(self)
+
+    def values(self):
+        self._materialize()
+        return dict.values(self)
+
+    def items(self):
+        self._materialize()
+        return dict.items(self)
+
+
 def _process_table_from_system() -> Dict[int, Dict[str, Any]]:
     """Best-effort process table used only to attribute bridge children to a host."""
+    if sys.platform == "win32":
+        return _LazyWindowsProcessTable()
+    return _cim_process_table_from_system()
+
+
+def _cim_process_table_from_system() -> Dict[int, Dict[str, Any]]:
+    """Enumerate every process through CIM.  Expensive; spawns a shell."""
     if sys.platform == "win32":
         command = powershell_cim_command(
             (
@@ -233,6 +326,12 @@ def _process_entry_from_system(pid: int) -> Optional[Dict[str, Any]]:
     if pid <= 0:
         return None
     if sys.platform == "win32":
+        # Fast path: answer from kernel32/ntdll without spawning anything. The
+        # PowerShell fallback below costs a shell cold start plus a conhost plus
+        # a WMI round trip, and this runs on a supervisor's poll loop.
+        native = native_process_entry(pid)
+        if native is not None:
+            return native
         command = powershell_cim_command(
             (
                 "Get-CimInstance Win32_Process -Filter \"ProcessId = %s\" | "
