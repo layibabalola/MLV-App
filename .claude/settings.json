@@ -36,6 +36,18 @@
           }
         ]
       }
+    ],
+    "_comment_sessionstart": "FLEET DOCTRINE CURRENCY, wired 2026-08-30. Bus law 3 says 'pull at boot and wake ticks'. That was prose and produced zero pulls: this box's bus clone was found 229 commits behind origin/master with a clean git status, and tools/doctrine-sync.mjs - which implements the check correctly - was invoked by NOTHING anywhere in the fleet. This hook is the boot half. It ends in '|| exit 0' ON PURPOSE: doctrine-sync exits 1 when folding is owed, and a non-zero SessionStart hook can abort session start, so the loudness here is the TEXT landing in the agent's context, not the exit code. The hard non-zero signal lives in the machine-scoped scheduled task MLV-FleetDoctrineSweep, which runs tools/fleet-sweep.mjs across every member. The bus path is absolute and machine-specific - same known debt as the interpreter pin above, and deliberate for the same reason: a portable-but-wrong command fails open.",
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/!Layi Wkspc/softwarefactory-fleet-doctrine/tools/doctrine-sync.mjs\" check --project mlv-app --consumer \"${CLAUDE_PROJECT_DIR}\" || exit 0",
+            "statusMessage": "Fleet doctrine currency check"
+          }
+        ]
+      }
     ]
   }
 }
