@@ -441,32 +441,32 @@ static int runBatch(QCoreApplication &app)
 
     QCommandLineOption exportFormatOpt(
         QStringLiteral("export-format"),
-        QStringLiteral("Batch export format. Supported now: cdng. Rendered video is reserved for Lane A E4 and fails closed until its prerequisite gates land."),
+        QStringLiteral("Batch export format: cdng (Cinema DNG frame sequence) or rendered (encoded video). Both are supported."),
         QStringLiteral("format"),
         QStringLiteral("cdng"));
     parser.addOption(exportFormatOpt);
 
     QCommandLineOption renderedCodecOpt(
         QStringLiteral("rendered-codec"),
-        QStringLiteral("Rendered-video codec request for the future E4 runner: h264, h265/hevc, or prores. Fails closed until rendered export lands."),
+        QStringLiteral("Rendered-video codec: h264, h265/hevc, or prores. Requires --export-format rendered."),
         QStringLiteral("codec"));
     parser.addOption(renderedCodecOpt);
 
     QCommandLineOption renderedContainerOpt(
         QStringLiteral("rendered-container"),
-        QStringLiteral("Rendered-video container request for the future E4 runner: mov, mp4, or mkv. Fails closed until rendered export lands."),
+        QStringLiteral("Rendered-video container: mov, mp4, or mkv. Requires --export-format rendered."),
         QStringLiteral("container"));
     parser.addOption(renderedContainerOpt);
 
     QCommandLineOption renderedResizeWidthOpt(
         QStringLiteral("rendered-resize-width"),
-        QStringLiteral("Planned rendered-video resize width in pixels for the future E4 runner. Requires rendered-video mode and still fails closed before export."),
+        QStringLiteral("Rendered-video resize width in pixels. Requires --export-format rendered."),
         QStringLiteral("pixels"));
     parser.addOption(renderedResizeWidthOpt);
 
     QCommandLineOption renderedResizeHeightOpt(
         QStringLiteral("rendered-resize-height"),
-        QStringLiteral("Planned rendered-video resize height in pixels for the future E4 runner unless --rendered-resize-height-locked is set."),
+        QStringLiteral("Rendered-video resize height in pixels, unless --rendered-resize-height-locked derives it from source geometry and stretch."),
         QStringLiteral("pixels"));
     parser.addOption(renderedResizeHeightOpt);
 
@@ -477,7 +477,7 @@ static int runBatch(QCoreApplication &app)
 
     QCommandLineOption renderedFfmpegOpt(
         QStringLiteral("rendered-ffmpeg"),
-        QStringLiteral("Planned ffmpeg executable path or command name for the future E4 runner. Fails closed before rendered export."),
+        QStringLiteral("ffmpeg executable path or command name used for rendered export. Defaults to 'ffmpeg' on PATH; rendered export fails with an actionable error if it cannot be resolved."),
         QStringLiteral("path-or-name"));
     parser.addOption(renderedFfmpegOpt);
 
