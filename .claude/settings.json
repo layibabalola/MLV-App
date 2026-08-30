@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Workflow",
+      "Agent"
+    ]
+  },
+  "skipWorkflowUsageWarning": true,
+  "hooks": {
+    "_comment_interpreter": "ALL THREE HOOKS BELOW RAN AS `py -3` UNTIL 2026-08-09 AND NONE OF THEM EXECUTED. There is no py.exe on this machine (not on PATH, not %WINDIR%\\py.exe, not Programs\\Python\\Launcher\\py.exe) and bare `python` is 2.7.15, so every one of them FAILED OPEN -- silently, with no error and no output, which is byte-identical to a hook that ran and approved. Proven, not inferred: the Stop hook's own trace at .claude-state/doc-size-runs.log stops dead at 2026-08-07T17:34:44Z and has not grown across many sessions since. Now pinned to an absolute interpreter that was EXECUTED and version-checked (Python 3.14.3) before being registered. The path is the Python Manager's stable bin\\ shim, not pythoncore-3.14-64\\, so a 3.15 upgrade does not silently re-open the hole. KNOWN DEBT: this file is TRACKED, so the absolute per-user path is not portable to another machine or OS user -- a fresh clone must re-pin it. That is deliberate: a portable-but-wrong command fails open, and failing open is what cost two days here. Re-prove after any Python change by watching doc-size-runs.log grow, never by reading this JSON.",
+    "_comment_paths": "SECOND FAILURE OF THE SAME CLASS, 2026-08-30. All three hooks above pointed at scripts that existed ONLY on the peer branches docs/fragmentation-policy-20260727 and claude/root-claude-wip-20260715, never on master. The canonical checkout moved to master on 2026-08-30 and every hook began erroring on every write; the Stop hook's trace at .claude-state/doc-size-runs.log stops dead at 2026-08-30T04:34:18Z for exactly that reason. The interpreter fix of 2026-08-09 was necessary and not sufficient: a hook is (interpreter x script x branch), and this file pinned only the first. The four scripts are now ON MASTER and this file is tracked (.gitignore:64 already declared that intent). RULE: a hook's script must live on the SAME REF as the tree it guards. Re-prove after any branch move by watching doc-size-runs.log grow and by writing one file and seeing no error block - never by reading this JSON.",
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/Users/obabalola/AppData/Local/Python/bin/python.exe\" \"${CLAUDE_PROJECT_DIR}/.claude/hooks/dual-lane-rule-sync.py\"",
+            "statusMessage": "Dual-lane rule-sync check"
+          },
+          {
+            "type": "command",
+            "command": "\"C:/Users/obabalola/AppData/Local/Python/bin/python.exe\" \"${CLAUDE_PROJECT_DIR}/tools/docs/check_pinned_tokens.py\" --hook --repo-root \"${CLAUDE_PROJECT_DIR}\"",
+            "statusMessage": "Pinned-token guard"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/Users/obabalola/AppData/Local/Python/bin/python.exe\" \"${CLAUDE_PROJECT_DIR}/tools/check-doc-size.py\" --repo \"${CLAUDE_PROJECT_DIR}\" --warn-only --trace .claude-state/doc-size-runs.log",
+            "statusMessage": "Doc size budget report"
+          }
+        ]
+      }
+    ]
+  }
+}
