@@ -152,6 +152,22 @@ $errPath    = "$base.err.txt"
 $lastPath   = "$base.last.txt"
 $rcptPath   = "$base.receipt.json"
 
+# RESERVED MARKER, written the instant the slot is taken and before ANY work.
+# The atomic reservation above creates an EMPTY file, which is a valid claim but
+# INVALID JSON - anything reading receipts while a lane is in flight crashes on
+# it, and a crash between reservation and completion would leave that empty file
+# as the only record. This is PEN-GAP-1's concern in receipt form: durable
+# mutation must not precede durable explanation. The slot now always parses and
+# always says what it is.
+Write-Utf8NoBom $rcptPath (([ordered]@{
+    schema   = 'mlv-app/fleet-lane-receipt/v1'
+    state    = 'reserved'
+    complete = $false
+    lane     = $Lane
+    card     = $Card
+    reservedUtc = (Get-Date).ToUniversalTime().ToString('o')
+} | ConvertTo-Json -Depth 4))
+
 # CRASH-TOTAL RECEIPT. Every field the receipt needs is initialised BEFORE the
 # try, so a failure anywhere still produces a well-formed receipt instead of
 # nothing. The old code wrote the receipt only on the normal tail, outside any
@@ -164,6 +180,7 @@ $exitCode   = -999
 $timedOut   = $false
 $final      = ''
 $failure    = $null
+$authority  = [ordered]@{ permissionMode = 'unset'; allowedTools = 'unset'; sandbox = 'unset'; writableRoot = $null }
 
 try {
 
@@ -192,6 +209,15 @@ if ($cfg.engine -eq 'claude') {
     # "Input must be provided either through stdin or as a prompt argument".
     # stdin has no such ambiguity and no command-line length limit.
     $stdinContent = $Prompt
+    # CAUSAL-REACH-1: the receipt used to record only allowEdits, which says what a
+    # lane may WRITE and nothing about what it may CAUSE. Record the actual granted
+    # authority so a receipt can be audited against the policy that produced it.
+    $authority = [ordered]@{
+        permissionMode = if ($AllowEdits) { 'acceptEdits' } else { 'dontAsk' }
+        allowedTools   = if ($AllowEdits) { 'ALL' } else { 'Read,Grep,Glob' }
+        sandbox        = 'n/a (claude)'
+        writableRoot   = if ($AllowEdits) { $WorkDir } else { $null }
+    }
 } else {
     $exe  = $CODEX_EXE
     $sandbox = if ($AllowEdits) { 'workspace-write' } else { 'read-only' }
@@ -213,6 +239,12 @@ if ($cfg.engine -eq 'claude') {
     # its first line only, and the lane answered "what would you like me to do?"
     # in 10.9s with exit 0 - a SUCCESSFUL-LOOKING run that reviewed nothing.
     $stdinContent = $Prompt
+    $authority = [ordered]@{
+        permissionMode = 'n/a (codex)'
+        allowedTools   = 'ALL'
+        sandbox        = $sandbox
+        writableRoot   = if ($AllowEdits) { $WorkDir } else { $null }
+    }
 }
 
 # ---------------------------------------------------------------- run, bounded
@@ -300,6 +332,9 @@ finally {
 
 $receipt = [ordered]@{
     schema       = 'mlv-app/fleet-lane-receipt/v1'
+    # SAME KEY AT EVERY STAGE. A reader checks `state` once - reserved, complete or
+    # failed - instead of inferring liveness from which fields happen to be present.
+    state        = if ($null -ne $failure) { 'failed' } elseif ($exitCode -ne -999) { 'complete' } else { 'incomplete' }
     lane         = $Lane
     role         = $cfg.role
     engine       = $cfg.engine
@@ -308,6 +343,7 @@ $receipt = [ordered]@{
     card         = $Card
     workDir      = $WorkDir
     allowEdits   = [bool]$AllowEdits
+    authority    = $authority
     startedUtc   = $startedUtc.ToString('o')
     endedUtc     = (Get-Date).ToUniversalTime().ToString('o')
     durationSec  = [math]::Round($sw.Elapsed.TotalSeconds, 1)
