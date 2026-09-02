@@ -7,6 +7,30 @@
 #include <string.h>
 #include <omp.h>
 
+/* Platform clock headers for mlv_stage_timing_now(); see the note on that
+ * function for why omp_get_wtime() alone is not sufficient. */
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#    define MLV_STAGE_TIMING_DEFINED_LEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#    define MLV_STAGE_TIMING_DEFINED_NOMINMAX
+#  endif
+#  include <windows.h>
+#  ifdef MLV_STAGE_TIMING_DEFINED_LEAN
+#    undef WIN32_LEAN_AND_MEAN
+#    undef MLV_STAGE_TIMING_DEFINED_LEAN
+#  endif
+#  ifdef MLV_STAGE_TIMING_DEFINED_NOMINMAX
+#    undef NOMINMAX
+#    undef MLV_STAGE_TIMING_DEFINED_NOMINMAX
+#  endif
+#else
+#  include <time.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -71,9 +95,59 @@ static inline FILE * mlv_stage_timing_stream(void)
     return stream ? stream : stderr;
 }
 
+/* HIGH-RESOLUTION MONOTONIC CLOCK.
+ *
+ * This used to be a bare `omp_get_wtime()`. On the MinGW toolchain this project
+ * builds with, `omp_get_wtick()` reports EXACTLY 1.000 ms, so every span shorter
+ * than a millisecond measured through it printed `ms=0.000`. Measured 2026-09-02
+ * across three Bachelor artifact sets and two build SHAs: 27,081 stage-timing
+ * values, ZERO of them non-integer. The emit path is `%.3f` with no rounding, so
+ * those integers were the CLOCK, not the code being fast.
+ *
+ * The consequence was not a rounding nuisance. A stage that truly costs 0.4 ms
+ * has a MEDIAN of 0 under 1 ms quantization while its MEAN stays near 0.4, and
+ * this board attributed frame time by summing MEDIANS -- so real cost was
+ * silently reclassified as "unattributed". Sum of medians 2.000 ms versus sum of
+ * means 8.816 ms on the same leg: a 4.4x gap that was an artifact of the clock.
+ *
+ * QueryPerformanceCounter measures 0.0001 ms steps on the same box (10,000x
+ * finer) and reads a deliberately sub-millisecond span as 0.2856 ms. The
+ * contract is unchanged -- monotonic seconds from an arbitrary epoch, exactly as
+ * omp_get_wtime() -- and omp_get_wtime() remains the fallback on every path that
+ * can fail, so a platform without QPC keeps the old behaviour rather than none. */
 static inline double mlv_stage_timing_now(void)
 {
+#if defined(_WIN32)
+    static LARGE_INTEGER mlv_stage_timing_qpc_freq;
+    static int mlv_stage_timing_qpc_ready = 0;
+    LARGE_INTEGER counter;
+
+    if (!mlv_stage_timing_qpc_ready)
+    {
+        if (!QueryPerformanceFrequency(&mlv_stage_timing_qpc_freq)
+         || mlv_stage_timing_qpc_freq.QuadPart <= 0)
+        {
+            return omp_get_wtime();
+        }
+        mlv_stage_timing_qpc_ready = 1;
+    }
+
+    if (!QueryPerformanceCounter(&counter))
+    {
+        return omp_get_wtime();
+    }
+
+    return (double)counter.QuadPart / (double)mlv_stage_timing_qpc_freq.QuadPart;
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+    {
+        return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    }
     return omp_get_wtime();
+#else
+    return omp_get_wtime();
+#endif
 }
 
 static inline uint64_t mlv_stage_timing_now_ns(void)
