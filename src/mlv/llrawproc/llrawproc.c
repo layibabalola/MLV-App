@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -2166,6 +2167,10 @@ static void llrawproc_free_worker_state(llrawprocWorkerState_t * worker)
     free_dualiso_full20bit_scratch(&worker->diso_full20bit_scratch);
     memset(&worker->diso_full20bit_scratch, 0, sizeof(worker->diso_full20bit_scratch));
 
+    free(worker->dual_iso_failure_backup);
+    worker->dual_iso_failure_backup = NULL;
+    worker->dual_iso_failure_backup_capacity_bytes = 0;
+
     worker->dng_bit_depth = 0;
     worker->dng_black_level = 0;
     worker->dng_white_level = 0;
@@ -2304,6 +2309,48 @@ static llrawproc_runtime_state_t llrawproc_capture_worker_runtime_state(const ll
     state.dng_black_level = worker->dng_black_level;
     state.dng_white_level = worker->dng_white_level;
     return state;
+}
+
+static void llrawproc_restore_worker_runtime_state(
+    llrawprocWorkerState_t * worker,
+    const llrawproc_runtime_state_t * state)
+{
+    if (!worker || !state) return;
+
+    worker->diso_pattern = state->diso_pattern;
+    worker->diso_auto_correction = state->diso_auto_correction;
+    worker->diso_ev_correction = state->diso_ev_correction;
+    worker->diso_black_delta = state->diso_black_delta;
+    worker->dng_bit_depth = state->dng_bit_depth;
+    worker->dng_black_level = state->dng_black_level;
+    worker->dng_white_level = state->dng_white_level;
+    worker->prev_black_level = -1;
+}
+
+static uint16_t * llrawproc_worker_capture_dual_iso_failure_backup(
+    llrawprocWorkerState_t * worker,
+    const uint16_t * source,
+    size_t source_bytes)
+{
+    if (!worker || !source || source_bytes == 0)
+    {
+        return NULL;
+    }
+
+    if (worker->dual_iso_failure_backup_capacity_bytes < source_bytes)
+    {
+        uint16_t * resized = (uint16_t *)realloc(worker->dual_iso_failure_backup,
+                                                 source_bytes);
+        if (!resized)
+        {
+            return NULL;
+        }
+        worker->dual_iso_failure_backup = resized;
+        worker->dual_iso_failure_backup_capacity_bytes = source_bytes;
+    }
+
+    memcpy(worker->dual_iso_failure_backup, source, source_bytes);
+    return worker->dual_iso_failure_backup;
 }
 
 static llrawproc_runtime_state_t llrawproc_capture_shared_runtime_state(const llrawprocObject_t * shared)
@@ -2459,21 +2506,91 @@ static void deflicker(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw
     video->RAWI.raw_info.exposure_bias[1] = 10000;
 }
 
-/* convert uncompressed 10/12bit raw data to 14bit for subsequent processing */
-static void make_14bit(uint16_t * raw_image_buff, size_t raw_image_size, struct raw_info * raw_info)
+static int llrawproc_checked_14bit_frame_extents(int width,
+                                                int height,
+                                                size_t * pixel_count,
+                                                uint32_t * frame_size)
 {
-    uint32_t pixel_count = raw_image_size / 2;
-    int bits_shift = 14 - raw_info->bits_per_pixel;
-    raw_info->black_level <<= bits_shift;
-    raw_info->white_level <<= bits_shift;
+    if (!pixel_count || !frame_size || width <= 0 || height <= 0)
+    {
+        return 0;
+    }
+
+    const size_t checked_width = (size_t)width;
+    const size_t checked_height = (size_t)height;
+    if (checked_width > SIZE_MAX / checked_height)
+    {
+        return 0;
+    }
+    const size_t checked_pixels = checked_width * checked_height;
+    if (checked_pixels > SIZE_MAX / 14u)
+    {
+        return 0;
+    }
+    const size_t checked_frame_size = checked_pixels * 14u / 8u;
+    if (checked_frame_size > UINT32_MAX)
+    {
+        return 0;
+    }
+
+    *pixel_count = checked_pixels;
+    *frame_size = (uint32_t)checked_frame_size;
+    return 1;
+}
+
+/* Production-linked arithmetic seam; it performs no allocation or frame
+ * access and lets boundary tests exercise otherwise impractical dimensions. */
+int llrawprocChecked14BitFrameSizeForTesting(int width,
+                                             int height,
+                                             uint32_t * frame_size);
+int llrawprocChecked14BitFrameSizeForTesting(int width,
+                                             int height,
+                                             uint32_t * frame_size)
+{
+    size_t pixel_count = 0;
+    return llrawproc_checked_14bit_frame_extents(width,
+                                                height,
+                                                &pixel_count,
+                                                frame_size);
+}
+
+/* convert uncompressed 10/12bit raw data to 14bit for subsequent processing */
+static int make_14bit(uint16_t * raw_image_buff, size_t raw_image_size, struct raw_info * raw_info)
+{
+    size_t expected_pixel_count = 0;
+    uint32_t frame_size = 0;
+    if (!raw_image_buff || !raw_info
+        || raw_info->bits_per_pixel <= 0 || raw_info->bits_per_pixel >= 14
+        || !llrawproc_checked_14bit_frame_extents(raw_info->width,
+                                                  raw_info->height,
+                                                  &expected_pixel_count,
+                                                  &frame_size)
+        || expected_pixel_count > SIZE_MAX / sizeof(uint16_t)
+        || expected_pixel_count * sizeof(uint16_t) != raw_image_size)
+    {
+        return 0;
+    }
+
+    const int bits_shift = 14 - raw_info->bits_per_pixel;
+    const int level_scale = 1 << bits_shift;
+    if (raw_info->black_level < 0 || raw_info->white_level < 0
+        || raw_info->black_level > INT_MAX / level_scale
+        || raw_info->white_level > INT_MAX / level_scale)
+    {
+        return 0;
+    }
+
+    raw_info->black_level *= level_scale;
+    raw_info->white_level *= level_scale;
     raw_info->bits_per_pixel = 14;
-    raw_info->frame_size = raw_info->width * raw_info->height * 14 / 8;
+    raw_info->frame_size = frame_size;
 
     #pragma omp parallel for
-    for(uint32_t i = 0; i < pixel_count; ++i)
+    for(size_t i = 0; i < expected_pixel_count; ++i)
     {
         raw_image_buff[i] <<= bits_shift;
     }
+    return 1;
 }
 
 /* undo 14bit conversion to initial bit depth with rounding error minimizing */
@@ -2492,38 +2609,35 @@ static void undo_14bit(uint16_t * raw_image_buff, size_t raw_image_size, uint32_
 }
 
 /* rescale restricted to imaginary 10-12bit levels of lossless raw data to about real 14bit range */
-static void _scale_restricted_range(struct raw_info * raw_info, uint16_t * image_data)
+static int scale_restricted_range(struct raw_info * raw_info,
+                                  uint16_t * image_data,
+                                  size_t pixel_count,
+                                  int low_iso,
+                                  int high_iso)
 {
-    uint32_t pixel_count = raw_info->width * raw_info->height;
-    /* find min and max level values in the currecnt raw frame */
-    int32_t min_level = image_data[0];
-    int32_t max_level = image_data[0];
-    for(uint32_t i = 1; i < pixel_count; ++i)
+    if (!raw_info || !image_data || pixel_count == 0
+        || raw_info->width <= 0 || raw_info->height <= 0)
     {
-        if(image_data[i] < min_level) min_level = image_data[i];
-        if(image_data[i] > max_level) max_level = image_data[i];
+        return 0;
     }
-#ifndef STDOUT_SILENT
-    printf("min_level = %d, max_level = %d\n", min_level, max_level);
-#endif
-    raw_info->black_level = MAX(min_level, raw_info->black_level);
-    raw_info->white_level = MAX(max_level, raw_info->white_level);
 
-    int32_t scaled_white_level = 16200;
-    double scale_ratio = (double)(scaled_white_level - raw_info->black_level) / (double)(raw_info->white_level - raw_info->black_level);
-    raw_info->white_level = scaled_white_level;
-
-#pragma omp parallel for
-    for(uint32_t i = 0; i < pixel_count; ++i)
+    const size_t width = (size_t)raw_info->width;
+    const size_t height = (size_t)raw_info->height;
+    if (width > SIZE_MAX / height || width * height != pixel_count
+        || raw_info->black_level < 0 || raw_info->black_level > 16383
+        || raw_info->white_level < 0 || raw_info->white_level > 16383
+        || raw_info->white_level <= raw_info->black_level)
     {
-        image_data[i] = MIN( (uint16_t)((double)((image_data[i] - raw_info->black_level) * scale_ratio + raw_info->black_level) + 0.5), 16383);
+        return 0;
     }
-}
 
-/* rescale restricted to imaginary 10-12bit levels of lossless raw data to about real 14bit range */
-static void scale_restricted_range(struct raw_info * raw_info, uint16_t * image_data, int low_iso, int high_iso)
-{
-    int32_t bd = ceil(log2(raw_info->white_level - raw_info->black_level));
+    const int32_t signal_span = raw_info->white_level - raw_info->black_level;
+    const double bd_value = ceil(log2((double)signal_span));
+    if (!isfinite(bd_value) || bd_value < 0.0 || bd_value > 14.0)
+    {
+        return 0;
+    }
+    const int32_t bd = (int32_t)bd_value;
 
     // Digital gain? Add 1 bit…
     int32_t add_bit = 0;
@@ -2533,20 +2647,68 @@ static void scale_restricted_range(struct raw_info * raw_info, uint16_t * image_
         add_bit = 1;
     }
 
-    int32_t actual_white_level = raw_info->black_level + ((1 << (bd + add_bit)) - 1);
-    int32_t scaled_white_level = (raw_info->white_level - raw_info->black_level) * (1 << (14 - bd));
+    const int32_t actual_shift = bd + add_bit;
+    const int32_t scaled_shift = 14 - bd;
+    if (actual_shift < 0 || actual_shift > 15
+        || scaled_shift < 0 || scaled_shift > 14)
+    {
+        return 0;
+    }
 
-    double scale_ratio = (double)(scaled_white_level - raw_info->black_level) / (double)(actual_white_level - raw_info->black_level);
+    const uint32_t actual_span = (1u << (uint32_t)actual_shift) - 1u;
+    const uint32_t scaled_factor = 1u << (uint32_t)scaled_shift;
+    const int64_t actual_white_wide = (int64_t)raw_info->black_level + actual_span;
+    const int64_t scaled_white_wide = (int64_t)signal_span * scaled_factor;
+    if (actual_white_wide <= raw_info->black_level || actual_white_wide > INT_MAX
+        || scaled_white_wide <= raw_info->black_level || scaled_white_wide > 16383)
+    {
+        return 0;
+    }
 
-    raw_info->white_level = scaled_white_level;
+    const int32_t actual_white_level = (int32_t)actual_white_wide;
+    const int32_t scaled_white_level = (int32_t)scaled_white_wide;
 
-    uint32_t pixel_count = raw_info->width * raw_info->height;
+    const double scale_ratio =
+        (double)(scaled_white_level - raw_info->black_level)
+        / (double)(actual_white_level - raw_info->black_level);
+    if (!isfinite(scale_ratio) || scale_ratio <= 0.0)
+    {
+        return 0;
+    }
 
     #pragma omp parallel for
-    for (uint32_t i = 0; i < pixel_count; ++i)
+    for (size_t i = 0; i < pixel_count; ++i)
     {
-        image_data[i] = MIN((uint16_t)((double)((image_data[i] - raw_info->black_level) * scale_ratio + raw_info->black_level) + 0.5), 16383);
+        const double scaled =
+            (double)(image_data[i] - raw_info->black_level) * scale_ratio
+            + raw_info->black_level;
+        image_data[i] = scaled <= 0.0
+                      ? 0
+                      : scaled >= 16383.0
+                      ? 16383
+                      : (uint16_t)(scaled + 0.5);
     }
+    raw_info->white_level = scaled_white_level;
+    return 1;
+}
+
+/* Production-linked fail-closed seam for hostile arithmetic tests. */
+int llrawprocScaleRestrictedRangeForTesting(struct raw_info * raw_info,
+                                            uint16_t * image_data,
+                                            size_t pixel_count,
+                                            int low_iso,
+                                            int high_iso);
+int llrawprocScaleRestrictedRangeForTesting(struct raw_info * raw_info,
+                                            uint16_t * image_data,
+                                            size_t pixel_count,
+                                            int low_iso,
+                                            int high_iso)
+{
+    return scale_restricted_range(raw_info,
+                                  image_data,
+                                  pixel_count,
+                                  low_iso,
+                                  high_iso);
 }
 
 /* initialise low level raw processing struct */
@@ -2754,7 +2916,11 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
 
     if (original_bits_per_pixel < 14)
     {
-        make_14bit(raw_image_buff, raw_image_size, &raw_info);
+        if (!make_14bit(raw_image_buff, raw_image_size, &raw_info))
+        {
+            if (using_stack_worker) llrawproc_free_worker_state(worker);
+            return;
+        }
     }
 
     llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
@@ -3117,10 +3283,48 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
         raw_info.active_area.x2 = raw_info.width;
         raw_info.active_area.y2 = raw_info.height;
 
+        uint16_t * dual_iso_failure_backup = NULL;
         int restricted_lossless = (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92) && raw_info.white_level < 15000;
+        size_t restricted_pixel_count = 0;
 
         if (restricted_lossless)
         {
+            uint32_t restricted_frame_size = 0;
+            if (!llrawproc_checked_14bit_frame_extents(raw_info.width,
+                                                       raw_info.height,
+                                                       &restricted_pixel_count,
+                                                       &restricted_frame_size)
+                || restricted_pixel_count > SIZE_MAX / sizeof(uint16_t)
+                || restricted_pixel_count * sizeof(uint16_t) != raw_image_size)
+            {
+                if (original_bits_per_pixel < 14)
+                {
+                    undo_14bit(raw_image_buff,
+                               raw_image_size,
+                               original_bits_per_pixel);
+                }
+                if (using_stack_worker) llrawproc_free_worker_state(worker);
+                return;
+            }
+            if (dual_iso_mode == 1)
+            {
+                dual_iso_failure_backup =
+                    llrawproc_worker_capture_dual_iso_failure_backup(
+                        worker,
+                        raw_image_buff,
+                        raw_image_size);
+                if (!dual_iso_failure_backup)
+                {
+                    if (original_bits_per_pixel < 14)
+                    {
+                        undo_14bit(raw_image_buff,
+                                   raw_image_size,
+                                   original_bits_per_pixel);
+                    }
+                    if (using_stack_worker) llrawproc_free_worker_state(worker);
+                    return;
+                }
+            }
             const double dual_iso_start = mlv_stage_timing_now();
 #ifndef STDOUT_SILENT
             printf("\nScaling raw data range...\n");
@@ -3128,7 +3332,21 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
 #endif
             int low_iso = MIN(diso1, diso2);
             int high_iso = MAX(diso1, diso2);
-            scale_restricted_range(&raw_info, raw_image_buff, low_iso, high_iso);
+            if (!scale_restricted_range(&raw_info,
+                                        raw_image_buff,
+                                        restricted_pixel_count,
+                                        low_iso,
+                                        high_iso))
+            {
+                if (original_bits_per_pixel < 14)
+                {
+                    undo_14bit(raw_image_buff,
+                               raw_image_size,
+                               original_bits_per_pixel);
+                }
+                if (using_stack_worker) llrawproc_free_worker_state(worker);
+                return;
+            }
             llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
 #ifndef STDOUT_SILENT
             printf("Raw_Black = %d, Raw_White = %d <= AFTER SCALING\n", raw_info.black_level, raw_info.white_level);
@@ -3530,18 +3748,36 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 &g_llrawproc_last_dual_iso_full20bit_timing);
             dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
 
-            if (has_explicit_auto_match)
+            if (!dual_iso_recon_ok)
             {
-                worker->diso_ev_correction = explicit_ev_correction;
-                worker->diso_black_delta = explicit_black_delta;
+                if (dual_iso_failure_backup)
+                {
+                    memcpy(raw_image_buff, dual_iso_failure_backup, raw_image_size);
+                }
+                if (original_bits_per_pixel < 14)
+                {
+                    undo_14bit(raw_image_buff,
+                               raw_image_size,
+                               original_bits_per_pixel);
+                }
+                llrawproc_restore_worker_runtime_state(
+                    worker,
+                    &worker->seeded_runtime_state);
             }
+            else
+            {
+                if (has_explicit_auto_match)
+                {
+                    worker->diso_ev_correction = explicit_ev_correction;
+                    worker->diso_black_delta = explicit_black_delta;
+                }
 
-            {
-                int bits_shift = 16 - raw_info.bits_per_pixel;
-                worker->dng_black_level = raw_info.black_level << bits_shift;
-                worker->dng_white_level = raw_info.white_level << bits_shift;
-                worker->dng_bit_depth = 16;
-            }
+                {
+                    int bits_shift = 16 - raw_info.bits_per_pixel;
+                    worker->dng_black_level = raw_info.black_level << bits_shift;
+                    worker->dng_white_level = raw_info.white_level << bits_shift;
+                    worker->dng_bit_depth = 16;
+                }
 
             if (gpu_playback_prepare_only_used)
             {
@@ -3696,6 +3932,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             {
                 llrawproc_worker_ensure_luts(worker, raw_info.black_level);
             }
+            }
+            dual_iso_failure_backup = NULL;
         }
         else if (dual_iso_mode == 2)
         {
@@ -3960,8 +4198,17 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
         g_llrawproc_last_total_ms = (mlv_stage_timing_now() - apply_start) * 1000.0;
         return 1; /* nothing to do — no recon, no fix */
     }
-    if (override_w <= 0 || override_h <= 0) return 0;
-    if ((size_t)override_w * (size_t)override_h * sizeof(uint16_t) != raw_image_size) return 0;
+    size_t override_pixel_count = 0;
+    uint32_t override_frame_size = 0;
+    if (!llrawproc_checked_14bit_frame_extents(override_w,
+                                              override_h,
+                                              &override_pixel_count,
+                                              &override_frame_size)
+        || override_pixel_count > SIZE_MAX / sizeof(uint16_t)
+        || override_pixel_count * sizeof(uint16_t) != raw_image_size)
+    {
+        return 0;
+    }
 
     /* Bail if the receipt enables features that are unsafe at scaled
      * resolution. Aggressive preview explicitly treats those stages as
@@ -3991,8 +4238,10 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
 
     raw_info.width = override_w;
     raw_info.height = override_h;
-    raw_info.pitch = override_w * (raw_info.bits_per_pixel <= 16 ? 2 : 4);
-    raw_info.frame_size = (uint32_t)(override_w * override_h * 14 / 8);
+    /* The Dual ISO core receives uint16_t samples and defines pitch in
+     * samples, matching the full-resolution caller. */
+    raw_info.pitch = override_w;
+    raw_info.frame_size = override_frame_size;
     raw_info.active_area.x1 = 0;
     raw_info.active_area.y1 = 0;
     raw_info.active_area.x2 = override_w;
@@ -4018,7 +4267,11 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
 
     if (original_bits_per_pixel < 14)
     {
-        make_14bit(raw_image_buff, raw_image_size, &raw_info);
+        if (!make_14bit(raw_image_buff, raw_image_size, &raw_info))
+        {
+            if (using_stack_worker) llrawproc_free_worker_state(worker);
+            return 0;
+        }
     }
 
     llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
@@ -4130,12 +4383,46 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
     if (diso_validity && dual_iso_mode == 1)
     {
         int restricted_lossless = (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92) && raw_info.white_level < 15000;
+        uint16_t * dual_iso_failure_backup = NULL;
         if (restricted_lossless)
         {
+            dual_iso_failure_backup =
+                llrawproc_worker_capture_dual_iso_failure_backup(
+                    worker,
+                    raw_image_buff,
+                    raw_image_size);
+            if (!dual_iso_failure_backup)
+            {
+                if (original_bits_per_pixel < 14)
+                {
+                    undo_14bit(raw_image_buff,
+                               raw_image_size,
+                               original_bits_per_pixel);
+                }
+                if (using_stack_worker) llrawproc_free_worker_state(worker);
+                return 0;
+            }
             const double dual_iso_start = mlv_stage_timing_now();
             int low_iso = MIN(diso1, diso2);
             int high_iso = MAX(diso1, diso2);
-            scale_restricted_range(&raw_info, raw_image_buff, low_iso, high_iso);
+            if (!scale_restricted_range(&raw_info,
+                                        raw_image_buff,
+                                        override_pixel_count,
+                                        low_iso,
+                                        high_iso))
+            {
+                if (original_bits_per_pixel < 14)
+                {
+                    undo_14bit(raw_image_buff,
+                               raw_image_size,
+                               original_bits_per_pixel);
+                }
+                llrawproc_restore_worker_runtime_state(
+                    worker,
+                    &worker->seeded_runtime_state);
+                if (using_stack_worker) llrawproc_free_worker_state(worker);
+                return 0;
+            }
             llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
             dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
         }
@@ -4161,32 +4448,57 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
 
         publish_auto_correction = !has_explicit_auto_match;
 
-        diso_get_full20bit(raw_info,
-                           raw_image_buff,
-                           dark_frame_mode,
-                           diso1,
-                           diso2,
-                           &worker->diso_pattern,
-                           auto_correction_ptr,
-                           ev_correction_ptr,
-                           black_delta_ptr,
-                           diso_averaging,
-                            diso_alias_map,
-                            diso_frblending,
-                            chroma_smooth_mode,
-                            isolated_analysis
-                                ? 0
-                                : processingPlaybackPreviewModeEnabled()
-                                ? ((video && video->playback_scale_factor_active > 0)
-                                    ? video->playback_scale_factor_active
-                                    : processingPlaybackPreviewScaleFactor())
-                                : 0,
-                            llrawproc_threads,
-                            &worker->diso_full20bit_scratch);
+        const int dual_iso_recon_ok =
+            diso_get_full20bit(raw_info,
+                               raw_image_buff,
+                               dark_frame_mode,
+                               diso1,
+                               diso2,
+                               &worker->diso_pattern,
+                               auto_correction_ptr,
+                               ev_correction_ptr,
+                               black_delta_ptr,
+                               diso_averaging,
+                               diso_alias_map,
+                               diso_frblending,
+                               chroma_smooth_mode,
+                               isolated_analysis
+                                   ? 0
+                                   : processingPlaybackPreviewModeEnabled()
+                                   ? ((video && video->playback_scale_factor_active > 0)
+                                       ? video->playback_scale_factor_active
+                                       : processingPlaybackPreviewScaleFactor())
+                                   : 0,
+                               llrawproc_threads,
+                               &worker->diso_full20bit_scratch);
         dualiso_debug_get_full20bit_timing(
             &g_llrawproc_last_dual_iso_full20bit_timing);
         dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
 
+        if (!dual_iso_recon_ok)
+        {
+            if (dual_iso_failure_backup)
+            {
+                memcpy(raw_image_buff, dual_iso_failure_backup, raw_image_size);
+            }
+            if (original_bits_per_pixel < 14)
+            {
+                undo_14bit(raw_image_buff,
+                           raw_image_size,
+                           original_bits_per_pixel);
+            }
+            llrawproc_restore_worker_runtime_state(
+                worker,
+                &worker->seeded_runtime_state);
+            g_llrawproc_last_dual_iso_ms = dual_iso_ms;
+            g_llrawproc_last_total_ms =
+                (mlv_stage_timing_now() - apply_start) * 1000.0;
+            if (using_stack_worker)
+            {
+                llrawproc_free_worker_state(worker);
+            }
+            return 0;
+        }
         if (has_explicit_auto_match)
         {
             worker->diso_ev_correction = explicit_ev_correction;

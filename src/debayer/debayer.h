@@ -25,7 +25,8 @@ int debayerBasicU16Avx2Active(void);
 /* Quite quick bilinear debayer, floating point sadly; threads argument is unused */
 void debayerBasic(uint16_t * __restrict debayerto, float * __restrict bayerdata, int width, int height, int threads);
 /* More useable amaze, threads number should be the number of cores(or threads if >= i7) your cpu has */
-void debayerAmaze(uint16_t * __restrict debayerto, float * __restrict bayerdata, int width, int height, int threads, int blacklevel);
+int debayerAmaze(uint16_t * __restrict debayerto, float * __restrict bayerdata, int width, int height, int threads, int blacklevel);
+void debayerAmazeSetThreadCreateFailureForTesting(int thread_index);
 /* via librtprocess */
 void debayerLibRtProcess(uint16_t *__restrict debayerto, float *__restrict bayerdata, int width, int height, int algorithm, double camMatrix[9]);
 /* AHD debayer */
@@ -53,7 +54,7 @@ typedef struct {
 } amazeinfo_t;
 
 /* Amaze demosaic */
-void
+int
 #ifdef __MINGW32__
 /* Needed for win32/mingw (might need include gaurd with another compiler) */
 __attribute__ ((force_align_arg_pointer))
@@ -61,5 +62,15 @@ __attribute__ ((force_align_arg_pointer))
 
 /*AMaZE algo*/
 demosaic(amazeinfo_t * inputdata);
+
+/* Test-only fault injection for the AMaZE worker's private tile allocation.
+ * Production leaves this disabled. */
+void amazeDemosaicSetAllocationFailureForTesting(int enabled);
+
+/* Test-only fault injection for debayerAmaze's wrapper allocations. */
+void debayerAmazeSetAllocationFailureForTesting(int enabled);
+
+/* Test-only ordinal fault injection for multithread helper allocations. */
+void debayerAmazeSetAuxAllocationFailureForTesting(int allocation_index);
 
 #endif

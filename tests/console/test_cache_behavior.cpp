@@ -54,6 +54,7 @@ static std::unique_ptr<mlvObject_t> make_cache_test_video(std::vector<uint8_t> *
 
     pthread_mutex_init(&video->g_mutexFind, nullptr);
     pthread_mutex_init(&video->g_mutexCount, nullptr);
+    pthread_mutex_init(&video->g_mutexCacheLifecycle, nullptr);
     pthread_mutex_init(&video->llrawproc_mutex, nullptr);
     pthread_mutex_init(&video->llrawproc_worker_mutex, nullptr);
 
@@ -64,6 +65,7 @@ static void destroy_cache_test_video(mlvObject_t * video)
 {
     pthread_mutex_destroy(&video->g_mutexFind);
     pthread_mutex_destroy(&video->g_mutexCount);
+    pthread_mutex_destroy(&video->g_mutexCacheLifecycle);
     pthread_mutex_destroy(&video->llrawproc_mutex);
     pthread_mutex_destroy(&video->llrawproc_worker_mutex);
     free(video->rgb_raw_frames);

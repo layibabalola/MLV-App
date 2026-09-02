@@ -7322,11 +7322,20 @@ def checkpoint_owned_work(repo_root_arg: Path, *, work_block_id: Optional[str] =
         payload = {"candidate": candidate, "latestCandidate": latest_candidate, "latestDetectionHash": latest_detection.get("detectorHash")}
         write_audit(repo_root, config, "checkpoint_owned_dirty_stale_tuple", payload, work_block_id=block_id, outcome="blocked")
         return {"status": "blocked", "reason": "stale_tuple", **payload}
-    add = run_git(repo_root, ["add", "--", *paths])
-    if add.returncode != 0:
-        payload = {"candidate": candidate, "paths": paths, "stderr": add.stderr[-3000:]}
-        write_audit(repo_root, config, "checkpoint_owned_dirty_blocked", payload, work_block_id=block_id, outcome="blocked")
-        return {"status": "blocked", "reason": "git_add_failed", **payload}
+    paths_to_stage = sorted(set(paths).difference(staged_before))
+    if paths_to_stage:
+        # Exact path scoping keeps the checkpoint bounded while -A is required
+        # to stage owned deletions as well as additions and modifications.
+        add = run_git(repo_root, ["add", "-A", "--", *paths_to_stage])
+        if add.returncode != 0:
+            payload = {
+                "candidate": candidate,
+                "paths": paths,
+                "pathsToStage": paths_to_stage,
+                "stderr": add.stderr[-3000:],
+            }
+            write_audit(repo_root, config, "checkpoint_owned_dirty_blocked", payload, work_block_id=block_id, outcome="blocked")
+            return {"status": "blocked", "reason": "git_add_failed", **payload}
     staged_after = staged_path_set(repo_root)
     outside_staged_after = sorted(staged_after.difference(paths))
     missing_staged = sorted(set(paths).difference(staged_after))

@@ -105,11 +105,21 @@ void SingleFrameExportDialog::exportViaQt()
     m_lastPath = QFileInfo( fileName ).absolutePath();
 
     //Get frame from library
-    uint8_t *pRawImage = (uint8_t*)malloc( 3 * getMlvWidth(m_pMlvObject) * getMlvHeight(m_pMlvObject) * sizeof( uint8_t ) );
+    const size_t rawImageBytes = (size_t)3
+        * (size_t)getMlvWidth(m_pMlvObject)
+        * (size_t)getMlvHeight(m_pMlvObject)
+        * sizeof(uint8_t);
+    uint8_t *pRawImage = (uint8_t*)malloc(rawImageBytes);
+    if( !pRawImage ) return;
     getMlvProcessedFrame8( m_pMlvObject, m_frameNr, pRawImage, 1 );
 
     uint8_t * imgBufferScaled8;
     imgBufferScaled8 = ( uint8_t* )malloc( getMlvWidth(m_pMlvObject) * stretchX * getMlvHeight(m_pMlvObject) * stretchY * 3 * sizeof( uint8_t ) );
+    if( !imgBufferScaled8 )
+    {
+        free( pRawImage );
+        return;
+    }
 
     avir_scale_thread_pool scaling_pool;
     avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;
@@ -209,6 +219,13 @@ void SingleFrameExportDialog::exportDng()
 
     //Init DNG data struct
     dngObject_t * cinemaDng = initDngObject( m_pMlvObject, ui->comboBoxCodec->currentIndex(), 1, picAR ); // 2nd param: 0 = uncompresed, 1 = lossless
+    if( !cinemaDng )
+    {
+        QMessageBox::critical( this, tr( "MLV App - Export file error" ),
+                               tr( "Could not allocate the DNG export buffers for: %1\n" ).arg( fileName ),
+                               QMessageBox::Cancel, QMessageBox::Cancel );
+        return;
+    }
 
     //Save cDNG frame
 #ifdef Q_OS_UNIX

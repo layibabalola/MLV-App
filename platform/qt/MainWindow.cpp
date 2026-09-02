@@ -6837,13 +6837,13 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     if( options.rawCacheMB > 0 )
     {
         setMlvCpuCores( m_pMlvObject, std::max( 1, options.cacheCpuCores ) );
-        m_pMlvObject->stop_caching = 0;
+        mlvCacheSetStop( m_pMlvObject, 0 );
         setMlvRawCacheLimitMegaBytes( m_pMlvObject, options.rawCacheMB );
     }
     else
     {
         setMlvCpuCores( m_pMlvObject, 1 );
-        m_pMlvObject->stop_caching = 1;
+        mlvCacheSetStop( m_pMlvObject, 1 );
         setMlvRawCacheLimitMegaBytes( m_pMlvObject, 0 );
     }
 
@@ -8079,7 +8079,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         playbackDebayerEffective == QStringLiteral("amaze-cached")
         && m_pMlvObject
         && getMlvRawCacheLimitMegaBytes( m_pMlvObject ) > 0
-        && m_pMlvObject->stop_caching == 0;
+        && !mlvCacheShouldStop( m_pMlvObject );
 
     metadata.insert( QStringLiteral("playback_debayer_request"),
                      QString::fromLatin1(
@@ -8840,6 +8840,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
     QElapsedTimer playbackClock;
     playbackClock.start();
+    m_playbackSmokeTargetPresentedFrames =
+        qMax( 0, options.targetPresentedFrames );
     // RULE 2026-06-26 (Layi): with --loop, check actionLoop BEFORE Play so a short clip (e.g. 16 frames)
     // replays continuously and actionPlay stays checked for the whole durationMs window -- otherwise the
     // clip plays once, the engine unchecks Play at clip-end, and the wait loop below exits early ("MLV
@@ -9160,6 +9162,15 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         QThread::msleep( 10 );
     }
 
+    if( m_playbackSmokeTargetPresentedFrames > 0
+     && m_playbackSmokePresentedFrames != m_playbackSmokeTargetPresentedFrames )
+    {
+        err << "[GUI-SMOKE] ERROR: exact presented-frame target was not met; target="
+            << m_playbackSmokeTargetPresentedFrames
+            << " observed=" << m_playbackSmokePresentedFrames << ".\n";
+        return 11;
+    }
+
     if( options.exerciseClipLifecycleStress && !stressAttempted )
     {
         logInteractionEvent(
@@ -9219,6 +9230,20 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             qApp->processEvents( QEventLoop::AllEvents );
         }
 
+        // Capture the presentation identity before copying pixels.  The smoke
+        // evidence consumer must be able to bind the PNG to the exact frame
+        // and request serial that were displayed at capture time, rather than
+        // inferring that identity later from the end-of-run summary.
+        const int screenshotFrame = m_lastPresentedRequestContextValid
+            ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+            : -1;
+        const qulonglong screenshotSerial =
+            static_cast<qulonglong>( m_lastPresentedRequestSerial );
+        const qulonglong screenshotGeneration = m_lastPresentedRequestContextValid
+            ? static_cast<qulonglong>(
+                  m_lastPresentedRequestContext.presentationGeneration )
+            : 0;
+
         QPixmap screenshot;
         QString screenshotMethod = QStringLiteral("app_internal_presented_pixmap");
         if( ( GpuDisplayViewport::isTexturePresentationActive( ui->graphicsView )
@@ -9256,13 +9281,30 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             return 9;
         }
 
+        QFile screenshotFile( screenshotInfo.absoluteFilePath() );
+        if( !screenshotFile.open( QIODevice::ReadOnly ) )
+        {
+            err << "[GUI-SMOKE] ERROR: failed to reopen screenshot for evidence binding: "
+                << screenshotInfo.absoluteFilePath() << "\n";
+            return 9;
+        }
+        const qint64 screenshotBytes = screenshotFile.size();
+        const QByteArray screenshotSha256 = QCryptographicHash::hash(
+            screenshotFile.readAll(), QCryptographicHash::Sha256 ).toHex();
+        screenshotFile.close();
+
         logInteractionEvent(
             QStringLiteral("gui_smoke.screenshot"),
-            QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4")
+            QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4 bytes=%5 sha256=%6 frame=%7 serial=%8 generation=%9")
                 .arg( screenshotInfo.absoluteFilePath() )
                 .arg( screenshot.width() )
                 .arg( screenshot.height() )
-                .arg( screenshotMethod ) );
+                .arg( screenshotMethod )
+                .arg( screenshotBytes )
+                .arg( QString::fromLatin1( screenshotSha256 ) )
+                .arg( screenshotFrame )
+                .arg( screenshotSerial )
+                .arg( screenshotGeneration ) );
     }
 
     if( ui->actionPlay->isChecked() )
@@ -11158,8 +11200,8 @@ void MainWindow::startExportPipe(QString fileName)
         colorTag = SPACETAG_UNKNOWN;
 
     //Dimension & scaling
-    uint16_t width = getMlvWidth(m_pMlvObject);
-    uint16_t height = getMlvHeight(m_pMlvObject);
+    int width = getMlvWidth(m_pMlvObject);
+    int height = getMlvHeight(m_pMlvObject);
     bool scaled = false;
     if( m_resizeFilterEnabled )
     {
@@ -11181,17 +11223,21 @@ void MainWindow::startExportPipe(QString fileName)
     else if( m_exportQueue.first()->stretchFactorX() != 1.0
           || m_exportQueue.first()->stretchFactorY() != 1.0 )
     {
-        //Upscale only
-        if( m_exportQueue.first()->stretchFactorY() == STRETCH_V_033 )
+        const RawAspectRenderedDimensions dimensions = rawAspectRenderedDimensions(
+            getMlvWidth( m_pMlvObject ),
+            getMlvHeight( m_pMlvObject ),
+            m_exportQueue.first()->stretchFactorX(),
+            m_exportQueue.first()->stretchFactorY(),
+            std::numeric_limits<uint16_t>::max());
+        if( !dimensions.valid )
         {
-            width = getMlvWidth( m_pMlvObject ) * 3;
-            height = getMlvHeight( m_pMlvObject );
+            QMessageBox::critical( this,
+                                   tr( "File export failed" ),
+                                   tr( "Rendered stretch dimensions are invalid or too large." ) );
+            return;
         }
-        else
-        {
-            width = getMlvWidth( m_pMlvObject ) * m_exportQueue.first()->stretchFactorX();
-            height = getMlvHeight( m_pMlvObject ) * m_exportQueue.first()->stretchFactorY();
-        }
+        width = dimensions.width;
+        height = dimensions.height;
         scaled = true;
     }
     if( m_codecProfile == CODEC_H264
@@ -11223,6 +11269,15 @@ void MainWindow::startExportPipe(QString fileName)
         scaled = scaled || alignedWidth != width || alignedHeight != height;
         width = alignedWidth;
         height = alignedHeight;
+    }
+    if( width <= 0 || height <= 0
+     || width > std::numeric_limits<uint16_t>::max()
+     || height > std::numeric_limits<uint16_t>::max() )
+    {
+        QMessageBox::critical( this,
+                               tr( "File export failed" ),
+                               tr( "Rendered output dimensions are invalid or too large." ) );
+        return;
     }
 
     //FFMpeg export
@@ -12120,10 +12175,38 @@ ProcessResult MainWindow::exportCdngSequence(
     /* --- Init DNG struct --- */
     double fps = getMlvFramerate( mlvObject );
     dngObject_t *cinemaDng = initDngObject( mlvObject, codecProfile - 6, fps, picAR );
+    if( !cinemaDng )
+    {
+        result.success = false;
+        result.errorMessage = QStringLiteral("Could not allocate DNG export buffers");
+        result.elapsedSeconds = timer.elapsed() / 1000.0;
+        return result;
+    }
 
     /* Render one frame for raw correction init */
-    uint32_t frameSize = getMlvWidth( mlvObject ) * getMlvHeight( mlvObject ) * 3;
-    uint16_t *imgBuffer = (uint16_t *)malloc( frameSize * sizeof( uint16_t ) );
+    const size_t rawWidth = static_cast<size_t>( getMlvWidth( mlvObject ) );
+    const size_t rawHeight = static_cast<size_t>( getMlvHeight( mlvObject ) );
+    if( rawWidth == 0 || rawHeight == 0
+        || rawWidth > SIZE_MAX / rawHeight
+        || rawWidth * rawHeight > SIZE_MAX / 3u
+        || rawWidth * rawHeight * 3u > SIZE_MAX / sizeof( uint16_t ) )
+    {
+        freeDngObject( cinemaDng );
+        result.success = false;
+        result.errorMessage = QStringLiteral("Invalid DNG export dimensions");
+        result.elapsedSeconds = timer.elapsed() / 1000.0;
+        return result;
+    }
+    const size_t frameSize = rawWidth * rawHeight * 3u;
+    uint16_t *imgBuffer = static_cast<uint16_t *>( malloc( frameSize * sizeof( uint16_t ) ) );
+    if( !imgBuffer )
+    {
+        freeDngObject( cinemaDng );
+        result.success = false;
+        result.errorMessage = QStringLiteral("Could not allocate DNG processing buffer");
+        result.elapsedSeconds = timer.elapsed() / 1000.0;
+        return result;
+    }
     getMlvProcessedFrame16( mlvObject, 0, imgBuffer, mlvappEffectiveWorkerThreadCount() );
     free( imgBuffer );
 
@@ -12548,8 +12631,8 @@ void MainWindow::startExportAVFoundation(QString fileName)
     else avfCodec = AVF_CODEC_PRORES_4444;
 
     //Dimension & scaling
-    uint16_t width = getMlvWidth(m_pMlvObject);
-    uint16_t height = getMlvHeight(m_pMlvObject);
+    int width = getMlvWidth(m_pMlvObject);
+    int height = getMlvHeight(m_pMlvObject);
     bool scaled = false;
     if( m_resizeFilterEnabled )
     {
@@ -12571,17 +12654,21 @@ void MainWindow::startExportAVFoundation(QString fileName)
     else if( m_exportQueue.first()->stretchFactorX() != 1.0
           || m_exportQueue.first()->stretchFactorY() != 1.0 )
     {
-        //Upscale only
-        if( m_exportQueue.first()->stretchFactorY() == STRETCH_V_033 )
+        const RawAspectRenderedDimensions dimensions = rawAspectRenderedDimensions(
+            getMlvWidth( m_pMlvObject ),
+            getMlvHeight( m_pMlvObject ),
+            m_exportQueue.first()->stretchFactorX(),
+            m_exportQueue.first()->stretchFactorY(),
+            std::numeric_limits<uint16_t>::max());
+        if( !dimensions.valid )
         {
-            width = getMlvWidth( m_pMlvObject ) * 3;
-            height = getMlvHeight( m_pMlvObject );
+            QMessageBox::critical( this,
+                                   tr( "File export failed" ),
+                                   tr( "Rendered stretch dimensions are invalid or too large." ) );
+            return;
         }
-        else
-        {
-            width = getMlvWidth( m_pMlvObject ) * m_exportQueue.first()->stretchFactorX();
-            height = getMlvHeight( m_pMlvObject ) * m_exportQueue.first()->stretchFactorY();
-        }
+        width = dimensions.width;
+        height = dimensions.height;
         scaled = true;
     }
     if( m_codecProfile == CODEC_H264
@@ -12599,6 +12686,15 @@ void MainWindow::startExportAVFoundation(QString fileName)
             height += height % 2;
             scaled = true;
         }
+    }
+    if( width <= 0 || height <= 0
+     || width > std::numeric_limits<uint16_t>::max()
+     || height > std::numeric_limits<uint16_t>::max() )
+    {
+        QMessageBox::critical( this,
+                               tr( "File export failed" ),
+                               tr( "Rendered output dimensions are invalid or too large." ) );
+        return;
     }
 
     //Init Encoder
@@ -14356,32 +14452,38 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
     on_comboBoxFilterName_currentIndexChanged( receipt->filterIndex() );
     ui->horizontalSliderFilterStrength->setValue( receipt->filterStrength() );
 
-    if( receipt->stretchFactorX() == STRETCH_H_100 ) ui->comboBoxHStretch->setCurrentIndex( 0 );
-    else if( receipt->stretchFactorX() == STRETCH_H_125 ) ui->comboBoxHStretch->setCurrentIndex( 1 );
-    else if( receipt->stretchFactorX() == STRETCH_H_133 ) ui->comboBoxHStretch->setCurrentIndex( 2 );
-    else if( receipt->stretchFactorX() == STRETCH_H_150 ) ui->comboBoxHStretch->setCurrentIndex( 3 );
-    else if( receipt->stretchFactorX() == STRETCH_H_167 ) ui->comboBoxHStretch->setCurrentIndex( 4 );
-    else if( receipt->stretchFactorX() == STRETCH_H_175 ) ui->comboBoxHStretch->setCurrentIndex( 5 );
-    else if( receipt->stretchFactorX() == STRETCH_H_180 ) ui->comboBoxHStretch->setCurrentIndex( 6 );
-    else ui->comboBoxHStretch->setCurrentIndex( 7 );
-    on_comboBoxHStretch_currentIndexChanged( ui->comboBoxHStretch->currentIndex() );
-
     const float ratioVFromMlv = m_pMlvObject ? getMlvAspectRatio( m_pMlvObject ) : 0.0f;
     const double mlvAspectRatio = ratioVFromMlv == 0.0f ? 1.0 : ratioVFromMlv;
-    if( receipt->stretchFactorY() == -1
+    const bool applyMlvAspect = receipt->stretchFactorY() == -1
      || mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(
             receipt->stretchFactorX(),
             receipt->stretchFactorY(),
-            mlvAspectRatio ) )
+            mlvAspectRatio );
+    if( applyMlvAspect )
     {
-        // Neutral receipts should not suppress RAWC de-squeeze on anamorphic/binned clips.
+        const RawAspectStretchSelection selection =
+            rawAspectStretchSelectionForRatio( mlvAspectRatio );
+        ui->comboBoxHStretch->setCurrentIndex(
+            selection.valid ? selection.horizontalIndex : 0 );
         ui->comboBoxVStretch->setCurrentIndex(
-            mainWindowVerticalStretchIndexForMlvAspectRatio( mlvAspectRatio ) );
+            selection.valid ? selection.verticalIndex : 3 );
     }
-    else if( receipt->stretchFactorY() == STRETCH_V_100 ) ui->comboBoxVStretch->setCurrentIndex( 0 );
-    else if( receipt->stretchFactorY() == STRETCH_V_167 ) ui->comboBoxVStretch->setCurrentIndex( 1 );
-    else if( receipt->stretchFactorY() == STRETCH_V_300 ) ui->comboBoxVStretch->setCurrentIndex( 2 );
-    else ui->comboBoxVStretch->setCurrentIndex( 3 );
+    else
+    {
+        if( receipt->stretchFactorX() == STRETCH_H_100 ) ui->comboBoxHStretch->setCurrentIndex( 0 );
+        else if( receipt->stretchFactorX() == STRETCH_H_125 ) ui->comboBoxHStretch->setCurrentIndex( 1 );
+        else if( receipt->stretchFactorX() == STRETCH_H_133 ) ui->comboBoxHStretch->setCurrentIndex( 2 );
+        else if( receipt->stretchFactorX() == STRETCH_H_150 ) ui->comboBoxHStretch->setCurrentIndex( 3 );
+        else if( receipt->stretchFactorX() == STRETCH_H_167 ) ui->comboBoxHStretch->setCurrentIndex( 4 );
+        else if( receipt->stretchFactorX() == STRETCH_H_175 ) ui->comboBoxHStretch->setCurrentIndex( 5 );
+        else if( receipt->stretchFactorX() == STRETCH_H_180 ) ui->comboBoxHStretch->setCurrentIndex( 6 );
+        else ui->comboBoxHStretch->setCurrentIndex( 7 );
+        if( receipt->stretchFactorY() == STRETCH_V_100 ) ui->comboBoxVStretch->setCurrentIndex( 0 );
+        else if( receipt->stretchFactorY() == STRETCH_V_167 ) ui->comboBoxVStretch->setCurrentIndex( 1 );
+        else if( receipt->stretchFactorY() == STRETCH_V_300 ) ui->comboBoxVStretch->setCurrentIndex( 2 );
+        else ui->comboBoxVStretch->setCurrentIndex( 3 );
+    }
+    on_comboBoxHStretch_currentIndexChanged( ui->comboBoxHStretch->currentIndex() );
     on_comboBoxVStretch_currentIndexChanged( ui->comboBoxVStretch->currentIndex() );
 
     //Vignette after stretching in order to use stretching once only
@@ -22807,7 +22909,6 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeLastPresentedTime = now;
     m_playbackSmokeLastPresentedFrame = static_cast<int>( displayFrame );
     ++m_playbackSmokePresentedFrames;
-
     const auto avgSmokeMs = [this]( double sum ) -> double
     {
         return m_playbackSmokePresentedFrames > 0
@@ -24946,6 +25047,25 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        .arg( dualIsoFull20Threads );
         }
     }
+
+    if( m_playbackSmokeTargetPresentedFrames > 0
+     && m_playbackSmokePresentedFrames >= m_playbackSmokeTargetPresentedFrames
+     && ui->actionPlay->isChecked() )
+    {
+        // Accumulate the target frame before stopping. setChecked(false)
+        // synchronously finalizes smoke telemetry, so stopping earlier would
+        // count frame N while reporting only N-1 timing samples. Playback may
+        // already have advanced the timeline while frame N was presenting;
+        // pin it back to the frame whose pixels were actually presented before
+        // the stop invalidates the generation and schedules the paused redraw.
+        // The internal-advance guard avoids a second generation invalidation;
+        // the play-stop transition performs the single authoritative fence.
+        m_playbackInternalSliderAdvance = true;
+        ui->horizontalSliderPosition->setValue(
+            static_cast<int>( displayFrame ) );
+        m_playbackInternalSliderAdvance = false;
+        ui->actionPlay->setChecked( false );
+    }
 }
 
 void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
@@ -25758,7 +25878,7 @@ bool MainWindow::primePlaybackCacheOnPlayStart( void )
 {
     if( !m_fileLoaded || !m_pMlvObject ) return false;
     if( playback_start_preroll_disabled_by_environment() ) return false;
-    if( m_pMlvObject->stop_caching
+    if( mlvCacheShouldStop( m_pMlvObject )
      || getMlvRawCacheLimitFrames( m_pMlvObject ) == 0 ) return false;
 
     int currentFrame = ui->horizontalSliderPosition->value();
@@ -28896,9 +29016,38 @@ void MainWindow::setWhiteBalanceFromMlv(ReceiptSettings *sliders)
     switch( getMlvWbMode( m_pMlvObject ) )
     {
     case 0: //Auto - use default
-    case 6: //Custom - use default
         sliders->setTemperature( 6000 );
+        sliders->setTint( 0 );
         break;
+    case 6: //Custom - fit the retained neutral to receipt controls
+    {
+        if( ( m_pMlvObject->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_DNGSEQ ) == 0 )
+        {
+            sliders->setTemperature( 6000 );
+            sliders->setTint( 0 );
+            break;
+        }
+        const double neutral[3] = {
+            static_cast<double>( getMlvWbRgain( m_pMlvObject ) ) / 1024.0,
+            static_cast<double>( getMlvWbGgain( m_pMlvObject ) ) / 1024.0,
+            static_cast<double>( getMlvWbBgain( m_pMlvObject ) ) / 1024.0
+        };
+        int temperature = 6000;
+        int tint = 0;
+        if( processingWhiteBalanceControlsForAsShotNeutral( neutral,
+                                                            &temperature,
+                                                            &tint ) )
+        {
+            sliders->setTemperature( temperature );
+            sliders->setTint( tint );
+        }
+        else
+        {
+            sliders->setTemperature( 6000 );
+            sliders->setTint( 0 );
+        }
+        break;
+    }
     case 1: //Sunny
         sliders->setTemperature( 5200 );
         break;

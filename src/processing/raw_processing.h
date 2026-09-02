@@ -415,6 +415,12 @@ void processing_update_clarity_curve(processingObject_t * processing);
 void processingSetWhiteBalance(processingObject_t * processing, double WBKelvin, double WBTint);
 void processingSetWhiteBalanceKelvin(processingObject_t * processing, double WBKelvin);
 void processingSetWhiteBalanceTint(processingObject_t * processing, double WBTint);
+/* Fit a DNG AsShotNeutral triplet to the existing receipt Kelvin/tint model.
+ * `neutral` is R,G,B and must be positive. Outputs use the GUI's exact units:
+ * Kelvin 2000..10000 and integer tint -100..100. */
+int processingWhiteBalanceControlsForAsShotNeutral(const double neutral[3],
+                                                    int * wbTemp,
+                                                    int * wbTint);
 #define processingGetWhiteBalanceKelvin(processing) (processing)->kelvin
 #define processingGetWhiteBalanceTint(processing) (processing)->wb_tint
 void processingFindWhiteBalance(processingObject_t * processing,

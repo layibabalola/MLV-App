@@ -23,6 +23,8 @@
 ////////////////////////////////////////////////////////////////
 
 #include <memory>
+#include <limits>
+#include <cstdint>
 
 #include "bayerhelper.h"
 #include "gauss.h"
@@ -156,8 +158,52 @@ rpError CA_correct(
     }
 
     // local variables
-    const int W = winw - winx;
-    const int H = winh - winy;
+    const int64_t wideW = static_cast<int64_t>(winw) - static_cast<int64_t>(winx);
+    const int64_t wideH = static_cast<int64_t>(winh) - static_cast<int64_t>(winy);
+    if (wideW <= 2 * cb || wideH <= 2 * cb
+        || wideW > std::numeric_limits<int>::max() - 1
+        || wideH > std::numeric_limits<int>::max()) {
+        return RP_MEMORY_ERROR;
+    }
+    const int W = static_cast<int>(wideW);
+    const int H = static_cast<int>(wideH);
+
+    const int width = W + (W & 1), height = H;
+    constexpr int border = 8;
+    constexpr int border2 = 16;
+
+    if (width > std::numeric_limits<int>::max() - border2
+        || height > std::numeric_limits<int>::max() - border2) {
+        return RP_MEMORY_ERROR;
+    }
+
+    const int vz1 = (height + border2) % (ts - border2) == 0 ? 1 : 0;
+    const int hz1 = (width + border2) % (ts - border2) == 0 ? 1 : 0;
+    const int vblsz = ceil((float)(height + border2) / (ts - border2) + 2 + vz1);
+    const int hblsz = ceil((float)(width + border2) / (ts - border2) + 2 + hz1);
+
+    const size_t widthElements = static_cast<size_t>(width);
+    const size_t heightElements = static_cast<size_t>(height);
+    const size_t vblockElements = static_cast<size_t>(vblsz);
+    const size_t hblockElements = static_cast<size_t>(hblsz);
+    if (heightElements > std::numeric_limits<size_t>::max() / widthElements
+        || vblockElements > std::numeric_limits<size_t>::max() / hblockElements) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t imageElements = heightElements * widthElements;
+    if (imageElements > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t blockCount = vblockElements * hblockElements;
+    constexpr size_t blockStride = 2u * 2u + 1u;
+    if (blockCount > std::numeric_limits<size_t>::max() / blockStride) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t blockElements = blockCount * blockStride;
+    if (blockElements > std::numeric_limits<size_t>::max() - imageElements
+        || imageElements + blockElements > std::numeric_limits<size_t>::max() / sizeof(float)) {
+        return RP_MEMORY_ERROR;
+    }
 
     std::unique_ptr<JaggedArray<float>> redFactor;
     std::unique_ptr<JaggedArray<float>> blueFactor;
@@ -195,28 +241,21 @@ rpError CA_correct(
     double progress = 0.0;
     setProgCancel(progress);
 
-    const int width = W + (W & 1), height = H;
-    constexpr int border = 8;
-    constexpr int border2 = 16;
-
-    const int vz1 = (height + border2) % (ts - border2) == 0 ? 1 : 0;
-    const int hz1 = (width + border2) % (ts - border2) == 0 ? 1 : 0;
-    const int vblsz = ceil((float)(height + border2) / (ts - border2) + 2 + vz1);
-    const int hblsz = ceil((float)(width + border2) / (ts - border2) + 2 + hz1);
-
     //temporary array to store simple interpolation of G
-    std::unique_ptr<float[]> buffer(new (std::nothrow) float[height * width + vblsz * hblsz * (2 * 2 + 1)]);
+    std::unique_ptr<float[]> buffer(new (std::nothrow) float[imageElements + blockElements]);
 
     float *Gtmp = buffer.get();
     if (!Gtmp) {
         return RP_MEMORY_ERROR;
     }
 
-    float *RawDataTmp = Gtmp + (winh * (winw + (winw & 1))) / 2;
+    float *RawDataTmp = Gtmp + imageElements / 2u;
     //block CA shift values and weight assigned to block
-    float *const blockwt = Gtmp + height * width;
-    memset(blockwt, 0, vblsz * hblsz * (2 * 2 + 1) * sizeof(float));
-    float (*blockshifts)[2][2] = (float (*)[2][2])(blockwt + vblsz * hblsz);
+    float *const blockwt = Gtmp + imageElements;
+    memset(blockwt,
+           0,
+           blockElements * sizeof(float));
+    float (*blockshifts)[2][2] = (float (*)[2][2])(blockwt + blockCount);
 
     // Because we can't break parallel processing, we need a switch do handle the errors
     bool processpasstwo = true;

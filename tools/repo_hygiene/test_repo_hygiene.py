@@ -49,6 +49,7 @@ from .core import (
     verify_policy,
 )
 from .protected_check_router import RouteError, build_receipt, classify_paths
+from .sealed_real_clip_receipt import SealedReceiptError, validate_sealed_receipt
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -193,6 +194,87 @@ class RepoHygieneTests(unittest.TestCase):
         shutil.copy(ROOT / "tools" / "repo-hygiene" / "POLICY.md", policy_dir / "POLICY.md")
         shutil.copy(ROOT / "tools" / "repo-hygiene" / "closeout.contract.json", policy_dir / "closeout.contract.json")
         return repo
+
+    def test_sealed_real_clip_receipt_schema_and_semantics_fail_closed(self) -> None:
+        schema_path = (
+            ROOT
+            / "tools"
+            / "repo_hygiene"
+            / "sealed-real-clip-ab-receipt.schema.json"
+        )
+        tracked = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "--",
+                "receipts/sealed-real-clip-ab-*.json",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        receipt_paths = [
+            ROOT / line
+            for line in tracked.stdout.splitlines()
+            if line.strip()
+        ]
+        self.assertGreater(len(receipt_paths), 0, "sealed receipt inventory is empty")
+        self.assertEqual(
+            sorted(receipt_paths),
+            receipt_paths,
+            "tracked sealed receipt inventory is not deterministic",
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        Draft202012Validator.check_schema(schema)
+        receipts = []
+        for receipt_path in receipt_paths:
+            with self.subTest(receipt=str(receipt_path.relative_to(ROOT))):
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                validate_sealed_receipt(
+                    receipt,
+                    repo_root=ROOT,
+                    require_git_objects=True,
+                )
+                receipts.append(receipt)
+
+        receipt = receipts[-1]
+
+        hostile_mutations = []
+        hostile = json.loads(json.dumps(receipt))
+        hostile["scope"]["mergeAuthority"] = True
+        hostile_mutations.append(("merge authority", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["retention"]["hostedPromotionRequired"] = False
+        hostile_mutations.append(("hosted requirement", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["candidate"]["productTree"] = hostile["baseline"]["protectedProductTree"]
+        hostile_mutations.append(("same tree", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["clips"][0]["afterScreenshotSha256"] = "F" * 64
+        hostile_mutations.append(("screenshot substitution", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["clips"][0]["sameScreenshotSha256"] = False
+        hostile["clips"][0]["changedSampleRatio"] = 0.00003
+        hostile["clips"][0]["maxAbsRgbDelta"] = 6
+        hostile_mutations.append(("contradictory PASS measurement", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["clips"].append(json.loads(json.dumps(hostile["clips"][0])))
+        hostile_mutations.append(("duplicate clip", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["coverage"]["availableAndPassed"] -= 1
+        hostile_mutations.append(("count mismatch", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["unknownAuthoritySurface"] = True
+        hostile_mutations.append(("unknown field", hostile))
+
+        for label, hostile in hostile_mutations:
+            with self.subTest(label=label), self.assertRaises(SealedReceiptError):
+                validate_sealed_receipt(
+                    hostile,
+                    repo_root=ROOT,
+                    require_git_objects=False,
+                )
 
     def signed(self, tx: dict, artifact_type: str, payload: dict, actor_id: str = "codex-test") -> dict:
         payload = json.loads(json.dumps(payload))
@@ -360,8 +442,8 @@ class RepoHygieneTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     assert_exact_codeql_storage_model(self, candidate)
 
-    def test_c_variadic_format_contracts_remain_type_safe_and_portable(self) -> None:
-        """Guard the format contracts whose mismatches are undefined behavior."""
+    def test_c_variadic_and_typed_pixel_store_contracts_remain_safe(self) -> None:
+        """Guard resolved UB contracts that ordinary output tests may not exercise."""
         blender = (ROOT / "platform" / "mlv_blender" / "MLVBlender.c").read_text(
             encoding="utf-8"
         )
@@ -373,6 +455,46 @@ class RepoHygieneTests(unittest.TestCase):
             encoding="utf-8"
         )
         cube_lut = (ROOT / "src" / "processing" / "cube_lut.c").read_text(
+            encoding="utf-8"
+        )
+        raw_processing = (
+            ROOT / "src" / "processing" / "raw_processing.c"
+        ).read_text(encoding="utf-8")
+        array2d = (
+            ROOT / "src" / "librtprocess" / "src" / "include" / "array2D.h"
+        ).read_text(encoding="utf-8")
+        ca_rt = (ROOT / "src" / "ca_correct" / "CA_correct_RT.c").read_text(
+            encoding="utf-8"
+        )
+        ca = (
+            ROOT / "src" / "librtprocess" / "src" / "preprocess" / "CA_correct.cc"
+        ).read_text(encoding="utf-8")
+        igv = (
+            ROOT / "src" / "librtprocess" / "src" / "demosaic" / "igv.cc"
+        ).read_text(encoding="utf-8")
+        lmmse = (
+            ROOT / "src" / "librtprocess" / "src" / "demosaic" / "lmmse.cc"
+        ).read_text(encoding="utf-8")
+        vng4 = (
+            ROOT / "src" / "librtprocess" / "src" / "demosaic" / "vng4.cc"
+        ).read_text(encoding="utf-8")
+        dng = (ROOT / "src" / "dng" / "dng.c").read_text(encoding="utf-8")
+        dng_reader = (ROOT / "src" / "dng" / "dng_reader.c").read_text(
+            encoding="utf-8"
+        )
+        lj92 = (ROOT / "src" / "mlv" / "liblj92" / "lj92.c").read_text(
+            encoding="utf-8"
+        )
+        video_mlv = (ROOT / "src" / "mlv" / "video_mlv.c").read_text(
+            encoding="utf-8"
+        )
+        main_window = (ROOT / "platform" / "qt" / "MainWindow.cpp").read_text(
+            encoding="utf-8"
+        )
+        aspect_policy = (
+            ROOT / "src" / "batch" / "RawAspectStretchPolicy.h"
+        ).read_text(encoding="utf-8")
+        batch_runner = (ROOT / "src" / "batch" / "BatchRunner.cpp").read_text(
             encoding="utf-8"
         )
 
@@ -394,6 +516,8 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn('"File header is missing, invalid file"', mcraw)
         self.assertNotIn('invalid file:  %s", ctx->fd', mcraw)
 
+        self.assertIn('Data line #%u values:', cube_lut)
+        self.assertNotIn('Data line #%d values:', cube_lut)
         self.assertIn(
             'printf("LUT_1D_INPUT_RANGE %f %f\\n", inMin, inMax);',
             cube_lut,
@@ -402,12 +526,136 @@ class RepoHygieneTests(unittest.TestCase):
             'printf("LUT_3D_INPUT_RANGE %f %f\\n", inMin, inMax);',
             cube_lut,
         )
-        self.assertIn('Data line #%u values:', cube_lut)
-        self.assertNotIn('Data line #%d values:', cube_lut)
         self.assertNotRegex(
             cube_lut,
             r'printf\("LUT_[13]D_INPUT_RANGE[^;]+&inMin',
         )
+
+        self.assertIn('static inline void agx_store_float_triplet_fast', raw_processing)
+        self.assertRegex(
+            raw_processing,
+            r'agx_store_float_triplet_fast\(agx_out_r,\s*agx_out_g,\s*agx_out_b,\s*'
+            r'&pixg\[0\],\s*&pixg\[1\],\s*&pixg\[2\]\);',
+        )
+        self.assertNotIn(
+            'agx_store_u16_triplet_fast(agx_out_r, agx_out_g, agx_out_b, '
+            '&pixg[0], &pixg[1], &pixg[2]);',
+            raw_processing,
+        )
+
+        self.assertIn("checked_element_count(w, h, offset)", array2d)
+        self.assertIn("std::unique_ptr<T[]> pendingData", array2d)
+        self.assertIn("std::unique_ptr<T*[]> pendingPtr", array2d)
+        self.assertNotIn("new T[h * w]", array2d)
+        self.assertNotIn("memset(data, 0, (size_t)w * (size_t)h", array2d)
+        self.assertIn("size_t tile_pixels = 0;", ca_rt)
+        self.assertIn(
+            "const size_t RawDataTmp_sz = tile_pixels / 2u + tile_pixels % 2u;",
+            ca_rt,
+        )
+        self.assertNotIn("calloc(TS*TS/2", ca_rt)
+        self.assertIn("image_pixels > (size_t)INT_MAX", ca_rt)
+        self.assertIn("const int64_t wideW", ca)
+        self.assertIn("imageElements > static_cast<size_t>(std::numeric_limits<int>::max())", ca)
+        self.assertIn("pixelCount > static_cast<size_t>(std::numeric_limits<int>::max())", igv)
+        self.assertIn("planeElements > static_cast<size_t>(std::numeric_limits<int>::max())", lmmse)
+        self.assertIn("width > std::numeric_limits<int>::max() / 16", vng4)
+        self.assertIn("std::numeric_limits<int>::max()) / 8u", vng4)
+        self.assertIn("const unsigned int requestedFlags = flgs", array2d)
+        self.assertIn("flags = requestedFlags;", array2d)
+        self.assertIn("bool is_locked() const noexcept", array2d)
+        self.assertIn("int encoded_length = 0;", dng)
+        self.assertNotIn("(int*)output_buffer_size", dng)
+        self.assertIn("size_t output_buffer_capacity", dng)
+        self.assertIn("(size_t)encoded_length > output_buffer_capacity", dng)
+        self.assertIn("dng_data->image_capacity", dng)
+        self.assertIn("decoded_pixels != expected_pixels", dng)
+        self.assertIn("components != 1 && components != 2", dng)
+        self.assertIn("decoded_bpp != (int)expected_bpp", dng)
+        self.assertIn("output_buffer_capacity < expected_bytes", dng)
+        self.assertIn("dng_data->image_size > dng_data->image_capacity", dng)
+        self.assertIn("(total_bits & 15u) != 0", dng)
+        self.assertIn("bits_address + 1u < packed_words", dng)
+        self.assertIn("(height & 1) != 0", dng)
+        self.assertIn("encoded_width * encoded_height > (INT_MAX - 200) / 3", dng)
+        self.assertIn("info->width == 0 || info->height == 0", dng_reader)
+        self.assertIn("pixels * sizeof(uint16_t)", dng_reader)
+        self.assertIn("dng_reader_strip_allocation_size", dng_reader)
+        self.assertIn("info->strip_byte_count > file_size - info->strip_offset", dng_reader)
+        self.assertIn("pixels > (SIZE_MAX - 7u) / (size_t)bpp", dng_reader)
+        self.assertIn("dng_reader_range_fits(ifd0_off, 2u, got)", dng_reader)
+        self.assertIn("(INT_MAX - 200) / 3 / height", lj92)
+        self.assertIn("if (rowcache == NULL) return LJ92_ERROR_NO_MEMORY;", lj92)
+        self.assertIn("uint8_t *shrunk = realloc", lj92)
+        self.assertIn("size_t compression_capacity = 0;", video_mlv)
+        self.assertIn("compression_capacity > frame_capacity", video_mlv)
+        self.assertIn("mlvRawFrameInputCapacity", video_mlv)
+        self.assertIn("mlvDngSequenceGeometryIsRepresentable", video_mlv)
+        self.assertIn("pixels > (size_t)INT_MAX / 3u", video_mlv)
+        self.assertIn("mlvDngAsShotNeutralToWbGains", video_mlv)
+        self.assertIn("mlvDngCfaPatternIsSupported", video_mlv)
+        self.assertIn("fi->compression == DNG_READER_COMPRESSION_NONE", video_mlv)
+        self.assertIn("uint32_t dng_wb_gains[3] = { 1024, 1024, 1024 }", video_mlv)
+        self.assertIn("mlvDngDefaultScaleToSampling", video_mlv)
+        self.assertIn("mlvDngAspectRatioIsSupported", video_mlv)
+        self.assertIn("mlvDngBaselineExposureToBias", video_mlv)
+        self.assertIn("video->RAWI.raw_info.dng_active_area", video_mlv)
+        self.assertIn("video->RAWI.raw_info.crop.origin", video_mlv)
+        self.assertIn("video->camid.cameraName[UNIQ]", video_mlv)
+        self.assertIn("video->MLVI.sourceFpsNom     = fi->has_frame_rate", video_mlv)
+        self.assertIn("video->EXPO.isoValue         = fi->has_iso", video_mlv)
+        self.assertIn("FILE ** dng_files", video_mlv)
+        self.assertIn("video->file = dng_files", video_mlv)
+        self.assertIn("snprintf(error_message, 256", video_mlv)
+        self.assertIn("dng_reader_processing_metadata_matches", dng_reader)
+        self.assertIn("!have_bps", dng_reader)
+        self.assertIn("positive_rationals", dng_reader)
+        for strict_tag in (
+            "tcPhotometricInterpretation",
+            "tcSamplesPerPixel",
+            "tcRowsPerStrip",
+            "tcPlanarConfiguration",
+            "tcCFARepeatPatternDim",
+            "tcDefaultScale",
+            "tcFrameRate",
+            "tcDefaultCropOrigin",
+            "tcDefaultCropSize",
+            "tcBaselineExposure",
+            "tcBaselineExposureOffset",
+            "tcModel",
+            "tcUniqueCameraModel",
+            "tcExifIFD",
+        ):
+            self.assertIn(strict_tag, dng_reader)
+        self.assertIn("enumeration_failed", dng_reader)
+        self.assertIn("candidate->has_default_scale != expected->has_default_scale", dng_reader)
+        self.assertIn("candidate->has_frame_rate != expected->has_frame_rate", dng_reader)
+        self.assertIn("candidate->has_iso != expected->has_iso", dng_reader)
+        self.assertIn("candidate->has_baseline_exposure != expected->has_baseline_exposure", dng_reader)
+        self.assertIn("candidate->unique_camera_model", dng_reader)
+        self.assertIn("processingWhiteBalanceControlsForAsShotNeutral", raw_processing)
+        self.assertIn("best_error > 0.01", raw_processing)
+        self.assertIn("processingWhiteBalanceControlsForAsShotNeutral", main_window)
+        self.assertIn("MLV_VIDEO_CLASS_FLAG_DNGSEQ ) == 0", main_window)
+        self.assertIn("rawAspectStretchSelectionForRatio", main_window)
+        self.assertIn("rawAspectStretchSelectionForRatio", aspect_policy)
+        self.assertIn("effectiveStretchFactors", batch_runner)
+        self.assertIn("width > UINT16_MAX || height > UINT16_MAX", video_mlv)
+        self.assertIn("width < 3 || height < 3", video_mlv)
+        self.assertIn("(size_t)frame_size > raw_frame_capacity - 4u", video_mlv)
+        self.assertIn("dng_lj92_output_capacity", blender)
+        self.assertIn("result_width > (size_t)UINT16_MAX", blender)
+        self.assertIn("frame_size_compressed > compressed_capacity", blender)
+        self.assertIn("export_failed = saveMlvHeaders", blender)
+        self.assertIn("fclose(mlv_output_file) != 0", blender)
+        self.assertIn("mlv->feather_right > usable_width - mlv->feather_left", blender)
+        self.assertIn("Blender->output_width != (int)output_width", blender)
+        self.assertIn("remove(OutputPath);", blender)
+        self.assertIn("MLVBlenderInclusiveFrameRange", blender)
+        self.assertIn("frame_count - 1u", blender)
+        self.assertIn("MLVBlenderQuantize14", blender)
+        self.assertIn("const float maximum = 16383.0f", blender)
+        self.assertNotIn("getMlvWhiteLevel(mlv_object) = 2 << bitdepth - 1", blender)
 
     def test_ci_product_oracles_are_isolated_from_factory_bridge_failures(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
@@ -847,6 +1095,12 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("    if: ${{ always() }}", product_job)
         self.assertIn("needs.protected-check-route.result != 'success'", product_job)
         self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", product_job)
+        self.assertIn("ref: ${{ env.EXPECTED_ROUTE_HEAD }}", product_job)
+        self.assertIn("Verify exact product checkout binding", product_job)
+        self.assertIn("git rev-parse HEAD", product_job)
+        self.assertIn("git rev-parse 'HEAD^{tree}'", product_job)
+        self.assertIn("product checkout head mismatch", product_job)
+        self.assertIn("product checkout tree mismatch", product_job)
         self.assertIn("EXPLICIT_NA_PROVIDER_CONTROL_ONLY", product_job)
         self.assertIn("MANUAL_DISPATCH_RUN_REAL_ORACLES", product_job)
         self.assertIn("outputs.product == 'false'", product_job)
@@ -880,6 +1134,12 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("outputs.gui != 'false'", gui_job)
         self.assertIn("outputs.gui == 'false'", gui_job)
         self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", gui_job)
+        self.assertIn("ref: ${{ env.EXPECTED_ROUTE_HEAD }}", gui_job)
+        self.assertIn("Verify exact GUI checkout binding", gui_job)
+        self.assertIn("git rev-parse HEAD", gui_job)
+        self.assertIn("git rev-parse 'HEAD^{tree}'", gui_job)
+        self.assertIn("GUI checkout head mismatch", gui_job)
+        self.assertIn("GUI checkout tree mismatch", gui_job)
         self.assertIn("EXPLICIT_NA_PROVIDER_CONTROL_ONLY", gui_job)
         self.assertIn("MANUAL_DISPATCH_RUN_REAL_ORACLES", gui_job)
 
@@ -2119,6 +2379,50 @@ class RepoHygieneTests(unittest.TestCase):
             r"\b__builtin_cpu_(?:init|supports)\b",
             "no x86 CPU builtin may remain reachable on ARM outside the architecture guard",
         )
+
+    def test_dualiso_histogram_match_has_one_checked_reachable_implementation(self) -> None:
+        source = (ROOT / "src" / "mlv" / "llrawproc" / "dualiso.c").read_text(
+            encoding="utf-8"
+        )
+        llrawproc_source = (
+            ROOT / "src" / "mlv" / "llrawproc" / "llrawproc.c"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn(
+            "static int _match_exposures(",
+            source,
+            "the unreachable pre-2025 matcher must not reintroduce unsafe duplicate arithmetic",
+        )
+        self.assertEqual(source.count("static int match_by_histogram("), 1)
+        self.assertEqual(source.count("static int match_exposures("), 1)
+        self.assertEqual(source.count("static int dualiso_checked_histogram_geometry("), 1)
+        self.assertEqual(source.count("static int dualiso_checked_full20_frame_geometry("), 1)
+        self.assertIn("checked_pixels > (size_t)INT_MAX", source)
+        self.assertIn("checked_samples > (size_t)INT_MAX", source)
+        self.assertIn("hi_n < highlight_capacity", source)
+        self.assertIn("if (hi_n >= highlight_capacity) break;", source)
+        self.assertIn("if (n == 0) return 0;", source)
+        self.assertIn("if (!match_by_histogram(raw_info,", source)
+        self.assertGreaterEqual(
+            source.count("dualiso_checked_full20_frame_geometry(raw_info,"), 3
+        )
+        self.assertIn("*black_delta > INT_MAX / 64", source)
+        self.assertIn("(double)white - (double)black + (double)_black_delta", source)
+        self.assertIn("raw_info.pitch != raw_info.width", source)
+        self.assertIn("interp_method == 0 && threads <= 0", source)
+        self.assertIn("raw_info.cfa_pattern == 0x01000201", source)
+        self.assertIn("if (num < 2)", source)
+        self.assertIn("if (final_blend_result < 0)", source)
+        self.assertIn("white - black >= 16383u * 64u", source)
+        self.assertIn("raw_info.width < 33 || raw_info.height < 33", source)
+        self.assertIn("llrawproc_checked_14bit_frame_extents(", llrawproc_source)
+        self.assertNotIn("override_w * override_h * 14 / 8", llrawproc_source)
+        self.assertNotIn("raw_info->width * raw_info->height * 14 / 8", llrawproc_source)
+        self.assertIn("const int dual_iso_recon_ok =", llrawproc_source)
+        self.assertIn("if (!dual_iso_recon_ok)", llrawproc_source)
+        self.assertIn(
+            "llrawproc_worker_capture_dual_iso_failure_backup(", llrawproc_source
+        )
+        self.assertIn("return 0;", llrawproc_source)
 
     def test_release_sources_remain_cxx14_and_c_memory_portable(self) -> None:
         for source_root in (ROOT / "src", ROOT / "platform" / "qt"):

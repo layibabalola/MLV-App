@@ -500,31 +500,111 @@ void debayerBasicU16(uint16_t * __restrict debayerto,
     memcpy(debayerto + (width * (height - 1) * 3), debayerto + (width * (height - 2) * 3), width * 3 * sizeof(uint16_t));
 }
 
-/* AmAZeMEmE debayer easier to use */
-void debayerAmaze(uint16_t * __restrict debayerto, float * __restrict bayerdata, int width, int height, int threads, int blacklevel)
+typedef struct
 {
-    int pixelsize = width * height;
+    amazeinfo_t * info;
+    int succeeded;
+} debayer_amaze_thread_arg_t;
+
+static int g_debayer_amaze_thread_create_failure_for_testing = -1;
+static int g_debayer_amaze_allocation_failure_for_testing = 0;
+static int g_debayer_amaze_aux_allocation_failure_for_testing = -1;
+
+void debayerAmazeSetThreadCreateFailureForTesting(int thread_index)
+{
+    g_debayer_amaze_thread_create_failure_for_testing = thread_index;
+}
+
+void debayerAmazeSetAllocationFailureForTesting(int enabled)
+{
+    g_debayer_amaze_allocation_failure_for_testing = enabled != 0;
+}
+
+void debayerAmazeSetAuxAllocationFailureForTesting(int allocation_index)
+{
+    g_debayer_amaze_aux_allocation_failure_for_testing = allocation_index;
+}
+
+static void * debayer_amaze_aux_calloc(size_t count, size_t size, int allocation_index)
+{
+    if (g_debayer_amaze_aux_allocation_failure_for_testing == allocation_index)
+        return NULL;
+    return calloc(count, size);
+}
+
+static void * debayer_amaze_thread(void * opaque)
+{
+    debayer_amaze_thread_arg_t * arg = (debayer_amaze_thread_arg_t *)opaque;
+    arg->succeeded = demosaic(arg->info);
+    return NULL;
+}
+
+/* AmAZeMEmE debayer easier to use. Returns zero without publishing output if
+ * any allocation or worker fails. */
+int debayerAmaze(uint16_t * __restrict debayerto, float * __restrict bayerdata, int width, int height, int threads, int blacklevel)
+{
+    enum { DEBAYER_AMAZE_MAX_THREADS = 256 };
+    if (!debayerto || !bayerdata || width < 33 || height < 33)
+        return 0;
+    const size_t checked_width = (size_t)width;
+    const size_t checked_height = (size_t)height;
+    if (checked_width > SIZE_MAX / checked_height)
+        return 0;
+    const size_t checked_pixels = checked_width * checked_height;
+    if (checked_pixels > INT32_MAX
+        || checked_pixels > SIZE_MAX / 3u
+        || checked_pixels > SIZE_MAX / sizeof(float)
+        || checked_height > SIZE_MAX / sizeof(float *))
+    {
+        return 0;
+    }
+    if (threads < 1)
+        threads = 1;
+    /* AMaZE needs at least 33 rows per worker.  Bound the caller-provided
+     * count before it is used as a VLA extent or in chunk calculations. */
+    const int geometry_thread_limit = height / 33;
+    if (threads > geometry_thread_limit)
+        threads = geometry_thread_limit;
+    if (threads > DEBAYER_AMAZE_MAX_THREADS)
+        threads = DEBAYER_AMAZE_MAX_THREADS;
 
     /* AmAZeMEmE wants an image as floating points and 2d arrey as well */
-    float ** __restrict imagefloat2d = (float **)malloc(height * sizeof(float *));
-    for (int y = 0; y < height; ++y) imagefloat2d[y] = (float *)(bayerdata+(y*width));
+    const int force_allocation_failure = g_debayer_amaze_allocation_failure_for_testing;
+    float ** __restrict imagefloat2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
 
     /* AmAZe also wants to return floats, so heres memeory 4 it */
-    float  * __restrict red1d = (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict red2d = (float **)malloc(height * sizeof(float *));
-    for (int y = 0; y < height; ++y) red2d[y] = (float *)(red1d+(y*width));
-    float  * __restrict green1d = (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict green2d = (float **)malloc(height * sizeof(float *));
-    for (int y = 0; y < height; ++y) green2d[y] = (float *)(green1d+(y*width));
-    float  * __restrict blue1d = (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict blue2d = (float **)malloc(height * sizeof(float *));
-    for (int y = 0; y < height; ++y) blue2d[y] = (float *)(blue1d+(y*width));
+    float  * __restrict red1d = force_allocation_failure ? NULL : (float *)malloc(checked_pixels * sizeof(float));
+    float ** __restrict red2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
+    float  * __restrict green1d = force_allocation_failure ? NULL : (float *)malloc(checked_pixels * sizeof(float));
+    float ** __restrict green2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
+    float  * __restrict blue1d = force_allocation_failure ? NULL : (float *)malloc(checked_pixels * sizeof(float));
+    float ** __restrict blue2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
+    if (!imagefloat2d || !red1d || !red2d || !green1d || !green2d || !blue1d || !blue2d)
+    {
+        free(red1d);
+        free(red2d);
+        free(green1d);
+        free(green2d);
+        free(blue1d);
+        free(blue2d);
+        free(imagefloat2d);
+        return 0;
+    }
+    for (int y = 0; y < height; ++y)
+    {
+        imagefloat2d[y] = bayerdata + (size_t)y * checked_width;
+        red2d[y] = red1d + (size_t)y * checked_width;
+        green2d[y] = green1d + (size_t)y * checked_width;
+        blue2d[y] = blue1d + (size_t)y * checked_width;
+    }
+
+    int succeeded = 1;
 
     /* If threads is < 2 just do a normal amaze */
     if (threads < 2)
     {
         /* run the Amaze */
-        demosaic( & (amazeinfo_t) {
+        succeeded = demosaic( & (amazeinfo_t) {
                   imagefloat2d,
                   red2d,
                   green2d,
@@ -538,8 +618,20 @@ void debayerAmaze(uint16_t * __restrict debayerto, float * __restrict bayerdata,
     /* Else do multithreading */
     else
     {
-        int startchunk_y[threads];
-        int endchunk_y[threads];
+        const size_t thread_count = (size_t)threads;
+        int * startchunk_y = (int *)debayer_amaze_aux_calloc(thread_count, sizeof(int), 0);
+        int * endchunk_y = (int *)debayer_amaze_aux_calloc(thread_count, sizeof(int), 1);
+        pthread_t * thread_id = (pthread_t *)debayer_amaze_aux_calloc(thread_count, sizeof(pthread_t), 2);
+        amazeinfo_t * amaze_arguments = (amazeinfo_t *)debayer_amaze_aux_calloc(thread_count, sizeof(amazeinfo_t), 3);
+        debayer_amaze_thread_arg_t * thread_arguments =
+            (debayer_amaze_thread_arg_t *)debayer_amaze_aux_calloc(
+                thread_count, sizeof(debayer_amaze_thread_arg_t), 4);
+        if (!startchunk_y || !endchunk_y || !thread_id || !amaze_arguments || !thread_arguments)
+        {
+            /* One cleanup owner below; leaving partial pointers intact avoids
+             * the historical double-free on a later common cleanup. */
+            succeeded = 0;
+        }
 
         /* How big each thread's chunk is, multiple of 2 - or debayer
          * would start on wrong pixel and magenta stripes appear */
@@ -556,20 +648,19 @@ void debayerAmaze(uint16_t * __restrict debayerto, float * __restrict bayerdata,
         }
 
         /* Calculate chunks of image for each thread */
-        for (int thread = 0; thread < threads; ++thread)
+        for (int thread = 0; succeeded && thread < threads; ++thread)
         {
             startchunk_y[thread] = chunk_height * thread;
             endchunk_y[thread] = chunk_height * (thread + 1);
         }
 
         /* Last chunk must reach end of frame */
-        endchunk_y[threads-1] = height;
-
-        pthread_t thread_id[threads];
-        amazeinfo_t amaze_arguments[threads];
+        if (succeeded)
+            endchunk_y[threads-1] = height;
+        int created_threads = 0;
 
         /* Create amaze pthreads */
-        for (int thread = 0; thread < threads; ++thread)
+        for (int thread = 0; succeeded && thread < threads; ++thread)
         {
             /* Amaze arguments */
             amaze_arguments[thread] = (amazeinfo_t) {
@@ -583,27 +674,64 @@ void debayerAmaze(uint16_t * __restrict debayerto, float * __restrict bayerdata,
                 0,
                 blacklevel };
 
-            /* Create pthread! */
-            pthread_create( &thread_id[thread], NULL, (void *)&demosaic, (void *)&amaze_arguments[thread] );
+            thread_arguments[thread].info = &amaze_arguments[thread];
+            thread_arguments[thread].succeeded = 0;
+            const int create_result =
+                g_debayer_amaze_thread_create_failure_for_testing == thread
+                ? 1
+                : pthread_create(&thread_id[thread],
+                                 NULL,
+                                 debayer_amaze_thread,
+                                 &thread_arguments[thread]);
+            if (create_result != 0)
+            {
+                succeeded = 0;
+                break;
+            }
+            created_threads++;
         }
 
         /* let all threads finish */
-        for (int thread = 0; thread < threads; ++thread)
+        int workers_quiesced = 1;
+        for (int thread = 0; thread < created_threads; ++thread)
         {
-            pthread_join( thread_id[thread], NULL );
+            if (pthread_join(thread_id[thread], NULL) != 0)
+            {
+                succeeded = 0;
+                workers_quiesced = 0;
+            }
+            else if (!thread_arguments[thread].succeeded)
+            {
+                succeeded = 0;
+            }
         }
-
+        if (created_threads != threads)
+            succeeded = 0;
+        if (!workers_quiesced)
+        {
+            /* A worker whose termination is not established may still hold
+             * these arguments and planes.  Leak rather than free live state. */
+            return 0;
+        }
+        free(startchunk_y);
+        free(endchunk_y);
+        free(thread_id);
+        free(amaze_arguments);
+        free(thread_arguments);
     }
 
     //int rgb_pixels = pixelsize * 3;
 
-    /* Giv back as RGB, not separate channels */
-    for (int i = 0; i < pixelsize; i++)
+    /* Give back as RGB only after every worker completed successfully. */
+    if (succeeded)
     {
-        int j = i * 3;
-        debayerto[ j ] = LIMIT16((uint32_t)red1d[i]);
-        debayerto[j+1] = LIMIT16((uint32_t)green1d[i]);
-        debayerto[j+2] = LIMIT16((uint32_t)blue1d[i]);
+        for (size_t i = 0; i < checked_pixels; i++)
+        {
+            const size_t j = i * 3u;
+            debayerto[ j ] = LIMIT16((uint32_t)red1d[i]);
+            debayerto[j+1] = LIMIT16((uint32_t)green1d[i]);
+            debayerto[j+2] = LIMIT16((uint32_t)blue1d[i]);
+        }
     }
 
     free(red1d);
@@ -613,6 +741,7 @@ void debayerAmaze(uint16_t * __restrict debayerto, float * __restrict bayerdata,
     free(blue1d);
     free(blue2d);
     free(imagefloat2d);
+    return succeeded;
 }
 
 

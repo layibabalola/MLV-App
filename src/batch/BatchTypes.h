@@ -3,6 +3,7 @@
 
 #include "../../platform/qt/ExportCodecIds.h"
 #include "../../platform/qt/StretchFactors.h"
+#include "RawAspectStretchPolicy.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -2376,18 +2377,19 @@ batchRenderedVideoFfmpegFramePlanFromGuiState(
     else if( stretchFactorX != STRETCH_H_100
           || stretchFactorY != STRETCH_V_100 )
     {
-        if( stretchFactorY == STRETCH_V_033 )
+        const RawAspectRenderedDimensions dimensions =
+            rawAspectRenderedDimensions(sourceWidth,
+                                        sourceHeight,
+                                        stretchFactorX,
+                                        stretchFactorY,
+                                        std::numeric_limits<int>::max());
+        if( !dimensions.valid )
         {
-            width = sourceWidth * 3;
-            height = sourceHeight;
+            plan.reason = QStringLiteral("rendered stretch dimensions invalid or too large");
+            return plan;
         }
-        else
-        {
-            width = static_cast<int>(
-                static_cast<double>(sourceWidth) * stretchFactorX);
-            height = static_cast<int>(
-                static_cast<double>(sourceHeight) * stretchFactorY);
-        }
+        width = dimensions.width;
+        height = dimensions.height;
         plan.stretchApplied = true;
         plan.scaled = true;
     }
@@ -2396,12 +2398,22 @@ batchRenderedVideoFfmpegFramePlanFromGuiState(
     {
         if( (width % 2) != 0 )
         {
+            if( width == std::numeric_limits<int>::max() )
+            {
+                plan.reason = QStringLiteral("rendered output dimensions too large to align safely");
+                return plan;
+            }
             width += width % 2;
             plan.codecDimensionAdjusted = true;
             plan.scaled = true;
         }
         if( (height % 2) != 0 )
         {
+            if( height == std::numeric_limits<int>::max() )
+            {
+                plan.reason = QStringLiteral("rendered output dimensions too large to align safely");
+                return plan;
+            }
             height += height % 2;
             plan.codecDimensionAdjusted = true;
             plan.scaled = true;

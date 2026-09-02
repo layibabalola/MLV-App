@@ -257,6 +257,7 @@ enum
 	tcBlackLevelDeltaV				= 50716,
 	tcWhiteLevel					= 50717,
 	tcDefaultScale					= 50718,
+	tcFrameRate					= 51044,
 	tcDefaultCropOrigin				= 50719,
 	tcDefaultCropSize				= 50720,
 	tcColorMatrix1					= 50721,

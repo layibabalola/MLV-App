@@ -346,6 +346,7 @@ HEADERS += MainWindow.h \
     ../../src/dng/dng_tag_codes.h \
     ../../src/dng/dng_tag_types.h \
     ../../src/dng/dng_tag_values.h \
+    ../../src/batch/RawAspectStretchPolicy.h \
     ../../src/processing/processing_object.h \
     ../../src/processing/raw_processing.h \
     ../../src/processing/playback_downsample.h \

@@ -1,0 +1,188 @@
+{
+  "schema": "mlv-app/sealed-real-clip-ab-receipt/v1",
+  "capturedAtUtc": "2026-08-20T16:18:35.3047480Z",
+  "disposition": "LOCAL_SEALED_CORPUS_PASS_PENDING_HOSTED_AND_INDEPENDENT_RATIFICATION",
+  "candidate": {
+    "productHead": "d8224107ac0d0af4cfca769c666c3a422d55f556",
+    "productTree": "a4386d56be30ff569aefdd8dc4bfc2eea7c283dc",
+    "exeSha256": "AEC87A846BA81773C182EA8B5B16DA218EAE986BB18F9B61034C701E73BD9D07",
+    "buildManifestSha256": "E4642406E3E6A8E6F90FECFAEE6C8FFA449F23A90D056081B565D9266C243148",
+    "clean": true,
+    "selfContained": true,
+    "launchProbeExitCode": 0
+  },
+  "baseline": {
+    "protectedProductHead": "c51a556f4e8c6ba13089580787a3899c564936ed",
+    "protectedProductTree": "97c6946a5811fd65bebbbaa20597461d7a0342c5",
+    "instrumentedHead": "150a50933f38809c1202ac9a8229b77bc76836c8",
+    "instrumentedTree": "0b6c95fdf5c9421b7109f7bea0bfc1eed2b37305",
+    "instrumentationOnlyPaths": [
+      "platform/qt/CrashForensics.cpp",
+      "platform/qt/MainWindow.cpp",
+      "platform/qt/MainWindow.h",
+      "platform/qt/main.cpp",
+      "tools/build-release.ps1",
+      "tools/gen-buildinfo.ps1"
+    ],
+    "exeSha256": "EC6DB365B08CD48E1EFF9DF88AE65D4DD53BBD0D80DC94739C8A8BA9DFBA179E",
+    "buildManifestSha256": "2FEBB08EAA6B7D270D2A7462B8CF7909A0367141F334D832BACB22BACDA6D696",
+    "clean": true,
+    "selfContained": true,
+    "launchProbeExitCode": 0
+  },
+  "verifier": {
+    "head": "d8224107ac0d0af4cfca769c666c3a422d55f556",
+    "tree": "a4386d56be30ff569aefdd8dc4bfc2eea7c283dc",
+    "sourceHashConvention": "GIT_BLOB_BYTES_CANONICAL_LF",
+    "comparerGitBlob": "b594a63d35c94d742d5ae438d19f9876eae59698",
+    "comparerSha256": "18D44CC180BE1CCCB596B09E482DBF1266BE21D99705FFC1B74A90F75DBC9DE8",
+    "runnerGitBlob": "79bd506560c492800b4a5894278c2ab6d41a5d83",
+    "runnerSha256": "790DCB93589B5805808165EB4A30882428DE03F160D9011EF7DB1C5DEE686DEE",
+    "schema": "gui-smoke-ab-compare.v3",
+    "maxMeanAbsRgbDelta": 2.0,
+    "maxChangedSampleRatio": 0.01,
+    "sampleStep": 4,
+    "failOnScreenshotDelta": true
+  },
+  "renderContract": {
+    "receiptGitBlob": "bf7c9464f9b967d3547d1ce5d3b7e5f746ecaf97",
+    "receiptSha256": "174A837B9496B36093542996E41AA9E36A39718A559CA6E5B624B92D1BEB7C24",
+    "lookAssistEnabled": false,
+    "workerThreads": 1,
+    "qualityMode": "auto",
+    "scaleRequest": 4,
+    "dropFrame": false,
+    "targetPresentedFrames": 2,
+    "captureFrameLocked": true,
+    "fullVisualStateRequiredEqual": true,
+    "captureTimeExecutableClipReceiptManifestLogAndScreenshotBindingsRequired": true
+  },
+  "clips": [
+    {
+      "name": "M16-1347",
+      "clipSha256": "763E5A302A8D04E97D84CA7D281D65752529A6ED00BF5A7FF8BBB1E46609934D",
+      "frame": 90,
+      "verdict": "PASS",
+      "sameScreenshotSha256": true,
+      "beforeScreenshotSha256": "40B767DD2669AA021182988D8872CEEF252A4EDF91F44CC5A65DC6942EE0308D",
+      "afterScreenshotSha256": "40B767DD2669AA021182988D8872CEEF252A4EDF91F44CC5A65DC6942EE0308D",
+      "meanAbsRgbDelta": 0.0,
+      "maxAbsRgbDelta": 0,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "33C562A6AB212907DC581C34243FE2A9A957899B51FFC8A3D9C8999991A598BD",
+      "afterSmokeJsonSha256": "D46702A13F8A79CC2607BD8C79ABED1FAC6586250654EB9F6CC1FD45B6E185E8",
+      "comparisonJsonSha256": "0D334DD6A17166B0041169BD504FE6224EEF30FCB472B9A8373BF730C4CA2C98"
+    },
+    {
+      "name": "M16-1327",
+      "clipSha256": "CFDCD64DA9931DB94B2B4F938FEC1E10B8A742C2E79847975BDD6A986E137A3F",
+      "frame": 90,
+      "verdict": "PASS",
+      "sameScreenshotSha256": true,
+      "beforeScreenshotSha256": "DE58E32290BA1B2F06B3C898F121BE1A764C728EAAB32EB2A269FD95DAF7EE13",
+      "afterScreenshotSha256": "DE58E32290BA1B2F06B3C898F121BE1A764C728EAAB32EB2A269FD95DAF7EE13",
+      "meanAbsRgbDelta": 0.0,
+      "maxAbsRgbDelta": 0,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "0C97EA4D4EE407D9F4E2D9DF9F90E58A182B926AF1D4D45582053033A103E982",
+      "afterSmokeJsonSha256": "FE9558067A98C264094E7AA78C0ED769B33E63C6C6D961EB3A7D1D3FFED64ADB",
+      "comparisonJsonSha256": "5D2910629551FF615418A1C1F7596DF41CAB44F24C16B0A80B3A25173DD8AF82"
+    },
+    {
+      "name": "M17-1207",
+      "clipSha256": "3BBB5034D8AB5D63A078517AF5A3098FFF89677BE37E78298317A19DEF043DCE",
+      "frame": 90,
+      "verdict": "PASS",
+      "sameScreenshotSha256": true,
+      "beforeScreenshotSha256": "2F42943A59A15084522041E38CAE75ED73110AD7EC0D9D2F6A887903C0EA456B",
+      "afterScreenshotSha256": "2F42943A59A15084522041E38CAE75ED73110AD7EC0D9D2F6A887903C0EA456B",
+      "meanAbsRgbDelta": 0.0,
+      "maxAbsRgbDelta": 0,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "3F55937010912695FFF2914E3D1C0ADEBFCAC5E3FE49F4A1C5D2479376A93A41",
+      "afterSmokeJsonSha256": "8475178EF13FAEB95E974D76C42A4641F14CDEA11BC326A65B46F3D3022CB73E",
+      "comparisonJsonSha256": "43954857B46E5063B7C619BECC22C0D3485470D446C0F5C02C196CC5AD03C192"
+    },
+    {
+      "name": "M15-1320",
+      "clipSha256": "B72347ACE4F18981A9EA66DB9FC2DB9413718C99D4818A1846413B86B703CA1E",
+      "frame": 22,
+      "verdict": "PASS",
+      "sameScreenshotSha256": true,
+      "beforeScreenshotSha256": "6FEC01CB43EE75191DAC629A260C2370CAAB8FD586EBFD5BE7B4CE85088A9D15",
+      "afterScreenshotSha256": "6FEC01CB43EE75191DAC629A260C2370CAAB8FD586EBFD5BE7B4CE85088A9D15",
+      "meanAbsRgbDelta": 0.0,
+      "maxAbsRgbDelta": 0,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "B0DEF3A9AB199260312C216B9B30E80EE0343C7092422D74122B4AF15A679AB4",
+      "afterSmokeJsonSha256": "F642D041B4B64507125E887AEB705A15DF7D9D56A97AB9D49322DB2337AA3F64",
+      "comparisonJsonSha256": "45C1B61A5177BB3FF461105F3FC668E198F91F5C2F76BB8F3EBCC5840D36E5DB"
+    },
+    {
+      "name": "M16-1210",
+      "clipSha256": "679EE976B0150C71CA26F7D8895C775AFDCA273FA7F907DB22CF7C3D58AF17CD",
+      "frame": 22,
+      "verdict": "PASS",
+      "sameScreenshotSha256": true,
+      "beforeScreenshotSha256": "C0CE42DBA101EE2E28E9529694F4EC74E8301C77B3C8B7AEC0FD1C27C6BD38A9",
+      "afterScreenshotSha256": "C0CE42DBA101EE2E28E9529694F4EC74E8301C77B3C8B7AEC0FD1C27C6BD38A9",
+      "meanAbsRgbDelta": 0.0,
+      "maxAbsRgbDelta": 0,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "84B9FA8010555BA8AADCA87A56565AAFB051B41451500B87379EA4B0A3005B7F",
+      "afterSmokeJsonSha256": "32E5533E221C112744BF72325D69ADE92C23C4DA0B3CB551E356E2C8828F08BC",
+      "comparisonJsonSha256": "AD3D2DFFD894BA9F421FBFADF71EA36ECEC39ED1E46D124657EF56847C28E135"
+    },
+    {
+      "name": "M16-1243",
+      "clipSha256": "C8F09E1EA8E6C40F673BF465D2D4ADB90CA218BC9F78C6461DB5CD22CD3E01B9",
+      "frame": 23,
+      "verdict": "PASS",
+      "sameScreenshotSha256": true,
+      "beforeScreenshotSha256": "9D74829C4D23947130F4E74BF91B83117E63EF191264DA99E720C714DCCE396F",
+      "afterScreenshotSha256": "9D74829C4D23947130F4E74BF91B83117E63EF191264DA99E720C714DCCE396F",
+      "meanAbsRgbDelta": 0.0,
+      "maxAbsRgbDelta": 0,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "F95E91C95A0D918D5D9FC3D8E59312C8A5419B6DFC489AA906CE90CE88750889",
+      "afterSmokeJsonSha256": "262ADE7D233E3BBFDA7DD9412CCEA259D0F6AB91D2CC29CBDBFC342C7D7A7A7B",
+      "comparisonJsonSha256": "D03ED400D24FB1D0600ED57965AFFDF45B3B819CEB895B4E76D0D67ADD07D4C3"
+    }
+  ],
+  "coverage": {
+    "requiredNamedClips": [
+      "M16-1327",
+      "M16-1347",
+      "M17-1207",
+      "M15-1320",
+      "M16-1210",
+      "M16-1243",
+      "M02-1344"
+    ],
+    "availableAndPassed": 6,
+    "unavailable": [
+      "M02-1344"
+    ],
+    "allAvailablePassed": true,
+    "gpuPlaybackCovered": false,
+    "dngCdngExportCoveredByThisReceipt": false,
+    "batchHeadlessCoveredByThisReceipt": false,
+    "cadenceDisposition": "ADVISORY_EXACT_TWO_PRESENTED_FRAMES_ONLY"
+  },
+  "retention": {
+    "rawArtifactsCommitted": false,
+    "rawArtifacts": "LOCAL_IGNORED_HASH_BOUND",
+    "comparisonReceiptsCommitted": false,
+    "independentRecomputationRequiresRetainedLocalArtifacts": true,
+    "hostedPromotionRequired": true
+  },
+  "scope": {
+    "providerAuthority": false,
+    "automaticLaunchGate": "CLOSED",
+    "mergeAuthority": false,
+    "releaseAuthority": false,
+    "reblessAuthority": false,
+    "humanBeforeAfterReviewRequired": true,
+    "independentAuditRequired": true
+  }
+}

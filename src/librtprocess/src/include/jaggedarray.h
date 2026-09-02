@@ -20,6 +20,7 @@
 #pragma once
 
 #include <cstring>
+#include <limits>
 
 namespace librtprocess
 {
@@ -37,19 +38,24 @@ public:
         array(
             [width, height, init_zero]() -> T**
             {
+                if (height == 0 || width == 0
+                    || width > std::numeric_limits<std::size_t>::max() / height
+                    || width * height > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+                    return nullptr;
+                }
                 T** const res = new (std::nothrow) T*[height];
                 if (res) {
                     res[0] = new (std::nothrow)T[height * width];
-
-                    for (std::size_t i = 1; i < height; ++i) {
-                        res[i] = res[i - 1] + width;
+                    if (!res[0]) {
+                        delete[] res;
+                        return nullptr;
                     }
-
-                    if (res[0] && init_zero) {
+                    for (std::size_t i = 1; i < height; ++i) {
+                        res[i] = res[0] + i * width;
+                    }
+                    if (init_zero) {
                         std::memset(res[0], 0, sizeof(T) * width * height);
                     }
-                } else {
-                    res[0] = nullptr;
                 }
                 return res;
             }()
@@ -59,7 +65,9 @@ public:
 
     ~JaggedArray ()
     {
-        delete[] array[0];
+        if (array) {
+            delete[] array[0];
+        }
         delete[] array;
     }
 

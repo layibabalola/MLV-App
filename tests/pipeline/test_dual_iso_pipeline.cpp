@@ -12,14 +12,19 @@ extern "C" {
 #include "../../src/mlv/llrawproc/hist.h"
 }
 #include "../../src/dng/dng_reader.h"
+#include "../../src/dng/dng_tag_codes.h"
+#include "../../src/dng/dng_tag_types.h"
 #include "../../src/processing/raw_processing.h"
 #include "../../src/debayer/debayer.h"
 #include "../../src/batch/ReceiptApplier.h"
 #include "../../src/batch/ReceiptLoader.h"
 #include "../../platform/qt/DualIsoPatternMapping.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,6 +41,95 @@ extern "C" {
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+
+extern "C" int dualisoHistogramGeometryForTesting(int width,
+                                                    int height,
+                                                    int active_y1,
+                                                    size_t * pixel_count,
+                                                    size_t * sample_capacity,
+                                                    size_t * highlight_capacity,
+                                                    int * first_sample_y);
+extern "C" int llrawprocChecked14BitFrameSizeForTesting(int width,
+                                                          int height,
+                                                          uint32_t * frame_size);
+extern "C" int llrawprocScaleRestrictedRangeForTesting(struct raw_info * raw_info,
+                                                          uint16_t * image_data,
+                                                          size_t pixel_count,
+                                                          int low_iso,
+                                                          int high_iso);
+extern "C" void dualisoSetAmazeThreadCreateFailureForTesting(int thread_index);
+extern "C" int dngFormatDateTimeForFrameForTesting(mlvObject_t * mlv_data,
+                                                     uint32_t frame_index,
+                                                     char * datetime,
+                                                     size_t datetime_capacity);
+
+TEST(DualIsoPipeline, FourteenBitFrameSizeUsesCheckedWideArithmetic)
+{
+    uint32_t frame_size = 0;
+    ASSERT_EQ(1, llrawprocChecked14BitFrameSizeForTesting(1920, 1080, &frame_size));
+    ASSERT_EQ(static_cast<uint32_t>(3628800), frame_size);
+
+    /* The historical signed-int expression overflowed even though this
+     * final size is representable. */
+    ASSERT_EQ(1, llrawprocChecked14BitFrameSizeForTesting(50000, 40000, &frame_size));
+    ASSERT_EQ(static_cast<uint32_t>(3500000000u), frame_size);
+
+    ASSERT_EQ(0, llrawprocChecked14BitFrameSizeForTesting(INT_MAX, 2, &frame_size));
+    ASSERT_EQ(0, llrawprocChecked14BitFrameSizeForTesting(0, 1080, &frame_size));
+    ASSERT_EQ(0, llrawprocChecked14BitFrameSizeForTesting(1920, 1080, nullptr));
+}
+
+TEST(DualIsoPipeline, RestrictedRangeScalingRejectsInvalidStateBeforeMutation)
+{
+    struct raw_info raw = {};
+    raw.width = 4;
+    raw.height = 4;
+    raw.pitch = 4;
+    raw.bits_per_pixel = 14;
+    raw.black_level = 1024;
+    raw.white_level = 1024;
+    std::vector<uint16_t> frame(16u, static_cast<uint16_t>(2048));
+    const std::vector<uint16_t> original_frame = frame;
+    const struct raw_info original_raw = raw;
+
+    ASSERT_EQ(0, llrawprocScaleRestrictedRangeForTesting(&raw,
+                                                          frame.data(),
+                                                          frame.size(),
+                                                          100,
+                                                          200));
+    ASSERT_TRUE(frame == original_frame);
+    ASSERT_EQ(original_raw.black_level, raw.black_level);
+    ASSERT_EQ(original_raw.white_level, raw.white_level);
+
+    raw.white_level = 14000;
+    const struct raw_info valid_levels_raw = raw;
+    ASSERT_EQ(0, llrawprocScaleRestrictedRangeForTesting(&raw,
+                                                          frame.data(),
+                                                          frame.size() - 1u,
+                                                          100,
+                                                          200));
+    ASSERT_TRUE(frame == original_frame);
+    ASSERT_EQ(valid_levels_raw.black_level, raw.black_level);
+    ASSERT_EQ(valid_levels_raw.white_level, raw.white_level);
+
+    /* A safe-domain historical vector prevents an implementation that merely
+     * rejects every restricted frame from satisfying the hostile tests. */
+    raw.width = 4;
+    raw.height = 1;
+    raw.pitch = 4;
+    raw.black_level = 1024;
+    raw.white_level = 14000;
+    frame = {1024, 2048, 8192, 14000};
+    ASSERT_EQ(1, llrawprocScaleRestrictedRangeForTesting(&raw,
+                                                          frame.data(),
+                                                          frame.size(),
+                                                          100,
+                                                          200));
+    const std::vector<uint16_t> expected = {1024, 1771, 6253, 10490};
+    ASSERT_TRUE(frame == expected);
+    ASSERT_EQ(1024, raw.black_level);
+    ASSERT_EQ(12976, raw.white_level);
+}
 
 TEST(DualIsoPipeline, HistogramBinsRemainExactAcrossUint16Boundary)
 {
@@ -95,6 +189,453 @@ TEST(DualIsoPipeline, HistogramMedianHandlesFullUint16WhiteRange)
     ASSERT_EQ(2u, hist_get_bin(histogram, 65535));
     ASSERT_EQ(65535, hist_median(histogram));
     hist_destroy(histogram);
+}
+
+TEST(DualIsoPipeline, HistogramMatchGeometryRejectsOverflowAndInvalidSamplingBeforeAllocation)
+{
+    size_t pixel_count = 0;
+    size_t sample_capacity = 0;
+    size_t highlight_capacity = 0;
+    int first_sample_y = 0;
+
+    ASSERT_EQ(1, dualisoHistogramGeometryForTesting(1920,
+                                                    1080,
+                                                    10,
+                                                    &pixel_count,
+                                                    &sample_capacity,
+                                                    &highlight_capacity,
+                                                    &first_sample_y));
+    ASSERT_EQ(static_cast<size_t>(1920u * 1080u), pixel_count);
+    ASSERT_EQ((static_cast<size_t>(1922u) * static_cast<size_t>(1082u)) / 9u,
+              sample_capacity);
+    const size_t expected_highlight_capacity =
+        std::max(sample_capacity / 50u, static_cast<size_t>(1u));
+    ASSERT_EQ(expected_highlight_capacity, highlight_capacity);
+    ASSERT_EQ(12, first_sample_y);
+
+    ASSERT_EQ(1, dualisoHistogramGeometryForTesting(3,
+                                                    5,
+                                                    0,
+                                                    &pixel_count,
+                                                    &sample_capacity,
+                                                    &highlight_capacity,
+                                                    &first_sample_y));
+    ASSERT_EQ(static_cast<size_t>(15), pixel_count);
+    ASSERT_EQ(static_cast<size_t>(3), sample_capacity);
+    ASSERT_EQ(static_cast<size_t>(1), highlight_capacity);
+    ASSERT_EQ(2, first_sample_y);
+
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(0, 1080, 0,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(1920, 4, 0,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(1920, 1080, -1,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(1920, 1080, 1076,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(INT_MAX, 5, 0,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(INT_MAX, INT_MAX, 0,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(1920, 1080, 0,
+                                                    nullptr, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+
+    struct raw_info hostile_raw = {};
+    hostile_raw.width = INT_MAX;
+    hostile_raw.height = 5;
+    hostile_raw.pitch = 2;
+    hostile_raw.bits_per_pixel = 14;
+    hostile_raw.black_level = 1024;
+    hostile_raw.white_level = 15000;
+    hostile_raw.active_area.x1 = 0;
+    hostile_raw.active_area.y1 = 0;
+    hostile_raw.active_area.x2 = INT_MAX;
+    hostile_raw.active_area.y2 = 5;
+    hostile_raw.cfa_pattern = 0x02010100;
+    uint16_t sentinel_pixel = 1234;
+    dualiso_full20bit_scratch_t hostile_scratch = {};
+    dualiso_gpu_recon_state_t hostile_state = {};
+    int iso_pattern = 1;
+    int auto_correction = -2;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(hostile_raw,
+                                               &sentinel_pixel,
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &hostile_scratch,
+                                               &hostile_state));
+    ASSERT_EQ(1, iso_pattern);
+    ASSERT_EQ(0, hostile_state.valid);
+    ASSERT_EQ(0, diso_get_full20bit(hostile_raw,
+                                    &sentinel_pixel,
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+    ASSERT_EQ(1, iso_pattern);
+    ASSERT_EQ(static_cast<uint16_t>(1234), sentinel_pixel);
+
+    /* Public entries must reject hostile geometry for every matching mode,
+     * not only the histogram (-2) path. */
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(hostile_raw,
+                                               &sentinel_pixel,
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &hostile_scratch,
+                                               &hostile_state));
+    ASSERT_EQ(0, diso_get_full20bit(hostile_raw,
+                                    &sentinel_pixel,
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+
+    struct raw_info hostile_levels = hostile_raw;
+    hostile_levels.width = 1;
+    hostile_levels.height = 1;
+    hostile_levels.pitch = 1;
+    hostile_levels.active_area.x2 = 1;
+    hostile_levels.active_area.y2 = 1;
+    hostile_levels.black_level = INT_MAX;
+    hostile_levels.white_level = INT_MAX;
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(hostile_levels,
+                                               &sentinel_pixel,
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &hostile_scratch,
+                                               &hostile_state));
+    ASSERT_EQ(0, diso_get_full20bit(hostile_levels,
+                                    &sentinel_pixel,
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+
+    struct raw_info lut_edge = {};
+    lut_edge.width = 5;
+    lut_edge.height = 6;
+    lut_edge.pitch = 5;
+    lut_edge.bits_per_pixel = 14;
+    lut_edge.black_level = 0;
+    lut_edge.white_level = 16383;
+    lut_edge.active_area.x1 = 0;
+    lut_edge.active_area.y1 = 0;
+    lut_edge.active_area.x2 = 5;
+    lut_edge.active_area.y2 = 6;
+    lut_edge.cfa_pattern = 0x02010100;
+    std::vector<uint16_t> lut_edge_canary(30, static_cast<uint16_t>(1000));
+    const std::vector<uint16_t> original_lut_edge_canary = lut_edge_canary;
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(lut_edge,
+                                               lut_edge_canary.data(),
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &hostile_scratch,
+                                               &hostile_state));
+    ASSERT_EQ(0, diso_get_full20bit(lut_edge,
+                                    lut_edge_canary.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+    ASSERT_TRUE(lut_edge_canary == original_lut_edge_canary);
+
+    struct raw_info hostile_pitch = {};
+    hostile_pitch.width = 5;
+    hostile_pitch.height = 7;
+    hostile_pitch.pitch = 6;
+    hostile_pitch.bits_per_pixel = 14;
+    hostile_pitch.black_level = 1024;
+    hostile_pitch.white_level = 15000;
+    hostile_pitch.active_area.x1 = 0;
+    hostile_pitch.active_area.y1 = 0;
+    hostile_pitch.active_area.x2 = 5;
+    hostile_pitch.active_area.y2 = 7;
+    hostile_pitch.cfa_pattern = 0x01000201; /* exact GBRG one-row shift path */
+    std::vector<uint16_t> pitch_canary(35, static_cast<uint16_t>(2345));
+    const std::vector<uint16_t> original_pitch_canary = pitch_canary;
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(0, diso_get_full20bit(hostile_pitch,
+                                    pitch_canary.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+    ASSERT_TRUE(pitch_canary == original_pitch_canary);
+
+    struct raw_info valid_gbrg = hostile_pitch;
+    valid_gbrg.width = 8;
+    valid_gbrg.height = 8;
+    valid_gbrg.pitch = 8;
+    valid_gbrg.active_area.x2 = 8;
+    valid_gbrg.active_area.y2 = 8;
+    std::vector<uint16_t> gbrg_guarded(66, static_cast<uint16_t>(2345));
+    gbrg_guarded.front() = static_cast<uint16_t>(0x1111);
+    gbrg_guarded.back() = static_cast<uint16_t>(0x2222);
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = -1;
+    (void)diso_get_full20bit(valid_gbrg,
+                             gbrg_guarded.data() + 1,
+                             0,
+                             100,
+                             200,
+                             &iso_pattern,
+                             &auto_correction,
+                             &ev_correction,
+                             &black_delta,
+                             1,
+                             0,
+                             1,
+                             0,
+                             1,
+                             1,
+                             &hostile_scratch);
+    ASSERT_EQ(static_cast<uint16_t>(0x1111), gbrg_guarded.front());
+    ASSERT_EQ(static_cast<uint16_t>(0x2222), gbrg_guarded.back());
+
+    struct raw_info tiny_geometry = hostile_pitch;
+    tiny_geometry.width = 4;
+    tiny_geometry.height = 6;
+    tiny_geometry.pitch = 4;
+    tiny_geometry.active_area.x2 = 4;
+    tiny_geometry.active_area.y2 = 6;
+    tiny_geometry.cfa_pattern = 0x02010100;
+    std::vector<uint16_t> tiny_canary(24, static_cast<uint16_t>(3456));
+    const std::vector<uint16_t> original_tiny_canary = tiny_canary;
+    ASSERT_EQ(0, diso_get_full20bit(tiny_geometry,
+                                    tiny_canary.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+    ASSERT_TRUE(tiny_canary == original_tiny_canary);
+
+    const int unsafe_amaze_dimensions[][2] = {
+        {5, 6},
+        {32, 32},
+    };
+    for (const auto & dimensions : unsafe_amaze_dimensions)
+    {
+        struct raw_info unsafe_amaze = tiny_geometry;
+        unsafe_amaze.width = dimensions[0];
+        unsafe_amaze.height = dimensions[1];
+        unsafe_amaze.pitch = dimensions[0];
+        unsafe_amaze.active_area.x2 = dimensions[0];
+        unsafe_amaze.active_area.y2 = dimensions[1];
+        std::vector<uint16_t> unsafe_amaze_canary(
+            static_cast<size_t>(dimensions[0]) * static_cast<size_t>(dimensions[1]),
+            static_cast<uint16_t>(4567));
+        const std::vector<uint16_t> original_unsafe_amaze_canary =
+            unsafe_amaze_canary;
+        iso_pattern = 1;
+        auto_correction = -1;
+        ev_correction = 1.0;
+        black_delta = -1;
+        ASSERT_EQ(0, diso_get_full20bit(unsafe_amaze,
+                                        unsafe_amaze_canary.data(),
+                                        0,
+                                        100,
+                                        200,
+                                        &iso_pattern,
+                                        &auto_correction,
+                                        &ev_correction,
+                                        &black_delta,
+                                        0,
+                                        0,
+                                        1,
+                                        0,
+                                        1,
+                                        1,
+                                        &hostile_scratch));
+        ASSERT_TRUE(unsafe_amaze_canary == original_unsafe_amaze_canary);
+    }
+
+    struct raw_info zero_thread_raw = tiny_geometry;
+    zero_thread_raw.width = 8;
+    zero_thread_raw.height = 8;
+    zero_thread_raw.pitch = 8;
+    zero_thread_raw.active_area.x2 = 8;
+    zero_thread_raw.active_area.y2 = 8;
+    std::vector<uint16_t> zero_thread_canary(64, static_cast<uint16_t>(4567));
+    const std::vector<uint16_t> original_zero_thread_canary = zero_thread_canary;
+    ASSERT_EQ(0, diso_get_full20bit(zero_thread_raw,
+                                    zero_thread_canary.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    0,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    &hostile_scratch));
+    ASSERT_TRUE(zero_thread_canary == original_zero_thread_canary);
+
+    const int32_t unsupported_cfa_patterns[] = {
+        0x00010102, /* BGGR */
+        0x01020001, /* GRBG */
+        0x12345678, /* unknown */
+    };
+    for (const int32_t unsupported_cfa : unsupported_cfa_patterns)
+    {
+        struct raw_info unsupported_raw = zero_thread_raw;
+        unsupported_raw.cfa_pattern = unsupported_cfa;
+        std::vector<uint16_t> unsupported_canary(
+            64, static_cast<uint16_t>(5678));
+        const std::vector<uint16_t> original_unsupported_canary =
+            unsupported_canary;
+        iso_pattern = 1;
+        auto_correction = -1;
+        ev_correction = 1.0;
+        black_delta = -1;
+        ASSERT_EQ(0, diso_get_full20bit(unsupported_raw,
+                                        unsupported_canary.data(),
+                                        0,
+                                        100,
+                                        200,
+                                        &iso_pattern,
+                                        &auto_correction,
+                                        &ev_correction,
+                                        &black_delta,
+                                        1,
+                                        0,
+                                        1,
+                                        0,
+                                        1,
+                                        1,
+                                        &hostile_scratch));
+        ASSERT_TRUE(unsupported_canary == original_unsupported_canary);
+    }
+    free_dualiso_full20bit_scratch(&hostile_scratch);
 }
 #include <QString>
 #include <QTemporaryDir>
@@ -1146,6 +1687,7 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
     ASSERT_TRUE(expected_bpp <= 16);
 
     std::vector<std::vector<uint16_t>> decoded_frames;
+    dng_frame_info_t retained_info = {};
     const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
     for (int raw_state : raw_states) {
         const QString suffix = raw_state == COMPRESSED_RAW
@@ -1159,7 +1701,7 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
         fixture.video()->llrawproc->dng_white_level = 0;
         pthread_mutex_unlock(&fixture.video()->llrawproc_mutex);
 
-        int32_t par[4] = { 1, 1, 1, 1 };
+        int32_t par[4] = { 1, 1, 5, 3 };
         dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
         ASSERT_TRUE(dng != nullptr);
         QByteArray dng_path_bytes = dng_path.toLocal8Bit();
@@ -1178,6 +1720,26 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
         ASSERT_EQ(expected_bpp, info.bits_per_sample);
         ASSERT_EQ(static_cast<uint32_t>(fixture.width()), info.width);
         ASSERT_EQ(static_cast<uint32_t>(fixture.height()), info.height);
+        ASSERT_TRUE(info.has_default_scale);
+        ASSERT_EQ(1, info.default_scale[0]);
+        ASSERT_EQ(1, info.default_scale[1]);
+        ASSERT_EQ(5, info.default_scale[2]);
+        ASSERT_EQ(3, info.default_scale[3]);
+        ASSERT_TRUE(info.has_frame_rate);
+        ASSERT_EQ(1000, info.frame_rate[0]);
+        ASSERT_EQ(1000, info.frame_rate[1]);
+        ASSERT_TRUE(info.has_iso);
+        ASSERT_EQ(static_cast<int32_t>(getMlvIso(fixture.video())), info.iso);
+        ASSERT_TRUE(info.has_as_shot_neutral);
+        ASSERT_TRUE(info.has_active_area);
+        ASSERT_TRUE(info.has_default_crop_origin);
+        ASSERT_TRUE(info.has_default_crop_size);
+        ASSERT_TRUE(info.has_baseline_exposure);
+        ASSERT_TRUE(info.has_baseline_exposure_offset);
+        ASSERT_TRUE(info.camera_model[0] != '\0');
+        ASSERT_TRUE(info.unique_camera_model[0] != '\0');
+        if (decoded_frames.empty())
+            retained_info = info;
         decoded_frames.push_back(std::move(decoded));
     }
 
@@ -1186,6 +1748,200 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
     for (std::size_t i = 0; i < decoded_frames[0].size(); ++i) {
         ASSERT_EQ(decoded_frames[0][i], decoded_frames[1][i]);
     }
+
+    /* Exercise the real writer -> folder reader -> mlvObject contract, not a
+     * same-codepath TIFF proxy. Both frames carry identical metadata while
+     * using different compression encodings. */
+    QByteArray folder_path = temp_dir.path().toLocal8Bit();
+    int open_error = MLV_ERR_NONE;
+    char open_message[256] = {};
+    mlvObject_t * reopened = initMlvObjectWithDngFolder(
+        folder_path.data(), MLV_OPEN_FULL, &open_error, open_message);
+    ASSERT_TRUE(reopened != nullptr);
+    ASSERT_EQ(MLV_ERR_NONE, open_error);
+    ASSERT_EQ(2u, reopened->frames);
+    ASSERT_EQ(1000u, reopened->MLVI.sourceFpsNom);
+    ASSERT_EQ(1000u, reopened->MLVI.sourceFpsDenom);
+    ASSERT_EQ(getMlvIso(fixture.video()), getMlvIso(reopened));
+    ASSERT_TRUE(std::fabs(getMlvAspectRatio(reopened) - (5.0f / 3.0f)) < 0.0001f);
+    ASSERT_EQ(6u, getMlvWbMode(reopened));
+    ASSERT_EQ(retained_info.active_area[0], reopened->RAWI.raw_info.active_area.y1);
+    ASSERT_EQ(retained_info.active_area[1], reopened->RAWI.raw_info.active_area.x1);
+    ASSERT_EQ(retained_info.active_area[2], reopened->RAWI.raw_info.active_area.y2);
+    ASSERT_EQ(retained_info.active_area[3], reopened->RAWI.raw_info.active_area.x2);
+    ASSERT_EQ(reopened->RAWI.raw_info.active_area.y1,
+              reopened->RAWI.raw_info.dng_active_area[0]);
+    ASSERT_EQ(reopened->RAWI.raw_info.active_area.x1,
+              reopened->RAWI.raw_info.dng_active_area[1]);
+    ASSERT_EQ(reopened->RAWI.raw_info.active_area.y2,
+              reopened->RAWI.raw_info.dng_active_area[2]);
+    ASSERT_EQ(reopened->RAWI.raw_info.active_area.x2,
+              reopened->RAWI.raw_info.dng_active_area[3]);
+    ASSERT_EQ(retained_info.default_crop_origin[0],
+              static_cast<uint32_t>(reopened->RAWI.raw_info.crop.origin[0]));
+    ASSERT_EQ(retained_info.default_crop_origin[1],
+              static_cast<uint32_t>(reopened->RAWI.raw_info.crop.origin[1]));
+    ASSERT_EQ(retained_info.default_crop_size[0],
+              static_cast<uint32_t>(reopened->RAWI.raw_info.crop.size[0]));
+    ASSERT_EQ(retained_info.default_crop_size[1],
+              static_cast<uint32_t>(reopened->RAWI.raw_info.crop.size[1]));
+    int32_t expected_bias[2] = {};
+    ASSERT_TRUE(mlvDngBaselineExposureToBias(retained_info.baseline_exposure,
+                                             retained_info.baseline_exposure_offset,
+                                             expected_bias));
+    ASSERT_EQ(expected_bias[0], reopened->RAWI.raw_info.exposure_bias[0]);
+    ASSERT_EQ(expected_bias[1], reopened->RAWI.raw_info.exposure_bias[1]);
+    ASSERT_EQ(std::string(retained_info.camera_model),
+              std::string(reinterpret_cast<const char *>(reopened->IDNT.cameraName)));
+    ASSERT_TRUE(reopened->camid.cameraName[UNIQ] != nullptr);
+    ASSERT_EQ(std::string(retained_info.unique_camera_model),
+              std::string(reopened->camid.cameraName[UNIQ]));
+    ASSERT_TRUE(reopened->camid.cameraName[UNIQ][0] != '\0');
+
+    /* Folder frames can mix compression encodings and the folder abstraction
+     * retains decoded samples, not immutable original strip bytes. The Fast
+     * pass-through mode must fail closed rather than decode/process/rewrite. */
+    int32_t fast_par[4] = { 1, 1, 5, 3 };
+    ASSERT_TRUE(initDngObject(reopened, UNCOMPRESSED_ORIG, 1.0, fast_par)
+                == nullptr);
+    ASSERT_TRUE(initDngObject(reopened, COMPRESSED_ORIG, 1.0, fast_par)
+                == nullptr);
+
+    /* Close the metadata loop: reopen the folder through the production MLV
+     * object, write a new DNG from that object, then parse and compare it to
+     * the first-generation writer output. */
+    QTemporaryDir reexport_dir;
+    ASSERT_TRUE(reexport_dir.isValid());
+    int32_t retained_scale[4] = {
+        retained_info.default_scale[0], retained_info.default_scale[1],
+        retained_info.default_scale[2], retained_info.default_scale[3]
+    };
+    dngObject_t * reexport_dng = initDngObject(
+        reopened, UNCOMPRESSED_RAW, 1.0, retained_scale);
+    ASSERT_TRUE(reexport_dng != nullptr);
+    const QString reexport_path = reexport_dir.filePath(QStringLiteral("reexport.dng"));
+    QByteArray reexport_path_bytes = reexport_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(reopened, reexport_dng, 0,
+                              reexport_path_bytes.data(), nullptr));
+    freeDngObject(reexport_dng);
+    dng_frame_info_t reexport_info = {};
+    ASSERT_EQ(0, dng_reader_parse_file(reexport_path_bytes.constData(), &reexport_info));
+    ASSERT_EQ(retained_info.width, reexport_info.width);
+    ASSERT_EQ(retained_info.height, reexport_info.height);
+    ASSERT_EQ(retained_info.bits_per_sample, reexport_info.bits_per_sample);
+    ASSERT_EQ(retained_info.cfa_pattern, reexport_info.cfa_pattern);
+    ASSERT_EQ(retained_info.black_level, reexport_info.black_level);
+    ASSERT_EQ(retained_info.white_level, reexport_info.white_level);
+    ASSERT_EQ(std::string(retained_info.camera_model),
+              std::string(reexport_info.camera_model));
+    ASSERT_EQ(std::string(retained_info.unique_camera_model),
+              std::string(reexport_info.unique_camera_model));
+    ASSERT_EQ(0, std::memcmp(retained_info.active_area,
+                             reexport_info.active_area,
+                             sizeof(retained_info.active_area)));
+    ASSERT_EQ(0, std::memcmp(retained_info.default_crop_origin,
+                             reexport_info.default_crop_origin,
+                             sizeof(retained_info.default_crop_origin)));
+    ASSERT_EQ(0, std::memcmp(retained_info.default_crop_size,
+                             reexport_info.default_crop_size,
+                             sizeof(retained_info.default_crop_size)));
+    ASSERT_EQ(0, std::memcmp(retained_info.baseline_exposure,
+                             reexport_info.baseline_exposure,
+                             sizeof(retained_info.baseline_exposure)));
+    ASSERT_EQ(0, std::memcmp(retained_info.baseline_exposure_offset,
+                             reexport_info.baseline_exposure_offset,
+                             sizeof(retained_info.baseline_exposure_offset)));
+    uint32_t retained_gains[3] = {};
+    uint32_t reexport_gains[3] = {};
+    ASSERT_TRUE(mlvDngAsShotNeutralToWbGains(retained_info.as_shot_neutral,
+                                             retained_gains));
+    ASSERT_TRUE(mlvDngAsShotNeutralToWbGains(reexport_info.as_shot_neutral,
+                                             reexport_gains));
+    ASSERT_EQ(retained_gains[0], reexport_gains[0]);
+    ASSERT_EQ(retained_gains[1], reexport_gains[1]);
+    ASSERT_EQ(retained_gains[2], reexport_gains[2]);
+    ASSERT_EQ(0, std::memcmp(retained_info.default_scale,
+                             reexport_info.default_scale,
+                             sizeof(retained_info.default_scale)));
+    ASSERT_EQ(0, std::memcmp(retained_info.frame_rate,
+                             reexport_info.frame_rate,
+                             sizeof(retained_info.frame_rate)));
+    ASSERT_EQ(retained_info.iso, reexport_info.iso);
+    ASSERT_EQ(0, std::memcmp(retained_info.color_matrix1,
+                             reexport_info.color_matrix1,
+                             sizeof(retained_info.color_matrix1)));
+    ASSERT_EQ(0, std::memcmp(retained_info.color_matrix2,
+                             reexport_info.color_matrix2,
+                             sizeof(retained_info.color_matrix2)));
+    ASSERT_EQ(0, std::memcmp(retained_info.forward_matrix1,
+                             reexport_info.forward_matrix1,
+                             sizeof(retained_info.forward_matrix1)));
+    ASSERT_EQ(0, std::memcmp(retained_info.forward_matrix2,
+                             reexport_info.forward_matrix2,
+                             sizeof(retained_info.forward_matrix2)));
+
+    dngObject_t * compressed_reexport = initDngObject(
+        reopened, COMPRESSED_RAW, 1.0, retained_scale);
+    ASSERT_TRUE(compressed_reexport != nullptr);
+    const QString compressed_reexport_path =
+        reexport_dir.filePath(QStringLiteral("reexport-compressed.dng"));
+    QByteArray compressed_reexport_bytes = compressed_reexport_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(reopened, compressed_reexport, 0,
+                              compressed_reexport_bytes.data(), nullptr));
+    freeDngObject(compressed_reexport);
+    dng_frame_info_t compressed_reexport_info = {};
+    const std::vector<uint16_t> reexport_pixels =
+        dng_decode_bayer16_from_file(reexport_path, nullptr);
+    const std::vector<uint16_t> compressed_reexport_pixels =
+        dng_decode_bayer16_from_file(compressed_reexport_path,
+                                     &compressed_reexport_info);
+    ASSERT_TRUE(dng_reader_processing_metadata_matches(&reexport_info,
+                                                        &compressed_reexport_info));
+    ASSERT_EQ(reexport_pixels.size(), compressed_reexport_pixels.size());
+    ASSERT_EQ(0, std::memcmp(reexport_pixels.data(),
+                             compressed_reexport_pixels.data(),
+                             reexport_pixels.size() * sizeof(uint16_t)));
+    freeMlvObject(reopened);
+
+    /* A later frame may not silently replace calibration inherited from frame
+     * zero. Corrupt only the second frame's retained AsShotNeutral numerator
+     * and prove lazy frame decode rejects it before touching output pixels. */
+    const QString drift_path = temp_dir.filePath(QStringLiteral("uncompressed.dng"));
+    QByteArray drift_bytes = read_all_bytes(drift_path);
+    uint16_t neutral_type = 0;
+    uint32_t neutral_count = 0;
+    uint32_t neutral_offset = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(drift_bytes, 50728,
+                                    &neutral_type, &neutral_count,
+                                    &neutral_offset));
+    ASSERT_EQ(5, neutral_type);
+    ASSERT_EQ(3u, neutral_count);
+    ASSERT_TRUE(neutral_offset + 24u <= static_cast<uint32_t>(drift_bytes.size()));
+    const uint32_t original_red = dng_u32(drift_bytes, static_cast<int>(neutral_offset));
+    const uint32_t changed_red = original_red == UINT32_MAX
+        ? original_red - 1u : original_red + 1u;
+    for (int shift = 0; shift < 32; shift += 8)
+        drift_bytes[static_cast<int>(neutral_offset) + shift / 8] =
+            static_cast<char>((changed_red >> shift) & 0xffu);
+    QFile drift_file(drift_path);
+    ASSERT_TRUE(drift_file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_EQ(drift_bytes.size(), drift_file.write(drift_bytes));
+    drift_file.close();
+
+    dng_sequence_t drift_sequence{};
+    ASSERT_EQ(0, dng_sequence_open(folder_path.constData(), &drift_sequence));
+    uint32_t drift_index = UINT32_MAX;
+    for (uint32_t i = 0; i < drift_sequence.count; ++i)
+        if (QString::fromLocal8Bit(drift_sequence.paths[i]).endsWith(
+                QStringLiteral("uncompressed.dng"))) drift_index = i;
+    ASSERT_NE(UINT32_MAX, drift_index);
+    std::vector<uint16_t> rejected_frame(
+        static_cast<std::size_t>(drift_sequence.info.width)
+        * static_cast<std::size_t>(drift_sequence.info.height));
+    ASSERT_NE(0, dng_sequence_get_bayer16(&drift_sequence,
+                                          drift_index,
+                                          rejected_frame.data()));
+    dng_sequence_free(&drift_sequence);
 }
 
 TEST(DualIsoPipeline, DngExportOverridesWriteLookAssistDefaults)
@@ -1250,6 +2006,22 @@ TEST(DualIsoPipeline, DngExportOverridesWriteLookAssistDefaults)
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value, false) - 0.5) < 0.0001);
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 8, false) - 1.0) < 0.0001);
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 16, false) - 0.25) < 0.0001);
+
+    dng_frame_info_t retained{};
+    ASSERT_EQ(0, dng_reader_parse_file(dng_path_bytes.constData(), &retained));
+    ASSERT_TRUE(retained.has_baseline_exposure);
+    ASSERT_EQ(static_cast<int64_t>(5) * retained.baseline_exposure[1],
+              static_cast<int64_t>(4) * retained.baseline_exposure[0]);
+    QByteArray folder_path = temp_dir.path().toLocal8Bit();
+    int open_error = MLV_ERR_NONE;
+    char open_message[256] = {};
+    mlvObject_t * reopened = initMlvObjectWithDngFolder(
+        folder_path.data(), MLV_OPEN_PREVIEW, &open_error, open_message);
+    ASSERT_TRUE(reopened != nullptr);
+    ASSERT_EQ(MLV_ERR_NONE, open_error);
+    ASSERT_EQ(5, reopened->RAWI.raw_info.exposure_bias[0]);
+    ASSERT_EQ(4, reopened->RAWI.raw_info.exposure_bias[1]);
+    freeMlvObject(reopened);
 }
 
 TEST(DualIsoPipeline, DngFocalPlaneResolutionIsStableAcrossSameProcessExports)
@@ -2505,6 +3277,31 @@ TEST(DualIsoPipeline, GpuExportParityMatrixMissingDllFallbackIsByteInertAcrossCo
                 ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE,
                           llrpGpuExportLastSkipCodeForTesting());
 
+                preserve_gpu_export_gate_artifacts(suffix, cpu_dng, fallback_dng);
+                if (cpu_bytes != fallback_bytes) {
+                    qsizetype first_difference = -1;
+                    const qsizetype common_size = std::min(cpu_bytes.size(), fallback_bytes.size());
+                    for (qsizetype i = 0; i < common_size; ++i) {
+                        if (cpu_bytes.at(i) != fallback_bytes.at(i)) {
+                            first_difference = i;
+                            break;
+                        }
+                    }
+                    const QByteArray suffix_bytes = suffix.toLocal8Bit();
+                    std::fprintf(stderr,
+                                 "[gpu-export-missing-fallback] case=%s cpu_len=%lld "
+                                 "fallback_len=%lld first_diff=%lld cpu_byte=%u fallback_byte=%u\n",
+                                 suffix_bytes.constData(),
+                                 static_cast<long long>(cpu_bytes.size()),
+                                 static_cast<long long>(fallback_bytes.size()),
+                                 static_cast<long long>(first_difference),
+                                 first_difference >= 0
+                                     ? static_cast<unsigned int>(static_cast<unsigned char>(cpu_bytes.at(first_difference)))
+                                     : 0u,
+                                 first_difference >= 0
+                                     ? static_cast<unsigned int>(static_cast<unsigned char>(fallback_bytes.at(first_difference)))
+                                     : 0u);
+                }
                 ASSERT_TRUE(cpu_bytes == fallback_bytes);
             }
         }
@@ -2870,6 +3667,224 @@ TEST(DualIsoPipeline, DngFramePayloadMatchesSaveDngFrameForPipelinePrep)
         ASSERT_TRUE(saved_bytes == payload_save_bytes);
         ASSERT_TRUE(saved_bytes == async_writer_bytes);
     }
+}
+
+TEST(DualIsoPipeline, DngDateTimeIsBoundToIndexedFrameNotMutableDecodeScratch)
+{
+    static constexpr uint16_t kDngTimeCodesTag = 51043;
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    mlvObject_t * video = fixture.video();
+    ASSERT_TRUE(video != nullptr);
+    ASSERT_TRUE(video->video_index != nullptr);
+    ASSERT_TRUE(video->frames > 1);
+
+    const mlv_rtci_hdr_t original_rtci = video->RTCI;
+    const mlv_vidf_hdr_t original_vidf = video->VIDF;
+    const uint32_t original_video_class = video->MLVI.videoClass;
+    const uint64_t original_frame0_time = video->video_index[0].frame_time;
+    const uint64_t original_frame1_time = video->video_index[1].frame_time;
+
+    video->RTCI.tm_year = 126;
+    video->RTCI.tm_mon = 0;
+    video->RTCI.tm_mday = 2;
+    video->RTCI.tm_hour = 13;
+    video->RTCI.tm_min = 44;
+    video->RTCI.tm_sec = 2;
+    video->RTCI.timestamp = 1000000u;
+    video->video_index[0].frame_time = 1000000u;
+    video->video_index[1].frame_time = 62000000u;
+    video->MLVI.videoClass &= ~(MLV_VIDEO_CLASS_FLAG_MCRAW
+                                | MLV_VIDEO_CLASS_FLAG_DNGSEQ);
+
+    char frame0_datetime[32] = {};
+    char frame1_datetime[32] = {};
+    ASSERT_EQ(1, dngFormatDateTimeForFrameForTesting(video,
+                                                     0,
+                                                     frame0_datetime,
+                                                     sizeof(frame0_datetime)));
+    ASSERT_EQ(1, dngFormatDateTimeForFrameForTesting(video,
+                                                     1,
+                                                     frame1_datetime,
+                                                     sizeof(frame1_datetime)));
+    ASSERT_TRUE(std::strcmp(frame0_datetime, "2026:01:02 13:44:02") == 0);
+    ASSERT_TRUE(std::strcmp(frame1_datetime, "2026:01:02 13:45:03") == 0);
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(video, UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+    dngFramePayload_t * frame0_payload = buildDngFramePayload(video, dng, 0, nullptr);
+    ASSERT_TRUE(frame0_payload != nullptr);
+    dngFramePayload_t * first_payload = buildDngFramePayload(video, dng, 1, nullptr);
+    ASSERT_TRUE(first_payload != nullptr);
+    video->VIDF.timestamp = original_vidf.timestamp + 5000000u;
+    dngFramePayload_t * second_payload = buildDngFramePayload(video, dng, 1, nullptr);
+    ASSERT_TRUE(second_payload != nullptr);
+
+    const QByteArray frame0_header(reinterpret_cast<const char *>(frame0_payload->header_buf),
+                                   static_cast<qsizetype>(frame0_payload->header_size));
+    const QByteArray first_header(reinterpret_cast<const char *>(first_payload->header_buf),
+                                  static_cast<qsizetype>(first_payload->header_size));
+    uint16_t datetime_type = 0;
+    uint32_t datetime_count = 0;
+    uint32_t datetime_offset = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(first_header,
+                                    tcDateTime,
+                                    &datetime_type,
+                                    &datetime_count,
+                                    &datetime_offset));
+    ASSERT_EQ(ttAscii, datetime_type);
+    ASSERT_EQ(20u, datetime_count);
+    ASSERT_TRUE(datetime_offset + datetime_count
+                <= static_cast<uint32_t>(first_header.size()));
+    const QByteArray exported_datetime(first_header.constData() + datetime_offset,
+                                       static_cast<qsizetype>(datetime_count - 1));
+    ASSERT_TRUE(exported_datetime == QByteArrayLiteral("2026:01:02 13:45:03"));
+
+    uint16_t frame0_datetime_type = 0;
+    uint32_t frame0_datetime_count = 0;
+    uint32_t frame0_datetime_offset = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(frame0_header,
+                                    tcDateTime,
+                                    &frame0_datetime_type,
+                                    &frame0_datetime_count,
+                                    &frame0_datetime_offset));
+    ASSERT_EQ(ttAscii, frame0_datetime_type);
+    ASSERT_EQ(20u, frame0_datetime_count);
+    ASSERT_TRUE(frame0_datetime_offset + frame0_datetime_count
+                <= static_cast<uint32_t>(frame0_header.size()));
+    const QByteArray exported_frame0_datetime(
+        frame0_header.constData() + frame0_datetime_offset,
+        static_cast<qsizetype>(frame0_datetime_count - 1));
+    ASSERT_TRUE(exported_frame0_datetime == QByteArrayLiteral("2026:01:02 13:44:02"));
+
+    uint16_t frame0_timecode_type = 0;
+    uint32_t frame0_timecode_count = 0;
+    uint32_t frame0_timecode_offset = 0;
+    uint16_t frame1_timecode_type = 0;
+    uint32_t frame1_timecode_count = 0;
+    uint32_t frame1_timecode_offset = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(frame0_header,
+                                    kDngTimeCodesTag,
+                                    &frame0_timecode_type,
+                                    &frame0_timecode_count,
+                                    &frame0_timecode_offset));
+    ASSERT_TRUE(dng_find_ifd0_entry(first_header,
+                                    kDngTimeCodesTag,
+                                    &frame1_timecode_type,
+                                    &frame1_timecode_count,
+                                    &frame1_timecode_offset));
+    ASSERT_EQ(ttByte, frame0_timecode_type);
+    ASSERT_EQ(ttByte, frame1_timecode_type);
+    ASSERT_EQ(8u, frame0_timecode_count);
+    ASSERT_EQ(8u, frame1_timecode_count);
+    ASSERT_TRUE(frame0_timecode_offset + 8u <= static_cast<uint32_t>(frame0_header.size()));
+    ASSERT_TRUE(frame1_timecode_offset + 8u <= static_cast<uint32_t>(first_header.size()));
+    ASSERT_TRUE(std::memcmp(frame0_header.constData() + frame0_timecode_offset,
+                            first_header.constData() + frame1_timecode_offset,
+                            8u) != 0);
+
+    ASSERT_EQ(first_payload->header_size, second_payload->header_size);
+    ASSERT_EQ(first_payload->image_size, second_payload->image_size);
+    ASSERT_TRUE(std::memcmp(first_payload->header_buf,
+                            second_payload->header_buf,
+                            first_payload->header_size) == 0);
+    ASSERT_TRUE(std::memcmp(first_payload->image_buf,
+                            second_payload->image_buf,
+                            first_payload->image_size) == 0);
+    freeDngFramePayload(frame0_payload);
+    freeDngFramePayload(first_payload);
+    freeDngFramePayload(second_payload);
+    freeDngObject(dng);
+
+    char non_mlv_datetime[32] = {};
+    video->MLVI.videoClass = original_video_class | MLV_VIDEO_CLASS_FLAG_MCRAW;
+    const int mcraw_format_status = dngFormatDateTimeForFrameForTesting(
+        video, 1, non_mlv_datetime, sizeof(non_mlv_datetime));
+    const bool mcraw_datetime_preserved =
+        std::strcmp(non_mlv_datetime, "2026:01:02 13:44:02") == 0;
+    video->MLVI.videoClass = original_video_class | MLV_VIDEO_CLASS_FLAG_DNGSEQ;
+    const int dngseq_format_status = dngFormatDateTimeForFrameForTesting(
+        video, 1, non_mlv_datetime, sizeof(non_mlv_datetime));
+    const bool dngseq_datetime_preserved =
+        std::strcmp(non_mlv_datetime, "2026:01:02 13:44:02") == 0;
+
+    video->RTCI = original_rtci;
+    video->VIDF = original_vidf;
+    video->MLVI.videoClass = original_video_class;
+    video->video_index[0].frame_time = original_frame0_time;
+    video->video_index[1].frame_time = original_frame1_time;
+
+    ASSERT_EQ(1, mcraw_format_status);
+    ASSERT_TRUE(mcraw_datetime_preserved);
+    ASSERT_EQ(1, dngseq_format_status);
+    ASSERT_TRUE(dngseq_datetime_preserved);
+    ASSERT_EQ(0, dngFormatDateTimeForFrameForTesting(video,
+                                                     video->frames,
+                                                     frame0_datetime,
+                                                     sizeof(frame0_datetime)));
+}
+
+TEST(DualIsoPipeline, DngPublicExportApisRejectInvalidFrameBeforePublishingOutput)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+    const uint32_t invalid_frame = fixture.video()->frames;
+    const QString direct_path = temp_dir.filePath(QStringLiteral("invalid-direct.dng"));
+    const QString payload_path = temp_dir.filePath(QStringLiteral("invalid-payload.dng"));
+    const QString async_path = temp_dir.filePath(QStringLiteral("invalid-async.dng"));
+    QByteArray direct_path_bytes = direct_path.toLocal8Bit();
+    QByteArray payload_path_bytes = payload_path.toLocal8Bit();
+    QByteArray async_path_bytes = async_path.toLocal8Bit();
+
+    ASSERT_TRUE(buildDngFramePayload(fixture.video(), dng, invalid_frame, nullptr) == nullptr);
+    ASSERT_EQ(1, saveDngFrame(fixture.video(),
+                              dng,
+                              invalid_frame,
+                              direct_path_bytes.data(),
+                              nullptr));
+    ASSERT_TRUE(!QFile::exists(direct_path));
+    ASSERT_EQ(1, saveDngFrameViaPayload(fixture.video(),
+                                        dng,
+                                        invalid_frame,
+                                        payload_path_bytes.data(),
+                                        nullptr));
+    ASSERT_TRUE(!QFile::exists(payload_path));
+
+    dngPayloadWriter_t * writer = createDngPayloadWriter();
+    ASSERT_TRUE(writer != nullptr);
+    ASSERT_EQ(1, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   invalid_frame,
+                                                   async_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(writer));
+    ASSERT_TRUE(!QFile::exists(async_path));
+
+    ASSERT_TRUE(fixture.video()->filenum > 0);
+    const uint16_t original_chunk = fixture.video()->video_index[0].chunk_num;
+    fixture.video()->video_index[0].chunk_num =
+        static_cast<uint16_t>(fixture.video()->filenum);
+    const QString invalid_chunk_path =
+        temp_dir.filePath(QStringLiteral("invalid-chunk.dng"));
+    QByteArray invalid_chunk_path_bytes = invalid_chunk_path.toLocal8Bit();
+    const int invalid_chunk_status = saveDngFrame(fixture.video(),
+                                                  dng,
+                                                  0,
+                                                  invalid_chunk_path_bytes.data(),
+                                                  nullptr);
+    fixture.video()->video_index[0].chunk_num = original_chunk;
+    ASSERT_EQ(1, invalid_chunk_status);
+    ASSERT_TRUE(!QFile::exists(invalid_chunk_path));
+    freeDngObject(dng);
 }
 
 TEST(DualIsoPipeline, DngFramePayloadReuseMatchesSaveDngFrame)
@@ -5318,6 +6333,1273 @@ static int synthetic_dual_iso_prepare_state(struct raw_info raw,
                                         state);
 }
 
+TEST(DualIsoPipeline, AmazeMinimumGeometryExecutesWithoutCrossingCanaries)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+
+    struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+    raw.width = 33;
+    raw.height = 33;
+    raw.pitch = 33;
+    raw.frame_size = raw.width * raw.height * 14 / 8;
+    raw.active_area.x2 = raw.width;
+    raw.active_area.y2 = raw.height;
+    const std::vector<uint16_t> source = synthetic_dual_iso_phase_frame(raw, 0);
+    std::vector<uint16_t> guarded(source.size() + 2u, static_cast<uint16_t>(0));
+    guarded.front() = static_cast<uint16_t>(0x1111);
+    guarded.back() = static_cast<uint16_t>(0x2222);
+    std::copy(source.begin(), source.end(), guarded.begin() + 1);
+
+    dualiso_full20bit_scratch_t scratch = {};
+    int iso_pattern = 1;
+    int auto_correction = -1;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+    ASSERT_EQ(1, diso_get_full20bit(raw,
+                                    guarded.data() + 1,
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    0,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &scratch));
+    ASSERT_EQ(static_cast<uint16_t>(0x1111), guarded.front());
+    ASSERT_EQ(static_cast<uint16_t>(0x2222), guarded.back());
+    free_dualiso_full20bit_scratch(&scratch);
+}
+
+TEST(DualIsoPipeline, AmazeWorkerFailuresAreTransactional)
+{
+    struct ScopedAmazeFailureReset
+    {
+        ~ScopedAmazeFailureReset()
+        {
+            dualisoSetAmazeThreadCreateFailureForTesting(-1);
+            amazeDemosaicSetAllocationFailureForTesting(0);
+        }
+    } reset;
+
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+
+    struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+    raw.width = 33;
+    raw.height = 33;
+    raw.pitch = 33;
+    raw.frame_size = raw.width * raw.height * 14 / 8;
+    raw.active_area.x2 = raw.width;
+    raw.active_area.y2 = raw.height;
+    const std::vector<uint16_t> source = synthetic_dual_iso_phase_frame(raw, 0);
+
+    auto expect_failure_without_publication = [&](bool allocation_failure) {
+        std::vector<uint16_t> frame = source;
+        const std::vector<uint16_t> original_frame = frame;
+        dualiso_full20bit_scratch_t scratch = {};
+        int iso_pattern = 1;
+        int auto_correction = -1;
+        double ev_correction = 1.0;
+        int black_delta = -1;
+
+        amazeDemosaicSetAllocationFailureForTesting(allocation_failure ? 1 : 0);
+        dualisoSetAmazeThreadCreateFailureForTesting(allocation_failure ? -1 : 0);
+        ASSERT_EQ(0, diso_get_full20bit(raw,
+                                        frame.data(),
+                                        0,
+                                        100,
+                                        200,
+                                        &iso_pattern,
+                                        &auto_correction,
+                                        &ev_correction,
+                                        &black_delta,
+                                        0,
+                                        0,
+                                        1,
+                                        0,
+                                        1,
+                                        1,
+                                        &scratch));
+        ASSERT_TRUE(frame == original_frame);
+        ASSERT_EQ(1, iso_pattern);
+        ASSERT_EQ(-1, auto_correction);
+        ASSERT_EQ(1.0, ev_correction);
+        ASSERT_EQ(-1, black_delta);
+        free_dualiso_full20bit_scratch(&scratch);
+        amazeDemosaicSetAllocationFailureForTesting(0);
+        dualisoSetAmazeThreadCreateFailureForTesting(-1);
+    };
+
+    expect_failure_without_publication(false);
+    expect_failure_without_publication(true);
+}
+
+TEST(DualIsoPipeline, DirectAmazeFailuresDoNotPublishRgbOutput)
+{
+    struct ScopedAmazeFailureReset
+    {
+        ~ScopedAmazeFailureReset()
+        {
+            debayerAmazeSetThreadCreateFailureForTesting(-1);
+            debayerAmazeSetAllocationFailureForTesting(0);
+            debayerAmazeSetAuxAllocationFailureForTesting(-1);
+            amazeDemosaicSetAllocationFailureForTesting(0);
+        }
+    } reset;
+
+    constexpr int width = 33;
+    constexpr int height = 68;
+    const size_t pixels = static_cast<size_t>(width) * height;
+    std::vector<float> input(pixels, 2048.0f);
+    std::vector<uint16_t> output(pixels * 3u, static_cast<uint16_t>(0x4444));
+    const std::vector<uint16_t> original_output = output;
+
+    amazeDemosaicSetAllocationFailureForTesting(1);
+    ASSERT_EQ(0, debayerAmaze(output.data(),
+                              input.data(),
+                              width,
+                              height,
+                              1,
+                              1024));
+    ASSERT_TRUE(output == original_output);
+
+    amazeDemosaicSetAllocationFailureForTesting(0);
+    debayerAmazeSetAllocationFailureForTesting(1);
+    ASSERT_EQ(0, debayerAmaze(output.data(),
+                              input.data(),
+                              width,
+                              height,
+                              1,
+                              1024));
+    ASSERT_TRUE(output == original_output);
+
+    debayerAmazeSetAllocationFailureForTesting(0);
+    for (int allocation_index = 0; allocation_index < 5; ++allocation_index)
+    {
+        debayerAmazeSetAuxAllocationFailureForTesting(allocation_index);
+        ASSERT_EQ(0, debayerAmaze(output.data(),
+                                  input.data(),
+                                  width,
+                                  height,
+                                  2,
+                                  1024));
+        ASSERT_TRUE(output == original_output);
+    }
+    debayerAmazeSetAuxAllocationFailureForTesting(-1);
+    /* The hostile caller count must be clamped before any storage extent or
+     * chunk loop; failing worker 1 also proves partial-create cleanup. */
+    debayerAmazeSetThreadCreateFailureForTesting(1);
+    ASSERT_EQ(0, debayerAmaze(output.data(),
+                              input.data(),
+                              width,
+                              height,
+                              INT_MAX,
+                              1024));
+    ASSERT_TRUE(output == original_output);
+
+    debayerAmazeSetThreadCreateFailureForTesting(-1);
+    ASSERT_EQ(1, debayerAmaze(output.data(),
+                              input.data(),
+                              width,
+                              height,
+                              1,
+                              1024));
+}
+
+TEST(DualIsoPipeline, CacheAmazeAllocationFailureBalancesWorkerCount)
+{
+    struct ScopedCacheAllocationFailureReset
+    {
+        ~ScopedCacheAllocationFailureReset()
+        {
+            mlvCacheSetAllocationFailureForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    const int initial_worker_count = mlvCacheWorkerCount(fixture.video());
+
+    mlvCacheSetAllocationFailureForTesting(1);
+    an_mlv_cache_thread(fixture.video());
+
+    ASSERT_EQ(initial_worker_count, mlvCacheWorkerCount(fixture.video()));
+}
+
+TEST(DualIsoPipeline, CacheAmazeDemosaicFailureExitsWithoutHotRetry)
+{
+    struct ScopedCacheDemosaicFailureReset
+    {
+        ~ScopedCacheDemosaicFailureReset()
+        {
+            amazeDemosaicSetAllocationFailureForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    setMlvAlwaysUseAmaze(fixture.video());
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    mlvCacheSetStop(fixture.video(), 0);
+    amazeDemosaicSetAllocationFailureForTesting(1);
+
+    an_mlv_cache_thread(fixture.video());
+
+    ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+    ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_NOT_CACHED),
+              static_cast<unsigned int>(fixture.video()->cached_frames[0]));
+    mlvCacheSetStop(fixture.video(), 1);
+}
+
+TEST(DualIsoPipeline, CacheRawAcquisitionFailureDoesNotPublishBlackFrame)
+{
+    struct ScopedCacheRawFailureReset
+    {
+        ~ScopedCacheRawFailureReset()
+        {
+            mlvCacheSetRawAcquisitionFailureForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    ASSERT_TRUE(fixture.video()->cache_memory_block != nullptr);
+    const size_t frame_words = static_cast<size_t>(fixture.width())
+        * static_cast<size_t>(fixture.height()) * 3u;
+    mlvCacheSetRawAcquisitionFailureForTesting(1);
+    for (int debayer_mode = 0; debayer_mode <= 8; ++debayer_mode)
+    {
+        switch (debayer_mode)
+        {
+            case 0: setMlvDontAlwaysUseAmaze(fixture.video()); break;
+            case 1: setMlvAlwaysUseAmaze(fixture.video()); break;
+            case 2: setMlvUseNoneDebayer(fixture.video()); break;
+            case 3: setMlvUseSimpleDebayer(fixture.video()); break;
+            case 4: setMlvUseLmmseDebayer(fixture.video()); break;
+            case 5: setMlvUseIgvDebayer(fixture.video()); break;
+            case 6: setMlvUseAhdDebayer(fixture.video()); break;
+            case 7: setMlvUseRcdDebayer(fixture.video()); break;
+            case 8: setMlvUseDcbDebayer(fixture.video()); break;
+        }
+        std::fill_n(fixture.video()->cache_memory_block,
+                    frame_words,
+                    static_cast<uint16_t>(0x5a5a));
+        mark_mlv_uncached(fixture.video());
+        mlvCacheSetStop(fixture.video(), 0);
+        an_mlv_cache_thread(fixture.video());
+
+        ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+        ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_NOT_CACHED),
+                  static_cast<unsigned int>(fixture.video()->cached_frames[0]));
+        ASSERT_TRUE(std::all_of(fixture.video()->cache_memory_block,
+                                fixture.video()->cache_memory_block + frame_words,
+                                [](uint16_t value) { return value == 0x5a5a; }));
+    }
+    mlvCacheSetStop(fixture.video(), 1);
+}
+
+TEST(DualIsoPipeline, CacheWorkerClaimsLifetimeBeforeAsyncStart)
+{
+    struct ScopedCacheWorkerPauseReset
+    {
+        ~ScopedCacheWorkerPauseReset()
+        {
+            mlvCacheSetWorkerStartPauseForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    mlvCacheSetStop(fixture.video(), 0);
+    mlvCacheSetWorkerStartPauseForTesting(1);
+
+    add_mlv_cache_thread(fixture.video());
+
+    const int reserved_worker_count = mlvCacheWorkerCount(fixture.video());
+    ASSERT_EQ(1, reserved_worker_count);
+
+    mlvCacheSetStop(fixture.video(), 1);
+    mlvCacheSetWorkerStartPauseForTesting(0);
+    bool stopped = false;
+    for (int attempt = 0; attempt < 5000; ++attempt)
+    {
+        stopped = mlvCacheWorkerCount(fixture.video()) == 0;
+        if (stopped) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(stopped);
+}
+
+TEST(DualIsoPipeline, CacheResizeAllocationFailurePreservesPublishedState)
+{
+    struct ScopedCacheResizeFailureReset
+    {
+        ~ScopedCacheResizeFailureReset()
+        {
+            mlvCacheSetResizeAllocationFailureForTesting(-1);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    uint16_t * const original_block = fixture.video()->cache_memory_block;
+    uint16_t ** const original_frames = fixture.video()->rgb_raw_frames;
+    const uint64_t original_frame_limit = fixture.video()->cache_limit_frames;
+    const uint64_t original_byte_limit = fixture.video()->cache_limit_bytes;
+
+    for (int allocation_index = 0; allocation_index < 2; ++allocation_index)
+    {
+        mlvCacheSetResizeAllocationFailureForTesting(allocation_index);
+        setMlvRawCacheLimitFrames(fixture.video(), 2);
+        ASSERT_TRUE(original_block == fixture.video()->cache_memory_block);
+        ASSERT_TRUE(original_frames == fixture.video()->rgb_raw_frames);
+        ASSERT_EQ(original_frame_limit, fixture.video()->cache_limit_frames);
+        ASSERT_EQ(original_byte_limit, fixture.video()->cache_limit_bytes);
+    }
+
+    mlvCacheSetResizeAllocationFailureForTesting(0);
+    clear_mlv_cache(fixture.video());
+    ASSERT_TRUE(original_block == fixture.video()->cache_memory_block);
+    ASSERT_TRUE(original_frames == fixture.video()->rgb_raw_frames);
+}
+
+TEST(DualIsoPipeline, DefaultCachePolicySurvivesInactiveInitialization)
+{
+    mlvObject_t * video = initMlvObject();
+    ASSERT_TRUE(video != nullptr);
+    ASSERT_EQ(static_cast<uint64_t>(290), getMlvRawCacheLimitMegaBytes(video));
+    ASSERT_EQ(static_cast<uint64_t>(290) << 20, video->cache_limit_bytes);
+    freeMlvObject(video);
+
+    struct ScopedVideo
+    {
+        mlvObject_t * value = nullptr;
+        ~ScopedVideo() { if (value) freeMlvObject(value); }
+    } opened;
+    QByteArray clip_path = repo_file_path(
+        QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv")).toLocal8Bit();
+    int open_code = MLV_ERR_NONE;
+    char open_error[256] = { 0 };
+    opened.value = initMlvObjectWithClip(clip_path.data(),
+                                        MLV_OPEN_FULL,
+                                        &open_code,
+                                        open_error);
+    ASSERT_TRUE(opened.value != nullptr);
+    ASSERT_EQ(MLV_ERR_NONE, open_code);
+    for (int attempt = 0; attempt < 10000 && mlvCacheWorkerCount(opened.value); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    mlvCacheSetStop(opened.value, 1);
+    ASSERT_EQ(0, mlvCacheWorkerCount(opened.value));
+    ASSERT_EQ(static_cast<uint64_t>(290),
+              getMlvRawCacheLimitMegaBytes(opened.value));
+    const uint64_t frame_limit = getMlvRawCacheLimitFrames(opened.value);
+    ASSERT_TRUE(frame_limit > 0);
+    ASSERT_TRUE(opened.value->cache_memory_block != nullptr);
+    const size_t frame_words = static_cast<size_t>(getMlvWidth(opened.value))
+        * static_cast<size_t>(getMlvHeight(opened.value)) * 3u;
+    const uintptr_t block_begin = reinterpret_cast<uintptr_t>(opened.value->cache_memory_block);
+    const uintptr_t block_end = block_begin
+        + frame_words * static_cast<size_t>(frame_limit) * sizeof(uint16_t);
+    for (uint64_t slot = 0; slot < frame_limit; ++slot)
+    {
+        ASSERT_TRUE(opened.value->rgb_raw_frames[slot] != nullptr);
+        const uintptr_t slot_begin = reinterpret_cast<uintptr_t>(opened.value->rgb_raw_frames[slot]);
+        ASSERT_TRUE(slot_begin >= block_begin);
+        ASSERT_TRUE(slot_begin + frame_words * sizeof(uint16_t) <= block_end);
+        ASSERT_EQ(static_cast<uintptr_t>(0),
+                  (slot_begin - block_begin) % (frame_words * sizeof(uint16_t)));
+    }
+
+    bool any_cached_frame = false;
+    for (uint64_t frame = 0; frame < getMlvFrames(opened.value); ++frame)
+        any_cached_frame = any_cached_frame
+            || opened.value->cached_frames[frame] == MLV_FRAME_IS_CACHED;
+    ASSERT_TRUE(any_cached_frame);
+    ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_IS_CACHED),
+              static_cast<unsigned int>(opened.value->cached_frames[0]));
+
+    std::vector<uint16_t> cached_frame(frame_words);
+    pthread_mutex_lock(&opened.value->g_mutexFind);
+    const uint64_t cached_slot = mlv_cache_slot_for_frame(opened.value, 0);
+    std::copy_n(opened.value->rgb_raw_frames[cached_slot],
+                frame_words,
+                cached_frame.begin());
+    pthread_mutex_unlock(&opened.value->g_mutexFind);
+    MlvPipelineFixture uncached_fixture;
+    QString uncached_error;
+    ASSERT_TRUE(uncached_fixture.openTinyDualIso(&uncached_error));
+    ASSERT_TRUE(uncached_error.isEmpty());
+    ASSERT_EQ(static_cast<uint64_t>(0),
+              getMlvRawCacheLimitFrames(uncached_fixture.video()));
+    const std::vector<uint16_t> uncached_frame = uncached_fixture.renderDebayeredFrame16(0);
+    ASSERT_TRUE(cached_frame == uncached_frame);
+}
+
+TEST(DualIsoPipeline, CacheClearWaitsForPendingWorkerBeforeReplacement)
+{
+    struct ScopedCacheWorkerPauseReset
+    {
+        ~ScopedCacheWorkerPauseReset()
+        {
+            mlvCacheSetWorkerStartPauseForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    mlvCacheSetStop(fixture.video(), 1);
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    uint16_t * const original_block = fixture.video()->cache_memory_block;
+
+    mlvCacheSetWorkerStartPauseForTesting(1);
+    mlvCacheSetStop(fixture.video(), 0);
+    add_mlv_cache_thread(fixture.video());
+    ASSERT_EQ(1, mlvCacheWorkerCount(fixture.video()));
+
+    std::atomic<bool> clear_started{false};
+    std::atomic<bool> clear_finished{false};
+    std::thread clear_thread([&]() {
+        clear_started.store(true, std::memory_order_release);
+        clear_mlv_cache(fixture.video());
+        clear_finished.store(true, std::memory_order_release);
+    });
+    while (!clear_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const bool clear_was_blocked = !clear_finished.load(std::memory_order_acquire);
+    const bool original_block_was_retained =
+        original_block == fixture.video()->cache_memory_block;
+
+    mlvCacheSetWorkerStartPauseForTesting(0);
+    clear_thread.join();
+    ASSERT_TRUE(clear_was_blocked);
+    ASSERT_TRUE(original_block_was_retained);
+    ASSERT_TRUE(clear_finished.load(std::memory_order_acquire));
+    for (int attempt = 0; attempt < 10000 && mlvCacheWorkerCount(fixture.video()); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+    ASSERT_TRUE(original_block != fixture.video()->cache_memory_block);
+    ASSERT_TRUE(!mlvCacheShouldStop(fixture.video()));
+}
+
+TEST(DualIsoPipeline, CacheClearWaitsForWorkerPastGenerationCheck)
+{
+    struct ScopedCachePublishPauseReset
+    {
+        ~ScopedCachePublishPauseReset()
+        {
+            mlvCacheSetWorkerBeforePublishPauseForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    mlvCacheSetStop(fixture.video(), 1);
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    uint16_t * const original_block = fixture.video()->cache_memory_block;
+
+    mlvCacheSetWorkerBeforePublishPauseForTesting(1);
+    mlvCacheSetStop(fixture.video(), 0);
+    add_mlv_cache_thread(fixture.video());
+    bool reached_publish_boundary = false;
+    for (int attempt = 0; attempt < 10000; ++attempt)
+    {
+        reached_publish_boundary =
+            mlvCacheWorkerBeforePublishPausedForTesting() != 0;
+        if (reached_publish_boundary) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(reached_publish_boundary);
+    ASSERT_EQ(1, mlvCacheWorkerCount(fixture.video()));
+
+    /* Quiesce without requesting a restart.  The worker already owns a pointer
+     * into the old block, so clear must retain that block until it exits. */
+    mlvCacheSetStop(fixture.video(), 1);
+    std::atomic<bool> clear_started{false};
+    std::atomic<bool> clear_finished{false};
+    std::thread clear_thread([&]() {
+        clear_started.store(true, std::memory_order_release);
+        clear_mlv_cache(fixture.video());
+        clear_finished.store(true, std::memory_order_release);
+    });
+    while (!clear_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const bool clear_was_blocked = !clear_finished.load(std::memory_order_acquire);
+    const bool original_block_was_retained =
+        original_block == fixture.video()->cache_memory_block;
+
+    mlvCacheSetWorkerBeforePublishPauseForTesting(0);
+    clear_thread.join();
+    ASSERT_TRUE(clear_was_blocked);
+    ASSERT_TRUE(original_block_was_retained);
+    ASSERT_TRUE(clear_finished.load(std::memory_order_acquire));
+    ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+    ASSERT_TRUE(original_block != fixture.video()->cache_memory_block);
+}
+
+TEST(DualIsoPipeline, CacheLifecycleSerializesOverlappingReplacementTransactions)
+{
+    struct ScopedLifecyclePauseReset
+    {
+        ~ScopedLifecyclePauseReset()
+        {
+            mlvCacheSetLifecyclePauseForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    mlvCacheSetStop(fixture.video(), 1);
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+
+    mlvCacheSetLifecyclePauseForTesting(1);
+    std::atomic<bool> clear_started{false};
+    std::atomic<bool> clear_finished{false};
+    std::thread clear_thread([&]() {
+        clear_started.store(true, std::memory_order_release);
+        clear_mlv_cache(fixture.video());
+        clear_finished.store(true, std::memory_order_release);
+    });
+    while (!clear_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    for (int attempt = 0; attempt < 10000 && !mlvCacheLifecyclePausedForTesting(); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool lifecycle_paused = mlvCacheLifecyclePausedForTesting();
+    if (!lifecycle_paused)
+    {
+        mlvCacheSetLifecyclePauseForTesting(0);
+        clear_thread.join();
+    }
+    ASSERT_TRUE(lifecycle_paused);
+
+    std::atomic<bool> resize_started{false};
+    std::atomic<bool> resize_finished{false};
+    std::thread resize_thread([&]() {
+        resize_started.store(true, std::memory_order_release);
+        setMlvRawCacheLimitFrames(fixture.video(), 2);
+        resize_finished.store(true, std::memory_order_release);
+    });
+    while (!resize_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const bool clear_was_blocked = !clear_finished.load(std::memory_order_acquire);
+    const bool resize_was_blocked = !resize_finished.load(std::memory_order_acquire);
+
+    mlvCacheSetLifecyclePauseForTesting(0);
+    clear_thread.join();
+    resize_thread.join();
+    ASSERT_TRUE(clear_was_blocked);
+    ASSERT_TRUE(resize_was_blocked);
+    ASSERT_TRUE(clear_finished.load(std::memory_order_acquire));
+    ASSERT_TRUE(resize_finished.load(std::memory_order_acquire));
+    ASSERT_EQ(static_cast<uint64_t>(2), getMlvRawCacheLimitFrames(fixture.video()));
+    ASSERT_TRUE(fixture.video()->cache_memory_block != nullptr);
+}
+
+TEST(DualIsoPipeline, CacheDisableThenQueuedEnablePublishesEnabledStateAtomically)
+{
+    struct ScopedLifecyclePauseReset
+    {
+        ~ScopedLifecyclePauseReset()
+        {
+            mlvCacheSetLifecyclePauseForTesting(0);
+        }
+    } reset;
+
+    QByteArray clip_path = repo_file_path(
+        QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv")).toLocal8Bit();
+    int open_code = MLV_ERR_NONE;
+    char open_error[256] = { 0 };
+    struct ScopedVideo
+    {
+        mlvObject_t * value = nullptr;
+        ~ScopedVideo() { if (value) freeMlvObject(value); }
+    } opened;
+    opened.value = initMlvObjectWithClip(clip_path.data(),
+                                        MLV_OPEN_FULL,
+                                        &open_code,
+                                        open_error);
+    ASSERT_TRUE(opened.value != nullptr);
+    ASSERT_EQ(MLV_ERR_NONE, open_code);
+    mlvCacheSetStop(opened.value, 1);
+    while (mlvCacheWorkerCount(opened.value))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    mlvCacheSetLifecyclePauseForTesting(1);
+    std::atomic<bool> disable_started{false};
+    std::atomic<bool> disable_finished{false};
+    std::thread disable_thread([&]() {
+        disable_started.store(true, std::memory_order_release);
+        disableMlvCaching(opened.value);
+        disable_finished.store(true, std::memory_order_release);
+    });
+    while (!disable_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    for (int attempt = 0; attempt < 10000 && !mlvCacheLifecyclePausedForTesting(); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool lifecycle_paused = mlvCacheLifecyclePausedForTesting();
+    if (!lifecycle_paused)
+    {
+        mlvCacheSetLifecyclePauseForTesting(0);
+        disable_thread.join();
+    }
+    ASSERT_TRUE(lifecycle_paused);
+
+    std::atomic<bool> enable_started{false};
+    std::atomic<bool> enable_finished{false};
+    std::thread enable_thread([&]() {
+        enable_started.store(true, std::memory_order_release);
+        enableMlvCaching(opened.value);
+        enable_finished.store(true, std::memory_order_release);
+    });
+    while (!enable_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const bool disable_was_blocked = !disable_finished.load(std::memory_order_acquire);
+    const bool enable_was_blocked = !enable_finished.load(std::memory_order_acquire);
+
+    mlvCacheSetLifecyclePauseForTesting(0);
+    disable_thread.join();
+    enable_thread.join();
+    ASSERT_TRUE(disable_was_blocked);
+    ASSERT_TRUE(enable_was_blocked);
+    ASSERT_TRUE(disable_finished.load(std::memory_order_acquire));
+    ASSERT_TRUE(enable_finished.load(std::memory_order_acquire));
+    ASSERT_TRUE(!mlvCacheShouldStop(opened.value));
+    ASSERT_TRUE(getMlvRawCacheLimitFrames(opened.value) > 0);
+    ASSERT_TRUE(opened.value->cache_memory_block != nullptr);
+    mlvCacheSetStop(opened.value, 1);
+    while (mlvCacheWorkerCount(opened.value))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+TEST(DualIsoPipeline, CacheEnableCommitsRunningStateOnlyAfterMaterialization)
+{
+    struct ScopedResizeFailureReset
+    {
+        ~ScopedResizeFailureReset()
+        {
+            mlvCacheSetResizeAllocationFailureForTesting(-1);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    ASSERT_TRUE(mlvCacheShouldStop(fixture.video()));
+    ASSERT_EQ(static_cast<uint64_t>(0),
+              getMlvRawCacheLimitFrames(fixture.video()));
+
+    for (int allocation_index = 0; allocation_index < 2; ++allocation_index)
+    {
+        mlvCacheSetResizeAllocationFailureForTesting(allocation_index);
+        enableMlvCaching(fixture.video());
+        ASSERT_TRUE(mlvCacheShouldStop(fixture.video()));
+        ASSERT_EQ(static_cast<uint64_t>(0),
+                  getMlvRawCacheLimitFrames(fixture.video()));
+        ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+    }
+
+    mlvCacheSetResizeAllocationFailureForTesting(-1);
+    enableMlvCaching(fixture.video());
+    ASSERT_TRUE(!mlvCacheShouldStop(fixture.video()));
+    ASSERT_TRUE(getMlvRawCacheLimitFrames(fixture.video()) > 0);
+    uint16_t * const running_block = fixture.video()->cache_memory_block;
+    uint8_t * const running_frames = fixture.video()->cached_frames;
+    uint16_t ** const running_rgb_frames = fixture.video()->rgb_raw_frames;
+    const uint64_t running_limit = getMlvRawCacheLimitFrames(fixture.video());
+    const uint64_t running_bytes = fixture.video()->cache_limit_bytes;
+    const uint64_t running_mb = getMlvRawCacheLimitMegaBytes(fixture.video());
+    for (int allocation_index = 0; allocation_index < 2; ++allocation_index)
+    {
+        mlvCacheSetResizeAllocationFailureForTesting(allocation_index);
+        enableMlvCaching(fixture.video());
+        ASSERT_TRUE(!mlvCacheShouldStop(fixture.video()));
+        ASSERT_TRUE(running_block == fixture.video()->cache_memory_block);
+        ASSERT_TRUE(running_frames == fixture.video()->cached_frames);
+        ASSERT_TRUE(running_rgb_frames == fixture.video()->rgb_raw_frames);
+        ASSERT_EQ(running_limit, getMlvRawCacheLimitFrames(fixture.video()));
+        ASSERT_EQ(running_bytes, fixture.video()->cache_limit_bytes);
+        ASSERT_EQ(running_mb, getMlvRawCacheLimitMegaBytes(fixture.video()));
+    }
+    mlvCacheSetStop(fixture.video(), 1);
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+TEST(DualIsoPipeline, CacheEnableRecordsRunningIntentWhileInactive)
+{
+    mlvObject_t * video = initMlvObject();
+    ASSERT_TRUE(video != nullptr);
+    mlvCacheSetStop(video, 1);
+    ASSERT_TRUE(mlvCacheShouldStop(video));
+    enableMlvCaching(video);
+    ASSERT_TRUE(!mlvCacheShouldStop(video));
+    ASSERT_EQ(static_cast<uint64_t>(290),
+              getMlvRawCacheLimitMegaBytes(video));
+    freeMlvObject(video);
+}
+
+TEST(DualIsoPipeline, CacheInvalidationPreventsStaleWorkerFromWritingSharedSlot)
+{
+    struct ScopedCachePublishPauseReset
+    {
+        ~ScopedCachePublishPauseReset()
+        {
+            mlvCacheSetWorkerBeforePublishPauseForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    mlvCacheSetStop(fixture.video(), 1);
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    const size_t frame_words = static_cast<size_t>(fixture.width())
+        * static_cast<size_t>(fixture.height()) * 3u;
+    std::fill_n(fixture.video()->cache_memory_block, frame_words, static_cast<uint16_t>(0x5A5A));
+
+    mlvCacheSetWorkerBeforePublishPauseForTesting(1);
+    mlvCacheSetStop(fixture.video(), 0);
+    add_mlv_cache_thread(fixture.video());
+    for (int attempt = 0; attempt < 10000 && !mlvCacheWorkerBeforePublishPausedForTesting(); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(mlvCacheWorkerBeforePublishPausedForTesting());
+
+    mark_mlv_uncached(fixture.video());
+    mlvCacheSetStop(fixture.video(), 1);
+    mlvCacheSetWorkerBeforePublishPauseForTesting(0);
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(std::all_of(fixture.video()->cache_memory_block,
+                            fixture.video()->cache_memory_block + frame_words,
+                            [](uint16_t value) { return value == static_cast<uint16_t>(0x5A5A); }));
+    ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_NOT_CACHED),
+              static_cast<unsigned int>(fixture.video()->cached_frames[0]));
+
+    mlvCacheSetStop(fixture.video(), 0);
+    add_mlv_cache_thread(fixture.video());
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    mlvCacheSetStop(fixture.video(), 1);
+    ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_IS_CACHED),
+              static_cast<unsigned int>(fixture.video()->cached_frames[0]));
+}
+
+TEST(DualIsoPipeline, CacheInvalidatedWorkerContinuesWithoutManualRestart)
+{
+    struct ScopedCachePublishPauseReset
+    {
+        ~ScopedCachePublishPauseReset()
+        {
+            mlvCacheSetWorkerBeforePublishPauseForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    mlvCacheSetStop(fixture.video(), 1);
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+
+    mlvCacheSetWorkerBeforePublishPauseForTesting(1);
+    mlvCacheSetStop(fixture.video(), 0);
+    add_mlv_cache_thread(fixture.video());
+    for (int attempt = 0; attempt < 10000 && !mlvCacheWorkerBeforePublishPausedForTesting(); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(mlvCacheWorkerBeforePublishPausedForTesting());
+
+    mark_mlv_uncached(fixture.video());
+    mlvCacheSetWorkerBeforePublishPauseForTesting(0);
+    for (int attempt = 0; attempt < 10000 && mlvCacheWorkerCount(fixture.video()); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    mlvCacheSetStop(fixture.video(), 1);
+    ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+    ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_IS_CACHED),
+              static_cast<unsigned int>(fixture.video()->cached_frames[0]));
+}
+
+TEST(DualIsoPipeline, CacheTeardownWaitsForAdmittedLifecycleTransaction)
+{
+    struct ScopedLifecyclePauseReset
+    {
+        ~ScopedLifecyclePauseReset()
+        {
+            mlvCacheSetLifecyclePauseForTesting(0);
+        }
+    } reset;
+
+    QByteArray clip_path = repo_file_path(
+        QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv")).toLocal8Bit();
+    int open_code = MLV_ERR_NONE;
+    char open_error[256] = { 0 };
+    mlvObject_t * video = initMlvObjectWithClip(clip_path.data(),
+                                               MLV_OPEN_FULL,
+                                               &open_code,
+                                               open_error);
+    ASSERT_TRUE(video != nullptr);
+    ASSERT_EQ(MLV_ERR_NONE, open_code);
+    mlvCacheSetStop(video, 1);
+    while (mlvCacheWorkerCount(video))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    mlvCacheSetLifecyclePauseForTesting(1);
+    std::atomic<bool> clear_started{false};
+    std::atomic<bool> clear_finished{false};
+    std::thread clear_thread([&]() {
+        clear_started.store(true, std::memory_order_release);
+        clear_mlv_cache(video);
+        clear_finished.store(true, std::memory_order_release);
+    });
+    while (!clear_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    for (int attempt = 0; attempt < 10000 && !mlvCacheLifecyclePausedForTesting(); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool lifecycle_paused = mlvCacheLifecyclePausedForTesting();
+    if (!lifecycle_paused)
+    {
+        mlvCacheSetLifecyclePauseForTesting(0);
+        clear_thread.join();
+        freeMlvObject(video);
+    }
+    ASSERT_TRUE(lifecycle_paused);
+
+    std::atomic<bool> free_started{false};
+    std::atomic<bool> free_finished{false};
+    std::thread free_thread([&]() {
+        free_started.store(true, std::memory_order_release);
+        freeMlvObject(video);
+        free_finished.store(true, std::memory_order_release);
+    });
+    while (!free_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    pthread_mutex_lock(&video->g_mutexCount);
+    const int active_while_admitted_owner_is_draining = isMlvActive(video);
+    pthread_mutex_unlock(&video->g_mutexCount);
+    const bool clear_was_blocked = !clear_finished.load(std::memory_order_acquire);
+    const bool free_was_blocked = !free_finished.load(std::memory_order_acquire);
+
+    mlvCacheSetLifecyclePauseForTesting(0);
+    clear_thread.join();
+    free_thread.join();
+    ASSERT_TRUE(clear_was_blocked);
+    ASSERT_TRUE(free_was_blocked);
+    ASSERT_NE(0, active_while_admitted_owner_is_draining);
+    ASSERT_TRUE(clear_finished.load(std::memory_order_acquire));
+    ASSERT_TRUE(free_finished.load(std::memory_order_acquire));
+}
+
+TEST(DualIsoPipeline, SparseNoiseWindowUsesFiniteFallbackAcrossPublicPaths)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+
+    struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+    raw.active_area.x1 = 17;
+    raw.active_area.x2 = std::min(raw.width, 32);
+    raw.active_area.y1 = 0;
+    raw.active_area.y2 = 41;
+    std::vector<uint16_t> gpu_frame = synthetic_dual_iso_phase_frame(raw, 0);
+    const std::vector<uint16_t> original_gpu_frame = gpu_frame;
+    dualiso_full20bit_scratch_t scratch = {};
+    dualiso_gpu_recon_state_t state = {};
+    int iso_pattern = 1;
+    int auto_correction = -1;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+
+    ASSERT_EQ(1, diso_prepare_gpu_recon_state(raw,
+                                               gpu_frame.data(),
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &scratch,
+                                               &state));
+    ASSERT_EQ(1, state.valid);
+    ASSERT_TRUE(std::isfinite(state.dark_noise));
+    ASSERT_TRUE(state.dark_noise > 0.0);
+    ASSERT_TRUE(gpu_frame == original_gpu_frame);
+
+    std::vector<uint16_t> cpu_frame = original_gpu_frame;
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(1, diso_get_full20bit(raw,
+                                    cpu_frame.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &scratch));
+    free_dualiso_full20bit_scratch(&scratch);
+}
+
+TEST(DualIsoPipeline, HistogramMatchRejectsUniformFrameWithoutPublishingGpuState)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+
+    const struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+    std::vector<uint16_t> frame(static_cast<size_t>(raw.width)
+                              * static_cast<size_t>(raw.height),
+                                static_cast<uint16_t>(raw.white_level));
+    dualiso_full20bit_scratch_t scratch = {};
+    dualiso_gpu_recon_state_t state;
+    std::memset(&state, 0xA5, sizeof(state));
+    int iso_pattern = 1;
+    int auto_correction = -2;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+
+    const int rc = diso_prepare_gpu_recon_state(raw,
+                                                 frame.data(),
+                                                 0,
+                                                 100,
+                                                 200,
+                                                 &iso_pattern,
+                                                 &auto_correction,
+                                                 &ev_correction,
+                                                 &black_delta,
+                                                 1,
+                                                 0,
+                                                 1,
+                                                 0,
+                                                 1,
+                                                 1,
+                                                 &scratch,
+                                                 &state);
+
+    ASSERT_EQ(0, rc);
+    ASSERT_EQ(0, state.valid);
+    ASSERT_EQ(1, iso_pattern);
+    ASSERT_EQ(-2, auto_correction);
+    ASSERT_EQ(1.0, ev_correction);
+    ASSERT_EQ(-1, black_delta);
+    ASSERT_EQ(1, iso_pattern);
+
+    iso_pattern = 1;
+    auto_correction = -2;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(0, diso_get_full20bit(raw,
+                                    frame.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &scratch));
+    ASSERT_EQ(-2, auto_correction);
+    ASSERT_EQ(1.0, ev_correction);
+    ASSERT_EQ(-1, black_delta);
+
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = INT_MAX;
+    std::memset(&state, 0xA5, sizeof(state));
+    const std::vector<uint16_t> frame_before_hostile_delta = frame;
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(raw,
+                                               frame.data(),
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &scratch,
+                                               &state));
+    ASSERT_EQ(0, state.valid);
+    ASSERT_EQ(INT_MAX, black_delta);
+    ASSERT_TRUE(frame == frame_before_hostile_delta);
+    ASSERT_EQ(0, diso_get_full20bit(raw,
+                                    frame.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &scratch));
+    ASSERT_EQ(INT_MAX, black_delta);
+    ASSERT_TRUE(frame == frame_before_hostile_delta);
+    free_dualiso_full20bit_scratch(&scratch);
+}
+
+TEST(DualIsoPipeline, HistogramMatchRejectsLowSeparationWithoutPublishingControls)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+
+    const struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+    std::vector<uint16_t> frame(static_cast<size_t>(raw.width)
+                              * static_cast<size_t>(raw.height));
+    for (int y = 0; y < raw.height; ++y)
+    {
+        const bool bright_row = ((y & 3) < 2);
+        for (int x = 0; x < raw.width; ++x)
+        {
+            const int texture = (x * 19 + (y / 4) * 23) & 1023;
+            frame[static_cast<size_t>(y) * static_cast<size_t>(raw.width)
+                + static_cast<size_t>(x)] =
+                static_cast<uint16_t>((bright_row ? 5200 : 5000) + texture);
+        }
+    }
+    const std::vector<uint16_t> original_frame = frame;
+
+    dualiso_full20bit_scratch_t scratch = {};
+    dualiso_gpu_recon_state_t state = {};
+    int iso_pattern = 0;
+    int auto_correction = -2;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(raw,
+                                               frame.data(),
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &scratch,
+                                               &state));
+    ASSERT_EQ(0, state.valid);
+    ASSERT_EQ(0, iso_pattern);
+    ASSERT_EQ(1.0, ev_correction);
+    ASSERT_EQ(-1, black_delta);
+    ASSERT_TRUE(scratch.histogram_match_pixel_capacity > 0);
+    ASSERT_TRUE(frame == original_frame);
+
+    iso_pattern = 0;
+    auto_correction = -2;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(0, diso_get_full20bit(raw,
+                                    frame.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &scratch));
+    ASSERT_EQ(1.0, ev_correction);
+    ASSERT_EQ(-1, black_delta);
+    ASSERT_EQ(0, iso_pattern);
+    ASSERT_TRUE(frame == original_frame);
+    free_dualiso_full20bit_scratch(&scratch);
+}
+
+TEST(DualIsoPipeline, ScaledLlrawprocRejectsUniformHistogramMatchFailure)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+    mlvSetPlaybackAggressivePreviewMode(1);
+    struct AggressivePreviewResetGuard {
+        ~AggressivePreviewResetGuard()
+        {
+            mlvSetPlaybackAggressivePreviewMode(0);
+        }
+    } aggressive_preview_reset_guard;
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(
+        QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+        &error_message));
+    fixture.receipt().setFocusPixels(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    llrawprocObject_t * shared = fixture.video()->llrawproc;
+    ASSERT_TRUE(shared != nullptr);
+    shared->fix_raw = 1;
+    shared->dual_iso = 1;
+    shared->diso_validity = 1;
+    shared->diso1 = 100;
+    shared->diso2 = 200;
+    shared->diso_averaging = 1;
+    shared->diso_alias_map = 0;
+    shared->diso_frblending = 1;
+    shared->diso_pattern = 1;
+    shared->diso_auto_correction = -2;
+    shared->diso_ev_correction = 1.0;
+    shared->diso_black_delta = -1;
+    shared->dark_frame = 0;
+    shared->chroma_smooth = 0;
+    shared->focus_pixels = 0;
+    shared->bad_pixels = 0;
+    shared->vertical_stripes = 0;
+    shared->pattern_noise = 0;
+
+    constexpr int width = 128;
+    constexpr int height = 128;
+    std::vector<uint16_t> frame(static_cast<size_t>(width)
+                              * static_cast<size_t>(height),
+                                static_cast<uint16_t>(
+                                    fixture.video()->RAWI.raw_info.white_level));
+    const std::vector<uint16_t> original_frame = frame;
+    const int original_dng_black = shared->dng_black_level;
+    const int original_dng_white = shared->dng_white_level;
+    const int original_dng_depth = shared->dng_bit_depth;
+    ASSERT_EQ(0, applyLLRawProcObject_with_dims(fixture.video(),
+                                                frame.data(),
+                                                frame.size() * sizeof(frame[0]),
+                                                width,
+                                                height));
+    ASSERT_TRUE(frame == original_frame);
+    ASSERT_EQ(1, shared->diso_pattern);
+    ASSERT_EQ(-2, shared->diso_auto_correction);
+    ASSERT_EQ(1.0, shared->diso_ev_correction);
+    ASSERT_EQ(-1, shared->diso_black_delta);
+    ASSERT_EQ(original_dng_black, shared->dng_black_level);
+    ASSERT_EQ(original_dng_white, shared->dng_white_level);
+    ASSERT_EQ(original_dng_depth, shared->dng_bit_depth);
+
+    std::vector<uint16_t> full_frame(
+        static_cast<size_t>(fixture.width()) * static_cast<size_t>(fixture.height()),
+        static_cast<uint16_t>(fixture.video()->RAWI.raw_info.white_level));
+    const std::vector<uint16_t> original_full_frame = full_frame;
+    applyLLRawProcObject(fixture.video(),
+                         full_frame.data(),
+                         full_frame.size() * sizeof(full_frame[0]));
+    ASSERT_TRUE(full_frame == original_full_frame);
+    ASSERT_EQ(1, shared->diso_pattern);
+    ASSERT_EQ(-2, shared->diso_auto_correction);
+    ASSERT_EQ(1.0, shared->diso_ev_correction);
+    ASSERT_EQ(-1, shared->diso_black_delta);
+    ASSERT_EQ(original_dng_black, shared->dng_black_level);
+    ASSERT_EQ(original_dng_white, shared->dng_white_level);
+    ASSERT_EQ(original_dng_depth, shared->dng_bit_depth);
+
+    /* Restricted-range scaling mutates the input before reconstruction.
+     * A non-histogram failure must roll those bytes and all runtime state
+     * back too, rather than relying on the -2-only backup. */
+    fixture.video()->MLVI.videoClass |= MLV_VIDEO_CLASS_FLAG_LJ92;
+    fixture.video()->RAWI.raw_info.white_level =
+        std::min(fixture.video()->RAWI.raw_info.white_level, 14000);
+    shared->diso_pattern = 99;
+    shared->diso_auto_correction = -1;
+    shared->diso_ev_correction = 1.0;
+    shared->diso_black_delta = -1;
+
+    std::vector<uint16_t> restricted_frame(
+        static_cast<size_t>(width) * static_cast<size_t>(height),
+        static_cast<uint16_t>(3000));
+    const std::vector<uint16_t> original_restricted_frame = restricted_frame;
+    ASSERT_EQ(0, applyLLRawProcObject_with_dims(fixture.video(),
+                                                restricted_frame.data(),
+                                                restricted_frame.size()
+                                                    * sizeof(restricted_frame[0]),
+                                                width,
+                                                height));
+    ASSERT_TRUE(restricted_frame == original_restricted_frame);
+    ASSERT_EQ(99, shared->diso_pattern);
+    ASSERT_EQ(-1, shared->diso_auto_correction);
+    ASSERT_EQ(1.0, shared->diso_ev_correction);
+    ASSERT_EQ(-1, shared->diso_black_delta);
+    ASSERT_EQ(original_dng_black, shared->dng_black_level);
+    ASSERT_EQ(original_dng_white, shared->dng_white_level);
+    ASSERT_EQ(original_dng_depth, shared->dng_bit_depth);
+}
+
 static std::string synthetic_phase_pattern_list(const std::vector<int> & patterns)
 {
     std::string out;
@@ -6167,7 +8449,10 @@ TEST(DualIsoPipeline, ExternalDarkFrameSnapshotReusesWorkerCopyAcrossFrames)
     pthread_mutex_lock(&fixture.video()->llrawproc_mutex);
     llrawprocObject_t * const llrawproc = fixture.video()->llrawproc;
     free(llrawproc->dark_frame_data);
-    llrawproc->dark_frame_size = fixture.video()->RAWI.xRes * fixture.video()->RAWI.yRes * sizeof(uint16_t);
+    llrawproc->dark_frame_size = static_cast<uint32_t>(
+        static_cast<uint64_t>(fixture.video()->RAWI.xRes)
+        * static_cast<uint64_t>(fixture.video()->RAWI.yRes)
+        * sizeof(uint16_t));
     llrawproc->dark_frame_data = static_cast<uint16_t *>(calloc(llrawproc->dark_frame_size + 4, 1));
     ASSERT_TRUE(llrawproc->dark_frame_data != nullptr);
     const uint32_t pixel_count = llrawproc->dark_frame_size / sizeof(uint16_t);

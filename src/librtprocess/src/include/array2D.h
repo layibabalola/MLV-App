@@ -56,6 +56,11 @@
 #define ARRAY2D_H_
 #include <csignal>  // for raise()
 #include <cassert>
+#include <cstddef>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <new>
 
 // flags for use
 #define ARRAY2D_LOCK_DATA   1
@@ -63,8 +68,8 @@
 #define ARRAY2D_BYREFERENCE 4
 #define ARRAY2D_VERBOSE     8
 
-#include <cstring>
 #include <cstdio>
+#include <stdexcept>
 
 
 template<typename T>
@@ -77,32 +82,68 @@ private:
     T ** ptr;
     T * data;
     bool lock; // useful lock to ensure data is not changed anymore.
+
+    static std::size_t checked_element_count(int w, int h, int offset = 0)
+    {
+        if (w <= 0 || h <= 0 || offset < 0) {
+            throw std::bad_array_new_length();
+        }
+
+        const std::size_t width = static_cast<std::size_t>(w);
+        const std::size_t height = static_cast<std::size_t>(h);
+        const std::size_t extra = static_cast<std::size_t>(offset);
+        if (height > std::numeric_limits<std::size_t>::max() / width) {
+            throw std::bad_array_new_length();
+        }
+        const std::size_t logical = width * height;
+        if (extra > std::numeric_limits<std::size_t>::max() - logical
+            || logical + extra > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+            throw std::bad_array_new_length();
+        }
+        return logical + extra;
+    }
+
     void ar_realloc(int w, int h, int offset = 0)
     {
-        if ((ptr) && ((h > y) || (4 * h < y))) {
-            delete[] ptr;
-            ptr = nullptr;
+        const std::size_t allocationCount = checked_element_count(w, h, offset);
+        const std::size_t logicalCount = checked_element_count(w, h);
+        const std::size_t previousCount =
+            (x > 0 && y > 0) ? checked_element_count(x, y) : 0;
+
+        const bool replacePtr = ptr == nullptr || h > y || h < y / 4;
+        const bool replaceData = data == nullptr || offset != 0
+            || logicalCount > previousCount || logicalCount < previousCount / 4u;
+
+        /* Allocate every throwing resource before releasing the old buffers.
+         * A failed resize therefore leaves the prior array and row pointers
+         * intact instead of publishing a half-resized object. */
+        std::unique_ptr<T*[]> pendingPtr;
+        std::unique_ptr<T[]> pendingData;
+        if (replacePtr) {
+            pendingPtr.reset(new T*[h]);
+        }
+        if (replaceData) {
+            pendingData.reset(new T[allocationCount]);
         }
 
-        if ((data) && (((h * w) > (x * y)) || ((h * w) < ((x * y) / 4)))) {
+        T *const nextData = pendingData ? pendingData.get() : data;
+        T **const nextPtr = pendingPtr ? pendingPtr.get() : ptr;
+        for (int i = 0; i < h; i++) {
+            nextPtr[i] = nextData + static_cast<std::size_t>(offset)
+                + static_cast<std::size_t>(w) * static_cast<std::size_t>(i);
+        }
+
+        if (pendingData) {
             delete[] data;
-            data = nullptr;
+            data = pendingData.release();
         }
-
-        if (ptr == nullptr) {
-            ptr = new T*[h];
-        }
-
-        if (data == nullptr) {
-            data = new T[h * w + offset];
+        if (pendingPtr) {
+            delete[] ptr;
+            ptr = pendingPtr.release();
         }
 
         x = w;
         y = h;
-
-        for (int i = 0; i < h; i++) {
-            ptr[i] = data + offset + w * i;
-        }
 
         owner = 1;
     }
@@ -119,26 +160,32 @@ public:
     // creator type1
     array2D(int w, int h, unsigned int flgs = 0)
     {
+        const std::size_t elementCount = checked_element_count(w, h);
         flags = flgs;
         lock = flags & ARRAY2D_LOCK_DATA;
-        data = new T[h * w];
+        std::unique_ptr<T[]> pendingData(new T[elementCount]);
+        std::unique_ptr<T*[]> pendingPtr(new T*[h]);
+        data = pendingData.get();
         owner = 1;
         x = w;
         y = h;
-        ptr = new T*[h];
+        ptr = pendingPtr.get();
 
         for (int i = 0; i < h; i++) {
-            ptr[i] = data + i * w;
+            ptr[i] = data + static_cast<std::size_t>(i) * static_cast<std::size_t>(w);
         }
 
         if (flags & ARRAY2D_CLEAR_DATA) {
-            memset(data, 0, w * h * sizeof(T));
+            memset(data, 0, elementCount * sizeof(T));
         }
+        pendingData.release();
+        pendingPtr.release();
     }
 
     // creator type 2
     array2D(int w, int h, T ** source, unsigned int flgs = 0)
     {
+        const std::size_t elementCount = checked_element_count(w, h);
         flags = flgs;
         //if (lock) { printf("array2D attempt to overwrite data\n");raise(SIGSEGV);}
         lock = flags & ARRAY2D_LOCK_DATA;
@@ -146,19 +193,22 @@ public:
         // TODO: improve this code with ar_realloc()
         owner = (flags & ARRAY2D_BYREFERENCE) ? 0 : 1;
 
+        std::unique_ptr<T[]> pendingData;
+        std::unique_ptr<T*[]> pendingPtr(new T*[h]);
         if (owner) {
-            data = new T[h * w];
+            pendingData.reset(new T[elementCount]);
+            data = pendingData.get();
         } else {
             data = nullptr;
         }
 
         x = w;
         y = h;
-        ptr = new T*[h];
+        ptr = pendingPtr.get();
 
         for (int i = 0; i < h; i++) {
             if (owner) {
-                ptr[i] = data + i * w;
+                ptr[i] = data + static_cast<std::size_t>(i) * static_cast<std::size_t>(w);
 
                 for (int j = 0; j < w; j++) {
                     ptr[i][j] = source[i][j];
@@ -167,6 +217,8 @@ public:
                 ptr[i] = source[i];
             }
         }
+        pendingData.release();
+        pendingPtr.release();
     }
 
     // destructor
@@ -224,10 +276,10 @@ public:
     // or use as resize of 2D array
     void operator()(int w, int h, unsigned int flgs = 0, int offset = 0)
     {
-        flags = flgs;
+        const unsigned int requestedFlags = flgs;
 
-        if (flags & ARRAY2D_VERBOSE) {
-            printf("got init request %dx%d flags=%u\n", w, h, flags);
+        if (requestedFlags & ARRAY2D_VERBOSE) {
+            printf("got init request %dx%d flags=%u\n", w, h, requestedFlags);
             printf("previous was data %p ptr %p \n", data, ptr);
         }
 
@@ -236,22 +288,23 @@ public:
             raise( SIGSEGV);
         }
 
-        lock = flags & ARRAY2D_LOCK_DATA;
-
+        const std::size_t elementCount = checked_element_count(w, h);
         ar_realloc(w, h, offset);
 
-        if (flags & ARRAY2D_CLEAR_DATA) {
-            memset(data + offset, 0, w * h * sizeof(T));
+        if (requestedFlags & ARRAY2D_CLEAR_DATA) {
+            memset(data + offset, 0, elementCount * sizeof(T));
         }
+        flags = requestedFlags;
+        lock = requestedFlags & ARRAY2D_LOCK_DATA;
     }
 
     // import from flat data
     void operator()(int w, int h, T* copy, unsigned int flgs = 0)
     {
-        flags = flgs;
+        const unsigned int requestedFlags = flgs;
 
-        if (flags & ARRAY2D_VERBOSE) {
-            printf("got init request %dx%d flags=%u\n", w, h, flags);
+        if (requestedFlags & ARRAY2D_VERBOSE) {
+            printf("got init request %dx%d flags=%u\n", w, h, requestedFlags);
             printf("previous was data %p ptr %p \n", data, ptr);
         }
 
@@ -260,10 +313,14 @@ public:
             raise( SIGSEGV);
         }
 
-        lock = flags & ARRAY2D_LOCK_DATA;
-
+        const std::size_t elementCount = checked_element_count(w, h);
+        if (elementCount != 0 && !copy) {
+            throw std::invalid_argument("array2D import source is null");
+        }
         ar_realloc(w, h);
-        memcpy(data, copy, w * h * sizeof(T));
+        memcpy(data, copy, elementCount * sizeof(T));
+        flags = requestedFlags;
+        lock = requestedFlags & ARRAY2D_LOCK_DATA;
     }
     int width() const
     {
@@ -272,6 +329,10 @@ public:
     int height() const
     {
         return y;
+    }
+    bool is_locked() const noexcept
+    {
+        return lock != 0;
     }
 
     operator bool()

@@ -4,9 +4,13 @@ param(
     [Alias("Input")]
     [string]$ClipPath = "",
     [string]$Output = "",
-    [int]$Seconds = 24,   # settled-playback window (s) AFTER settle. RULE 2026-06-26 (Layi): give MLV a
-                          # generous time to actually play before closing -- ~3x the old 8s, toward the
-                          # recommended 30s settled-validation window. Both lanes use a generous window.
+    [double]$Seconds = 24,   # settled-playback window (s) AFTER settle. RULE 2026-06-26 (Layi): give MLV a
+                           # generous time to actually play before closing -- ~3x the old 8s, toward the
+                           # recommended 30s settled-validation window. Both lanes use a generous window.
+    [ValidateRange(0, 3600000)]
+    [int]$ProcessTimeoutMs = 0,
+    [ValidateRange(0, 1000000)]
+    [int]$TargetPresentedFrames = 0,
     [int]$StartFrame = 0,
     [ValidateSet("persisted", "on", "off")]
     [string]$DropFrameMode = "persisted",
@@ -73,6 +77,7 @@ param(
     [string[]]$AdditionalArgs = @(),
     [switch]$DetectPlaybackArtifacts,
     [switch]$ArtifactCadenceAdvisory,
+    [switch]$LegacyGuiSmokeOptions,
     [switch]$AllowZeroPresentedFrames,
     [switch]$LaunchOnlyProbe,
     [ValidateRange(0.0, 1.0)]
@@ -84,6 +89,7 @@ $ErrorActionPreference = "Stop"
 $settledValidationRecommendedSeconds = 30
 $validationWarnings = @()
 . (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')
+Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force
 
 if ($RequireFreshScreenshotRender -and -not $CaptureScreenshot) {
     throw "-RequireFreshScreenshotRender requires -CaptureScreenshot."
@@ -92,6 +98,13 @@ if ($RequireFreshScreenshotRender) {
     # V2 provenance binds the screenshot to playback frame/session/index and
     # request serial telemetry. Make the dependency intrinsic to the policy.
     $FrameTelemetry = $true
+}
+
+if ($DisableLookAssist) {
+    if ($PSBoundParameters.ContainsKey("RequireLookAssist") -and $RequireLookAssist) {
+        throw "-DisableLookAssist cannot be combined with -RequireLookAssist:`$true."
+    }
+    $RequireLookAssist = $false
 }
 
 # A zero-present result proves only that the process launched. It is never a
@@ -111,6 +124,17 @@ if ($ExerciseClipLifecycleStress -and $DetectPlaybackArtifacts) {
 }
 if ($ArtifactCadenceAdvisory -and -not $DetectPlaybackArtifacts) {
     throw "-ArtifactCadenceAdvisory requires -DetectPlaybackArtifacts."
+}
+if ($LegacyGuiSmokeOptions) {
+    if (-not $NoLoop) {
+        throw "-LegacyGuiSmokeOptions requires -NoLoop because the pinned legacy CLI has no --loop option."
+    }
+    if ($DropFrameMode -ne "persisted") {
+        throw "-LegacyGuiSmokeOptions supports only the legacy persisted drop-frame default."
+    }
+    if ($DisableLookAssist -and [string]::IsNullOrWhiteSpace($Receipt)) {
+        throw "-LegacyGuiSmokeOptions requires a receipt that explicitly disables Look Assist when -DisableLookAssist is requested."
+    }
 }
 
 if ($UsePersistedPlaybackSettings) {
@@ -356,6 +380,27 @@ function Get-ScreenshotImageMetadata {
     }
     finally {
         $image.Dispose()
+    }
+}
+
+function Get-EvidenceFileBinding {
+    param(
+        [string]$Path,
+        [string]$Label,
+        [switch]$Optional
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        if ($Optional) { return $null }
+        throw "$Label file not found: $Path"
+    }
+    $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
+    $item = Get-Item -LiteralPath $resolvedPath
+    [pscustomobject]@{
+        path = $resolvedPath
+        length = $item.Length
+        sha256 = (Get-FileHash -LiteralPath $resolvedPath -Algorithm SHA256).Hash
     }
 }
 
@@ -822,6 +867,12 @@ function Wait-ForLogLineMatch {
 }
 
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
+if ($TargetPresentedFrames -gt 0 -and $LegacyGuiSmokeOptions) {
+    throw "-TargetPresentedFrames requires the current GUI-smoke option contract; it cannot be combined with -LegacyGuiSmokeOptions."
+}
+if ([double]::IsNaN($Seconds) -or [double]::IsInfinity($Seconds) -or $Seconds -lt 0) {
+    throw "-Seconds must be a finite non-negative value."
+}
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $ExePath = Join-Path $root "platform\qt\build-release\release\MLVApp.exe"
 }
@@ -849,7 +900,9 @@ $outputDir = Split-Path -Parent $outputPath
 if (-not [string]::IsNullOrWhiteSpace($outputDir)) {
     New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 }
-$logRoot = Join-Path $outputDir "logs"
+$runNonce = [Guid]::NewGuid().ToString("N")
+$outputStem = [IO.Path]::GetFileNameWithoutExtension($outputPath)
+$logRoot = Join-Path $outputDir ("logs-{0}-{1}" -f $outputStem, $runNonce)
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
 $screenshotPath = $null
@@ -872,9 +925,19 @@ if ($CaptureScreenshot) {
 $arguments = @(
     "--gui-smoke-playback",
     "--input", $inputPath,
-    "--seconds", [string]$Seconds,
-    "--start-frame", [string]$StartFrame,
-    "--drop-frame-mode", $DropFrameMode,
+    "--seconds", ([string]::Format(
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        "{0}",
+        $Seconds)),
+    "--start-frame", [string]$StartFrame
+)
+if ($TargetPresentedFrames -gt 0 -and -not $LegacyGuiSmokeOptions) {
+    $arguments += @("--presented-frames", [string]$TargetPresentedFrames)
+}
+if (-not $LegacyGuiSmokeOptions) {
+    $arguments += @("--drop-frame-mode", $DropFrameMode)
+}
+$arguments += @(
     "--settle-ms", [string]$SettleMs,
     "--settle-cpu-percent", ([string]::Format(
         [System.Globalization.CultureInfo]::InvariantCulture,
@@ -909,7 +972,7 @@ if (-not [string]::IsNullOrWhiteSpace($GpuAmazeDebayer)) {
 if ($GpuAmazeTexturePresent) {
     $arguments += "--gpu-amaze-texture-present"
 }
-if ($DisableLookAssist) {
+if ($DisableLookAssist -and -not $LegacyGuiSmokeOptions) {
     $arguments += "--no-look-assist"
 }
 if ($ExerciseClipLifecycleStress) {
@@ -1034,6 +1097,24 @@ $effectiveExpectedVisualScaleRequest = if ($ExpectedVisualScaleRequest -eq -2) {
     $ExpectedVisualScaleRequest
 }
 
+$derivedProcessTimeoutMs = [Math]::Ceiling(
+    ([Math]::Max(0.0, $Seconds) * 1000.0) +
+    [Math]::Max(0, $SettleMs) +
+    [Math]::Max(0, $SettleCpuMaxMs) +
+    [Math]::Max(0, $ScreenshotDelayMs) +
+    [Math]::Max(0, $ScreenshotWindowWaitMs) +
+    [Math]::Max(0, $ScreenshotCaptureTimeoutMs) +
+    $(if ($ExerciseClipLifecycleStress) { [Math]::Max(0, $StressSwitchAtMs) + 60000 } else { 30000 })
+)
+if ($derivedProcessTimeoutMs -gt 3600000) {
+    throw "Derived GUI-smoke process timeout exceeds the 3600000 ms safety ceiling; pass a smaller bounded workload."
+}
+$effectiveProcessTimeoutMs = if ($ProcessTimeoutMs -gt 0) {
+    $ProcessTimeoutMs
+} else {
+    [Math]::Max(1000, [int]$derivedProcessTimeoutMs)
+}
+
 if ($DryRun) {
     $dryRunResult = [pscustomobject]@{
         exePath = $exe
@@ -1063,6 +1144,8 @@ if ($DryRun) {
             qualityModeOverride = $QualityMode
             scaleFactorOverride = $ScaleFactor
             usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
+            legacyGuiSmokeOptions = [bool]$LegacyGuiSmokeOptions
+            processTimeoutMs = $effectiveProcessTimeoutMs
         }
         output = $outputPath
     }
@@ -1081,6 +1164,28 @@ if (-not $smokeMutexAcquired) {
     throw "Timed out waiting for another GUI smoke run to release the shared MLVApp log parser."
 }
 
+try {
+
+$buildManifestPath = Join-Path (Split-Path -Parent $exe) "build-manifest.json"
+$receiptPath = $null
+for ($argumentIndex = 0; $argumentIndex -lt $arguments.Count; ++$argumentIndex) {
+    if ([string]$arguments[$argumentIndex] -eq "--receipt" -and
+        $argumentIndex + 1 -lt $arguments.Count) {
+        $receiptPath = [string]$arguments[$argumentIndex + 1]
+        break
+    }
+}
+$captureInputBindings = [pscustomobject]@{
+    executable = Get-EvidenceFileBinding -Path $exe -Label "executable"
+    clip = Get-EvidenceFileBinding -Path $inputPath -Label "clip"
+    receipt = if ($receiptPath) {
+        Get-EvidenceFileBinding -Path $receiptPath -Label "receipt"
+    } else { $null }
+    buildManifest = Get-EvidenceFileBinding `
+        -Path $buildManifestPath -Label "build manifest" -Optional
+}
+$captureBindingFailures = @()
+
 $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
 $startInfo.FileName = $exe
 $startInfo.WorkingDirectory = $root
@@ -1093,6 +1198,7 @@ foreach ($argument in $arguments) {
 }
 
 $envBlock = $startInfo.EnvironmentVariables
+$envBlock["MLVAPP_GUI_SMOKE_RUN_NONCE"] = $runNonce
 if (-not $useAutoPlaybackThreads) {
     $envBlock["MLVAPP_PLAYBACK_MAX_THREADS"] = $Threads
 }
@@ -1159,46 +1265,66 @@ $fpsStatusCropCapture = $null
 $colorArtifactScan = $null
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderrTask = $process.StandardError.ReadToEndAsync()
-$process.WaitForExit()
-$stdout = $stdoutTask.GetAwaiter().GetResult()
-$stderr = $stderrTask.GetAwaiter().GetResult()
+$processBoundary = Wait-GuiSmokeProcessBounded `
+    -Process $process `
+    -StandardOutputTask $stdoutTask `
+    -StandardErrorTask $stderrTask `
+    -TimeoutMs $effectiveProcessTimeoutMs
+$stdout = $processBoundary.stdout
+$stderr = $processBoundary.stderr
+$processExitCode = [int]$processBoundary.exitCode
+$captureBindingFailures += @($processBoundary.failures)
 $endUtc = [datetime]::UtcNow
 
 if ($CaptureScreenshot) {
     if (-not (Test-Path -LiteralPath $screenshotPath)) {
-        throw "GUI smoke completed but did not write screenshot: $screenshotPath"
+        $captureBindingFailures += "GUI smoke completed but did not write screenshot: $screenshotPath"
     }
-    $screenshotItem = Get-Item -LiteralPath $screenshotPath
-    $screenshotImage = Get-ScreenshotImageMetadata -Path $screenshotPath
-    $screenshotCapture = [pscustomobject]@{
-        outputPath = $screenshotItem.FullName
-        takenAtUtc = $screenshotItem.LastWriteTimeUtc.ToString("o")
-        method = "app-internal-presented-frame-preferred"
-        length = $screenshotItem.Length
-        image = $screenshotImage
-        requestedDelayMs = $ScreenshotDelayMs
-        windowWaitMs = $ScreenshotWindowWaitMs
-        captureTimeoutMs = $ScreenshotCaptureTimeoutMs
+    else {
+        try {
+            $screenshotItem = Get-Item -LiteralPath $screenshotPath
+            $screenshotImage = Get-ScreenshotImageMetadata -Path $screenshotPath
+            $screenshotCapture = [pscustomobject]@{
+                outputPath = $screenshotItem.FullName
+                takenAtUtc = $screenshotItem.LastWriteTimeUtc.ToString("o")
+                method = "app-internal-presented-frame-preferred"
+                length = $screenshotItem.Length
+                image = $screenshotImage
+                requestedDelayMs = $ScreenshotDelayMs
+                windowWaitMs = $ScreenshotWindowWaitMs
+                captureTimeoutMs = $ScreenshotCaptureTimeoutMs
+            }
+            $colorArtifactScan = Get-ScreenshotColorArtifactScan -Path $screenshotPath
+        }
+        catch {
+            $captureBindingFailures += "GUI smoke screenshot validation failed: $($_.Exception.Message)"
+        }
     }
-    $colorArtifactScan = Get-ScreenshotColorArtifactScan -Path $screenshotPath
 }
 if (-not [string]::IsNullOrWhiteSpace($windowScreenshotPath)) {
     if (-not (Test-Path -LiteralPath $windowScreenshotPath)) {
-        throw "GUI smoke completed but did not write window screenshot: $windowScreenshotPath"
+        $captureBindingFailures += "GUI smoke completed but did not write window screenshot: $windowScreenshotPath"
     }
-    $windowScreenshotItem = Get-Item -LiteralPath $windowScreenshotPath
-    $windowScreenshotImage = Get-ScreenshotImageMetadata -Path $windowScreenshotPath
-    $windowScreenshotCapture = [pscustomobject]@{
-        outputPath = $windowScreenshotItem.FullName
-        takenAtUtc = $windowScreenshotItem.LastWriteTimeUtc.ToString("o")
-        method = "app-internal-window-grab"
-        length = $windowScreenshotItem.Length
-        image = $windowScreenshotImage
-    }
-    if (-not [string]::IsNullOrWhiteSpace($fpsStatusCropPath)) {
-        $fpsStatusCropCapture = New-FpsStatusProofCrop `
-            -SourcePath $windowScreenshotPath `
-            -OutputPath $fpsStatusCropPath
+    else {
+        try {
+            $windowScreenshotItem = Get-Item -LiteralPath $windowScreenshotPath
+            $windowScreenshotImage = Get-ScreenshotImageMetadata -Path $windowScreenshotPath
+            $windowScreenshotCapture = [pscustomobject]@{
+                outputPath = $windowScreenshotItem.FullName
+                takenAtUtc = $windowScreenshotItem.LastWriteTimeUtc.ToString("o")
+                method = "app-internal-window-grab"
+                length = $windowScreenshotItem.Length
+                image = $windowScreenshotImage
+            }
+            if (-not [string]::IsNullOrWhiteSpace($fpsStatusCropPath)) {
+                $fpsStatusCropCapture = New-FpsStatusProofCrop `
+                    -SourcePath $windowScreenshotPath `
+                    -OutputPath $fpsStatusCropPath
+            }
+        }
+        catch {
+            $captureBindingFailures += "GUI smoke window-screenshot validation failed: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -1216,6 +1342,15 @@ if ($logFile) {
         }
     }
 }
+
+# Preserve the exact lines consumed by this result in a per-run immutable
+# snapshot.  The aggregate rotating app log is allowed to grow later and is
+# therefore diagnostic only; comparison authority comes from this snapshot.
+$runLogSnapshotPath = "$outputPath.run.log"
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllLines($runLogSnapshotPath, [string[]]$recentLines, $utf8NoBom)
+$runLogSnapshotBinding = Get-EvidenceFileBinding `
+    -Path $runLogSnapshotPath -Label "run log snapshot"
 
 $runMetadataLine = $recentLines |
     Where-Object { $_ -like "*run_metadata=*" -and $_ -like "*--gui-smoke-playback*" } |
@@ -1307,6 +1442,17 @@ $runMetadata = $null
 if ($runMetadataLine -and $runMetadataLine -match 'run_metadata=(?<json>\{.*\})') {
     $runMetadata = $Matches["json"] | ConvertFrom-Json
 }
+if ($null -eq $runMetadata) {
+    $captureBindingFailures += "Run metadata was missing from the per-run log snapshot."
+}
+else {
+    if ([string](Get-ObjectPropertyValue $runMetadata "gui_smoke_run_nonce") -ne $runNonce) {
+        $captureBindingFailures += "Run metadata nonce did not match the launcher nonce."
+    }
+    if ([int64](Get-ObjectPropertyValue $runMetadata "process_id") -ne [int64]$process.Id) {
+        $captureBindingFailures += "Run metadata process id did not match the launched process."
+    }
+}
 
 $playbackStart = if ($playbackStartLine) { Convert-PlaybackLogLineToObject $playbackStartLine } else { $null }
 $playbackSummary = if ($summaryLine) { Convert-PlaybackLogLineToObject $summaryLine } else { $null }
@@ -1346,6 +1492,25 @@ $screenshotProvenance = if ($RequireFreshScreenshotRender) {
 }
 if ($screenshotCapture -and $screenshotLog -and (Get-ObjectPropertyValue $screenshotLog "method")) {
     $screenshotCapture.method = [string](Get-ObjectPropertyValue $screenshotLog "method")
+    $screenshotCapture | Add-Member -NotePropertyName frame `
+        -NotePropertyValue (Get-ObjectPropertyValue $screenshotLog "frame") -Force
+    $screenshotCapture | Add-Member -NotePropertyName serial `
+        -NotePropertyValue (Get-ObjectPropertyValue $screenshotLog "serial") -Force
+    $screenshotCapture | Add-Member -NotePropertyName generation `
+        -NotePropertyValue (Get-ObjectPropertyValue $screenshotLog "generation") -Force
+    $screenshotCapture | Add-Member -NotePropertyName eventSha256 `
+        -NotePropertyValue (Get-ObjectPropertyValue $screenshotLog "sha256") -Force
+    $screenshotCapture | Add-Member -NotePropertyName eventLength `
+        -NotePropertyValue (Get-ObjectPropertyValue $screenshotLog "bytes") -Force
+    if ([string]$screenshotCapture.image.sha256 -ne [string]$screenshotCapture.eventSha256 -or
+        [int64]$screenshotCapture.length -ne [int64]$screenshotCapture.eventLength -or
+        [int]$screenshotCapture.image.width -ne [int](Get-ObjectPropertyValue $screenshotLog "width") -or
+        [int]$screenshotCapture.image.height -ne [int](Get-ObjectPropertyValue $screenshotLog "height")) {
+        $captureBindingFailures += "Screenshot bytes/dimensions do not match the app capture event."
+    }
+}
+elseif ($screenshotCapture) {
+    $captureBindingFailures += "Screenshot capture event was missing."
 }
 if ($RequireFreshScreenshotRender -and $screenshotCapture) {
     $screenshotCapture | Add-Member `
@@ -1518,8 +1683,12 @@ $colorArtifactScanPassed =
     -not ($colorArtifactFailureVerdicts -contains $colorArtifactVerdict)
 
 $validationFailures = @()
-if ($null -ne $process -and $process.ExitCode -ne 0) {
-    $validationFailures += "MLVApp exited with code $($process.ExitCode)."
+$validationFailures += $captureBindingFailures
+if ($processBoundary.timedOut) {
+    $validationFailures += "MLVApp exceeded its fail-closed process timeout and was terminated."
+}
+if ($processExitCode -ne 0) {
+    $validationFailures += "MLVApp exited with effective code $processExitCode."
 }
 if ($RequireLookAssist -and -not $lookAssistApplied) {
     $validationFailures += "Look Assist did not settle/apply before playback."
@@ -1532,6 +1701,11 @@ if ($RequireLookAssist -and
     ([int](Get-ObjectPropertyValue $visualState "look_assist_enabled") -ne 1 -or
      [int](Get-ObjectPropertyValue $visualState "look_assist_diagnostics_valid") -ne 1)) {
     $validationFailures += "GUI visual state did not have settled Look Assist enabled."
+}
+if ($DisableLookAssist -and
+    $null -ne $visualState -and
+    [int](Get-ObjectPropertyValue $visualState "look_assist_enabled") -ne 0) {
+    $validationFailures += "GUI visual state did not have Look Assist disabled."
 }
 if ($RequireCpuSettled -and -not $cpuSettled) {
     $validationFailures += "CPU did not settle before playback."
@@ -1620,8 +1794,11 @@ if ($ExpectedQualityMode -ge 0 -and
     [int](Get-ObjectPropertyValue $visualState "quality_mode") -ne $ExpectedQualityMode) {
     $validationFailures += "GUI visual state quality mode was $(Get-ObjectPropertyValue $visualState "quality_mode"); expected $ExpectedQualityMode."
 }
-if ($ExpectedQualityMode -eq 2 -and -not $autoDecisionFieldsPresent) {
+if ($ExpectedQualityMode -eq 2 -and -not $autoDecisionFieldsPresent -and -not $LegacyGuiSmokeOptions) {
     $validationFailures += "Auto playback quality telemetry was missing from playback_smoke.summary."
+}
+elseif ($ExpectedQualityMode -eq 2 -and -not $autoDecisionFieldsPresent -and $LegacyGuiSmokeOptions) {
+    $validationWarnings += "Pinned legacy build predates auto-decision telemetry; quality_mode=2 remains verified from visual-state and summary telemetry."
 }
 if ($ExpectedQualityMode -eq 2 -and $autoDecisionFieldsPresent) {
     $validationFailures += $autoDecisionCapabilityFailures
@@ -1731,12 +1908,17 @@ if ($ExerciseClipLifecycleStress) {
 }
 
 $result = [pscustomobject]@{
-    schema = "mlvapp-gui-smoke-result.v1"
+    schema = "mlvapp-gui-smoke-result.v2"
     capturedAtUtc = $endUtc.ToString("o")
     repoRoot = $root
     exePath = $exe
     clipPath = $inputPath
     outputPath = $outputPath
+    evidence = [pscustomobject]@{
+        runNonce = $runNonce
+        inputs = $captureInputBindings
+        runLogSnapshot = $runLogSnapshotBinding
+    }
     launch = [pscustomobject]@{
         workingDirectory = $root
         arguments = $arguments
@@ -1758,6 +1940,7 @@ $result = [pscustomobject]@{
             expectedAspectMode = $ExpectedAspectMode
             expectedStretchTolerance = $ExpectedStretchTolerance
             usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
+            legacyGuiSmokeOptions = [bool]$LegacyGuiSmokeOptions
         }
         matchedUserShellDefaults = [pscustomobject]@{
             frameTelemetry = [bool]$FrameTelemetry
@@ -1852,7 +2035,15 @@ $result = [pscustomobject]@{
     playbackArtifacts = $playbackArtifacts
     process = [pscustomobject]@{
         id = $process.Id
-        exitCode = $process.ExitCode
+        exitCode = $processExitCode
+        nativeExitCode = $processBoundary.nativeExitCode
+        timedOut = [bool]$processBoundary.timedOut
+        timeoutMs = [int]$processBoundary.timeoutMs
+        treeKillAttempted = [bool]$processBoundary.treeKillAttempted
+        treeKillSucceeded = [bool]$processBoundary.treeKillSucceeded
+        terminationConfirmed = [bool]$processBoundary.terminationConfirmed
+        stdoutDrained = [bool]$processBoundary.stdoutDrained
+        stderrDrained = [bool]$processBoundary.stderrDrained
         startedAtUtc = $startUtc.ToString("o")
         endedAtUtc = $endUtc.ToString("o")
         stdout = $stdout.Trim()
@@ -1870,7 +2061,8 @@ $result = [pscustomobject]@{
         visibleBottomLeftGuiProof = $fpsStatusCropCapture
     }
     log = [pscustomobject]@{
-        path = if ($logFile) { $logFile.FullName } else { $null }
+        path = $runLogSnapshotPath
+        aggregateSourcePath = if ($logFile) { $logFile.FullName } else { $null }
         runMetadata = $runMetadata
         playbackStart = $playbackStart
         summary = $playbackSummary
@@ -1988,17 +2180,21 @@ if ($RequireFreshScreenshotRender) {
 
 $result | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $outputPath -Encoding UTF8
 $result | ConvertTo-Json -Depth 8
-if ($smokeMutexAcquired) {
-    $smokeMutex.ReleaseMutex()
-    $smokeMutex.Dispose()
+$scriptExitCode = 0
+if ($processExitCode -ne 0) {
+    $scriptExitCode = $processExitCode
 }
-if ($process.ExitCode -ne 0) {
-    exit $process.ExitCode
-}
-if ($validationFailures.Count -gt 0) {
+elseif ($validationFailures.Count -gt 0) {
     foreach ($failure in $validationFailures) {
         Write-Error $failure
     }
-    exit 2
+    $scriptExitCode = 2
 }
-exit 0
+}
+finally {
+    if ($smokeMutexAcquired) {
+        $smokeMutex.ReleaseMutex()
+        $smokeMutex.Dispose()
+    }
+}
+exit $scriptExitCode

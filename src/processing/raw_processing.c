@@ -4651,7 +4651,7 @@ void get_frame_transformed(processingObject_t *processing, uint16_t * frame_buf,
     if(processing->transformation == TR_ROT180)
     {
         int half_pixels = imageX * imageY / 2;
-        int frame_size = imageX * imageY * sizeof(uint16_t) * 3;
+        size_t frame_size = (size_t)imageX * (size_t)imageY * sizeof(uint16_t) * 3u;
 
         uint8_t rgb_pixel[6];
         uint8_t * rgb_buf = (uint8_t*)frame_buf;
@@ -4786,6 +4786,82 @@ void processingSetSharpening(processingObject_t * processing, double sharpen)
     }
 }
 
+static double processing_receipt_tint_to_render_tint(double receipt_tint)
+{
+    const int negative = receipt_tint < 0.0;
+    if(negative) receipt_tint = -receipt_tint;
+    receipt_tint /= 10.0;
+    receipt_tint = pow(receipt_tint, 1.75) * 10.0;
+    return negative ? -receipt_tint : receipt_tint;
+}
+
+static void processing_wb_controls_to_multipliers(int kelvin, int receipt_tint,
+                                                  double multipliers[3])
+{
+    get_kelvin_multipliers_rgb((double)kelvin, multipliers);
+    /* Receipt/UI tint is stored as -100..100, while every production caller
+     * passes receiptTint/10 to processingSetWhiteBalance. Model that exact
+     * call boundary here so fitting cannot converge on a 10x stronger tint. */
+    const double tint = processing_receipt_tint_to_render_tint(
+        (double)receipt_tint / 10.0);
+    multipliers[2] += tint / 11.0;
+    multipliers[0] += tint / 19.0;
+    const double lowest = MIN(MIN(multipliers[0], multipliers[1]), multipliers[2]);
+    if(lowest > 0.0)
+        for(int channel = 0; channel < 3; ++channel) multipliers[channel] /= lowest;
+}
+
+int processingWhiteBalanceControlsForAsShotNeutral(const double neutral[3],
+                                                    int * wbTemp,
+                                                    int * wbTint)
+{
+    if(!neutral || !wbTemp || !wbTint) return 0;
+    double target[3];
+    for(int channel = 0; channel < 3; ++channel)
+    {
+        if(!isfinite(neutral[channel]) || neutral[channel] <= 0.0) return 0;
+        target[channel] = 1.0 / neutral[channel];
+    }
+    const double target_lowest = MIN(MIN(target[0], target[1]), target[2]);
+    if(!isfinite(target_lowest) || target_lowest <= 0.0) return 0;
+    for(int channel = 0; channel < 3; ++channel) target[channel] /= target_lowest;
+
+    double best_error = DBL_MAX;
+    int best_temperature = 6000;
+    int best_tint = 0;
+    /* Ten-kelvin resolution matches the precision useful to the integer GUI
+     * receipt while keeping clip-open work bounded and deterministic. */
+    for(int temperature = 2000; temperature <= 10000; temperature += 10)
+    {
+        for(int tint = -100; tint <= 100; ++tint)
+        {
+            double candidate[3];
+            processing_wb_controls_to_multipliers(temperature, tint, candidate);
+            if(candidate[0] <= 0.0 || candidate[1] <= 0.0 || candidate[2] <= 0.0)
+                continue;
+            double error = 0.0;
+            for(int channel = 0; channel < 3; ++channel)
+            {
+                const double delta = log(candidate[channel] / target[channel]);
+                error += delta * delta;
+            }
+            if(error < best_error)
+            {
+                best_error = error;
+                best_temperature = temperature;
+                best_tint = tint;
+            }
+        }
+    }
+    /* Refuse a finite but visibly wrong boundary-clamped approximation. The
+     * squared log-ratio residual is scale-independent; 0.01 corresponds to
+     * roughly a six-percent RMS channel-ratio error. */
+    if(!isfinite(best_error) || best_error > 0.01) return 0;
+    *wbTemp = best_temperature;
+    *wbTint = best_tint;
+    return 1;
+}
+
 /* Set white balance by kelvin + tint value */
 void processingSetWhiteBalance(processingObject_t * processing, double WBKelvin, double WBTint)
 {
@@ -4816,11 +4892,7 @@ void processingSetWhiteBalance(processingObject_t * processing, double WBKelvin,
     if (WBTint != processing->wb_tint)
     {
         /* Non-linear tint makes control finer in the middle */
-        int is_negative = (WBTint < 0.0);
-        if (is_negative) WBTint = -WBTint;
-        WBTint /= 10.0;
-        WBTint = pow(WBTint, 1.75) * 10.0;
-        if (is_negative) WBTint = -WBTint;
+        WBTint = processing_receipt_tint_to_render_tint(WBTint);
 
         processing->wb_tint = WBTint;
     }
