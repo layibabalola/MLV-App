@@ -1668,6 +1668,36 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegFrameGeometryFromGuiState)
     ASSERT_TRUE( plan.codecDimensionAdjusted );
 
     plan = batchRenderedVideoFfmpegFramePlanFromGuiState(
+        100,
+        100,
+        25.0,
+        STRETCH_H_125,
+        STRETCH_V_033,
+        false,
+        0,
+        0,
+        false,
+        BatchRenderedVideoEncoderProfile::ProRes422HQ);
+    ASSERT_TRUE( plan.ready );
+    ASSERT_EQ( 375, plan.outputWidth );
+    ASSERT_EQ( 100, plan.outputHeight );
+
+    plan = batchRenderedVideoFfmpegFramePlanFromGuiState(
+        std::numeric_limits<int>::max(),
+        100,
+        25.0,
+        STRETCH_H_125,
+        STRETCH_V_033,
+        false,
+        0,
+        0,
+        false,
+        BatchRenderedVideoEncoderProfile::H264);
+    ASSERT_FALSE( plan.ready );
+    ASSERT_EQ( std::string("rendered stretch dimensions invalid or too large"),
+               std::string(plan.reason.toUtf8().constData()) );
+
+    plan = batchRenderedVideoFfmpegFramePlanFromGuiState(
         1001,
         501,
         25.0,

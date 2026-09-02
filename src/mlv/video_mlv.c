@@ -2900,13 +2900,191 @@ static void frame_index_sort(frame_index_t *frame_index, uint32_t entries)
     } while (n > 1);
 }
 
+int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
+                             uint32_t encoded_size,
+                             size_t * packed_size,
+                             size_t * allocation_size)
+{
+    if(!packed_size || !allocation_size || width < 3 || height < 3
+       || bitdepth <= 0 || bitdepth > 16
+       || (size_t)width > SIZE_MAX / (size_t)height)
+        return 0;
+
+    const size_t pixels = (size_t)width * (size_t)height;
+    if(pixels == 0 || pixels > (size_t)INT_MAX
+       || pixels > (SIZE_MAX - 7u) / (size_t)bitdepth
+       || pixels > (SIZE_MAX - 200u) / 3u)
+        return 0;
+
+    const size_t packed_bits = pixels * (size_t)bitdepth;
+    if((packed_bits & 15u) != 0) return 0;
+    const size_t packed = packed_bits / 8u;
+    const size_t max_encoded = pixels * 3u + 200u;
+    if(max_encoded > (size_t)INT_MAX
+       || (encoded_size != 0 && (size_t)encoded_size > max_encoded))
+        return 0;
+
+    const size_t selected = (size_t)encoded_size > packed
+        ? (size_t)encoded_size : packed;
+    if(selected > SIZE_MAX - 4u) return 0;
+
+    *packed_size = packed;
+    *allocation_size = selected + 4u;
+    return 1;
+}
+
+int mlvDngSequenceGeometryIsRepresentable(uint32_t width, uint32_t height,
+                                          uint32_t bits_per_sample,
+                                          size_t * pixel_count)
+{
+    if(!pixel_count || width < 3u || height < 3u
+       || width > UINT16_MAX || height > UINT16_MAX
+       || bits_per_sample == 0u || bits_per_sample > 16u
+       || (size_t)width > SIZE_MAX / (size_t)height)
+        return 0;
+
+    const size_t pixels = (size_t)width * (size_t)height;
+    if(pixels == 0 || pixels > (size_t)INT_MAX / 3u
+       || pixels > SIZE_MAX / (size_t)bits_per_sample)
+        return 0;
+    *pixel_count = pixels;
+    return 1;
+}
+
+int mlvDngCfaPatternIsSupported(uint32_t cfa_pattern)
+{
+    return cfa_pattern == UINT32_C(0x02010100); /* RGGB */
+}
+
+int mlvDngAsShotNeutralToWbGains(const int32_t neutral[6], uint32_t gains[3])
+{
+    if(!neutral || !gains) return 0;
+    for(int channel = 0; channel < 3; channel++)
+    {
+        const int32_t numerator = neutral[channel * 2];
+        const int32_t denominator = neutral[channel * 2 + 1];
+        if(numerator <= 0 || denominator <= 0) return 0;
+        /* MLV's custom WBAL stores the DNG AsShotNeutral ratios directly:
+         * the repo's DNG writer emits wbgain_{r,g,b}/wbgain_g and the mcraw
+         * importer uses the same convention.  Inverting here would swap the
+         * red/blue correction on a write -> folder-open round trip. */
+        const double gain = ((double)numerator / (double)denominator) * 1024.0;
+        if(!isfinite(gain) || gain < 1.0 || gain > (double)UINT32_MAX) return 0;
+        gains[channel] = (uint32_t)gain;
+    }
+    return 1;
+}
+
+static uint64_t mlvGcdU64(uint64_t a, uint64_t b)
+{
+    while(b != 0u)
+    {
+        const uint64_t next = a % b;
+        a = b;
+        b = next;
+    }
+    return a;
+}
+
+int mlvDngDefaultScaleToSampling(const int32_t scale[4],
+                                 uint32_t * sampling_x,
+                                 uint32_t * sampling_y)
+{
+    if(!scale || !sampling_x || !sampling_y
+       || scale[0] <= 0 || scale[1] <= 0
+       || scale[2] <= 0 || scale[3] <= 0)
+        return 0;
+
+    /* Pixel aspect is Y-scale / X-scale. The writer emits X=1 and
+     * Y=(sampling_y/sampling_x), but handle any positive canonical pair. */
+    uint64_t y = (uint64_t)(uint32_t)scale[2] * (uint64_t)(uint32_t)scale[1];
+    uint64_t x = (uint64_t)(uint32_t)scale[3] * (uint64_t)(uint32_t)scale[0];
+    const uint64_t divisor = mlvGcdU64(x, y);
+    if(divisor == 0u) return 0;
+    x /= divisor;
+    y /= divisor;
+    if(x == 0u || y == 0u || x > UINT8_MAX || y > UINT8_MAX) return 0;
+    *sampling_x = (uint32_t)x;
+    *sampling_y = (uint32_t)y;
+    return 1;
+}
+
+int mlvDngAspectRatioIsSupported(uint32_t sampling_x, uint32_t sampling_y)
+{
+    if(sampling_x == 0u || sampling_y == 0u) return 0;
+    static const uint32_t horizontal[][2] = {
+        {1u,1u}, {5u,4u}, {4u,3u}, {3u,2u},
+        {5u,3u}, {7u,4u}, {9u,5u}, {2u,1u}
+    };
+    static const uint32_t vertical[][2] = {
+        {1u,1u}, {5u,3u}, {3u,1u}, {1u,3u}
+    };
+    for(size_t h = 0; h < sizeof(horizontal) / sizeof(horizontal[0]); ++h)
+    {
+        for(size_t v = 0; v < sizeof(vertical) / sizeof(vertical[0]); ++v)
+        {
+            /* sampling_y/sampling_x == vertical/horizontal */
+            const uint64_t left = (uint64_t)sampling_y * vertical[v][1]
+                                * horizontal[h][0];
+            const uint64_t right = (uint64_t)sampling_x * vertical[v][0]
+                                 * horizontal[h][1];
+            if(left == right) return 1;
+        }
+    }
+    return 0;
+}
+
+static uint64_t mlvAbsI64ToU64(int64_t value)
+{
+    return value < 0 ? (uint64_t)(-(value + 1)) + 1u : (uint64_t)value;
+}
+
+int mlvDngBaselineExposureToBias(const int32_t baseline[2],
+                                 const int32_t offset[2],
+                                 int32_t bias[2])
+{
+    if(!baseline || !offset || !bias
+       || baseline[1] == 0 || offset[1] == 0) return 0;
+    int64_t bnum = baseline[0], bden = baseline[1];
+    int64_t onum = offset[0], oden = offset[1];
+    if(bden < 0) { bnum = -bnum; bden = -bden; }
+    if(oden < 0) { onum = -onum; oden = -oden; }
+    const uint64_t denominator_gcd = mlvGcdU64((uint64_t)bden, (uint64_t)oden);
+    const int64_t bscale = oden / (int64_t)denominator_gcd;
+    const int64_t oscale = bden / (int64_t)denominator_gcd;
+    const uint64_t babs = mlvAbsI64ToU64(bnum);
+    const uint64_t oabs = mlvAbsI64ToU64(onum);
+    if((babs != 0u && (uint64_t)bscale > (uint64_t)INT64_MAX / babs)
+       || (oabs != 0u && (uint64_t)oscale > (uint64_t)INT64_MAX / oabs))
+        return 0;
+    const int64_t bterm = bnum * bscale;
+    const int64_t oterm = onum * oscale;
+    if((oterm > 0 && bterm > INT64_MAX - oterm)
+       || (oterm < 0 && bterm < INT64_MIN - oterm)) return 0;
+    const int64_t numerator = bterm + oterm;
+    if((uint64_t)bden > (uint64_t)INT64_MAX / (uint64_t)bscale) return 0;
+    const int64_t denominator = bden * bscale;
+    if(denominator <= 0) return 0;
+    const uint64_t divisor = mlvGcdU64(mlvAbsI64ToU64(numerator),
+                                      (uint64_t)denominator);
+    if(divisor == 0u) return 0;
+    const int64_t normalized_num = numerator / (int64_t)divisor;
+    const int64_t normalized_den = denominator / (int64_t)divisor;
+    if(normalized_num < INT32_MIN || normalized_num > INT32_MAX
+       || normalized_den <= 0 || normalized_den > INT32_MAX) return 0;
+    bias[0] = (int32_t)normalized_num;
+    bias[1] = (int32_t)normalized_den;
+    return 1;
+}
+
 /* Unpack or decompress original raw data */
 static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, uint16_t * unpackedFrame)
 {
     int bitdepth = video->RAWI.raw_info.bits_per_pixel;
     int width = video->RAWI.xRes;
     int height = video->RAWI.yRes;
-    int pixels_count = width * height;
+    size_t packed_frame_size = 0;
+    size_t raw_frame_capacity = 0;
 
     /* CinemaDNG folder source: there is no MLV/mcraw file[chunk] container.
      * Each frame is its own .dng file. Decode the requested frame's bayer
@@ -2955,15 +3133,26 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
         return 0;
     }
 
+    if(!mlvRawFrameInputCapacity(width, height, bitdepth, 0,
+                                 &packed_frame_size, &raw_frame_capacity))
+        return 1;
+    const int pixels_count = width * height;
+
     int chunk = video->video_index[frameIndex].chunk_num;
     uint32_t frame_size = video->video_index[frameIndex].frame_size;
     uint64_t frame_offset = video->video_index[frameIndex].frame_offset;
     uint64_t frame_header_offset = video->video_index[frameIndex].block_offset;
 
-    /* How many bytes is RAW frame */
-    int raw_frame_size = (width * height * bitdepth) / 8;
-    /* Memory buffer for original RAW data */
-    uint8_t * raw_frame = (uint8_t *)malloc(raw_frame_size + 4); // additional 4 bytes for safety
+    const int compressed_input = (isMcrawLoaded(video))
+        || (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92);
+    if(compressed_input && !(isMcrawLoaded(video))
+       && !mlvRawFrameInputCapacity(width, height, bitdepth, frame_size,
+                                    &packed_frame_size, &raw_frame_capacity))
+        return 1;
+    /* Additional four bytes preserve the legacy bit-unpack look-ahead while
+     * every read is bounded by the retained allocation capacity. */
+    uint8_t * raw_frame = (uint8_t *)malloc(raw_frame_capacity);
+    if(!raw_frame) return 1;
 
     g_mlv_last_raw_uint16_disk_read_ms = 0.0;
     g_mlv_last_raw_uint16_decompress_ms = 0.0;
@@ -3018,7 +3207,30 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
 
         frame_size = item.size;
 
-        if (fread(raw_frame, frame_size, 1, file) != 1)
+        size_t item_packed_size = 0;
+        size_t item_capacity = 0;
+        if(!mlvRawFrameInputCapacity(width, height, bitdepth, frame_size,
+                                     &item_packed_size, &item_capacity))
+        {
+            free(raw_frame);
+            pthread_mutex_unlock(video->main_file_mutex + chunk);
+            return 1;
+        }
+        if(item_capacity > raw_frame_capacity)
+        {
+            uint8_t * replacement = (uint8_t *)realloc(raw_frame, item_capacity);
+            if(!replacement)
+            {
+                free(raw_frame);
+                pthread_mutex_unlock(video->main_file_mutex + chunk);
+                return 1;
+            }
+            raw_frame = replacement;
+            raw_frame_capacity = item_capacity;
+        }
+
+        if ((size_t)frame_size > raw_frame_capacity - 4u
+            || fread(raw_frame, frame_size, 1, file) != 1)
         {
             DEBUG( printf("Frame data read error\n"); )
             free(raw_frame);
@@ -3048,7 +3260,9 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             // rg      gb
 
             // discard first row
-            memmove(unpackedFrame, &unpackedFrame[width], width * (height - 1) * 2);
+            memmove(unpackedFrame,
+                    &unpackedFrame[width],
+                    (size_t)width * (size_t)(height - 1) * sizeof(*unpackedFrame));
 
             // copy row n-2 to row n
             memcpy(&unpackedFrame[width * (height - 1)], &unpackedFrame[width * (height - 3)], width * 2);
@@ -3063,10 +3277,14 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             // !!untested!!
 
             // discard first row, discard first col
-            memmove(unpackedFrame, &unpackedFrame[width + 1], (width * (height - 1) * 2) - 2);
+            memmove(unpackedFrame, &unpackedFrame[width + 1],
+                    (size_t)width * (size_t)(height - 1) * sizeof(*unpackedFrame)
+                        - sizeof(*unpackedFrame));
 
             // copy row n-2 to row n
-            memcpy(&unpackedFrame[width * (height - 1)], &unpackedFrame[width * (height - 3)], width * 2);
+            memcpy(&unpackedFrame[width * (height - 1)],
+                   &unpackedFrame[width * (height - 3)],
+                   (size_t)width * sizeof(*unpackedFrame));
 
             // copy col n-2 to col n
             for (int i = 0; i < height; i++)
@@ -3085,7 +3303,9 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             // !!untested!!
 
             // discard first col
-            memmove(unpackedFrame, &unpackedFrame[1], (width * height * 2) - 2);
+            memmove(unpackedFrame, &unpackedFrame[1],
+                    (size_t)pixels_count * sizeof(*unpackedFrame)
+                        - sizeof(*unpackedFrame));
 
             // copy col n-2 to col n
             for (int i = 0; i < height; i++)
@@ -3111,7 +3331,8 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
 
         if (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92)
         {
-            if(fread(raw_frame, frame_size, 1, file) != 1)
+            if((size_t)frame_size > raw_frame_capacity - 4u
+               || fread(raw_frame, frame_size, 1, file) != 1)
             {
                 DEBUG( printf("Frame data read error\n"); )
                 free(raw_frame);
@@ -3122,6 +3343,9 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             pthread_mutex_unlock(video->main_file_mutex + chunk);
             g_mlv_last_raw_uint16_disk_read_ms = (mlv_stage_timing_now() - disk_read_start) * 1000.0;
 
+            const int expected_width = width;
+            const int expected_height = height;
+            const int expected_bitdepth = bitdepth;
             int components = 1;
             lj92 decoder_object;
             const double decompress_start = mlv_stage_timing_now();
@@ -3137,8 +3361,20 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             }
             else
             {
+                if(width <= 0 || height <= 0 || components <= 0
+                   || (components != 1 && components != 2)
+                   || bitdepth != expected_bitdepth
+                   || (size_t)width > SIZE_MAX / (size_t)height
+                   || (size_t)width * (size_t)height > SIZE_MAX / (size_t)components
+                   || (size_t)width * (size_t)height * (size_t)components
+                        != (size_t)expected_width * (size_t)expected_height)
+                {
+                    lj92_close(decoder_object);
+                    free(raw_frame);
+                    return 1;
+                }
                 const double decompress_execute_start = mlv_stage_timing_now();
-                ret = lj92_decode(decoder_object, unpackedFrame, width * height * components, 0, NULL, 0);
+                ret = lj92_decode(decoder_object, unpackedFrame, pixels_count, 0, NULL, 0);
                 g_mlv_last_raw_uint16_decompress_execute_ms =
                     (mlv_stage_timing_now() - decompress_execute_start) * 1000.0;
                 g_mlv_last_raw_uint16_lj92_pred6_split_active =
@@ -3201,7 +3437,8 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
         }
         else /* If not compressed just unpack to 16bit */
         {
-            if(fread(raw_frame, raw_frame_size, 1, file) != 1)
+            if(packed_frame_size > raw_frame_capacity - 4u
+               || fread(raw_frame, packed_frame_size, 1, file) != 1)
             {
                 DEBUG( printf("Frame data read error\n"); )
                 free(raw_frame);
@@ -3212,19 +3449,9 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             pthread_mutex_unlock(video->main_file_mutex + chunk);
             g_mlv_last_raw_uint16_disk_read_ms = (mlv_stage_timing_now() - disk_read_start) * 1000.0;
 
-            uint32_t mask = (1 << bitdepth) - 1;
             const double unpack_start = mlv_stage_timing_now();
-            #pragma omp parallel for
-            for (int i = 0; i < pixels_count; ++i)
-            {
-                uint32_t bits_offset = i * bitdepth;
-                uint32_t bits_address = bits_offset / 16;
-                uint32_t bits_shift = bits_offset % 16;
-                uint32_t rotate_value = 16 + ((32 - bitdepth) - bits_shift);
-                uint32_t uncorrected_data = *((uint32_t *)&((uint16_t *)raw_frame)[bits_address]);
-                uint32_t data = ROR32(uncorrected_data, rotate_value);
-                unpackedFrame[i] = ((uint16_t)(data & mask));
-            }
+            dng_unpack_image_bits(unpackedFrame, (uint16_t *)raw_frame,
+                                  width, height, (uint32_t)bitdepth);
             g_mlv_last_raw_uint16_unpack_ms = (mlv_stage_timing_now() - unpack_start) * 1000.0;
         }
     }
@@ -3589,11 +3816,42 @@ void setMlvProcessing(mlvObject_t * video, processingObject_t * processing)
     /* explicitely switch whitebalance find flag off to get right matrix values */
     video->processing->wbFindActive = 0;
 
-    /* Vignette alloc */
-    video->processing->vignette_mask = realloc( video->processing->vignette_mask, getMlvWidth(video) * getMlvHeight(video) * sizeof( float ) );
+    const int processing_width = getMlvWidth(video);
+    const int processing_height = getMlvHeight(video);
+    size_t processing_pixels = 0;
+    if (processing_width > 0 && processing_height > 0
+        && (size_t)processing_width <= SIZE_MAX / (size_t)processing_height) {
+        processing_pixels = (size_t)processing_width * (size_t)processing_height;
+    }
 
-    /* Gradient alloc */
-    video->processing->gradient_mask = realloc( video->processing->gradient_mask, getMlvWidth(video) * getMlvHeight(video) * sizeof( uint16_t ) );
+    /* Vignette alloc.  Never retain an undersized old buffer after realloc
+     * failure: disable the position-dependent stage instead. */
+    float *vignette_mask = processing_pixels > 0
+        && processing_pixels <= SIZE_MAX / sizeof(float)
+        ? realloc(video->processing->vignette_mask,
+                  processing_pixels * sizeof(float))
+        : NULL;
+    if (vignette_mask) {
+        video->processing->vignette_mask = vignette_mask;
+    } else {
+        free(video->processing->vignette_mask);
+        video->processing->vignette_mask = NULL;
+        video->processing->vignette_strength = 0;
+    }
+
+    /* Gradient alloc follows the same fail-closed ownership rule. */
+    uint16_t *gradient_mask = processing_pixels > 0
+        && processing_pixels <= SIZE_MAX / sizeof(uint16_t)
+        ? realloc(video->processing->gradient_mask,
+                  processing_pixels * sizeof(uint16_t))
+        : NULL;
+    if (gradient_mask) {
+        video->processing->gradient_mask = gradient_mask;
+    } else {
+        free(video->processing->gradient_mask);
+        video->processing->gradient_mask = NULL;
+        video->processing->gradient_enable = 0;
+    }
 
     /* MATRIX stuff (not working, so commented out - 
      * processing object defaults to 1,0,0,0,1,0,0,0,1) */
@@ -5610,76 +5868,93 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
 {
     int width = getMlvWidth(video);
     int height = getMlvHeight(video);
-    int frame_size = width * height * sizeof(uint16_t) * 3;
-    uint64_t pixels_count = (uint64_t)width * height;
+    if (!outputFrame || width <= 0 || height <= 0
+        || frameIndex >= getMlvFrames(video)
+        || (size_t)width > SIZE_MAX / (size_t)height) {
+        return;
+    }
+    const size_t frame_pixels = (size_t)width * (size_t)height;
+    if (frame_pixels > SIZE_MAX / (sizeof(uint16_t) * 3u)) {
+        return;
+    }
+    size_t frame_size = frame_pixels * sizeof(uint16_t) * 3u;
+    uint64_t pixels_count = frame_pixels;
     mlv_reset_last_raw_stage_telemetry();
     resetMlvLastDebayerStageMilliseconds();
     mlv_cache_ensure_window(video, frameIndex);
+    int copied_from_cache = 0;
+    int cache_state = MLV_FRAME_NOT_CACHED;
+    pthread_mutex_lock(&video->g_mutexFind);
     int cache_window_active = mlv_frame_in_cache_window(video, frameIndex);
-
-    /* If frame was requested last time and is sitting in the "current" frame cache */
-    if ( video->cached_frames[frameIndex] == MLV_FRAME_NOT_CACHED
-         && video->current_cached_frame_active 
-         && video->current_cached_frame == frameIndex )
+    cache_state = video->cached_frames[frameIndex];
+    if (cache_state == MLV_FRAME_NOT_CACHED
+        && video->current_cached_frame_active
+        && video->current_cached_frame == frameIndex)
     {
         memcpy(outputFrame, video->rgb_raw_current_frame, frame_size);
+        copied_from_cache = 1;
     }
-    /* Is this next bit even readable? */
-    else switch (video->cached_frames[frameIndex])
+    else if (cache_state == MLV_FRAME_IS_CACHED && cache_window_active)
     {
-        case MLV_FRAME_IS_CACHED:
+        memcpy(outputFrame,
+               video->rgb_raw_frames[mlv_cache_slot_for_frame(video, frameIndex)],
+               frame_size);
+        copied_from_cache = 1;
+    }
+    else
+    {
+        if (cache_state == MLV_FRAME_IS_CACHED)
         {
-            if (cache_window_active)
-            {
-                memcpy(outputFrame, video->rgb_raw_frames[mlv_cache_slot_for_frame(video, frameIndex)], frame_size);
-                break;
-            }
             video->cached_frames[frameIndex] = MLV_FRAME_NOT_CACHED;
-            /* fall through */
+            cache_state = MLV_FRAME_NOT_CACHED;
         }
+        if (cache_state == MLV_FRAME_NOT_CACHED && cache_window_active)
+            video->cache_next = frameIndex;
+    }
+    pthread_mutex_unlock(&video->g_mutexFind);
+    if (copied_from_cache) return;
 
-        case MLV_FRAME_NOT_CACHED:
+    if (doesMlvAlwaysUseAmaze(video) && isMlvObjectCaching(video))
+    {
+        while (isMlvObjectCaching(video))
         {
-            /* If it is within the cache range, request for it to be cached */
-            if (cache_window_active)
+            pthread_mutex_lock(&video->g_mutexFind);
+            cache_window_active = mlv_frame_in_cache_window(video, frameIndex);
+            cache_state = video->cached_frames[frameIndex];
+            if (cache_state == MLV_FRAME_IS_CACHED && cache_window_active)
             {
-                video->cache_next = frameIndex;
+                memcpy(outputFrame,
+                       video->rgb_raw_frames[mlv_cache_slot_for_frame(video, frameIndex)],
+                       frame_size);
+                copied_from_cache = 1;
             }
-            /* fall through */
-        }
-
-        case MLV_FRAME_BEING_CACHED:
-        {
-            if (doesMlvAlwaysUseAmaze(video) && isMlvObjectCaching(video))
-            {
-                while (video->cached_frames[frameIndex] != MLV_FRAME_IS_CACHED) usleep(100);
-                if (mlv_frame_in_cache_window(video, frameIndex))
-                {
-                    memcpy(outputFrame, video->rgb_raw_frames[mlv_cache_slot_for_frame(video, frameIndex)], frame_size);
-                    break;
-                }
-            }
-
-            float * raw_frame = mlv_ensure_float_buffer(&video->raw_debayer_temp_frame,
-                                                        &video->raw_debayer_temp_frame_pixels,
-                                                        pixels_count);
-            uint16_t * current_frame = mlv_ensure_u16_buffer(&video->rgb_raw_current_frame,
-                                                             &video->rgb_raw_current_frame_words,
-                                                             pixels_count * 3);
-            if (!raw_frame || !current_frame)
-            {
-                memset(outputFrame, 0, frame_size);
-                video->current_cached_frame_active = 0;
-                break;
-            }
-
-            get_mlv_raw_frame_debayered(video, frameIndex, raw_frame, current_frame, doesMlvAlwaysUseAmaze(video));
-            memcpy(outputFrame, video->rgb_raw_current_frame, frame_size);
-            video->current_cached_frame_active = 1;
-            video->current_cached_frame = frameIndex;
-            break;
+            pthread_mutex_unlock(&video->g_mutexFind);
+            if (copied_from_cache) return;
+            usleep(100);
         }
     }
+
+    float * raw_frame = mlv_ensure_float_buffer(&video->raw_debayer_temp_frame,
+                                                &video->raw_debayer_temp_frame_pixels,
+                                                pixels_count);
+    uint16_t * current_frame = mlv_ensure_u16_buffer(&video->rgb_raw_current_frame,
+                                                     &video->rgb_raw_current_frame_words,
+                                                     pixels_count * 3);
+    if (!raw_frame || !current_frame)
+    {
+        memset(outputFrame, 0, frame_size);
+        pthread_mutex_lock(&video->g_mutexFind);
+        video->current_cached_frame_active = 0;
+        pthread_mutex_unlock(&video->g_mutexFind);
+        return;
+    }
+
+    get_mlv_raw_frame_debayered(video, frameIndex, raw_frame, current_frame, doesMlvAlwaysUseAmaze(video));
+    pthread_mutex_lock(&video->g_mutexFind);
+    memcpy(outputFrame, video->rgb_raw_current_frame, frame_size);
+    video->current_cached_frame_active = 1;
+    video->current_cached_frame = frameIndex;
+    pthread_mutex_unlock(&video->g_mutexFind);
 }
 
 static void mlv_compute_desired_processing_bw_levels(mlvObject_t * video,
@@ -7747,6 +8022,7 @@ mlvObject_t * initMlvObject()
     /* Will avoid main file conflicts with audio and stuff */
     pthread_mutex_init(&video->g_mutexFind, NULL);
     pthread_mutex_init(&video->g_mutexCount, NULL);
+    pthread_mutex_init(&video->g_mutexCacheLifecycle, NULL);
     pthread_mutex_init(&video->llrawproc_mutex, NULL);
     pthread_mutex_init(&video->llrawproc_worker_mutex, NULL);
     pthread_mutex_init(&video->processed8_prefetch_mutex, NULL);
@@ -7809,11 +8085,30 @@ mlvObject_t * initMlvObject()
 /* Free all memory and close file */
 void freeMlvObject(mlvObject_t * video)
 {
-    isMlvActive(video) = 0;
-
-    /* Stop caching and make sure using silly sleep trick */
+    if (!video) return;
+    /* Close admission atomically with worker claims.  Existing lifecycle
+     * owners/waiters and workers retain the object until they drain; no new
+     * cache operation or detached worker can enter after this transition. */
+    pthread_mutex_lock(&video->g_mutexCount);
+    video->cache_closing = 1;
     video->stop_caching = 1;
-    while (video->cache_thread_count) usleep(100);
+    pthread_mutex_unlock(&video->g_mutexCount);
+    for (;;)
+    {
+        pthread_mutex_lock(&video->g_mutexCount);
+        const int cache_busy = video->cache_thread_count != 0
+            || video->cache_lifecycle_users != 0;
+        pthread_mutex_unlock(&video->g_mutexCount);
+        if (!cache_busy) break;
+        usleep(100);
+    }
+
+    /* is_active is read by admitted cache transactions and claimed workers.
+     * Publish the inactive state only after both populations have drained, so
+     * teardown never races those readers or changes an in-flight transaction. */
+    pthread_mutex_lock(&video->g_mutexCount);
+    isMlvActive(video) = 0;
+    pthread_mutex_unlock(&video->g_mutexCount);
 
     pthread_mutex_lock(&video->processed8_prefetch_mutex);
     video->processed8_prefetch_stop = 1;
@@ -7885,6 +8180,8 @@ void freeMlvObject(mlvObject_t * video)
     pthread_cond_destroy(&video->processed8_prefetch_cond);
     pthread_mutex_destroy(&video->raw_uint16_prefetch_mutex);
     pthread_cond_destroy(&video->raw_uint16_prefetch_cond);
+
+    pthread_mutex_destroy(&video->g_mutexCacheLifecycle);
 
     /* Main 1 */
     free(video);
@@ -8478,10 +8775,32 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
 {
     mlv_vidf_hdr_t vidf_hdr = { 0 };
 
+    if(!video || !output_mlv || !error_message || video->RAWI.xRes == 0 || video->RAWI.yRes == 0
+       || video->RAWI.raw_info.bits_per_pixel == 0
+       || (size_t)video->RAWI.xRes > SIZE_MAX / (size_t)video->RAWI.yRes)
+    {
+        if(error_message) sprintf(error_message, "Invalid frame dimensions");
+        return 1;
+    }
     int write_ok = (export_mode == MLV_AVERAGED_FRAME) ? 0 : 1;
-    uint32_t pixel_count = video->RAWI.xRes * video->RAWI.yRes;
-    uint32_t frame_size_packed = (uint32_t)(pixel_count * video->RAWI.raw_info.bits_per_pixel / 8);
-    uint32_t frame_size_unpacked = pixel_count * 2;
+    const size_t pixel_count = (size_t)video->RAWI.xRes * (size_t)video->RAWI.yRes;
+    if(pixel_count > SIZE_MAX / sizeof(uint16_t)
+       || pixel_count > (SIZE_MAX / video->RAWI.raw_info.bits_per_pixel))
+    {
+        sprintf(error_message, "Frame dimensions exceed addressable memory");
+        return 1;
+    }
+    const size_t frame_size_unpacked = pixel_count * sizeof(uint16_t);
+    const size_t packed_bits = pixel_count * video->RAWI.raw_info.bits_per_pixel;
+    const size_t frame_size_packed_size = (packed_bits + 7u) / 8u;
+    size_t compression_capacity = 0;
+    if(frame_size_packed_size > UINT32_MAX
+       || !dng_lj92_output_capacity(video->RAWI.xRes, video->RAWI.yRes, &compression_capacity))
+    {
+        sprintf(error_message, "Frame dimensions exceed MLV/LJ92 limits");
+        return 1;
+    }
+    const uint32_t frame_size_packed = (uint32_t)frame_size_packed_size;
     uint32_t max_frame_number = frame_end - frame_start + 1;
 
     int chunk = video->video_index[frame_index].chunk_num;
@@ -8501,8 +8820,21 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
     vidf_hdr.blockSize -= vidf_hdr.frameSpace;
     vidf_hdr.frameSpace = 0;
 
-    /* for safety allocate max possible size buffer for VIDF block, calculated for 16bits per pixel */
-    uint8_t * block_buf = calloc(sizeof(mlv_vidf_hdr_t) + frame_size_unpacked, 1);
+    size_t frame_capacity = frame_size_unpacked;
+    if(compression_capacity > frame_capacity) frame_capacity = compression_capacity;
+    if((size_t)frame_size > frame_capacity) frame_capacity = frame_size;
+    if(export_mode == MLV_DF_INT && video->DARK.blockSize > sizeof(mlv_dark_hdr_t))
+    {
+        const size_t dark_payload = video->DARK.blockSize - sizeof(mlv_dark_hdr_t);
+        if(dark_payload > frame_capacity) frame_capacity = dark_payload;
+    }
+    if(frame_capacity > UINT32_MAX - sizeof(mlv_vidf_hdr_t))
+    {
+        sprintf(error_message, "VIDF frame exceeds block-size limit");
+        return 1;
+    }
+    /* Allocate for the largest legal packed, unpacked, compressed, or pass-through frame. */
+    uint8_t * block_buf = calloc(sizeof(mlv_vidf_hdr_t) + frame_capacity, 1);
     if(!block_buf)
     {
         sprintf(error_message, "Could not allocate memory for VIDF block");
@@ -8510,7 +8842,7 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         return 1;
     }
     /* for safety allocate max possible size buffer for image data, calculated for 16bits per pixel */
-    uint8_t * frame_buf = calloc(frame_size_unpacked, 1);
+    uint8_t * frame_buf = calloc(frame_capacity, 1);
     if(!frame_buf)
     {
         sprintf(error_message, "Could not allocate memory for VIDF frame");
@@ -8562,7 +8894,10 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         }
         if(isMlvCompressed(video))
         {
-            int ret = dng_decompress_image(frame_buf_unpacked, (uint16_t*)frame_buf, frame_size, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
+            int ret = dng_decompress_image(frame_buf_unpacked, frame_size_unpacked,
+                                           (uint16_t*)frame_buf, frame_size,
+                                           video->RAWI.xRes, video->RAWI.yRes,
+                                           video->RAWI.raw_info.bits_per_pixel);
             if(ret != LJ92_ERROR_NONE)
             {
                 sprintf(error_message, "Averaging: could not decompress frame:  LJ92_ERROR %u", ret);
@@ -8577,14 +8912,14 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         {
             dng_unpack_image_bits(frame_buf_unpacked, (uint16_t*)frame_buf, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
         }
-        for(uint32_t i = 0; i < pixel_count; i++)
+        for(size_t i = 0; i < pixel_count; i++)
         {
             avg_buf[i] += frame_buf_unpacked[i];
         }
 
         if(frame_index == frame_end - 1)
         {
-            for(uint32_t i = 0; i < pixel_count; i++)
+            for(size_t i = 0; i < pixel_count; i++)
             {
                 frame_buf_unpacked[i] = (avg_buf[i] + max_frame_number / 2) / max_frame_number;
             }
@@ -8605,37 +8940,42 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         size_t frame_size_compressed = 0;
 
         uint16_t * frame_buf_unpacked = calloc(frame_size_unpacked, 1);
-        uint16_t * frame_buf_compressed = calloc(frame_size_unpacked, 1);
+        uint8_t * frame_buf_compressed = calloc(compression_capacity, 1);
         if(!frame_buf_unpacked || !frame_buf_compressed)
         {
-            DEBUG( printf("\nCould not allocate memory for frame compressing\n"); )
-            ret = 1;
+            sprintf(error_message, "Could not allocate memory for frame compressing");
+            DEBUG( printf("\n%s\n", error_message); )
+            free(frame_buf_unpacked);
+            free(frame_buf_compressed);
+            free(frame_buf);
+            free(block_buf);
+            return 1;
         }
 
         if(!ret)
         {
             dng_unpack_image_bits(frame_buf_unpacked, (uint16_t*)frame_buf, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
-            ret = dng_compress_image(frame_buf_compressed, frame_buf_unpacked, &frame_size_compressed, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
+            ret = dng_compress_image((uint16_t*)frame_buf_compressed,
+                                     compression_capacity,
+                                     frame_buf_unpacked,
+                                     &frame_size_compressed,
+                                     video->RAWI.xRes,
+                                     video->RAWI.yRes,
+                                     video->RAWI.raw_info.bits_per_pixel);
             if(ret == LJ92_ERROR_NONE)
             {
                 vidf_hdr.blockSize = sizeof(mlv_vidf_hdr_t) + frame_size_compressed;
                 memcpy(block_buf, &vidf_hdr, sizeof(mlv_vidf_hdr_t));
                 memcpy((block_buf + sizeof(mlv_vidf_hdr_t)), (uint8_t*)frame_buf_compressed, frame_size_compressed);
             }
-            else // if compression error then save original uncompressed raw
+            else
             {
-                memcpy(block_buf, &vidf_hdr, sizeof(mlv_vidf_hdr_t));
-                memcpy((block_buf + sizeof(mlv_vidf_hdr_t)), frame_buf, frame_size);
-
-                /* patch MLVI header and set back videoClass to 1 (uncompressed) */
-                uint64_t current_pos = file_get_pos(output_mlv);
-                file_set_pos(output_mlv, 32, SEEK_SET);
-                uint16_t videoClass = 0x1;
-                if(fwrite(&videoClass, sizeof(uint16_t), 1, output_mlv) != 1)
-                {
-                    DEBUG( printf("\nCould not patch videoClass in MLV header\n"); )
-                }
-                file_set_pos(output_mlv, current_pos, SEEK_SET);
+                sprintf(error_message, "Could not compress frame: LJ92_ERROR %d", ret);
+                free(frame_buf_unpacked);
+                free(frame_buf_compressed);
+                free(frame_buf);
+                free(block_buf);
+                return ret ? ret : 1;
             }
         }
 
@@ -8649,13 +8989,19 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         uint16_t * frame_buf_unpacked = calloc(frame_size_unpacked, 1);
         if(!frame_buf_unpacked)
         {
-            DEBUG( printf("\nCould not allocate memory for frame decompressing\n"); )
-            ret = 1;
+            sprintf(error_message, "Could not allocate memory for frame decompressing");
+            DEBUG( printf("\n%s\n", error_message); )
+            free(frame_buf);
+            free(block_buf);
+            return 1;
         }
 
         if(!ret)
         {
-            int ret = dng_decompress_image(frame_buf_unpacked, (uint16_t*)frame_buf, frame_size, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
+            int ret = dng_decompress_image(frame_buf_unpacked, frame_size_unpacked,
+                                           (uint16_t*)frame_buf, frame_size,
+                                           video->RAWI.xRes, video->RAWI.yRes,
+                                           video->RAWI.raw_info.bits_per_pixel);
             if(ret == LJ92_ERROR_NONE)
             {
                 dng_pack_image_bits((uint16_t*)frame_buf, frame_buf_unpacked, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel, 0);
@@ -8663,20 +9009,13 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
                 memcpy(block_buf, &vidf_hdr, sizeof(mlv_vidf_hdr_t));
                 memcpy((block_buf + sizeof(mlv_vidf_hdr_t)), frame_buf, frame_size_packed);
             }
-            else // if decompression error then save original lossless raw
+            else
             {
-                memcpy(block_buf, &vidf_hdr, sizeof(mlv_vidf_hdr_t));
-                memcpy((block_buf + sizeof(mlv_vidf_hdr_t)), frame_buf, frame_size);
-
-                /* patch MLVI header and set back videoClass to 0x21 (lossless) */
-                uint64_t current_pos = file_get_pos(output_mlv);
-                file_set_pos(output_mlv, 32, SEEK_SET);
-                uint16_t videoClass = 0x1 | MLV_VIDEO_CLASS_FLAG_LJ92;
-                if(fwrite(&videoClass, sizeof(uint16_t), 1, output_mlv) != 1)
-                {
-                    DEBUG( printf("\nCould not patch videoClass in MLV header\n"); )
-                }
-                file_set_pos(output_mlv, current_pos, SEEK_SET);
+                sprintf(error_message, "Could not decompress frame: LJ92_ERROR %d", ret);
+                free(frame_buf_unpacked);
+                free(frame_buf);
+                free(block_buf);
+                return ret ? ret : 1;
             }
         }
 
@@ -8695,7 +9034,8 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         mlv_audf_hdr_t audf_hdr = { { 'A','U','D','F' }, 0, 0, 0, 0 };
 
         /* Calculate the sum of audio sample sizes for all audio channels */
-        uint64_t audio_sample_size = getMlvAudioChannels(video) * (getMlvAudioBitsPerSample(video) / 8);
+        uint64_t audio_sample_size = (uint64_t)getMlvAudioChannels(video)
+            * (uint64_t)(getMlvAudioBitsPerSample(video) / 8);
         /* Calculate the audio alignement block size in bytes */
         uint16_t block_align = audio_sample_size * 1024;
         /* Calculate audio starting offset */
@@ -8969,20 +9309,29 @@ short_cut:
     /* Calculate framerate */
     video->frame_rate = getMlvFramerateOrig(video);
 
-    /* Make sure frame cache number is up to date by rerunniinitLLRawProcObjectng thiz */
-    setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
-
     /* For frame cache */
     video->rgb_raw_frames = (uint16_t **)malloc( sizeof(uint16_t *) * video->frames );
     video->rgb_raw_current_frame_words = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
     video->rgb_raw_current_frame = (uint16_t *)malloc( video->rgb_raw_current_frame_words * sizeof(uint16_t) );
     video->cached_frames = (uint8_t *)calloc( sizeof(uint8_t), video->frames );
+    if (!video->rgb_raw_frames || !video->rgb_raw_current_frame || !video->cached_frames)
+    {
+        snprintf(error_message, 256, "Out of memory creating mcraw frame cache:  %.185s", video->path);
+        return MLV_ERR_OPEN;
+    }
 
     isMlvActive(video) = 5;
-
-    /* Start caching unless it was disabled already */
-    if (!video->stop_caching && (open_mode != MLV_OPEN_PREVIEW))
+    const int cache_was_enabled = !mlvCacheShouldStop(video);
+    if (cache_was_enabled && (open_mode != MLV_OPEN_PREVIEW))
     {
+        mlvCacheSetStop(video, 1);
+        setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
+        mlvCacheSetStop(video, 0);
+        if (!video->cache_memory_block)
+        {
+            snprintf(error_message, 256, "Out of memory applying mcraw frame cache policy:  %.176s", video->path);
+            return MLV_ERR_OPEN;
+        }
         for (int i = 0; i < video->cpu_cores; ++i)
         {
             add_mlv_cache_thread(video);
@@ -8999,7 +9348,13 @@ short_cut:
  * the isDngFolderLoaded() branch. Mirrors openMcrawClip(). */
 int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char * error_message)
 {
+    if (!video || !dirPath || !error_message) return MLV_ERR_INVALID;
     video->path = malloc( strlen(dirPath) + 1 );
+    if (!video->path)
+    {
+        snprintf(error_message, 256, "Out of memory copying CinemaDNG folder path");
+        return MLV_ERR_OPEN;
+    }
     memcpy(video->path, dirPath, strlen(dirPath));
     video->path[strlen(dirPath)] = 0x0;
 
@@ -9007,19 +9362,129 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     dng_sequence_t * seq = (dng_sequence_t *)calloc(1, sizeof(dng_sequence_t));
     if (!seq)
     {
-        sprintf(error_message, "Out of memory opening DNG folder:  %s", video->path);
+        snprintf(error_message, 256, "Out of memory opening DNG folder:  %.200s", video->path);
         return MLV_ERR_OPEN;
     }
     if (dng_sequence_open(dirPath, seq) != 0 || !seq->info.valid)
     {
         free(seq);
-        sprintf(error_message, "No readable CinemaDNG frames in folder:  %s", video->path);
+        snprintf(error_message, 256, "No readable CinemaDNG frames in folder:  %.195s", video->path);
         DEBUG( printf("\n%s\n", error_message); )
         return MLV_ERR_OPEN;
     }
     video->dng_sequence = seq;
 
     const dng_frame_info_t * fi = &seq->info;
+    if(fi->unique_camera_model[0] == '\0')
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256,
+                 "CinemaDNG UniqueCameraModel is missing:  %.181s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    if(fi->camera_model[0] == '\0'
+       && strlen(fi->unique_camera_model) >= sizeof(video->IDNT.cameraName))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256,
+                 "CinemaDNG UniqueCameraModel is too long for Model fallback:  %.166s",
+                 video->path);
+        return MLV_ERR_INVALID;
+    }
+    size_t dng_pixels = 0;
+    if (!mlvDngSequenceGeometryIsRepresentable(fi->width, fi->height,
+                                                fi->bits_per_sample,
+                                                &dng_pixels))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Unsupported CinemaDNG geometry in folder:  %.190s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    if (!mlvDngCfaPatternIsSupported(fi->cfa_pattern))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Unsupported CinemaDNG CFA pattern in folder:  %.187s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    if (fi->compression == DNG_READER_COMPRESSION_NONE
+        && ((dng_pixels * (size_t)fi->bits_per_sample) & 15u) != 0)
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Unsupported packed CinemaDNG geometry in folder:  %.183s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    const uint32_t sample_max = fi->bits_per_sample == 16
+        ? UINT16_MAX : ((UINT32_C(1) << fi->bits_per_sample) - 1u);
+    const uint32_t effective_white = fi->white_level > 0
+        ? (uint32_t)fi->white_level : sample_max;
+    if (fi->black_level < 0 || (uint32_t)fi->black_level > sample_max
+        || fi->white_level < 0
+        || effective_white > sample_max
+        || (uint32_t)fi->black_level >= effective_white)
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Invalid CinemaDNG sample range in folder:  %.188s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    uint32_t dng_wb_gains[3] = { 1024, 1024, 1024 };
+    if (fi->has_as_shot_neutral
+        && !mlvDngAsShotNeutralToWbGains(fi->as_shot_neutral, dng_wb_gains))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Invalid CinemaDNG white balance in folder:  %.188s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    uint32_t dng_sampling_x = 1u;
+    uint32_t dng_sampling_y = 1u;
+    if (fi->has_default_scale
+        && !mlvDngDefaultScaleToSampling(fi->default_scale,
+                                         &dng_sampling_x,
+                                         &dng_sampling_y))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Unsupported CinemaDNG pixel aspect in folder:  %.185s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    if (!mlvDngAspectRatioIsSupported(dng_sampling_x, dng_sampling_y))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "CinemaDNG pixel aspect is not representable:  %.178s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    const int32_t zero_exposure[2] = { 0, 1 };
+    const int32_t * baseline_exposure = fi->has_baseline_exposure
+        ? fi->baseline_exposure : zero_exposure;
+    const int32_t * baseline_offset = fi->has_baseline_exposure_offset
+        ? fi->baseline_exposure_offset : zero_exposure;
+    int32_t dng_exposure_bias[2] = { 0, 1 };
+    if (!mlvDngBaselineExposureToBias(baseline_exposure,
+                                      baseline_offset,
+                                      dng_exposure_bias))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Invalid CinemaDNG baseline exposure in folder:  %.180s", video->path);
+        return MLV_ERR_INVALID;
+    }
 
     /* In preview mode only the first frame is needed. */
     uint32_t frame_count = seq->count;
@@ -9030,6 +9495,11 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
      * non-NULL video_index keeps the rest of the object consistent (some code
      * indexes it for frame numbers / time). One entry per frame. */
     video->video_index = (frame_index_t *)calloc(video->frames ? video->frames : 1, sizeof(frame_index_t));
+    if (!video->video_index)
+    {
+        snprintf(error_message, 256, "Out of memory indexing DNG folder:  %.194s", video->path);
+        return MLV_ERR_OPEN;
+    }
     for (uint32_t i = 0; i < video->frames; i++)
     {
         video->video_index[i].frame_type   = 1;
@@ -9041,24 +9511,52 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     /* No multi-file chunk model here, but allocate a 1-element file/mutex array
      * so any incidental file[0]/mutex[0] access stays valid. */
     video->filenum = 1;
-    video->file = (FILE **)calloc(1, sizeof(FILE *));
-    video->main_file_mutex = calloc(sizeof(pthread_mutex_t), 1);
-    pthread_mutex_init(video->main_file_mutex, NULL);
+    FILE ** dng_files = (FILE **)calloc(1, sizeof(FILE *));
+    pthread_mutex_t * dng_mutex = (pthread_mutex_t *)calloc(1, sizeof(pthread_mutex_t));
+    if (!dng_files || !dng_mutex)
+    {
+        free(dng_files);
+        free(dng_mutex);
+        snprintf(error_message, 256, "Out of memory preparing DNG folder handles:  %.183s", video->path);
+        return MLV_ERR_OPEN;
+    }
+    if (pthread_mutex_init(dng_mutex, NULL) != 0)
+    {
+        free(dng_files);
+        free(dng_mutex);
+        snprintf(error_message, 256, "Could not initialize DNG folder lock:  %.192s", video->path);
+        return MLV_ERR_OPEN;
+    }
+    video->file = dng_files;
+    video->main_file_mutex = dng_mutex;
 
     /* RAWI geometry + calibration straight from the DNG IFD. */
     memcpy(&video->RAWI.blockType, "RAWI", 4);
     video->RAWI.blockSize                 = sizeof(mlv_rawi_hdr_t);
-    video->RAWI.xRes                      = fi->width;
-    video->RAWI.yRes                      = fi->height;
-    video->RAWI.raw_info.bits_per_pixel   = fi->bits_per_sample ? fi->bits_per_sample : 14;
+    video->RAWI.xRes                      = (uint16_t)fi->width;
+    video->RAWI.yRes                      = (uint16_t)fi->height;
+    video->RAWI.raw_info.bits_per_pixel   = fi->bits_per_sample;
     video->RAWI.raw_info.black_level      = fi->black_level;
-    video->RAWI.raw_info.white_level      = fi->white_level ? fi->white_level : ((1 << video->RAWI.raw_info.bits_per_pixel) - 1);
+    video->RAWI.raw_info.white_level      = fi->white_level ? fi->white_level : (int32_t)sample_max;
     video->RAWI.raw_info.cfa_pattern      = (int32_t)fi->cfa_pattern;
-    video->RAWI.raw_info.exposure_bias[0] = 0;
-    video->RAWI.raw_info.exposure_bias[1] = 0;
+    video->RAWI.raw_info.exposure_bias[0] = dng_exposure_bias[0];
+    video->RAWI.raw_info.exposure_bias[1] = dng_exposure_bias[1];
+
+    /* Preserve DefaultScale through the source-of-truth RAWC aspect path used
+     * by every playback/export/present route. */
+    memcpy(&video->RAWC.blockType, "RAWC", 4);
+    video->RAWC.blockSize = sizeof(mlv_rawc_hdr_t);
+    video->RAWC.binning_x = (uint8_t)dng_sampling_x;
+    video->RAWC.binning_y = (uint8_t)dng_sampling_y;
+    video->RAWC.skipping_x = 0;
+    video->RAWC.skipping_y = 0;
 
     /* Active area: use the DNG tag if present, else full frame. */
-    if (fi->active_area[2] > fi->active_area[0] && fi->active_area[3] > fi->active_area[1])
+    if (fi->active_area[0] >= 0 && fi->active_area[1] >= 0
+        && fi->active_area[2] > fi->active_area[0]
+        && fi->active_area[3] > fi->active_area[1]
+        && (uint32_t)fi->active_area[2] <= fi->height
+        && (uint32_t)fi->active_area[3] <= fi->width)
     {
         video->RAWI.raw_info.active_area.y1 = fi->active_area[0];
         video->RAWI.raw_info.active_area.x1 = fi->active_area[1];
@@ -9071,6 +9569,33 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
         video->RAWI.raw_info.active_area.y1 = 0;
         video->RAWI.raw_info.active_area.x2 = fi->width;
         video->RAWI.raw_info.active_area.y2 = fi->height;
+    }
+    if(fi->has_active_area)
+        memcpy(video->RAWI.raw_info.dng_active_area, fi->active_area,
+               sizeof(video->RAWI.raw_info.dng_active_area));
+    else
+    {
+        video->RAWI.raw_info.dng_active_area[0] = 0;
+        video->RAWI.raw_info.dng_active_area[1] = 0;
+        video->RAWI.raw_info.dng_active_area[2] = (int32_t)fi->height;
+        video->RAWI.raw_info.dng_active_area[3] = (int32_t)fi->width;
+    }
+    if(fi->has_default_crop_origin)
+    {
+        video->RAWI.raw_info.crop.origin[0] = (int32_t)fi->default_crop_origin[0];
+        video->RAWI.raw_info.crop.origin[1] = (int32_t)fi->default_crop_origin[1];
+        video->RAWI.raw_info.crop.size[0] = (int32_t)fi->default_crop_size[0];
+        video->RAWI.raw_info.crop.size[1] = (int32_t)fi->default_crop_size[1];
+    }
+    else
+    {
+        /* DefaultCropOrigin is relative to ActiveArea, not to the full image. */
+        video->RAWI.raw_info.crop.origin[0] = 0;
+        video->RAWI.raw_info.crop.origin[1] = 0;
+        video->RAWI.raw_info.crop.size[0] = video->RAWI.raw_info.active_area.x2
+                                          - video->RAWI.raw_info.active_area.x1;
+        video->RAWI.raw_info.crop.size[1] = video->RAWI.raw_info.active_area.y2
+                                          - video->RAWI.raw_info.active_area.y1;
     }
 
     /* Color matrices: prefer the values baked into the DNG; fall back to the
@@ -9096,38 +9621,34 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     video->MLVI.blockSize        = sizeof(mlv_file_hdr_t);
     video->MLVI.videoClass       = MLV_VIDEO_CLASS_RAW | MLV_VIDEO_CLASS_FLAG_DNGSEQ;
     video->MLVI.videoFrameCount  = frame_count;
-    /* Default to 24 fps; CinemaDNG does not reliably carry a clip frame rate
-     * in a single frame's IFD (FrameRate tag is optional). */
-    video->MLVI.sourceFpsNom     = 24;
-    video->MLVI.sourceFpsDenom   = 1;
+    video->MLVI.sourceFpsNom     = fi->has_frame_rate
+        ? (uint32_t)fi->frame_rate[0] : 24u;
+    video->MLVI.sourceFpsDenom   = fi->has_frame_rate
+        ? (uint32_t)fi->frame_rate[1] : 1u;
     video->MLVI.audioClass       = 0;
     video->MLVI.audioFrameCount  = 0;
 
-    /* White balance: from AsShotNeutral when present (gains are 1/neutral,
-     * scaled by 1024 like the mcraw path). */
+    /* White balance: preserve the repository's AsShotNeutral/WBAL round-trip
+     * convention, scaled by 1024 just like the mcraw import path. */
     memcpy(&video->WBAL.blockType, "WBAL", 4);
     video->WBAL.blockSize        = sizeof(mlv_wbal_hdr_t);
     video->WBAL.wb_mode          = 6;     // CUSTOM
     video->WBAL.timestamp        = 0;
     video->WBAL.kelvin           = 0;
-    if (fi->has_as_shot_neutral &&
-        fi->as_shot_neutral[0] && fi->as_shot_neutral[2] && fi->as_shot_neutral[4])
-    {
-        double nr = (double)fi->as_shot_neutral[0] / (double)fi->as_shot_neutral[1];
-        double ng = (double)fi->as_shot_neutral[2] / (double)fi->as_shot_neutral[3];
-        double nb = (double)fi->as_shot_neutral[4] / (double)fi->as_shot_neutral[5];
-        video->WBAL.wbgain_r     = (nr != 0.0) ? (uint32_t)((1.0 / nr) * 1024) : 1024;
-        video->WBAL.wbgain_g     = (ng != 0.0) ? (uint32_t)((1.0 / ng) * 1024) : 1024;
-        video->WBAL.wbgain_b     = (nb != 0.0) ? (uint32_t)((1.0 / nb) * 1024) : 1024;
-    }
+    video->WBAL.wbgain_r         = dng_wb_gains[0];
+    video->WBAL.wbgain_g         = dng_wb_gains[1];
+    video->WBAL.wbgain_b         = dng_wb_gains[2];
 
     memcpy(&video->IDNT.blockType, "IDNT", 4);
     video->IDNT.blockSize        = sizeof(mlv_idnt_hdr_t);
-    snprintf((char *)video->IDNT.cameraName, 31, "%s", fi->camera_model[0] ? fi->camera_model : "CinemaDNG");
+    snprintf((char *)video->IDNT.cameraName, sizeof(video->IDNT.cameraName),
+             "%s", fi->camera_model[0]
+                 ? fi->camera_model : fi->unique_camera_model);
+    video->camid.cameraName[UNIQ] = fi->unique_camera_model;
 
     memcpy(&video->EXPO.blockType, "EXPO", 4);
     video->EXPO.blockSize        = sizeof(mlv_expo_hdr_t);
-    video->EXPO.isoValue         = fi->iso ? fi->iso : 100;
+    video->EXPO.isoValue         = fi->has_iso ? fi->iso : 100;
     video->EXPO.shutterValue     = 1;     /* unknown; non-zero to avoid div-by-zero in UI */
 
     /* Save original levels for reset. */
@@ -9140,25 +9661,47 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     video->llrawproc->diso_validity = DISO_INVALID;
 
     /* NON compressed frame size. */
-    video->frame_size = (getMlvHeight(video) * getMlvWidth(video) * getMlvBitdepth(video)) / 8;
+    const uint64_t dng_frame_bytes = ((uint64_t)dng_pixels * fi->bits_per_sample + 7u) / 8u;
+    if (dng_frame_bytes > UINT32_MAX)
+    {
+        snprintf(error_message, 256, "CinemaDNG frame size is not representable:  %.180s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    video->frame_size = (uint32_t)dng_frame_bytes;
 
     /* Calculate framerate. */
     video->frame_rate = getMlvFramerateOrig(video);
 
-    /* Make sure frame cache number is up to date. */
-    setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
-
     /* For frame cache. */
+    if ((size_t)(video->frames ? video->frames : 1u) > SIZE_MAX / sizeof(uint16_t *)
+        || dng_pixels > SIZE_MAX / 3u
+        || dng_pixels * 3u > SIZE_MAX / sizeof(uint16_t))
+    {
+        snprintf(error_message, 256, "CinemaDNG cache size is not representable:  %.180s", video->path);
+        return MLV_ERR_INVALID;
+    }
     video->rgb_raw_frames = (uint16_t **)malloc( sizeof(uint16_t *) * (video->frames ? video->frames : 1) );
     video->rgb_raw_current_frame_words = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
     video->rgb_raw_current_frame = (uint16_t *)malloc( video->rgb_raw_current_frame_words * sizeof(uint16_t) );
     video->cached_frames = (uint8_t *)calloc( sizeof(uint8_t), (video->frames ? video->frames : 1) );
+    if (!video->rgb_raw_frames || !video->rgb_raw_current_frame || !video->cached_frames)
+    {
+        snprintf(error_message, 256, "Out of memory creating DNG frame cache:  %.187s", video->path);
+        return MLV_ERR_OPEN;
+    }
 
     isMlvActive(video) = 1;
-
-    /* Start caching unless it was disabled already. */
-    if (!video->stop_caching && (open_mode != MLV_OPEN_PREVIEW))
+    const int cache_was_enabled = !mlvCacheShouldStop(video);
+    if (cache_was_enabled && (open_mode != MLV_OPEN_PREVIEW))
     {
+        mlvCacheSetStop(video, 1);
+        setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
+        mlvCacheSetStop(video, 0);
+        if (!video->cache_memory_block)
+        {
+            snprintf(error_message, 256, "Out of memory applying DNG frame cache policy:  %.178s", video->path);
+            return MLV_ERR_OPEN;
+        }
         for (int i = 0; i < video->cpu_cores; ++i)
         {
             add_mlv_cache_thread(video);
@@ -9570,20 +10113,29 @@ preview_out:
     /* Calculate framerate */
     video->frame_rate = getMlvFramerateOrig(video);
 
-    /* Make sure frame cache number is up to date by rerunniinitLLRawProcObjectng thiz */
-    setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
-
     /* For frame cache */
     video->rgb_raw_frames = (uint16_t **)malloc( sizeof(uint16_t *) * video->frames );
     video->rgb_raw_current_frame_words = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
     video->rgb_raw_current_frame = (uint16_t *)malloc( video->rgb_raw_current_frame_words * sizeof(uint16_t) );
     video->cached_frames = (uint8_t *)calloc( sizeof(uint8_t), video->frames );
+    if (!video->rgb_raw_frames || !video->rgb_raw_current_frame || !video->cached_frames)
+    {
+        snprintf(error_message, 256, "Out of memory creating MLV frame cache:  %.188s", video->path);
+        return MLV_ERR_OPEN;
+    }
 
     isMlvActive(video) = 1;
-
-    /* Start caching unless it was disabled already */
-    if (!video->stop_caching && (open_mode != MLV_OPEN_PREVIEW))
+    const int cache_was_enabled = !mlvCacheShouldStop(video);
+    if (cache_was_enabled && (open_mode != MLV_OPEN_PREVIEW))
     {
+        mlvCacheSetStop(video, 1);
+        setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
+        mlvCacheSetStop(video, 0);
+        if (!video->cache_memory_block)
+        {
+            snprintf(error_message, 256, "Out of memory applying MLV frame cache policy:  %.178s", video->path);
+            return MLV_ERR_OPEN;
+        }
         for (int i = 0; i < video->cpu_cores; ++i)
         {
             add_mlv_cache_thread(video);

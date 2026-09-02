@@ -22,6 +22,7 @@ SOFTWARE.
 */
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1133,7 +1134,20 @@ int lj92_open(lj92* lj,
     int ret = findSoI(self);
 
     if (ret == LJ92_ERROR_NONE) {
-        u16* rowcache = (u16*)calloc(self->x * self->components * 2, sizeof(u16));
+        if (self->x <= 0 || self->components <= 0
+            || (size_t)self->x > SIZE_MAX / (size_t)self->components) {
+            ret = LJ92_ERROR_NO_MEMORY;
+        }
+    }
+
+    if (ret == LJ92_ERROR_NONE) {
+        const size_t row_elements = (size_t)self->x * (size_t)self->components;
+        if (row_elements > SIZE_MAX / (2u * sizeof(u16))) {
+            ret = LJ92_ERROR_NO_MEMORY;
+        }
+        u16* rowcache = ret == LJ92_ERROR_NONE
+            ? (u16*)calloc(row_elements, 2u * sizeof(u16))
+            : NULL;
         if (rowcache == NULL) ret = LJ92_ERROR_NO_MEMORY;
         else {
             self->rowcache = rowcache;
@@ -1301,9 +1315,10 @@ int frequencyScan(lje* self) {
     // Scan through the tile using the standard type 6 prediction
     // Need to cache the previous 2 row in target coordinates because of tiling
     uint16_t* pixel = self->image;
-    int pixcount = self->width*self->height;
+    int pixcount = self->width * self->height;
     int scan = self->readLength;
-    uint16_t* rowcache = (uint16_t*)calloc(1,self->width*4);
+    uint16_t* rowcache = (uint16_t*)calloc((size_t)self->width * 2u, sizeof(uint16_t));
+    if (rowcache == NULL) return LJ92_ERROR_NO_MEMORY;
     uint16_t* rows[2];
     rows[0] = rowcache;
     rows[1] = &rowcache[self->width];
@@ -1598,9 +1613,10 @@ int writeBody(lje* self) {
     // Scan through the tile using the standard type 6 prediction
     // Need to cache the previous 2 row in target coordinates because of tiling
     uint16_t* pixel = self->image;
-    int pixcount = self->width*self->height;
+    int pixcount = self->width * self->height;
     int scan = self->readLength;
-    uint16_t* rowcache = (uint16_t*)calloc(1,self->width*4);
+    uint16_t* rowcache = (uint16_t*)calloc((size_t)self->width * 2u, sizeof(uint16_t));
+    if (rowcache == NULL) return LJ92_ERROR_NO_MEMORY;
     uint16_t* rows[2];
     rows[0] = rowcache;
     rows[1] = &rowcache[self->width];
@@ -1732,6 +1748,12 @@ int lj92_encode(uint16_t* image, int width, int height, int bitdepth,
                 uint16_t* delinearize,int delinearizeLength,
                 uint8_t** encoded, int* encodedLength) {
     int ret = LJ92_ERROR_NONE;
+    if (!image || !encoded || !encodedLength || width <= 0 || height <= 0
+        || width > (INT_MAX - 200) / 3 / height) {
+        return LJ92_ERROR_CORRUPT;
+    }
+    *encoded = NULL;
+    *encodedLength = 0;
 
     lje* self = (lje*)calloc(sizeof(lje),1);
     if (self==NULL) return LJ92_ERROR_NO_MEMORY;
@@ -1743,7 +1765,7 @@ int lj92_encode(uint16_t* image, int width, int height, int bitdepth,
     self->skipLength = skipLength;
     self->delinearize = delinearize;
     self->delinearizeLength = delinearizeLength;
-    self->encodedLength = width*height*3+200;
+    self->encodedLength = width * height * 3 + 200;
     self->encoded = malloc(self->encodedLength);
     if (self->encoded==NULL) { free(self); return LJ92_ERROR_NO_MEMORY; }
     // Scan through data to gather frequencies of ssss prefixes
@@ -1769,7 +1791,10 @@ int lj92_encode(uint16_t* image, int width, int height, int bitdepth,
 #ifdef DEBUG
     printf("written:%d\n",self->encodedWritten);
 #endif
-    self->encoded = realloc(self->encoded,self->encodedWritten);
+    uint8_t *shrunk = realloc(self->encoded, self->encodedWritten);
+    if (shrunk != NULL) {
+        self->encoded = shrunk;
+    }
     self->encodedLength = self->encodedWritten;
     *encoded = self->encoded;
     *encodedLength = self->encodedLength;

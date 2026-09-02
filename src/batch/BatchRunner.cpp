@@ -412,11 +412,12 @@ int BatchRunner::exportRenderedVideoFile(
     ReceiptApplier::printFingerprint( mlvObject, processingObject );
 
     /* ---- Complete the plan against the clip's real geometry ------------- */
-    const double stretchX =
-        BatchRunner::effectiveStretchFactorX( receipt->stretchFactorX() );
-    const double stretchY =
-        BatchRunner::effectiveStretchFactorY( receipt->stretchFactorY(),
-                                              getMlvAspectRatio( mlvObject ) );
+    double stretchX = STRETCH_H_100;
+    double stretchY = STRETCH_V_100;
+    BatchRunner::effectiveStretchFactors( receipt->stretchFactorX(),
+                                          receipt->stretchFactorY(),
+                                          getMlvAspectRatio( mlvObject ),
+                                          &stretchX, &stretchY );
 
     const BatchRenderedVideoSourceMetadata metadata =
         BatchRunner::renderedVideoSourceMetadataFromClipState(
@@ -1234,11 +1235,12 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
      * CDNGs for binned modes (e.g. 5D3 1080p: binning_x=3/binning_y=1 needs a 3:1
      * stretch). The rendered-video runner needs the identical answer, so both call the
      * one definition in BatchRunner.h rather than each carrying a copy of the bands. */
-    const double stretchX =
-        BatchRunner::effectiveStretchFactorX( receipt->stretchFactorX() );
-    const double stretchY =
-        BatchRunner::effectiveStretchFactorY( receipt->stretchFactorY(),
-                                              getMlvAspectRatio( mlvObject ) );
+    double stretchX = STRETCH_H_100;
+    double stretchY = STRETCH_V_100;
+    BatchRunner::effectiveStretchFactors( receipt->stretchFactorX(),
+                                          receipt->stretchFactorY(),
+                                          getMlvAspectRatio( mlvObject ),
+                                          &stretchX, &stretchY );
 
     /* ---- Resume logic (--resume flag) ----
      * Scan the output subfolder for existing DNG files.  If the clip is

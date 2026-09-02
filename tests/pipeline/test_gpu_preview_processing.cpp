@@ -842,6 +842,70 @@ TEST(GpuPreviewProcessing, GradientIsSupportedAndMatchesCpuReference)
     assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "gradient");
 }
 
+TEST(GpuPreviewProcessing, GradientAndAgXEngineOutputMatchesIndependentPreviewOracle)
+{
+    /* This combination exercises the engine branch that stores the AgX matrix
+     * result into the float gradient layer.  The preview reference is a separate
+     * implementation, so it detects both the historical uint16_t-through-float
+     * pointer bug and future typed-store drift in the production engine. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    (void)assert_gpu_preview_subset_supported(fixture);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    const uint16_t w = static_cast<uint16_t>(fixture.width());
+    const uint16_t h = static_cast<uint16_t>(fixture.height());
+    processingSetGradientEnable(p, 1);
+    processingSetGradientMask(p, w, h, 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h));
+    processingSetGradientExposure(p, 1.0);
+    processingEnableAgX(p);
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyGradient);
+    ASSERT_TRUE(cfg.applyAgx);
+
+    const std::vector<uint16_t> debayered = fixture.renderDebayeredFrame16(0);
+    ASSERT_TRUE(!debayered.empty());
+    std::vector<uint16_t> engine_input = debayered;
+    std::vector<uint16_t> engine(debayered.size(), 0);
+    std::vector<uint16_t> engine_blur(debayered.size(), 0);
+    apply_processing_object(p, fixture.width(), fixture.height(),
+                            engine_input.data(), engine.data(),
+                            engine_blur.data(), p->gradient_mask,
+                            p->vignette_mask, nullptr);
+
+    const std::vector<uint16_t> oracle =
+        render_gpu_preview_subset_cpu_reference(fixture, cfg, 0);
+    ASSERT_EQ(oracle.size(), engine.size());
+
+    const frame_compare_result_t result = compare_frames_u16(
+        oracle.data(), engine.data(), fixture.width(), fixture.height(), 3,
+        /*per_pixel_tolerance=*/2);
+    /* The independently implemented preview path and the engine differ at a
+     * small set of LUT/gamut boundary samples (0.365%, max 3395 LSB on the
+     * frozen fixture).  The historical uint16_t-through-float corruption
+     * disagrees on 99.39% of samples, so these bounds retain a wide separation
+     * from the actual regression while allowing the independently grounded
+     * edge behavior. */
+    const frame_tolerance_verdict_t verdict = evaluate_frame_tolerance(
+        result, engine.size(), /*max_abs_diff_threshold=*/4096,
+        /*max_mismatch_fraction=*/0.005);
+    if (!verdict.passed)
+    {
+        ::minitest::fail(__FILE__, __LINE__,
+                         "gradient + AgX engine vs independent preview oracle",
+                         verdict.detail);
+    }
+
+    test_artifacts::record(
+        "tiny_dual_iso.gradient_agx.engine_vs_preview.compare",
+        frame_compare_summary(result));
+}
+
 TEST(GpuPreviewProcessing, BlurImageBoxParity)
 {
     /* The GPU separable integer box blur is the keystone pre-pass for the spatial

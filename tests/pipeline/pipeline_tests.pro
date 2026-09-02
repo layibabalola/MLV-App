@@ -66,6 +66,7 @@ SOURCES += \
     $$REPO_ROOT/src/processing/tinyexpr/tinyexpr.c \
     $$REPO_ROOT/src/dng/dng.c \
     $$REPO_ROOT/src/dng/dng_reader.c \
+    $$REPO_ROOT/platform/mlv_blender/MLVBlender.c \
     $$REPO_ROOT/src/batch/BatchLogger.cpp \
     $$REPO_ROOT/src/batch/ReceiptLoader.cpp \
     $$REPO_ROOT/src/batch/ReceiptApplier.cpp \

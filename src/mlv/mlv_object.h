@@ -62,6 +62,10 @@ typedef struct {
     pthread_mutex_t * main_file_mutex; /* One for each file */
     pthread_mutex_t g_mutexFind; /* 'g' mutexes should prevent pink frames */
     pthread_mutex_t g_mutexCount;
+    /* Serializes stop -> quiesce -> cache topology mutation -> restart. */
+    pthread_mutex_t g_mutexCacheLifecycle;
+    int cache_lifecycle_users;
+    int cache_closing;
 
     /* For access to MLV headers */
     mlv_file_hdr_t    MLVI;

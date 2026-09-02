@@ -58,13 +58,62 @@ static QString find_tool(const QString & env_name, const QStringList & candidate
 
 static void prepend_to_path(QProcessEnvironment * environment, const QStringList & directories)
 {
-    QStringList parts = environment->value(QStringLiteral("PATH")).split(QDir::listSeparator(), Qt::SkipEmptyParts);
-    for (auto it = directories.crbegin(); it != directories.crend(); ++it) {
-        if (!it->isEmpty() && !parts.contains(*it, Qt::CaseInsensitive)) {
-            parts.prepend(*it);
+#ifdef Q_OS_WIN
+    constexpr Qt::CaseSensitivity path_case_sensitivity = Qt::CaseInsensitive;
+    QStringList parts;
+    for (const QString & directory : directories) {
+        if (!directory.isEmpty() && !parts.contains(directory, path_case_sensitivity)) {
+            parts.append(directory);
         }
     }
+
+    const QString windows_root = qEnvironmentVariable("SystemRoot", QStringLiteral("C:/Windows"));
+    const QStringList system_directories = {
+        QDir(windows_root).filePath(QStringLiteral("System32")),
+        QDir(windows_root).absolutePath()
+    };
+    for (const QString & directory : system_directories) {
+        if (!parts.contains(directory, path_case_sensitivity)) {
+            parts.append(directory);
+        }
+    }
+#else
+    constexpr Qt::CaseSensitivity path_case_sensitivity = Qt::CaseSensitive;
+    QString inherited_path;
+    const QStringList inherited_keys = environment->keys();
+    for (const QString & key : inherited_keys) {
+        if (key == QStringLiteral("PATH")) {
+            if (!inherited_path.isEmpty() && !environment->value(key).isEmpty()) {
+                inherited_path.append(QDir::listSeparator());
+            }
+            inherited_path.append(environment->value(key));
+            environment->remove(key);
+        }
+    }
+
+    QStringList parts = inherited_path.split(QDir::listSeparator(), Qt::SkipEmptyParts);
+    for (const QString & directory : directories) {
+        if (!directory.isEmpty() && !parts.contains(directory, path_case_sensitivity)) {
+            parts.prepend(directory);
+        }
+    }
+#endif
+
+    const QStringList keys = environment->keys();
+    for (const QString & key : keys) {
+#ifdef Q_OS_WIN
+        if (key.compare(QStringLiteral("PATH"), Qt::CaseInsensitive) == 0) {
+#else
+        if (key == QStringLiteral("PATH")) {
+#endif
+            environment->remove(key);
+        }
+    }
+#ifdef Q_OS_WIN
+    environment->insert(QStringLiteral("Path"), parts.join(QDir::listSeparator()));
+#else
     environment->insert(QStringLiteral("PATH"), parts.join(QDir::listSeparator()));
+#endif
 }
 
 static bool run_process(const QString & program,
@@ -143,16 +192,20 @@ static QString build_helper(bool enable_avx)
 
     const QString flavor = enable_avx ? QStringLiteral("on") : QStringLiteral("off");
     const QString build_directory = QDir(root).filePath(QStringLiteral("tests/build-avx-parity/%1").arg(flavor));
-    QDir().mkpath(build_directory);
+    QDir build_directory_handle(build_directory);
+    if (build_directory_handle.exists()) {
+        ASSERT_TRUE(build_directory_handle.removeRecursively());
+    }
+    ASSERT_TRUE(QDir().mkpath(build_directory));
 
     const QString pro_path = QDir(root).filePath(QStringLiteral("tests/console/avx_parity_helper.pro"));
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     prepend_to_path(&environment,
                     {QFileInfo(qmake).absolutePath(), QFileInfo(make_tool).absolutePath()});
+    environment.remove(QStringLiteral("MLVAPP_ENABLE_AVX"));
+    environment.remove(QStringLiteral("MLVAPP_ENABLE_AVX2"));
     if (enable_avx) {
         environment.insert(QStringLiteral("MLVAPP_ENABLE_AVX"), QStringLiteral("1"));
-    } else {
-        environment.remove(QStringLiteral("MLVAPP_ENABLE_AVX"));
     }
 
     QString output;
@@ -163,6 +216,7 @@ static QString build_helper(bool enable_avx)
                                       &output);
     if (!qmake_ok) {
         qCritical().noquote() << "AVX parity qmake failed:" << output;
+        std::cerr << "AVX parity qmake failed: " << output.toStdString() << "\n";
     }
     ASSERT_TRUE(qmake_ok);
     const bool make_ok = run_process(make_tool,
@@ -172,6 +226,7 @@ static QString build_helper(bool enable_avx)
                                      &output);
     if (!make_ok) {
         qCritical().noquote() << "AVX parity helper build failed:" << output;
+        std::cerr << "AVX parity helper build failed: " << output.toStdString() << "\n";
     }
     ASSERT_TRUE(make_ok);
 
@@ -219,6 +274,11 @@ TEST(AvxParity, DefaultAndAvxBuildsProduceMatchingFrameHashes)
 
     QJsonObject default_output = run_helper_and_collect(default_helper);
     QJsonObject avx_output = run_helper_and_collect(avx_helper);
+
+    ASSERT_TRUE(default_output.value(QStringLiteral("build_avx")).isBool());
+    ASSERT_FALSE(default_output.value(QStringLiteral("build_avx")).toBool());
+    ASSERT_TRUE(avx_output.value(QStringLiteral("build_avx")).isBool());
+    ASSERT_TRUE(avx_output.value(QStringLiteral("build_avx")).toBool());
 
     default_output.remove(QStringLiteral("build_avx"));
     avx_output.remove(QStringLiteral("build_avx"));

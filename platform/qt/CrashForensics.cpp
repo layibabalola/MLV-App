@@ -35,6 +35,16 @@
 #include <cstdio>
 #include <cstdlib>
 
+/* The authoritative clean-build path generates this header in OUT_PWD. Use
+ * it for run_metadata as well as the title/build stamp; otherwise a perfectly
+ * stamped artifact can still report build_sha="unknown" when qmake-time git
+ * discovery was unavailable. */
+#if defined(__has_include)
+#  if __has_include("build_buildinfo.h")
+#    include "build_buildinfo.h"
+#  endif
+#endif
+
 #ifdef Q_OS_WIN
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -897,6 +907,10 @@ QString runMetadataJson()
     QJsonArray cmdline;
     for (const QString & arg : g_commandLine) cmdline.append(arg);
     root.insert(QStringLiteral("command_line"), cmdline);
+    root.insert(QStringLiteral("process_id"),
+                static_cast<double>( QCoreApplication::applicationPid() ));
+    root.insert(QStringLiteral("gui_smoke_run_nonce"),
+                qEnvironmentVariable("MLVAPP_GUI_SMOKE_RUN_NONCE"));
 
     root.insert(QStringLiteral("log_file"), g_logFilePath);
     root.insert(QStringLiteral("logs_directory"), g_logsDir);

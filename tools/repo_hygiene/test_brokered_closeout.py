@@ -4076,6 +4076,28 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual((repo / "foreign.txt").read_text(encoding="utf-8"), "foreign stays dirty\n")
         self.assertEqual(git(repo, "diff", "--cached", "--name-only").stdout, "")
 
+    def test_owned_dirty_checkpoint_stages_exact_owned_deletion(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/deletion-checkpoint")
+        deleted_path = repo / "obsolete-receipt.json"
+        deleted_path.write_text('{"state":"superseded"}\n', encoding="utf-8")
+        git(repo, "add", deleted_path.name)
+        git(repo, "commit", "-m", "add superseded receipt")
+        start_work_block(repo, work_block_id="wb-delete", actor="local-test")
+        deleted_path.unlink()
+        git(repo, "add", "-A", "--", deleted_path.name)
+
+        result = checkpoint_owned_work(repo, work_block_id="wb-delete")
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["paths"], [deleted_path.name])
+        self.assertEqual(result["stagedPaths"], [deleted_path.name])
+        self.assertNotEqual(
+            git(repo, "cat-file", "-e", f"HEAD:{deleted_path.name}", check=False).returncode,
+            0,
+        )
+        self.assertEqual(git(repo, "diff", "--cached", "--name-only").stdout, "")
+
     def test_stale_refs_block_finalize_before_mutation(self) -> None:
         repo = self.init_repo()
         self.make_feature(repo, "wb-stale-refs")

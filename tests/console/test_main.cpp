@@ -17,6 +17,40 @@
 #include <map>
 #include <string>
 
+static int run_noisy_pipeline_helper()
+{
+    for (int index = 1; index <= 4000; ++index) {
+        std::cerr << "NOISY-STDERR-" << index << "\n";
+    }
+
+    std::string line;
+    if (!std::getline(std::cin, line)) {
+        return 4;
+    }
+    std::cout << line << "\n";
+    std::cout.flush();
+    return 0;
+}
+
+static int run_pipeline_match_helper()
+{
+    std::string line;
+    if (!std::getline(std::cin, line)) {
+        return 5;
+    }
+    if (line != "PIPELINE-DATA") {
+        std::cerr << "PIPELINE-DATA-MISMATCH:" << line << "\n";
+        return 6;
+    }
+    std::string trailing;
+    if (std::getline(std::cin, trailing)) {
+        std::cerr << "PIPELINE-DATA-UNEXPECTED-TRAILING:" << trailing << "\n";
+        return 7;
+    }
+    std::cerr << "PIPELINE-DATA-VERIFIED\n";
+    return 0;
+}
+
 static bool compare_against_golden(const QString & golden_path, std::string * error_message)
 {
     QFile golden_file(golden_path);
@@ -89,6 +123,16 @@ int main(int argc, char ** argv)
 {
     test_runtime::force_single_threaded_pipeline();
     QCoreApplication app(argc, argv);
+
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]) == "--pipeline-noisy-helper") {
+            return run_noisy_pipeline_helper();
+        }
+        if (std::string(argv[index]) == "--pipeline-match-helper") {
+            return run_pipeline_match_helper();
+        }
+    }
+
     PlaybackSettingsSnapshot playback_settings_snapshot;
 
     std::string hash_output_path;

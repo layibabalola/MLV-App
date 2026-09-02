@@ -1,6 +1,9 @@
 #include "../common/minitest.h"
 #include "../../platform/qt/ExportProcess.h"
 
+#include <QCoreApplication>
+#include <QRegularExpression>
+
 TEST( ExportProcess, RawVideoInvocationPreservesProgramAndArgumentBoundaries )
 {
     const QString program = QStringLiteral("C:/Program Files/ffmpeg & tools/ffmpeg.exe");
@@ -105,28 +108,40 @@ TEST( ExportProcess, PipelineStreamsAcrossTwoProcessesWithoutShellParsing )
 TEST( ExportProcess, PipelineDrainsHighVolumeStderrWithoutStalling )
 {
     QVector<export_process::Invocation> stages;
-#ifdef Q_OS_WIN
     stages << export_process::Invocation{
-                  QStringLiteral("cmd.exe"),
-                  { QStringLiteral("/D"), QStringLiteral("/S"), QStringLiteral("/C"),
-                    QStringLiteral("(for /L %i in (1,1,4000) do @echo NOISY-STDERR-%i 1>&2) & more") } }
-           << export_process::Invocation{ QStringLiteral("findstr.exe"),
-                                          { QStringLiteral("PIPELINE-DATA") } };
-#else
-    stages << export_process::Invocation{
-                  QStringLiteral("/bin/sh"),
-                  { QStringLiteral("-c"),
-                    QStringLiteral("i=0; while [ $i -lt 4000 ]; do echo NOISY-STDERR-$i >&2; i=$((i+1)); done; cat") } }
-           << export_process::Invocation{ QStringLiteral("/bin/grep"),
-                                          { QStringLiteral("PIPELINE-DATA") } };
-#endif
+                  QCoreApplication::applicationFilePath(),
+                  { QStringLiteral("--pipeline-noisy-helper") } }
+           << export_process::Invocation{
+                  QCoreApplication::applicationFilePath(),
+                  { QStringLiteral("--pipeline-match-helper") } };
     export_process::StreamingPipeline pipeline;
     const QByteArray input = QByteArrayLiteral("PIPELINE-DATA\n");
     ASSERT_TRUE( pipeline.start( stages ) );
     ASSERT_TRUE( pipeline.writeAll( input.constData(), input.size(), 10000 ) );
-    ASSERT_TRUE( pipeline.finish( 30000 ) );
-    ASSERT_TRUE( pipeline.diagnostics().contains( QStringLiteral("NOISY-STDERR-") ) );
-    ASSERT_TRUE( pipeline.diagnostics().contains( QStringLiteral("PIPELINE-DATA") ) );
+    const bool finished = pipeline.finish( 30000 );
+    if ( !finished ) {
+        std::cerr << "High-volume stderr pipeline failed: "
+                  << pipeline.diagnostics().toStdString() << "\n";
+    }
+    // The matcher returns zero only after receiving the exact line and EOF, so
+    // finish() proves transfer. The shared diagnostic tail intentionally makes
+    // no cross-process ordering guarantee; assert only its deterministic cap.
+    ASSERT_TRUE( finished );
+    const QString diagnostic_text = pipeline.diagnostics();
+    const QByteArray diagnostic_bytes = diagnostic_text.toUtf8();
+    ASSERT_TRUE( diagnostic_bytes.size() <= 8192 );
+
+    bool saw_first_noise = false;
+    bool saw_last_noise = false;
+    const QStringList diagnostic_lines = diagnostic_text.split(
+        QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts );
+    for ( const QString &line : diagnostic_lines ) {
+        const QString trimmed = line.trimmed();
+        saw_first_noise = saw_first_noise || trimmed == QStringLiteral("NOISY-STDERR-1");
+        saw_last_noise = saw_last_noise || trimmed == QStringLiteral("NOISY-STDERR-4000");
+    }
+    ASSERT_FALSE( saw_first_noise );
+    ASSERT_TRUE( saw_last_noise );
 }
 
 TEST( ExportProcess, PipelineMidStreamChildDeathIsFailureWithDiagnostics )

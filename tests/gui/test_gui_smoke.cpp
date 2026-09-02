@@ -728,6 +728,31 @@ void GuiSmokeTest::mainWindowMlvAspectKeepsNeutralReceiptFromSuppressingDesqueez
     QCOMPARE(mainWindowVerticalStretchIndexForMlvAspectRatio(0.3333), 3);
     QCOMPARE(mainWindowVerticalStretchIndexForMlvAspectRatio(0.0), 0);
 
+    const RawAspectStretchSelection horizontal125 =
+        rawAspectStretchSelectionForRatio(0.8);
+    QVERIFY(horizontal125.valid);
+    QCOMPARE(horizontal125.horizontalIndex, 1);
+    QCOMPARE(horizontal125.verticalIndex, 0);
+    const RawAspectStretchSelection combined =
+        rawAspectStretchSelectionForRatio(4.0 / 3.0);
+    QVERIFY(combined.valid);
+    QCOMPARE(combined.horizontalIndex, 1);
+    QCOMPARE(combined.verticalIndex, 1);
+
+    const RawAspectRenderedDimensions v033Combined =
+        rawAspectRenderedDimensions(100, 100, STRETCH_H_125, STRETCH_V_033, 65535);
+    QVERIFY(v033Combined.valid);
+    QCOMPARE(v033Combined.width, 375);
+    QCOMPARE(v033Combined.height, 100);
+    const RawAspectRenderedDimensions fractional =
+        rawAspectRenderedDimensions(3, 3, STRETCH_H_125, STRETCH_V_100, 65535);
+    QVERIFY(fractional.valid);
+    QCOMPARE(fractional.width, 3);
+    QCOMPARE(fractional.height, 3);
+    QVERIFY(!rawAspectRenderedDimensions(65535, 100,
+                                         STRETCH_H_125, STRETCH_V_033,
+                                         65535).valid);
+
     QVERIFY(mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.0, 1.0, 0.3333));
     QVERIFY(mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.0, 1.0, 3.0));
     QVERIFY(!mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.0, 1.0, 1.0));

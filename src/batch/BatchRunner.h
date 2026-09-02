@@ -3,6 +3,7 @@
 
 #include <QString>
 #include "BatchTypes.h"
+#include "RawAspectStretchPolicy.h"
 
 #include <cstdint>
 
@@ -65,8 +66,8 @@ public:
      * clip's binning/skipping aspect, and a headless export that skips the same step
      * emits squeezed output for binned modes (5D3 1080p is binning_x=3/binning_y=1 ->
      * needs a 3:1 stretch). Both the CDNG runner and the rendered-video runner need the
-     * identical answer, so it lives here ONCE rather than being written twice; the bands
-     * are the same ones setSliders uses. Header-inline so console tests can pin it
+     * identical answer, so the exact horizontal/vertical pair lives in the shared
+     * RawAspectStretchPolicy rather than being written twice. Header-inline so tests can pin it
      * without linking the GUI-dependent BatchRunner.cpp.
      *
      * clipAspectRatio is getMlvAspectRatio() (sampling_y/sampling_x); 0 means the clip
@@ -88,6 +89,33 @@ public:
         if( aspectV > 1.6f && aspectV < 1.7f )      return STRETCH_V_167;
         if( aspectV > 2.9f && aspectV < 3.1f )      return STRETCH_V_300;
         return STRETCH_V_033;
+    }
+
+    static void effectiveStretchFactors( double receiptStretchX,
+                                         double receiptStretchY,
+                                         float clipAspectRatio,
+                                         double * stretchX,
+                                         double * stretchY )
+    {
+        if( !stretchX || !stretchY ) return;
+        const double aspect = clipAspectRatio == 0.0f ? 1.0
+                                                       : clipAspectRatio;
+        const RawAspectStretchSelection selection =
+            rawAspectStretchSelectionForRatio( aspect );
+        constexpr double neutralTolerance = 0.0001;
+        const bool neutralReceipt = receiptStretchX > 0.0
+            && receiptStretchY > 0.0
+            && std::fabs( receiptStretchX - 1.0 ) <= neutralTolerance
+            && std::fabs( receiptStretchY - 1.0 ) <= neutralTolerance;
+        if( selection.valid && ( receiptStretchY <= 0.0 || neutralReceipt ) )
+        {
+            *stretchX = selection.horizontalFactor;
+            *stretchY = selection.verticalFactor;
+            return;
+        }
+        *stretchX = effectiveStretchFactorX( receiptStretchX );
+        *stretchY = effectiveStretchFactorY( receiptStretchY,
+                                              clipAspectRatio );
     }
 
     static BatchRenderedVideoSourceMetadata renderedVideoSourceMetadataFromClipState(

@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 #include <pthread.h>
 #include <time.h>
 
@@ -37,6 +38,7 @@
 #include "dng_tag_types.h"
 #include "dng_tag_values.h"
 #include "../mlv/camid/camera_id.h"
+#include "../mlv/video_mlv.h"
 
 #include "../mlv/liblj92/lj92.h"
 #include "../mlv/llrawproc/llrawproc.h"
@@ -59,8 +61,6 @@
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define COERCE(x,lo,hi) MAX(MIN((x),(hi)),(lo))
 #define ABS(a) ((a) > 0 ? (a) : -(a))
-#define ROR32(v,a) ((v) >> (a) | (v) << (32-(a)))
-#define ROL32(v,a) ((v) << (a) | (v) >> (32-(a)))
 #define ROR16(v,a) ((v) >> (a) | (v) << (16-(a)))
 #define ROL16(v,a) ((v) << (a) | (v) >> (16-(a)))
 #define log2(x) log((float)(x))/log(2.)
@@ -1616,7 +1616,6 @@ struct directory_entry {
 enum
 {
     tcTimeCodes             = 51043,
-    tcFrameRate             = 51044,
     tcTStop                 = 51058,
     tcReelName              = 51081,
     tcCameraLabel           = 51105,
@@ -1630,7 +1629,7 @@ static uint32_t add_array(int32_t * array, uint8_t * buffer, uint32_t * data_off
     return result;
 }
 
-static uint32_t add_string(char * str, uint8_t * buffer, uint32_t * data_offset)
+static uint32_t add_string(const char * str, uint8_t * buffer, uint32_t * data_offset)
 {
     uint32_t result = 0;
     size_t length = strlen(str) + 1;
@@ -1716,37 +1715,92 @@ static void add_ifd(struct directory_entry * ifd, uint8_t * header, size_t * pos
     *position += sizeof(uint32_t);
 }
 
-static char * format_datetime(char * datetime, mlvObject_t * mlv_data)
+static char * format_datetime(char * datetime,
+                              size_t datetime_capacity,
+                              mlvObject_t * mlv_data,
+                              uint32_t frame_index)
 {
-    uint32_t seconds = mlv_data->RTCI.tm_sec + (uint32_t)((mlv_data->VIDF.timestamp - mlv_data->RTCI.timestamp) / 1000000);
-    uint32_t minutes = mlv_data->RTCI.tm_min + seconds / 60;
-    uint32_t hours = mlv_data->RTCI.tm_hour + minutes / 60;
-    uint32_t days = mlv_data->RTCI.tm_mday + hours / 24;
+    /* VIDF is mutable decode scratch and cache workers can advance it while a
+     * different frame is exported.  Bind DateTime to the indexed target frame
+     * instead, which is immutable after clip indexing. */
+    const uint64_t frame_timestamp = mlv_data->video_index[frame_index].frame_time;
+    /* MCRAW currently indexes milliseconds and CinemaDNG folders use a
+     * synthetic ordinal. Their historical DateTime behavior is clip-local
+     * RTCI with no frame offset, so preserve it until those formats expose a
+     * canonical microsecond timestamp. */
+    const int source_has_mlv_microsecond_timestamps =
+        (mlv_data->MLVI.videoClass & (MLV_VIDEO_CLASS_FLAG_MCRAW
+                                      | MLV_VIDEO_CLASS_FLAG_DNGSEQ)) == 0;
+    const uint64_t elapsed_seconds = source_has_mlv_microsecond_timestamps
+        && frame_timestamp >= mlv_data->RTCI.timestamp
+            ? (frame_timestamp - mlv_data->RTCI.timestamp) / 1000000u
+            : 0u;
+    const uint64_t seconds = (uint64_t)mlv_data->RTCI.tm_sec + elapsed_seconds;
+    const uint64_t minutes = (uint64_t)mlv_data->RTCI.tm_min + seconds / 60u;
+    const uint64_t hours = (uint64_t)mlv_data->RTCI.tm_hour + minutes / 60u;
+    const uint64_t days = (uint64_t)mlv_data->RTCI.tm_mday + hours / 24u;
     //TODO: days could also overflow in the month, but this is no longer simple modulo arithmetic like with hr:min:sec
-    sprintf(datetime, "%04d:%02d:%02d %02d:%02d:%02d",
-            1900 + mlv_data->RTCI.tm_year,
-            mlv_data->RTCI.tm_mon + 1,
-            days,
-            hours % 24,
-            minutes % 60,
-            seconds % 60);
+    snprintf(datetime,
+             datetime_capacity,
+             "%04d:%02d:%02llu %02llu:%02llu:%02llu",
+             1900 + mlv_data->RTCI.tm_year,
+             mlv_data->RTCI.tm_mon + 1,
+             (unsigned long long)days,
+             (unsigned long long)(hours % 24u),
+             (unsigned long long)(minutes % 60u),
+             (unsigned long long)(seconds % 60u));
     return datetime;
+}
+
+int dngFormatDateTimeForFrameForTesting(mlvObject_t * mlv_data,
+                                        uint32_t frame_index,
+                                        char * datetime,
+                                        size_t datetime_capacity)
+{
+    if(!mlv_data || !mlv_data->video_index || !datetime
+       || datetime_capacity == 0 || frame_index >= mlv_data->frames) {
+        return 0;
+    }
+
+    format_datetime(datetime, datetime_capacity, mlv_data, frame_index);
+    return 1;
 }
 
 /* returns the size of uncompressed image data. does not include header */
 static size_t dng_get_image_size(mlvObject_t * mlv_data, int size_mode, uint64_t frame_index)
 {
+    if(!mlv_data) return 0;
     switch(size_mode)
     {
         case IMG_SIZE_PACKED:
-            return (size_t)(mlv_data->RAWI.xRes * mlv_data->RAWI.yRes * mlv_data->RAWI.raw_info.bits_per_pixel / 8);
+        {
+            const uint32_t bpp = mlv_data->RAWI.raw_info.bits_per_pixel;
+            if(mlv_data->RAWI.xRes == 0 || mlv_data->RAWI.yRes == 0
+               || bpp == 0 || bpp > 16
+               || (size_t)mlv_data->RAWI.xRes > SIZE_MAX / (size_t)mlv_data->RAWI.yRes)
+                return 0;
+            const size_t pixels = (size_t)mlv_data->RAWI.xRes * (size_t)mlv_data->RAWI.yRes;
+            if(pixels > SIZE_MAX / (size_t)bpp) return 0;
+            const size_t bits = pixels * (size_t)bpp;
+            /* The legacy pack/unpack API exposes uint16_t words rather than a
+             * byte capacity. Refuse a partial final word so every caller and
+             * the bit helpers agree on the exact writable extent. */
+            return (bits & 15u) == 0 ? bits / 8u : 0;
+        }
             break;
         case IMG_SIZE_LOSLESS:
             return mlv_data->video_index[frame_index].frame_size;
             break;
         case IMG_SIZE_UNPACKED:
         default:
-            return mlv_data->RAWI.xRes * mlv_data->RAWI.yRes * 2;
+            if(mlv_data->RAWI.xRes == 0 || mlv_data->RAWI.yRes == 0
+               || (size_t)mlv_data->RAWI.xRes > SIZE_MAX / (size_t)mlv_data->RAWI.yRes)
+                return 0;
+            {
+                const size_t pixels = (size_t)mlv_data->RAWI.xRes * (size_t)mlv_data->RAWI.yRes;
+                return pixels <= SIZE_MAX / sizeof(uint16_t)
+                    ? pixels * sizeof(uint16_t) : 0;
+            }
             break;
     }
 }
@@ -1855,7 +1909,7 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
         memcpy(serial, mlv_data->IDNT.cameraSerial, 32);
         
         /* 'Unique Camera Model' Tag */
-        char * unique_model = camid->cameraName[UNIQ];
+        const char * unique_model = camid->cameraName[UNIQ];
 
         char unique_model2[64] = "";
         if (loadDngPropertiesString(props_buffer, "UniqueCameraModel", unique_model2, 64) > 0) {
@@ -1981,6 +2035,48 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
                               dng_data->overrides.baseline_exposure);
         }
 
+        int32_t dng_active_area[4] = {
+            mlv_data->RAWI.raw_info.dng_active_area[0],
+            mlv_data->RAWI.raw_info.dng_active_area[1],
+            mlv_data->RAWI.raw_info.dng_active_area[2],
+            mlv_data->RAWI.raw_info.dng_active_area[3]
+        };
+        if(dng_active_area[0] < 0 || dng_active_area[1] < 0
+           || dng_active_area[2] <= dng_active_area[0]
+           || dng_active_area[3] <= dng_active_area[1]
+           || (uint32_t)dng_active_area[2] > mlv_data->RAWI.yRes
+           || (uint32_t)dng_active_area[3] > mlv_data->RAWI.xRes)
+        {
+            dng_active_area[0] = 0;
+            dng_active_area[1] = 0;
+            dng_active_area[2] = mlv_data->RAWI.yRes;
+            dng_active_area[3] = mlv_data->RAWI.xRes;
+        }
+        const int32_t active_width = dng_active_area[3] - dng_active_area[1];
+        const int32_t active_height = dng_active_area[2] - dng_active_area[0];
+        int32_t default_crop_origin[2] = {
+            mlv_data->RAWI.raw_info.crop.origin[0],
+            mlv_data->RAWI.raw_info.crop.origin[1]
+        };
+        int32_t default_crop_size[2] = {
+            mlv_data->RAWI.raw_info.crop.size[0],
+            mlv_data->RAWI.raw_info.crop.size[1]
+        };
+        if(default_crop_origin[0] < 0 || default_crop_origin[1] < 0
+           || default_crop_size[0] <= 0 || default_crop_size[1] <= 0
+           || default_crop_origin[0] > UINT16_MAX
+           || default_crop_origin[1] > UINT16_MAX
+           || default_crop_size[0] > UINT16_MAX
+           || default_crop_size[1] > UINT16_MAX
+           || (int64_t)default_crop_origin[0] + default_crop_size[0] > active_width
+           || (int64_t)default_crop_origin[1] + default_crop_size[1] > active_height)
+        {
+            default_crop_origin[0] = 0;
+            default_crop_origin[1] = 0;
+            default_crop_size[0] = active_width;
+            default_crop_size[1] = active_height;
+        }
+
         /* Time code stuff */
         //number of frames since midnight
         int tc_frame = (int)mlv_data->video_index[frame_index].frame_number;// + (uint64_t)((mlv_data->RTCI.tm_hour * 3600 + mlv_data->RTCI.tm_min * 60 + mlv_data->RTCI.tm_sec) * mlv_data->MLVI.sourceFpsNom) / (uint64_t)mlv_data->MLVI.sourceFpsDenom;
@@ -2036,7 +2132,7 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             {tcStripByteCounts,             ttLong,     1,      dng_data->image_size},
             {tcPlanarConfiguration,         ttShort,    1,      pcInterleaved},
             {tcSoftware,                    ttAscii,    STRING_ENTRY(SOFTWARE_NAME, header, &data_offset)},
-            {tcDateTime,                    ttAscii,    STRING_ENTRY(format_datetime(datetime, mlv_data), header, &data_offset)},
+            {tcDateTime,                    ttAscii,    STRING_ENTRY(format_datetime(datetime, sizeof(datetime), mlv_data, frame_index), header, &data_offset)},
             {tcCFARepeatPatternDim,         ttShort,    2,      0x00020002}, //2x2
             {tcCFAPattern,                  ttByte,     4,      cfa_pattern},
             {tcExifIFD,                     ttLong,     1,      exif_ifd_offset},
@@ -2045,8 +2141,8 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             {tcBlackLevel,                  ttLong,     1,      black_level},
             {tcWhiteLevel,                  ttLong,     1,      white_level},
             {tcDefaultScale,                ttRational, RATIONAL_ENTRY(par, header, &data_offset, 4)},
-            {tcDefaultCropOrigin,           ttShort,    2,      PACK(mlv_data->RAWI.raw_info.crop.origin)},
-            {tcDefaultCropSize,             ttShort,    2,      PACK2((mlv_data->RAWI.raw_info.active_area.x2 - mlv_data->RAWI.raw_info.active_area.x1), (mlv_data->RAWI.raw_info.active_area.y2 - mlv_data->RAWI.raw_info.active_area.y1))},
+            {tcDefaultCropOrigin,           ttShort,    2,      PACK(default_crop_origin)},
+            {tcDefaultCropSize,             ttShort,    2,      PACK(default_crop_size)},
             {tcColorMatrix1,                ttSRational,RATIONAL_ENTRY(camid->ColorMatrix1, header, &data_offset, 18)},
             {tcColorMatrix2,                ttSRational,RATIONAL_ENTRY(camid->ColorMatrix2, header, &data_offset, 18)},
             {tcAsShotNeutral,               ttRational, RATIONAL_ENTRY(wbal, header, &data_offset, 6)},
@@ -2054,7 +2150,7 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             {tcCameraSerialNumber,          ttAscii,    STRING_ENTRY(serial, header, &data_offset)},
             {tcCalibrationIlluminant1,      ttShort,    1,      lsStandardLightA},
             {tcCalibrationIlluminant2,      ttShort,    1,      lsD65},
-            {tcActiveArea,                  ttLong,     ARRAY_ENTRY(mlv_data->RAWI.raw_info.dng_active_area, header, &data_offset, 4)},
+            {tcActiveArea,                  ttLong,     ARRAY_ENTRY(dng_active_area, header, &data_offset, 4)},
             {tcForwardMatrix1,              ttSRational,RATIONAL_ENTRY(camid->ForwardMatrix1, header, &data_offset, 18)},
             {tcForwardMatrix2,              ttSRational,RATIONAL_ENTRY(camid->ForwardMatrix2, header, &data_offset, 18)},
             {tcTimeCodes,                   ttByte,     8,      add_timecode(frame_rate_f, tc_frame, header, &data_offset)},
@@ -2103,25 +2199,39 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
 */
 void dng_unpack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, int width, int height, uint32_t bpp)
 {
-    uint32_t pixel_count = width * height;
-    uint32_t mask = (1 << bpp) - 1;
+    if (!output_buffer || !input_buffer || width <= 0 || height <= 0 || bpp == 0 || bpp > 16
+        || (size_t)width > SIZE_MAX / (size_t)height) {
+        return;
+    }
+    const size_t pixel_count = (size_t)width * (size_t)height;
+    if (pixel_count > SIZE_MAX / (size_t)bpp) {
+        return;
+    }
+    const size_t packed_words = (pixel_count * (size_t)bpp + 15u) / 16u;
+    uint32_t mask = bpp == 16u ? UINT16_MAX : ((UINT32_C(1) << bpp) - 1u);
     uint16_t *packed_bits = input_buffer;
     uint16_t *unpacked_bits = output_buffer;
 
     #pragma omp parallel for
-    for (uint32_t pixel_index = 0; pixel_index < pixel_count; pixel_index++)
+    for (size_t pixel_index = 0; pixel_index < pixel_count; pixel_index++)
     {
-        uint32_t bits_offset = pixel_index * bpp;
-        uint32_t bits_address = bits_offset / 16;
-        uint32_t bits_shift = bits_offset % 16;
+        const size_t bits_offset = pixel_index * (size_t)bpp;
+        const size_t bits_address = bits_offset / 16u;
+        const uint32_t bits_shift = (uint32_t)(bits_offset % 16u);
 
-        /* fetch two 16 bit words into a 32 bit register and correct it plus shift it as needed.
-        after the 32 bit fetch, the two 16 bit words will be swapped, so use a ROR to align them correctly.
-        ROR by 16 to swap 16 bit words plus the bits needed to put the needed pixel bits to right position */
-        uint32_t rotate_value = 16 + ((32 - bpp) - bits_shift);
-        uint32_t uncorrected_data = *((uint32_t *)&packed_bits[bits_address]);
-        uint32_t data = ROR32(uncorrected_data, rotate_value);
-
+        const uint32_t first_bits = 16u - bits_shift;
+        uint32_t data;
+        if (first_bits >= bpp) {
+            data = (uint32_t)packed_bits[bits_address] >> (first_bits - bpp);
+        } else {
+            const uint32_t remaining_bits = bpp - first_bits;
+            const uint32_t low_part = (uint32_t)packed_bits[bits_address]
+                & ((UINT32_C(1) << first_bits) - 1u);
+            const uint32_t high_part = bits_address + 1u < packed_words
+                ? (uint32_t)packed_bits[bits_address + 1u] >> (16u - remaining_bits)
+                : 0u;
+            data = (low_part << remaining_bits) | high_part;
+        }
         unpacked_bits[pixel_index] = (uint16_t)(data & mask);
     }
 }
@@ -2135,63 +2245,139 @@ void dng_unpack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, in
 */
 void dng_pack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, int width, int height, uint32_t bpp, int big_endian)
 {
-    uint32_t pixel_count = width * height;
-    uint32_t bits_free = 16 - bpp;
+    if (!output_buffer || !input_buffer || width <= 0 || height <= 0 || bpp == 0 || bpp > 16
+        || (size_t)width > SIZE_MAX / (size_t)height) {
+        return;
+    }
+    const size_t pixel_count = (size_t)width * (size_t)height;
+    if (pixel_count > SIZE_MAX / (size_t)bpp) {
+        return;
+    }
+    const size_t total_bits = pixel_count * (size_t)bpp;
+    /* All production callers retain 16-bit-word packed payloads. Refuse an
+     * odd trailing byte because this legacy pointer-only API has no capacity
+     * parameter with which to prove that a final full word is writable. */
+    if ((total_bits & 15u) != 0) {
+        return;
+    }
+    const size_t packed_words = (total_bits + 15u) / 16u;
+    const uint32_t mask = bpp == 16u ? UINT16_MAX : ((UINT32_C(1) << bpp) - 1u);
     uint16_t *unpacked_bits = input_buffer;
     uint16_t *packed_bits = output_buffer;
 
-    packed_bits[0] = unpacked_bits[0] << bits_free;
-    for (uint32_t pixel_index = 1; pixel_index < pixel_count; pixel_index++)
+    memset(packed_bits, 0, packed_words * sizeof(*packed_bits));
+    for (size_t pixel_index = 0; pixel_index < pixel_count; pixel_index++)
     {
-        uint32_t bits_offset = (pixel_index * bits_free) % 16;
-        uint32_t bits_to_rol = bits_free + bits_offset + (bits_offset > 0) * 16;
+        const size_t bits_offset = pixel_index * (size_t)bpp;
+        const size_t bits_address = bits_offset / 16u;
+        const uint32_t bits_shift = (uint32_t)(bits_offset % 16u);
+        const uint32_t first_bits = 16u - bits_shift;
+        const uint32_t data = (uint32_t)unpacked_bits[pixel_index] & mask;
 
-        /* increment pointer by two bytes but fetch 32 bit words from input and outbut buffers.
-        after the 32 bit fetch, the two 16 bit words will be swapped, so use a ROL by 16 to swap
-        16 bit words plus shift to the left to put the needed pixel bits to right position.
-        mask/zero high 16 bits of 32 bit word of packed buffer and do logical OR to ROLed unpacked one.
-        make current packed 16 bit word big endian to satisfy DNG spec */
-        uint32_t data = ROL32((uint32_t)unpacked_bits[pixel_index], bits_to_rol);
-        *(uint32_t *)packed_bits = (*(uint32_t *)packed_bits & 0x0000FFFF) | data;
+        if (first_bits >= bpp) {
+            packed_bits[bits_address] = (uint16_t)(packed_bits[bits_address]
+                | (uint16_t)(data << (first_bits - bpp)));
+        } else {
+            const uint32_t remaining_bits = bpp - first_bits;
+            packed_bits[bits_address] = (uint16_t)(packed_bits[bits_address]
+                | (uint16_t)(data >> remaining_bits));
+            if (bits_address + 1u < packed_words) {
+                packed_bits[bits_address + 1u] = (uint16_t)(packed_bits[bits_address + 1u]
+                    | (uint16_t)(data << (16u - remaining_bits)));
+            }
+        }
+    }
 
-        if(bits_offset > 0 && bits_offset <= bpp)
-        {
-            if(big_endian) *(uint16_t *)packed_bits = ROL16(*(uint16_t *)packed_bits, 8);
-            packed_bits++;
+    if (big_endian) {
+        for (size_t word_index = 0; word_index < packed_words; ++word_index) {
+            packed_bits[word_index] = ROL16(packed_bits[word_index], 8);
         }
     }
 }
 
 /* decompress LJ92 image to output_buffer */
-int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t input_buffer_size, int width, int height, uint32_t bpp)
+int dng_decompress_image(uint16_t * output_buffer, size_t output_buffer_capacity, uint16_t * input_buffer, size_t input_buffer_size, int width, int height, uint32_t bpp)
 {
+    if (!output_buffer || !input_buffer || input_buffer_size == 0 || input_buffer_size > (size_t)INT_MAX
+        || width <= 0 || height <= 0
+        || (size_t)width > SIZE_MAX / (size_t)height
+        || (size_t)width * (size_t)height > SIZE_MAX / sizeof(uint16_t)) {
+        return LJ92_ERROR_CORRUPT;
+    }
+    const size_t expected_pixels = (size_t)width * (size_t)height;
+    const size_t expected_bytes = expected_pixels * sizeof(uint16_t);
+    if (output_buffer_capacity < expected_bytes || bpp == 0 || bpp > 16) {
+        return LJ92_ERROR_CORRUPT;
+    }
     int components = 1;
+    int decoded_bpp = 0;
     lj92 decoder_object;
 
-    int ret = lj92_open(&decoder_object, (uint8_t*)input_buffer, input_buffer_size, &width, &height, (int*)&bpp, &components);
+    const uint32_t expected_bpp = bpp;
+    int ret = lj92_open(&decoder_object, (uint8_t*)input_buffer, input_buffer_size, &width, &height, &decoded_bpp, &components);
     if(ret != LJ92_ERROR_NONE)
     {
 #ifndef STDOUT_SILENT
         printf("LJ92 decoder: Failed with error code (%d)\n", ret);
 #endif
-        memset(output_buffer, 0, width * height * sizeof(uint16_t));
+        memset(output_buffer, 0, expected_bytes);
         return ret;
     }
 
-    ret = lj92_decode(decoder_object, output_buffer, width * height * components, 0, NULL, 0);
+    size_t decoded_pixels = 0;
+    if (width <= 0 || height <= 0 || components <= 0
+        || (size_t)width > SIZE_MAX / (size_t)height
+        || (size_t)width * (size_t)height > SIZE_MAX / (size_t)components) {
+        ret = LJ92_ERROR_CORRUPT;
+    } else {
+        decoded_pixels = (size_t)width * (size_t)height * (size_t)components;
+    }
+    /* Native output is one component. Retain compatibility with valid
+     * two-component lossless JPEGs only when their decoded sample total and
+     * bit depth match the caller's retained RAW geometry exactly. */
+    if (ret == LJ92_ERROR_NONE
+        && ((components != 1 && components != 2) || decoded_bpp != (int)expected_bpp
+            || decoded_pixels != expected_pixels || expected_pixels > (size_t)INT_MAX)) {
+        ret = LJ92_ERROR_CORRUPT;
+    }
+    if (ret == LJ92_ERROR_NONE) {
+        ret = lj92_decode(decoder_object, output_buffer, (int)expected_pixels, 0, NULL, 0);
+    }
     if(ret != LJ92_ERROR_NONE)
     {
 #ifndef STDOUT_SILENT
         printf("LJ92 decoder: Failed with error code (%d)\n", ret);
 #endif
-        memset(output_buffer, 0, width * height * sizeof(uint16_t));
+        memset(output_buffer, 0, expected_bytes);
     }
 
     lj92_close(decoder_object);
     return ret;
 }
 
+int dng_lj92_output_capacity(int width, int height, size_t * output_capacity)
+{
+    if (!output_capacity || width <= 0 || height <= 1 || (height & 1) != 0
+        || width > UINT16_MAX / 2 || height / 2 > UINT16_MAX
+        || (size_t)width > SIZE_MAX / (size_t)height) {
+        return 0;
+    }
+    const size_t input_pixels = (size_t)width * (size_t)height;
+    if (input_pixels > (SIZE_MAX - 200u) / 3u) {
+        return 0;
+    }
+    const int encoded_width = width * 2;
+    const int encoded_height = height / 2;
+    if (encoded_height <= 0 || encoded_width > INT_MAX / encoded_height
+        || encoded_width * encoded_height > (INT_MAX - 200) / 3) {
+        return 0;
+    }
+    *output_capacity = input_pixels * 3u + 200u;
+    return 1;
+}
+
 static int dng_compress_image_profiled(uint16_t * output_buffer,
+                                       size_t output_buffer_capacity,
                                        uint16_t * input_buffer,
                                        size_t * output_buffer_size,
                                        int width,
@@ -2199,28 +2385,53 @@ static int dng_compress_image_profiled(uint16_t * output_buffer,
                                        uint32_t bpp,
                                        exportProfileFrame_t * profile_frame)
 {
+    if (!output_buffer || !input_buffer || !output_buffer_size
+        || width <= 0 || height <= 0 || bpp == 0 || bpp > 16 || width > INT_MAX / 2
+        || (size_t)width > SIZE_MAX / (size_t)height
+        || (size_t)width * (size_t)height > SIZE_MAX / sizeof(uint16_t)) {
+        if (output_buffer_size) *output_buffer_size = 0;
+        return LJ92_ERROR_CORRUPT;
+    }
+    size_t maximum_encoded_size = 0;
+    if (!dng_lj92_output_capacity(width, height, &maximum_encoded_size)
+        || output_buffer_capacity == 0) {
+        *output_buffer_size = 0;
+        return LJ92_ERROR_CORRUPT;
+    }
     uint8_t * compressed = NULL;
     int new_width = width * 2;
     int new_height = height / 2;
 
     double profile_stage_start = export_profile_stage_begin(profile_frame);
-    int ret = lj92_encode(input_buffer, new_width, new_height, (int)bpp, new_width * new_height, 0, NULL, 0, &compressed, (int*)output_buffer_size);
+    if (new_height <= 0 || new_width > INT_MAX / new_height) {
+        return LJ92_ERROR_CORRUPT;
+    }
+    int encoded_length = 0;
+    int ret = lj92_encode(input_buffer, new_width, new_height, (int)bpp,
+                          new_width * new_height, 0, NULL, 0,
+                          &compressed, &encoded_length);
+    if (ret == LJ92_ERROR_NONE
+        && (!compressed || encoded_length < 0
+            || (size_t)encoded_length > maximum_encoded_size
+            || (size_t)encoded_length > output_buffer_capacity)) {
+        ret = LJ92_ERROR_CORRUPT;
+    }
     export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS_ENCODE, profile_stage_start);
 
     if(ret == LJ92_ERROR_NONE)
     {
+        *output_buffer_size = (size_t)encoded_length;
         profile_stage_start = export_profile_stage_begin(profile_frame);
         memcpy(output_buffer, compressed, *output_buffer_size);
         export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS_COPY, profile_stage_start);
 #ifndef STDOUT_SILENT
-        size_t input_buffer_size = width * height * 2;
+        size_t input_buffer_size = (size_t)width * (size_t)height * sizeof(uint16_t);
         printf("LJ92 encoder: "FMT_SIZE" -> "FMT_SIZE" (%2.2f%% ratio)\n", *output_buffer_size, input_buffer_size, ((float)*output_buffer_size * 100.0f) / (float)input_buffer_size);
 #endif
     }
     else
     {
-        *output_buffer_size = width * height * sizeof(uint16_t);
-        memset(output_buffer, 0, *output_buffer_size);
+        *output_buffer_size = 0;
 #ifndef STDOUT_SILENT
         printf("LJ92 encoder: failed with error code (%d)\n", ret);
 #endif
@@ -2237,9 +2448,10 @@ static int dng_compress_image_profiled(uint16_t * output_buffer,
 }
 
 /* compress input_buffer to LJ92 image */
-int dng_compress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t * output_buffer_size, int width, int height, uint32_t bpp)
+int dng_compress_image(uint16_t * output_buffer, size_t output_buffer_capacity, uint16_t * input_buffer, size_t * output_buffer_size, int width, int height, uint32_t bpp)
 {
     return dng_compress_image_profiled(output_buffer,
+                                      output_buffer_capacity,
                                       input_buffer,
                                       output_buffer_size,
                                       width,
@@ -2272,6 +2484,25 @@ static void dng_reset_deferred_payload_compress(dngObject_t * dng_data)
     dng_data->payload_compress_height = 0;
     dng_data->payload_compress_bpp = 0;
     dng_data->payload_compress_input_bytes = 0;
+}
+
+static int dng_frame_request_is_valid(const mlvObject_t * mlv_data,
+                                      const dngObject_t * dng_data,
+                                      uint32_t frame_index)
+{
+    if(!mlv_data || !dng_data || !mlv_data->video_index
+       || frame_index >= mlv_data->frames) {
+        return 0;
+    }
+    if(isDngFolderLoaded(mlv_data)) return 1;
+    if(!mlv_data->file) return 0;
+
+    const uint16_t chunk_num = mlv_data->video_index[frame_index].chunk_num;
+    if(isMcrawLoaded(mlv_data)) {
+        return chunk_num == 0 && mlv_data->file[0];
+    }
+    return mlv_data->filenum > 0 && (int)chunk_num < mlv_data->filenum
+        && mlv_data->file[chunk_num];
 }
 
 static int dng_defer_compress_to_payload(dngObject_t * dng_data,
@@ -2314,6 +2545,7 @@ static int dng_prepare_compressed_frame(mlvObject_t * mlv_data,
 
     double profile_stage_start = export_profile_stage_begin(profile_frame);
     const int ret = dng_compress_image_profiled(dng_data->image_buf,
+                                                dng_data->image_capacity,
                                                 dng_data->image_buf_unpacked,
                                                 &dng_data->image_size,
                                                 mlv_data->RAWI.xRes,
@@ -2339,18 +2571,79 @@ static int dng_get_frame(mlvObject_t * mlv_data,
                          exportProfileFrame_t * profile_frame,
                          int defer_compress_to_payload)
 {
+    if(!dng_frame_request_is_valid(mlv_data, dng_data, frame_index)) return 1;
+
     int ret = 0;
     double profile_stage_start = 0.0;
     dng_reset_deferred_payload_compress(dng_data);
     llrpResetDngBWLevels(mlv_data);
 
-    FILE *fd = mlv_data->file[mlv_data->video_index[frame_index].chunk_num];
-
-    if (isMcrawLoaded(mlv_data))
+    /* A CinemaDNG-folder clip has no backing MLV FILE*. Decode it through the
+     * folder reader, then enter the same llrawproc + pack/compress boundary as
+     * other inputs. This also makes folder-open -> DNG re-export a real
+     * supported path instead of falling through to file_set_pos(NULL, ...). */
+    if(isDngFolderLoaded(mlv_data))
     {
+        profile_stage_start = export_profile_stage_begin(profile_frame);
+        if(getMlvRawFrameUint16(mlv_data, frame_index,
+                                dng_data->image_buf_unpacked) != 0)
+        {
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_DECODE,
+                                     profile_stage_start);
+            return LJ92_ERROR_CORRUPT;
+        }
+        export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_DECODE,
+                                 profile_stage_start);
+
+        profile_stage_start = export_profile_stage_begin(profile_frame);
+        apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked,
+                               dng_data->image_size_unpacked);
+        export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC,
+                                 profile_stage_start);
+        export_profile_note_llrawproc_breakdown(profile_frame);
+        export_profile_note_gpu_export_telemetry(profile_frame);
+
+        if(dng_data->raw_output_state == COMPRESSED_RAW
+           || dng_data->raw_output_state == COMPRESSED_ORIG)
+        {
+            ret = dng_prepare_compressed_frame(
+                mlv_data, dng_data, frame_index,
+                mlv_data->RAWI.raw_info.bits_per_pixel,
+                defer_compress_to_payload, profile_frame);
+            if(ret != 0) return ret;
+        }
+        else
+        {
+            dng_data->image_size = dng_get_image_size(
+                mlv_data, IMG_SIZE_PACKED, frame_index);
+            if(dng_data->image_size == 0
+               || dng_data->image_size > dng_data->image_capacity)
+                return LJ92_ERROR_CORRUPT;
+            profile_stage_start = export_profile_stage_begin(profile_frame);
+            dng_pack_image_bits(dng_data->image_buf,
+                                dng_data->image_buf_unpacked,
+                                mlv_data->RAWI.xRes,
+                                mlv_data->RAWI.yRes,
+                                mlv_data->RAWI.raw_info.bits_per_pixel,
+                                1);
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_PACK,
+                                     profile_stage_start);
+        }
+    }
+    else
+    {
+        FILE *fd = mlv_data->file[mlv_data->video_index[frame_index].chunk_num];
+
+        if (isMcrawLoaded(mlv_data))
+        {
         /* Move to start of frame in file and read the RAW data */
         profile_stage_start = export_profile_stage_begin(profile_frame);
-        file_set_pos(fd, mlv_data->video_index[frame_index].block_offset, SEEK_SET);
+        if(file_set_pos(fd, mlv_data->video_index[frame_index].block_offset,
+                        SEEK_SET) != 0) {
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ,
+                                     profile_stage_start);
+            return LJ92_ERROR_CORRUPT;
+        }
 
         mr_item_t item = {};
 
@@ -2365,8 +2658,13 @@ static int dng_get_frame(mlvObject_t * mlv_data,
 
         size_t stored_size = item.size;
 
-        if (stored_size > dng_get_image_size(mlv_data, IMG_SIZE_UNPACKED, frame_index)) {
-            dng_data->image_buf2 = realloc(dng_data->image_buf2, stored_size);
+        if (stored_size > dng_data->image_capacity) {
+            void * replacement = realloc(dng_data->image_buf2, stored_size);
+            if(!replacement) {
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
+                return -1;
+            }
+            dng_data->image_buf2 = replacement;
         }
 
         if (fread(dng_data->image_buf2, stored_size, 1, fd) != 1)
@@ -2414,6 +2712,11 @@ static int dng_get_frame(mlvObject_t * mlv_data,
         }
         else   // uncompressed and fast pass
         {
+            dng_data->image_size = dng_get_image_size(
+                mlv_data, IMG_SIZE_PACKED, frame_index);
+            if(dng_data->image_size == 0
+                || dng_data->image_size > dng_data->image_capacity)
+                return LJ92_ERROR_CORRUPT;
             profile_stage_start = export_profile_stage_begin(profile_frame);
             dng_pack_image_bits(dng_data->image_buf,
                                 dng_data->image_buf_unpacked,
@@ -2424,21 +2727,32 @@ static int dng_get_frame(mlvObject_t * mlv_data,
             export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_PACK, profile_stage_start);
         }
     }
-    else
-    {
+        else
+        {
         /* Move to start of frame in file and read the RAW data */
         profile_stage_start = export_profile_stage_begin(profile_frame);
-        file_set_pos(fd, mlv_data->video_index[frame_index].frame_offset, SEEK_SET);
+        if(file_set_pos(fd, mlv_data->video_index[frame_index].frame_offset,
+                        SEEK_SET) != 0) {
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ,
+                                     profile_stage_start);
+            return LJ92_ERROR_CORRUPT;
+        }
 
         if (dng_data->raw_input_state == COMPRESSED_RAW) /* If lossless, decompress or pass trough */
         {
             dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_LOSLESS, frame_index);
+            if(dng_data->image_size == 0 || dng_data->image_size > dng_data->image_capacity)
+            {
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
+                return LJ92_ERROR_CORRUPT;
+            }
             if(fread(dng_data->image_buf, dng_data->image_size, 1, fd) != 1)
             {
                 export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
 #ifndef STDOUT_SILENT
                 printf("Can not read raw frame from %s\n", mlv_data->path);
 #endif
+                return LJ92_ERROR_CORRUPT;
             }
             else
             {
@@ -2453,6 +2767,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
             {
                 profile_stage_start = export_profile_stage_begin(profile_frame);
                 ret = dng_decompress_image(dng_data->image_buf_unpacked,
+                                           dng_data->image_capacity,
                                            dng_data->image_buf,
                                            dng_data->image_size,
                                            mlv_data->RAWI.xRes,
@@ -2504,12 +2819,18 @@ static int dng_get_frame(mlvObject_t * mlv_data,
         else /* If uncompressed, unpack to 16bit or pass trough */
         {
             dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_PACKED, frame_index);
+            if(dng_data->image_size == 0 || dng_data->image_size > dng_data->image_capacity)
+            {
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
+                return LJ92_ERROR_CORRUPT;
+            }
             if(fread(dng_data->image_buf, dng_data->image_size, 1, fd) != 1)
             {
                 export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
 #ifndef STDOUT_SILENT
                 printf("Can not read raw frame from %s\n", mlv_data->path);
 #endif
+                return LJ92_ERROR_CORRUPT;
             }
             else
             {
@@ -2574,6 +2895,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
             }
         }
     }
+    }
 
     profile_stage_start = export_profile_stage_begin(profile_frame);
     dng_fill_header(mlv_data, dng_data, frame_index, prop_filename);
@@ -2586,6 +2908,29 @@ dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, i
 {
     dngObject_t * dng_data = calloc(1, sizeof(dngObject_t));
 
+    if(!dng_data || !mlv_data) {
+        free(dng_data);
+        return NULL;
+    }
+
+    if(mlv_data->RAWI.xRes == 0 || mlv_data->RAWI.yRes == 0
+       || mlv_data->RAWI.raw_info.bits_per_pixel == 0
+       || mlv_data->RAWI.raw_info.bits_per_pixel > 16) {
+        free(dng_data);
+        return NULL;
+    }
+
+    /* Fast/original export promises byte-for-byte payload pass-through. A
+     * CinemaDNG folder may mix compressed and uncompressed frames, while its
+     * current source abstraction exposes decoded bayer samples rather than a
+     * retained per-frame strip. Refuse this mode instead of silently applying
+     * llrawproc and rewriting the payload under a pass-through label. */
+    if(isDngFolderLoaded(mlv_data)
+       && (raw_state == UNCOMPRESSED_ORIG || raw_state == COMPRESSED_ORIG)) {
+        free(dng_data);
+        return NULL;
+    }
+
     dng_data->fps_float = fps;
     memcpy(dng_data->par, par, sizeof(int32_t) * 4);
 
@@ -2595,12 +2940,32 @@ dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, i
     dng_data->header_size = HEADER_SIZE;
     dng_data->header_buf = malloc(dng_data->header_size);
 
-    dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_UNPACKED, 0);
-    dng_data->image_buf  = malloc(dng_data->image_size);
-    dng_data->image_buf2 = malloc(dng_data->image_size);
-
     dng_data->image_size_unpacked = dng_get_image_size(mlv_data, IMG_SIZE_UNPACKED, 0);
-    dng_data->image_buf_unpacked = malloc(dng_data->image_size_unpacked);
+    size_t compressed_capacity = 0;
+    if(dng_data->image_size_unpacked == 0
+       || !dng_lj92_output_capacity(mlv_data->RAWI.xRes,
+                                 mlv_data->RAWI.yRes,
+                                 &compressed_capacity)) {
+        free(dng_data->header_buf);
+        free(dng_data);
+        return NULL;
+    }
+    dng_data->image_size = dng_data->image_size_unpacked;
+    dng_data->image_capacity = compressed_capacity > dng_data->image_size_unpacked
+        ? compressed_capacity : dng_data->image_size_unpacked;
+    dng_data->image_buf = malloc(dng_data->image_capacity);
+    dng_data->image_buf2 = malloc(dng_data->image_capacity);
+    dng_data->image_buf_unpacked = malloc(dng_data->image_capacity);
+
+    if(!dng_data->header_buf || !dng_data->image_buf || !dng_data->image_buf2
+       || !dng_data->image_buf_unpacked) {
+        free(dng_data->header_buf);
+        free(dng_data->image_buf);
+        free(dng_data->image_buf2);
+        free(dng_data->image_buf_unpacked);
+        free(dng_data);
+        return NULL;
+    }
 
     return dng_data;
 }
@@ -2643,7 +3008,7 @@ static dngFramePayload_t * dng_take_ready_frame_payload(dngObject_t * dng_data,
     if(!dng_data) return NULL;
     if(!dng_data->header_buf || !dng_data->image_buf) return NULL;
 
-    uint16_t * replacement_image = (uint16_t*)malloc(dng_data->image_size_unpacked);
+    uint16_t * replacement_image = (uint16_t*)malloc(dng_data->image_capacity);
     uint8_t * payload_header = (uint8_t*)malloc(dng_data->header_size);
     if(!replacement_image || !payload_header)
     {
@@ -2670,7 +3035,7 @@ static dngFramePayload_t * dng_take_ready_frame_payload(dngObject_t * dng_data,
     payload->compression_input_bytes = dng_data->payload_compress_input_bytes;
     payload->header_size = dng_data->header_size;
     payload->image_size = dng_data->image_size;
-    payload->image_capacity = dng_data->image_size_unpacked;
+    payload->image_capacity = dng_data->image_capacity;
     payload->header_buf = payload_header;
     payload->image_buf = (uint8_t*)dng_data->image_buf;
 
@@ -2685,7 +3050,7 @@ dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data,
                                          uint32_t frame_index,
                                          const char *prop_filename)
 {
-    if(!mlv_data || !dng_data) return NULL;
+    if(!dng_frame_request_is_valid(mlv_data, dng_data, frame_index)) return NULL;
 
     if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, NULL, 0) != 0)
     {
@@ -2751,6 +3116,7 @@ static int dng_prepare_payload_for_write(dngFramePayload_t * payload,
     size_t output_size = payload->image_capacity;
     double profile_stage_start = export_profile_stage_begin(profile_frame);
     const int ret = dng_compress_image_profiled((uint16_t*)payload->image_buf,
+                                                payload->image_capacity,
                                                 (uint16_t*)payload->image_buf,
                                                 &output_size,
                                                 payload->compression_width,
@@ -3202,6 +3568,11 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
                                       char * dng_filename,
                                       const char *prop_filename)
 {
+    if(!writer || !dng_filename
+       || !dng_frame_request_is_valid(mlv_data, dng_data, frame_index)) {
+        return 1;
+    }
+
     exportProfileFrame_t profile_frame;
     double profile_frame_start = 0.0;
     double profile_stage_start = 0.0;
@@ -3209,14 +3580,6 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
 
     export_profile_frame_begin(&profile_frame, mlv_data, dng_data, frame_index);
     profile_frame_start = export_profile_stage_begin(&profile_frame);
-
-    if(!writer || !dng_filename)
-    {
-        export_profile_producer_finish(&profile_frame, profile_frame_start);
-        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
-        export_profile_frame_finish(&profile_frame, 0);
-        return 1;
-    }
 
     if(dng_get_frame(mlv_data,
                      dng_data,
@@ -3265,6 +3628,11 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
                            char * dng_filename,
                            const char *prop_filename)
 {
+    if(!dng_filename
+       || !dng_frame_request_is_valid(mlv_data, dng_data, frame_index)) {
+        return 1;
+    }
+
     exportProfileFrame_t profile_frame;
     double profile_frame_start = 0.0;
     double profile_stage_start = 0.0;
@@ -3272,14 +3640,6 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
 
     export_profile_frame_begin(&profile_frame, mlv_data, dng_data, frame_index);
     profile_frame_start = export_profile_stage_begin(&profile_frame);
-
-    if(!dng_filename)
-    {
-        export_profile_producer_finish(&profile_frame, profile_frame_start);
-        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
-        export_profile_frame_finish(&profile_frame, 0);
-        return 1;
-    }
 
     if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame, 0) != 0)
     {
@@ -3320,6 +3680,8 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
 /* save DNG file */
 int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *prop_filename)
 {
+    if(!dng_filename
+       || !dng_frame_request_is_valid(mlv_data, dng_data, frame_index)) return 1;
     exportProfileFrame_t profile_frame;
     double profile_frame_start = 0.0;
     double profile_stage_start = 0.0;
@@ -3374,6 +3736,7 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
 /* free all buffers used for DNG creation */
 void freeDngObject(dngObject_t * dng_data)
 {
+    if(!dng_data) return;
     export_profile_write_json();
     if(dng_data->header_buf) free(dng_data->header_buf);
     if(dng_data->image_buf) free(dng_data->image_buf);

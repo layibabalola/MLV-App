@@ -67,6 +67,16 @@ fixed-point property test — auto-WB drives a near-neutral target to neutral AN
 of the corrected frame is already neutral. Single-pass code cannot satisfy it, so it fails the
 dropped refinement loop (8ddddce2) directly.
 
+Sealed local corpus evidence uses
+`tools/repo_hygiene/sealed-real-clip-ab-receipt.schema.json` and the semantic
+verifier `python -m tools.repo_hygiene.sealed_real_clip_receipt`. The verifier
+closes the JSON shape, authority posture, named-corpus accounting, screenshot
+identity, thresholds, candidate/baseline separation, Git commit/tree topology,
+and exact comparer/runner/neutral-receipt blobs. This does not upgrade local
+ignored artifacts into hosted or release evidence: the receipt remains
+`CLOSED`, requires retained raw artifacts for independent recomputation, and
+cannot grant merge, release, re-bless, or provider authority.
+
 ## Per-regression gate (each grounded in existing tooling)
 
 - **COLOR** — (a) Tier-0 deterministic VALUES golden in `tests/console/test_clip_golden.cpp`:

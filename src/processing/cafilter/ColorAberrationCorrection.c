@@ -1,4 +1,7 @@
 #include <string.h>
+#include <stdlib.h>
+#include <limits.h>
+#include <stdint.h>
 #include "ColorAberrationCorrection.h"
 
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
@@ -77,17 +80,42 @@ void CACorrection(int imageX, int imageY,
                   uint16_t * __restrict outputImage,
                   uint16_t threshold, uint8_t radius)
 {
+    if (imageX <= 0 || imageY <= 0 || !inputImage || !outputImage)
+    {
+        return;
+    }
+
+    if ((size_t)imageX > (size_t)INT_MAX / (size_t)imageY)
+    {
+        return;
+    }
+    const size_t pixelCount = (size_t)imageX * (size_t)imageY;
+    if (pixelCount > SIZE_MAX / sizeof(uint16_t)
+        || pixelCount > SIZE_MAX / 3u)
+    {
+        return;
+    }
+    const size_t channelBytes = pixelCount * sizeof(uint16_t);
     //getting working memory
-    uint16_t *bVec = malloc( imageX * imageY * sizeof( uint16_t ) );
-    uint16_t *gVec = malloc( imageX * imageY * sizeof( uint16_t ) );
-    uint16_t *rVec = malloc( imageX * imageY * sizeof( uint16_t ) );
-    uint16_t *temp = malloc( imageX * imageY * sizeof( uint16_t ) );
+    uint16_t *bVec = malloc(channelBytes);
+    uint16_t *gVec = malloc(channelBytes);
+    uint16_t *rVec = malloc(channelBytes);
+    uint16_t *temp = malloc(channelBytes);
+
+    if (!bVec || !gVec || !rVec || !temp)
+    {
+        free(bVec);
+        free(gVec);
+        free(rVec);
+        free(temp);
+        return;
+    }
 
 	//split the color image into individual color channel for convenient in calculation
 #pragma omp parallel for
-    for( int i = 0; i < imageX*imageY; i++ )
+    for (size_t i = 0; i < pixelCount; i++)
     {
-        int j = i * 3;
+        const size_t j = i * 3u;
         rVec[i] = inputImage[j+0];
         gVec[i] = inputImage[j+1];
         bVec[i] = inputImage[j+2];
@@ -101,47 +129,53 @@ void CACorrection(int imageX, int imageY,
     rmCA(rVec, gVec, bVec, imageX, imageY, threshold, radius);
 
 	//transpose the R,G B channel image to correct chromatic aberration in vertical direction 
-    memcpy( temp, rVec, imageX*imageY * sizeof(uint16_t) );
+    memcpy(temp, rVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
-            rVec[x*imageY+y] = temp[y*imageX+x];
-    memcpy( temp, gVec, imageX*imageY * sizeof(uint16_t) );
+            rVec[(size_t)x * (size_t)imageY + (size_t)y] =
+                temp[(size_t)y * (size_t)imageX + (size_t)x];
+    memcpy(temp, gVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
-            gVec[x*imageY+y] = temp[y*imageX+x];
-    memcpy( temp, bVec, imageX*imageY * sizeof(uint16_t) );
+            gVec[(size_t)x * (size_t)imageY + (size_t)y] =
+                temp[(size_t)y * (size_t)imageX + (size_t)x];
+    memcpy(temp, bVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
-            bVec[x*imageY+y] = temp[y*imageX+x];
+            bVec[(size_t)x * (size_t)imageY + (size_t)y] =
+                temp[(size_t)y * (size_t)imageX + (size_t)x];
 
     //second run
     rmCA(rVec, gVec, bVec, imageY, imageX, threshold, radius);
 
     //rotate the image back to original position
-    memcpy( temp, rVec, imageX*imageY * sizeof(uint16_t) );
+    memcpy(temp, rVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
-            rVec[y*imageX+x] = temp[x*imageY+y];
-    memcpy( temp, gVec, imageX*imageY * sizeof(uint16_t) );
+            rVec[(size_t)y * (size_t)imageX + (size_t)x] =
+                temp[(size_t)x * (size_t)imageY + (size_t)y];
+    memcpy(temp, gVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
-            gVec[y*imageX+x] = temp[x*imageY+y];
-    memcpy( temp, bVec, imageX*imageY * sizeof(uint16_t) );
+            gVec[(size_t)y * (size_t)imageX + (size_t)x] =
+                temp[(size_t)x * (size_t)imageY + (size_t)y];
+    memcpy(temp, bVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
-            bVec[y*imageX+x] = temp[x*imageY+y];
+            bVec[(size_t)y * (size_t)imageX + (size_t)x] =
+                temp[(size_t)x * (size_t)imageY + (size_t)y];
 
     //merge channels into final image
 #pragma omp parallel for
-    for( int i = 0; i < imageX*imageY; i++ )
+    for (size_t i = 0; i < pixelCount; i++)
     {
-        int j = i * 3;
+        const size_t j = i * 3u;
         outputImage[j+0] = rVec[i];
         outputImage[j+1] = gVec[i];
         outputImage[j+2] = bVec[i];

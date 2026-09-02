@@ -211,6 +211,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          fetch-depth: 1
+          ref: ${{ env.EXPECTED_ROUTE_HEAD }}
+
+      - name: Verify exact product checkout binding
+        run: |
+          $actualHead = (git rev-parse HEAD).Trim()
+          $actualTree = (git rev-parse 'HEAD^{tree}').Trim()
+          $expectedTree = '${{ needs.protected-check-route.outputs.tree }}'
+          if ($actualHead -ne $env:EXPECTED_ROUTE_HEAD) { throw "product checkout head mismatch" }
+          if ($actualTree -ne $expectedTree) { throw "product checkout tree mismatch" }
 
       - name: Test screenshot fresh-render provenance gate
         if: needs.protected-check-route.outputs.product == 'true'
@@ -572,6 +582,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          fetch-depth: 1
+          ref: ${{ env.EXPECTED_ROUTE_HEAD }}
+
+      - name: Verify exact GUI checkout binding
+        run: |
+          $actualHead = (git rev-parse HEAD).Trim()
+          $actualTree = (git rev-parse 'HEAD^{tree}').Trim()
+          $expectedTree = '${{ needs.protected-check-route.outputs.tree }}'
+          if ($actualHead -ne $env:EXPECTED_ROUTE_HEAD) { throw "GUI checkout head mismatch" }
+          if ($actualTree -ne $expectedTree) { throw "GUI checkout tree mismatch" }
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6

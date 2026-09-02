@@ -45,6 +45,7 @@ HEADERS += \
     $$REPO_ROOT/tests/common/repo_paths.h \
     $$REPO_ROOT/src/batch/BatchTypes.h \
     $$REPO_ROOT/src/batch/BatchRunner.h \
+    $$REPO_ROOT/src/batch/RawAspectStretchPolicy.h \
     $$REPO_ROOT/platform/qt/ClipLifecycleBarrier.h \
     $$REPO_ROOT/platform/qt/ExportDimensions.h \
     $$REPO_ROOT/platform/qt/ExportProcess.h \

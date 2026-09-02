@@ -89,6 +89,16 @@ try {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    # ProcessStartInfo does not reliably populate the child environment on every
+    # PowerShell/.NET combination used by the Windows lanes.  In particular, a
+    # fresh MinGW build could start mingw32-make by absolute path but windres
+    # could not resolve its nested gcc preprocessor because PATH disappeared at
+    # this process boundary.  Copy the current environment explicitly before
+    # adding arguments so nested compiler/runtime tools see the same bounded
+    # build environment as the exclusive runner itself.
+    foreach ($entry in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) {
+        $startInfo.Environment[[string]$entry.Key] = [string]$entry.Value
+    }
     foreach ($argument in $ArgumentList) { [void]$startInfo.ArgumentList.Add($argument) }
     $process = [System.Diagnostics.Process]::Start($startInfo)
     if (-not $process) { throw "Failed to start MLV-App exclusive command: $FilePath" }

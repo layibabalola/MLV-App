@@ -354,4 +354,19 @@ TEST( RenderedVideoRunner, UnsetStretchFallsBackToTheClipAspectBands )
 
     /* No RAWC info at all is treated as square, not as an out-of-band value. */
     ASSERT_NEAR( STRETCH_V_100, BatchRunner::effectiveStretchFactorY( -1.0, 0.0f ), 1e-9 );
+
+    double stretchX = 0.0;
+    double stretchY = 0.0;
+    BatchRunner::effectiveStretchFactors( 1.0, 1.0, 0.8f,
+                                          &stretchX, &stretchY );
+    ASSERT_NEAR( STRETCH_H_125, stretchX, 1e-9 );
+    ASSERT_NEAR( STRETCH_V_100, stretchY, 1e-9 );
+    BatchRunner::effectiveStretchFactors( -1.0, -1.0, 4.0f / 3.0f,
+                                          &stretchX, &stretchY );
+    ASSERT_NEAR( STRETCH_H_125, stretchX, 1e-9 );
+    ASSERT_NEAR( STRETCH_V_167, stretchY, 1e-9 );
+    BatchRunner::effectiveStretchFactors( 2.0, 1.75, 0.8f,
+                                          &stretchX, &stretchY );
+    ASSERT_NEAR( 2.0, stretchX, 1e-9 );
+    ASSERT_NEAR( 1.75, stretchY, 1e-9 );
 }

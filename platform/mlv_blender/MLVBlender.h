@@ -9,12 +9,18 @@ void free_MLVBlender(MLVBlender_t * Blender);
 
 /* Generate and get output */
 void MLVBlenderBlend(MLVBlender_t * Blender, uint64_t FrameIndex);
-uint16_t * MLVBlenderGetOutput(MLVBlender_t * Blender);
+float * MLVBlenderGetOutput(MLVBlender_t * Blender);
 int MLVBlenderGetOutputWidth(MLVBlender_t * Blender);
 int MLVBlenderGetOutputHeight(MLVBlender_t * Blender);
 
 /* Exports an mlv fil to OutputPath */
-void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath);
+int MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath);
+
+/* Exact helpers shared by export and executable regression tests. */
+int MLVBlenderInclusiveFrameRange(uint64_t frame_count,
+                                  uint32_t * frame_start,
+                                  uint32_t * frame_end);
+uint16_t MLVBlenderQuantize14(float normalized, int black_level);
 
 /* Add an MLV */
 void MLVBlenderAddMLV(MLVBlender_t * Blender, const char * MLVPath);

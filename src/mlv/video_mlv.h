@@ -1,6 +1,8 @@
 #ifndef _video_mlv_
 #define _video_mlv_
 
+#include <stddef.h>
+
 #include "raw.h"
 #include "mlv.h"
 #include "../processing/raw_processing.h"
@@ -30,6 +32,41 @@ int openMlvClip(mlvObject_t * video, char * mlvPath, int open_mode, char * error
 int openMcrawClip(mlvObject_t * video, char * mcrawPath, int open_mode, char * error_message);
 int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char * error_message);
 
+/* Validate hostile frame metadata before allocating/reading compressed or
+ * packed RAW bytes. Exposed for sizing regression tests. */
+int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
+                             uint32_t encoded_size,
+                             size_t * packed_size,
+                             size_t * allocation_size);
+
+/* Validate CinemaDNG folder metadata before it is narrowed into RAWI's
+ * uint16 geometry or used by legacy int-indexed processing paths. */
+int mlvDngSequenceGeometryIsRepresentable(uint32_t width, uint32_t height,
+                                          uint32_t bits_per_sample,
+                                          size_t * pixel_count);
+
+/* The current shared debayer pipeline consumes RGGB samples only. */
+int mlvDngCfaPatternIsSupported(uint32_t cfa_pattern);
+
+/* Convert three positive AsShotNeutral rationals into bounded MLV WB gains. */
+int mlvDngAsShotNeutralToWbGains(const int32_t neutral[6], uint32_t gains[3]);
+
+/* Convert DNG DefaultScale X/Y rationals to the exact small-integer sampling
+ * ratio consumed by RAWC/getMlvAspectRatio(). */
+int mlvDngDefaultScaleToSampling(const int32_t scale[4],
+                                 uint32_t * sampling_x,
+                                 uint32_t * sampling_y);
+
+/* Return non-zero only for exact RAWC aspect ratios representable by the
+ * application's horizontal/vertical stretch controls in every output path. */
+int mlvDngAspectRatioIsSupported(uint32_t sampling_x, uint32_t sampling_y);
+
+/* Add BaselineExposure and BaselineExposureOffset without signed overflow,
+ * normalize the result, and retain an exact signed rational for re-export. */
+int mlvDngBaselineExposureToBias(const int32_t baseline[2],
+                                 const int32_t offset[2],
+                                 int32_t bias[2]);
+
 /* return error codes of and open modes of openMlvClip() */
 enum mlv_err { MLV_ERR_NONE, MLV_ERR_OPEN, MLV_ERR_IO, MLV_ERR_CORRUPTED, MLV_ERR_INVALID };
 enum open_mode { MLV_OPEN_FULL, MLV_OPEN_MAPP, MLV_OPEN_PREVIEW };
@@ -41,7 +78,13 @@ enum export_mode { MLV_FAST_PASS, MLV_COMPRESS, MLV_DECOMPRESS, MLV_AVERAGED_FRA
 /* from darkframe.c */
 extern int df_init(mlvObject_t * video);
 
-/* Frees all memory and closes file */
+/* Frees all memory and closes file.
+ *
+ * Lifetime contract: the caller must stop and join foreground render/UI/API
+ * users before calling this function.  freeMlvObject fences the asynchronous
+ * workers owned by the object (including cache workers and admitted cache
+ * topology operations); cache lifecycle admission is not a general external
+ * reference count for arbitrary concurrent render calls. */
 void freeMlvObject(mlvObject_t * video);
 
 /* To enable and disable caching */
@@ -276,6 +319,20 @@ void setMlvLosslessBpp(mlvObject_t * video);
 /* Add as many of these as you want :) */
 void an_mlv_cache_thread(mlvObject_t * video);
 
+/* Test-only fault injection for cache-worker plane allocation. */
+void mlvCacheSetAllocationFailureForTesting(int enabled);
+void mlvCacheSetRawAcquisitionFailureForTesting(int enabled);
+
+/* Test-only barrier for validating the async launch/count lifetime contract. */
+void mlvCacheSetWorkerStartPauseForTesting(int enabled);
+void mlvCacheSetWorkerBeforePublishPauseForTesting(int enabled);
+int mlvCacheWorkerBeforePublishPausedForTesting(void);
+void mlvCacheSetLifecyclePauseForTesting(int enabled);
+int mlvCacheLifecyclePausedForTesting(void);
+
+/* Test-only ordinal fault injection for cache resize allocations. */
+void mlvCacheSetResizeAllocationFailureForTesting(int allocation_index);
+
 /* Marks all frames as not cached */
 void mark_mlv_uncached(mlvObject_t * video);
 
@@ -294,8 +351,11 @@ void mlv_cache_request_playback_preroll(mlvObject_t * video,
 /* Returns 1 on success, or 0 if all are cached */
 int find_mlv_frame_to_cache(mlvObject_t * video, uint64_t *index); /* Outputs to *index */
 
-/* Adds one thread, active total can be checked in mlvObject->cache_thread_count */
+/* Adds one thread; query the active total through mlvCacheWorkerCount(). */
 void add_mlv_cache_thread(mlvObject_t * video);
+int mlvCacheWorkerCount(mlvObject_t * video);
+int mlvCacheShouldStop(mlvObject_t * video);
+void mlvCacheSetStop(mlvObject_t * video, int stop);
 
 /* OLD DEPRACTEDFSDJKHJKLAJSKDLJ KLSDJKL AJSD LKSAJDLKSAJDLK DKJS */
 void cache_mlv_frames(mlvObject_t * video);
