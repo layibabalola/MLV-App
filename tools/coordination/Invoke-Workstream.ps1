@@ -250,8 +250,14 @@ if ($candidates.Count -eq 0) {
         Write-Output "WORKSTREAM: NO-LIVE-CARDS on track '$Track'. This track has ZERO non-terminal work - it is not idle, it is EMPTY. That is a backlog gap, not a healthy queue. (live overall = $($live.Count))"
         exit 4
     }
+    # EXIT 5, NOT 0. This script preaches "three outcomes, never two" and then returned the
+    # SAME code for "I dispatched a lane" and "I dispatched nothing". Invoke-WorkstreamLoop
+    # counts exit 0 as a dispatch, so every ALL-RECENTLY-DISPATCHED cycle consumed a slot of
+    # -MaxDispatchesPerCycle and inflated the cycle receipt with work that never happened.
+    # Measured 2026-09-03: cycle-20260903T180119Z recorded dispatched=1 with no dispatch-log
+    # row and no run directory to match it.
     Write-Output "WORKSTREAM: ALL-RECENTLY-DISPATCHED on track '$Track' - $onTrackLive live card(s), every one carrying a dispatch newer than $StaleHours h. Use -Force or lower -StaleHours to re-dispatch."
-    exit 0
+    exit 5
 }
 
 $card      = $candidates[0]
