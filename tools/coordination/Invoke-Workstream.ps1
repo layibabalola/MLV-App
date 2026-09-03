@@ -77,7 +77,17 @@ if (-not $QueuePath) { $QueuePath = Join-Path $DualLane 'queue.json' }
 else { Write-Output "WORKSTREAM: NON-CANONICAL QUEUE in use: $QueuePath" }
 $LogPath    = Join-Path $DualLane 'workstream-dispatch-log.jsonl'
 $PromptDir  = Join-Path $RepoRoot '.claude-state\fleet-runs\prompts'
-$LaneRunner = Join-Path $RepoRoot 'tools\coordination\Invoke-Lane.ps1'
+# THE LANE RUNNER MUST COME FROM THE TREE THIS SCRIPT LIVES IN, NOT FROM $RepoRoot.
+# Invoke-WorkstreamLoop pins a driver worktree to fork/master precisely so the unattended loop
+# runs reviewed code - and then this line reached OUTSIDE that pin, back to the canonical
+# checkout, which is parked on a peer branch (diag/async-h2d-preupload-exits). Measured
+# 2026-09-03: every dispatched lane ran the DIAG BRANCH's Invoke-Lane.ps1, so PR #27's read
+# deny-list, turn cap and spend telemetry had NO EFFECT on any production dispatch. A fable lane
+# at 20:16Z - three hours after #27 merged - cost USD 22.01 at 948,598 cache-creation tokens,
+# the exact unprotected signature #27 was written to stop, and its receipt carried no spend field.
+# $PSScriptRoot is the pinned sibling when driven by the loop, and the local sibling when run by
+# hand: correct in both cases, and it can never silently cross into another branch's checkout.
+$LaneRunner = Join-Path $PSScriptRoot 'Invoke-Lane.ps1'
 
 foreach ($p in @($QueuePath, $LaneRunner)) {
     if (-not (Test-Path -LiteralPath $p)) {
