@@ -218,10 +218,17 @@ if ($halted) {
 
             $out = & pwsh @argv 2>&1
             $rc  = $LASTEXITCODE
-            $line = ($out | Where-Object { $_ -match 'WORKSTREAM:' } | Select-Object -First 1)
+            # THE DISPATCH LINE, not merely the first WORKSTREAM: line. PR #26 added
+            # "WORKSTREAM: landing-probe ..." and "WORKSTREAM: SKIP-LANDED ..." which now
+            # print BEFORE the dispatch line, so First-1 recorded a probe summary as the
+            # dispatch detail. Match the line that actually names the card; fall back to
+            # the last WORKSTREAM: line, never the first.
+            $line = ($out | Where-Object { $_ -match 'WORKSTREAM: track=' } | Select-Object -First 1)
+            if (-not $line) { $line = ($out | Where-Object { $_ -match 'WORKSTREAM:' } | Select-Object -Last 1) }
 
             switch ($rc) {
                 0 { $dispatched += [ordered]@{ track = $track; detail = "$line" } ; Write-Output "LOOP: [$track] dispatched - $line" }
+                5 { $skipped    += [ordered]@{ track = $track; reason = 'ALL-RECENTLY-DISPATCHED'; detail = "$line" } ; Write-Output "LOOP: [$track] ALL-RECENTLY-DISPATCHED - no slot consumed" }
                 4 { $skipped    += [ordered]@{ track = $track; reason = 'NO-LIVE-CARDS'; detail = "$line" } ; Write-Output "LOOP: [$track] NO-LIVE-CARDS - backlog gap, nothing to dispatch" }
                 3 { $skipped    += [ordered]@{ track = $track; reason = 'CANNOT-DETERMINE'; detail = "$line" } ; Write-Output "LOOP: [$track] CANNOT-DETERMINE - $line" }
                 default { $skipped += [ordered]@{ track = $track; reason = "exit-$rc"; detail = "$line" } ; Write-Output "LOOP: [$track] exit=$rc - $line" }
