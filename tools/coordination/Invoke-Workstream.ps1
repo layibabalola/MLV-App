@@ -56,7 +56,16 @@ param(
     [int]$TimeoutSec = 1800,
 
     [switch]$Force,
-    [int]$StaleHours = 12
+    [int]$StaleHours = 12,
+
+    # Skip the merged-PR landing probe entirely (offline, or gh deliberately not consulted).
+    [switch]$NoLandingProbe,
+
+    # Read the queue from somewhere other than the canonical path. EXISTS FOR FALSIFICATION:
+    # the landed-card guard below can only be proven by a queue in which a landed card is the
+    # TOP pick, and the real queue must never be mutated to manufacture that. Never used in
+    # production; the default is the canonical queue.
+    [string]$QueuePath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,7 +73,8 @@ Set-StrictMode -Version Latest
 
 $RepoRoot   = 'C:\!Layi Wkspc\MLV-App'
 $DualLane   = Join-Path $RepoRoot '.claude-state\coordination\dual-lane'
-$QueuePath  = Join-Path $DualLane 'queue.json'
+if (-not $QueuePath) { $QueuePath = Join-Path $DualLane 'queue.json' }
+else { Write-Output "WORKSTREAM: NON-CANONICAL QUEUE in use: $QueuePath" }
 $LogPath    = Join-Path $DualLane 'workstream-dispatch-log.jsonl'
 $PromptDir  = Join-Path $RepoRoot '.claude-state\fleet-runs\prompts'
 $LaneRunner = Join-Path $RepoRoot 'tools\coordination\Invoke-Lane.ps1'
@@ -124,9 +134,74 @@ function Get-LastDispatchAgeHours([string]$id) {
     if (-not $history.ContainsKey($id)) { return $null }
     $t = Get-Prop $history[$id] 'dispatchedUtc'
     if (-not $t) { return $null }
+    # TIMEZONE, MEASURED 2026-09-03. ConvertFrom-Json already materialises an ISO-8601 "...Z"
+    # string as a [datetime] with Kind=Utc. The previous body called [datetime]::Parse($t) on
+    # that object, which stringifies it to a zone-less local-looking form, re-parses it as
+    # Kind=Unspecified, and then ToUniversalTime() adds the local offset a SECOND time. On this
+    # host (UTC-5) a card dispatched 0.21 h ago computed as -4.79 h, so `$age -ge $StaleHours`
+    # was false and the card was filtered for ~5 h longer than configured.
+    # It is invisible on a UTC machine, which is why it survived: the bug's size IS the offset.
+    if ($t -is [datetime]) { return ((Get-Date).ToUniversalTime() - $t.ToUniversalTime()).TotalHours }
     try {
-        return ((Get-Date).ToUniversalTime() - ([datetime]::Parse($t)).ToUniversalTime()).TotalHours
+        $parsed = [datetime]::Parse(
+            [string]$t, [cultureinfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor
+            [System.Globalization.DateTimeStyles]::AssumeUniversal)
+        return ((Get-Date).ToUniversalTime() - $parsed).TotalHours
     } catch { return $null }
+}
+
+# ------------------------------------------------------------------ landed-elsewhere probe
+# WHY THIS EXISTS. Card liveness above is derived from queue.json's `state` field alone.
+# queue.json is the DISPATCH authority - it is NOT the authority on whether the WORK landed,
+# and this script never mutates it (RESUME.md STEP 4/5). So a card whose fix merged stays
+# `dispatched` forever and this selector re-picks it every cycle, spending real model budget
+# on work that is already on master. Measured 2026-09-03: the loop's first unattended fire
+# dispatched a lane for SIDECAR-FIX-1, which PR #23 had merged nine hours earlier.
+#
+# RAW OUTRANKS THE QUEUE, so ask GitHub, not the card. Two strengths, never merged:
+#   TITLE match  -> strong. A maintainer wrote the card id into the merge subject
+#                   ("...(lands SIDECAR-FIX-1)"). This SKIPS the card, with the PR cited.
+#   BODY-ONLY    -> weak. `gh --search` is full text, so a card id in a body or comment is a
+#                   MENTION, not a landing (QUEUE-DERIVE-1 appears in PR #22 and did not land
+#                   there). This is REPORTED and the card is still dispatched.
+# FAIL-OPEN BY CONSTRUCTION: if gh is missing, unauthenticated, offline or slow, the probe
+# returns CANNOT-DETERMINE and NOTHING is skipped. An unreadable signal must never silently
+# shrink the board - that is how a queue goes quiet and looks healthy.
+$landedById = @{}
+$landingProbe = 'skipped'
+if (-not $NoLandingProbe) {
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    if (-not $gh) {
+        $landingProbe = 'cannot-determine: gh not on PATH'
+    } else {
+        try {
+            $raw = & gh pr list --repo layibabalola/MLV-App --state merged --limit 100 `
+                       --json number,title 2>$null
+            if ($LASTEXITCODE -ne 0 -or -not $raw) {
+                $landingProbe = "cannot-determine: gh exited $LASTEXITCODE"
+            } else {
+                $prs = $raw | ConvertFrom-Json
+                foreach ($item in $live) {
+                    $id = Get-Prop $item 'id'
+                    if (-not $id) { continue }
+                    # Word-boundary match so C2-SUBMIT-2 never matches C2-SUBMIT-22.
+                    $rx = '(?<![A-Za-z0-9-])' + [regex]::Escape($id) + '(?![A-Za-z0-9-])'
+                    $hit = @($prs | Where-Object { $_.title -match $rx }) | Select-Object -First 1
+                    if ($hit) { $landedById[$id] = $hit }
+                }
+                $landingProbe = "ok: $($prs.Count) merged PR(s) scanned, $($landedById.Count) card(s) matched by title"
+            }
+        } catch {
+            $landingProbe = "cannot-determine: $($_.Exception.Message)"
+        }
+    }
+}
+Write-Output "WORKSTREAM: landing-probe $landingProbe"
+foreach ($id in $landedById.Keys) {
+    $pr = $landedById[$id]
+    Write-Output ("WORKSTREAM: SKIP-LANDED card={0} merged in PR #{1} ({2}) but queue.json still says '{3}'. The queue is STALE on this card; this script does not mutate it - reconcile it." -f `
+        $id, $pr.number, $pr.title, (Get-Prop (@($live | Where-Object { (Get-Prop $_ 'id') -eq $id })[0]) 'state'))
 }
 
 # ------------------------------------------------------------------ selection
@@ -147,6 +222,12 @@ if ($CardId) {
     $pool = $live
     if ($Track -ne 'auto') {
         $pool = @($live | Where-Object { (Get-Track $_) -eq $Track })
+    }
+    # Landed-elsewhere cards are excluded here, never earlier: $live must keep its meaning
+    # ("non-terminal per the queue") so the NO-LIVE-CARDS vs ALL-FILTERED distinction below
+    # still reports the truth about the track.
+    if ($landedById.Count -gt 0 -and -not $Force) {
+        $pool = @($pool | Where-Object { -not $landedById.ContainsKey((Get-Prop $_ 'id')) })
     }
     if (-not $Force) {
         $pool = @($pool | Where-Object {
