@@ -33,6 +33,11 @@
             "type": "command",
             "command": "\"C:/Users/obabalola/AppData/Local/Python/bin/python.exe\" \"${CLAUDE_PROJECT_DIR}/tools/check-doc-size.py\" --repo \"${CLAUDE_PROJECT_DIR}\" --warn-only --trace .claude-state/doc-size-runs.log",
             "statusMessage": "Doc size budget report"
+          },
+          {
+            "type": "command",
+            "command": "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"C:/!Layi Wkspc/MLV-App/.claude-state/coordination/dual-lane/assert-resume-readiness.ps1\"",
+            "statusMessage": "Resume-readiness check"
           }
         ]
       }
@@ -48,6 +53,7 @@
           }
         ]
       }
-    ]
+    ],
+    "_comment_resume_readiness": "RESUME-READINESS, wired 2026-09-02 before a planned account rotation. Runs after every turn and PRINTS NOTHING unless a resume surface is stale, so it costs no tokens on the happy path. It checks the four surfaces a fresh session actually reads: the heartbeat snapshot (1 h bound - its own contract is 30 min), the SESSION-HANDOFF anchor, the NEWEST *-resume-CURRENT.md by mtime (never a named one - naming one is how the memory trigger went stale), and RESUME.md's derived-value contract. IT IS DELIBERATELY NOT GATED ON A USAGE THRESHOLD: weekly usage percentage is not persisted anywhere readable on this box, so an 89% trigger would be a gate that never fires - a policy on a path the live arm never reaches. Running it unconditionally is cheaper than detecting, and removes the surprise entirely. The script lives under .claude-state/ ON PURPOSE, like the board heartbeat: a tracked script vanishes when the checkout moves to a ref that predates it, which is exactly how all three hooks here broke on 2026-08-30."
   }
 }
