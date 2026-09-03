@@ -129,8 +129,17 @@ if ($Status) {
 
 # ------------------------------------------------------------------ -Install
 if ($Install) {
+    # BUDGET FLAGS MUST SURVIVE A REINSTALL. Until 2026-09-03 this line was hardcoded with
+    # no budget arguments, so the task ALWAYS ran the defaults no matter what -Install was
+    # given. When the measured spend (USD 22-25 per fable lane) forced an emergency cap, it
+    # had to be applied by editing the live task action - a change that any later -Install
+    # would silently have thrown away. Pass them through, so the registered task states its
+    # own bound and the bound is auditable from the task itself.
+    $argLine = ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" ' +
+                '-DailyBudget {1} -MaxDispatchesPerCycle {2} -TimeoutSec {3} -StaleHours {4}') -f `
+               $PSCommandPath, $DailyBudget, $MaxDispatchesPerCycle, $TimeoutSec, $StaleHours
     $action  = New-ScheduledTaskAction -Execute 'pwsh.exe' `
-        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$PSCommandPath`"" `
+        -Argument $argLine `
         -WorkingDirectory $RepoRoot
     # No -RepetitionDuration: [TimeSpan]::MaxValue serialises to a value the task XML
     # validator REJECTS, and omitting the duration is how you say "indefinitely".
@@ -143,7 +152,7 @@ if ($Install) {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
         -Settings $settings -Description 'MLV-App: advance workstreams by dispatching bounded lanes. Budget-capped; kill switch at .claude-state\coordination\dual-lane\WORKSTREAM-LOOP-DISABLED' `
         -Force | Out-Null
-    Write-Output "LOOP: registered '$TaskName' every 45 min."
+    Write-Output "LOOP: registered '$TaskName' every 45 min with dailyBudget=$DailyBudget perCycle=$MaxDispatchesPerCycle."
     Write-Output "LOOP: PROVE IT BY ITS RECEIPTS, not by this message - run with -Status after the first fire."
     exit 0
 }

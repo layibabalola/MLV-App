@@ -67,7 +67,21 @@ param(
     [switch]$AllowEdits,
 
     # Free-text tag recorded in the receipt (e.g. the card id).
-    [string]$Card = ''
+    [string]$Card = '',
+
+    # Backstop against a runaway lane. Claude only (codex exec has no equivalent).
+    # 0 disables the cap. Measured 2026-09-03: real lanes used 13-21 turns, so 40 is a
+    # runaway guard, NOT the spend control - that is -DenyBulkReads below.
+    [int]$MaxTurns = 40,
+
+    # Let the lane read the bulk coordination files. OFF by default.
+    # MEASURED 2026-09-03: three unattended fable lanes cost USD 22-25 EACH, every one
+    # burning ~970,000 cache-creation tokens - almost exactly the 1.6 MB coordination
+    # surface. Invoke-Workstream.ps1 already reads that bulk in PowerShell and inlines
+    # the facts into a 4-7 KB brief, so a lane re-reading it pays full price for context
+    # it was already given. A compact brief bounds the PROMPT; it does not bound the
+    # READING, and nothing here did until now.
+    [switch]$AllowBulkReads
 )
 
 $ErrorActionPreference = 'Stop'
@@ -151,6 +165,7 @@ $outPath    = "$base.out.txt"
 $errPath    = "$base.err.txt"
 $lastPath   = "$base.last.txt"
 $rcptPath   = "$base.receipt.json"
+$settingsPath = "$base.settings.json"
 
 # RESERVED MARKER, written the instant the slot is taken and before ANY work.
 # The atomic reservation above creates an EMPTY file, which is a valid claim but
@@ -181,6 +196,12 @@ $timedOut   = $false
 $final      = ''
 $failure    = $null
 $authority  = [ordered]@{ permissionMode = 'unset'; allowedTools = 'unset'; sandbox = 'unset'; writableRoot = $null }
+$denyRules  = @()
+# $null, never 0. An engine that does not REPORT cost and a run that cost nothing are
+# different facts and this receipt will not merge them - the same rule the dispatcher's
+# malformed-row counter follows.
+$costUsd = $null; $numTurns = $null
+$cacheCreateTokens = $null; $cacheReadTokens = $null; $outputTokens = $null
 
 try {
 
@@ -192,6 +213,21 @@ Write-Utf8NoBom $promptPath $Prompt
 if ($cfg.engine -eq 'claude') {
     $exe  = $CLAUDE_EXE
     $argv = @('-p', '--model', $cfg.model, '--output-format', 'json', '--add-dir', $WorkDir)
+    if ($MaxTurns -gt 0) { $argv += @('--max-turns', [string]$MaxTurns) }
+    # Deny-list written to the RUN DIR so the grant is auditable beside the receipt that
+    # it produced, rather than being an invisible property of the invocation.
+    if (-not $AllowBulkReads) {
+        $denyRules = @(
+            'Read(**/gpu-lane-impl-review-sync.md)',
+            'Read(**/queue.json)',
+            'Read(**/claude-resume-CURRENT.md)',
+            'Read(**/fable-resume-CURRENT.md)',
+            'Read(**/orchestrator-resume-CURRENT.md)'
+        )
+        $settingsObj = @{ permissions = @{ deny = $denyRules } }
+        Write-Utf8NoBom $settingsPath ($settingsObj | ConvertTo-Json -Depth 5)
+        $argv += @('--settings', $settingsPath)
+    }
     if ($AllowEdits) {
         $argv += @('--permission-mode', 'acceptEdits')
     } else {
@@ -217,6 +253,9 @@ if ($cfg.engine -eq 'claude') {
         allowedTools   = if ($AllowEdits) { 'ALL' } else { 'Read,Grep,Glob' }
         sandbox        = 'n/a (claude)'
         writableRoot   = if ($AllowEdits) { $WorkDir } else { $null }
+        maxTurns       = if ($MaxTurns -gt 0) { $MaxTurns } else { 'unset' }
+        bulkReads      = if ($AllowBulkReads) { 'ALLOWED' } else { 'DENIED' }
+        denyRules      = if ($AllowBulkReads) { @() } else { $denyRules }
     }
 } else {
     $exe  = $CODEX_EXE
@@ -244,6 +283,9 @@ if ($cfg.engine -eq 'claude') {
         allowedTools   = 'ALL'
         sandbox        = $sandbox
         writableRoot   = if ($AllowEdits) { $WorkDir } else { $null }
+        maxTurns       = 'n/a (codex exec has no turn cap)'
+        bulkReads      = 'ALLOWED (codex takes no settings deny-list)'
+        denyRules      = @()
     }
 }
 
@@ -305,6 +347,25 @@ if ($cfg.engine -eq 'claude') {
     try {
         $j = $stdout | ConvertFrom-Json
         if ($j.PSObject.Properties.Name -contains 'result') { $final = [string]$j.result }
+        # SPEND IS A FIRST-CLASS RECEIPT FACT. Until 2026-09-03 the receipt recorded
+        # exitCode (the truth about completion) and byte counts, but NOTHING about cost -
+        # so "what did this board spend" was answerable only by grepping raw stdout of
+        # every run dir by hand. That is how USD 74.62 accumulated unnoticed in 4 h.
+        if ($j.PSObject.Properties.Name -contains 'total_cost_usd') {
+            $costUsd = [double]$j.total_cost_usd
+        }
+        if ($j.PSObject.Properties.Name -contains 'num_turns') { $numTurns = [int]$j.num_turns }
+        if ($j.PSObject.Properties.Name -contains 'usage' -and $null -ne $j.usage) {
+            if ($j.usage.PSObject.Properties.Name -contains 'cache_creation_input_tokens') {
+                $cacheCreateTokens = [int64]$j.usage.cache_creation_input_tokens
+            }
+            if ($j.usage.PSObject.Properties.Name -contains 'cache_read_input_tokens') {
+                $cacheReadTokens = [int64]$j.usage.cache_read_input_tokens
+            }
+            if ($j.usage.PSObject.Properties.Name -contains 'output_tokens') {
+                $outputTokens = [int64]$j.usage.output_tokens
+            }
+        }
     } catch { $final = '' }
     if (-not $final) { $final = $stdout }
     Write-Utf8NoBom $lastPath $final
@@ -360,13 +421,28 @@ $receipt = [ordered]@{
     stderrPath   = $errPath
     failure      = $failure
     complete     = ($null -eq $failure -and $exitCode -ne -999)
+    spend        = [ordered]@{
+        costUsd            = $costUsd
+        costReported       = ($null -ne $costUsd)
+        # Absence is NOT zero. codex exec emits no cost telemetry, so a codex receipt
+        # says so explicitly instead of implying a free run.
+        costUnavailableWhy = if ($null -ne $costUsd) { $null }
+                             elseif ($cfg.engine -eq 'codex') { 'codex exec reports no cost telemetry' }
+                             else { 'claude json carried no total_cost_usd (died before emitting it?)' }
+        numTurns           = $numTurns
+        cacheCreateTokens  = $cacheCreateTokens
+        cacheReadTokens    = $cacheReadTokens
+        outputTokens       = $outputTokens
+    }
 }
 Write-Utf8NoBom $rcptPath (($receipt | ConvertTo-Json -Depth 6))
 
 }   # end finally - the receipt is now written on EVERY exit path
 
-Write-Host ("[{0}] {1}/{2} effort={3} exit={4} {5}s -> {6}" -f `
-    $Lane, $cfg.engine, $cfg.model, $cfg.effort, $exitCode, $receipt.durationSec, $rcptPath)
+Write-Host ("[{0}] {1}/{2} effort={3} exit={4} {5}s cost={6} -> {7}" -f `
+    $Lane, $cfg.engine, $cfg.model, $cfg.effort, $exitCode, $receipt.durationSec,
+    $(if ($null -ne $costUsd) { 'USD ' + ([math]::Round($costUsd,2)) } else { 'unreported' }),
+    $rcptPath)
 
 if ($timedOut) { Write-Host "  TIMED OUT after ${TimeoutSec}s - output is partial." }
 
