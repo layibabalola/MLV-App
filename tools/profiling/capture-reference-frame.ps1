@@ -39,6 +39,22 @@ param(
     [string]$ProfileId = 'shipping-default',
     [int]$Seconds = 30,
     [int]$SettleMs = 3000,
+    # PIN THE FRAME. Measured 2026-09-03: five builds captured with --loop and a wall-clock
+    # --seconds bound landed on FIVE DIFFERENT FRAMES of the clip (mean|luma diff| 10.2..27.3,
+    # max 198 between consecutive arms). Whole-frame COLOUR statistics survive that; any SPATIAL
+    # statistic does not, and a col:row striping ratio scattered 1.63..17.46 with its own control
+    # moving in lockstep - an uncontrolled measurement wearing decimal places.
+    # --presented-frames stops after exactly N FRESH presented frames ("--seconds remains a
+    # fail-closed timeout", main.cpp:1193-1198), so the stop point is a frame index rather than a
+    # race against machine speed. 0 restores the old time-based behaviour.
+    [int]$PresentedFrames = 24,
+    # --presented-frames pins the COUNT of presented frames, NOT the timeline position. With
+    # drop-frame pacing on, the timeline advances by wall clock, so a slower build reaches a LATER
+    # timeline frame by the same count - and two builds then capture different moments while both
+    # honouring the pin. Measured 2026-09-03: same binary twice = byte-identical, but base vs
+    # candidate differed by mean|px| 28 across 99.92% of pixels, which is a different-frame
+    # signature, not a colour change. 'off' makes presented-frame N equal timeline frame N.
+    [ValidateSet('off','on','persisted')][string]$DropFrameMode = 'off',
     [hashtable]$ExtraEnv = @{}
 )
 $ErrorActionPreference = 'Stop'
@@ -57,10 +73,15 @@ $applied = @('MLVAPP_PLAYBACK_PHASE3_UNATTENDED','MLVAPP_PLAYBACK_SMOKE_TELEMETR
 foreach ($k in $ExtraEnv.Keys) { Set-Item -Path ("env:" + $k) -Value ([string]$ExtraEnv[$k]); $applied += $k }
 
 $shot = Join-Path $OutDir 'reference-frame.png'
+# --loop is DELIBERATELY ABSENT when the frame is pinned: looping wraps the timeline and
+# reintroduces exactly the which-frame ambiguity --presented-frames exists to remove.
+$playArgs = @('--gui-smoke-playback','--input',$Clip,'--scope','none','--no-zebras',
+              '--seconds',[string]$Seconds,'--settle-ms',[string]$SettleMs,'--start-frame','0','--drop-frame-mode',$DropFrameMode)
+if ($PresentedFrames -gt 0) { $playArgs += @('--presented-frames',[string]$PresentedFrames) }
+else                        { $playArgs += @('--loop') }
+$playArgs += @('--screenshot-output',$shot)
 $proc = Start-Process -FilePath $Exe -NoNewWindow -PassThru -Wait `
-    -ArgumentList @('--gui-smoke-playback','--input',$Clip,'--scope','none','--no-zebras',
-                    '--seconds',[string]$Seconds,'--settle-ms',[string]$SettleMs,
-                    '--start-frame','0','--loop','--screenshot-output',$shot) `
+    -ArgumentList $playArgs `
     -RedirectStandardOutput (Join-Path $OutDir 'capture.out.txt') `
     -RedirectStandardError  (Join-Path $OutDir 'capture.err.txt')
 
@@ -98,7 +119,20 @@ $manifest = [ordered]@{
     executable  = [ordered]@{ path = $Exe; sha256 = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash; bytes = (Get-Item -LiteralPath $Exe).Length }
     clip        = [ordered]@{ path = $Clip; sha256 = (Get-FileHash -LiteralPath $Clip -Algorithm SHA256).Hash; bytes = (Get-Item -LiteralPath $Clip).Length }
     artifact    = [ordered]@{ path = $shot; sha256 = (Get-FileHash -LiteralPath $shot -Algorithm SHA256).Hash; bytes = $img.Length }
-    settings    = [ordered]@{ seconds = $Seconds; settleMs = $SettleMs; scopeFlags = '--scope none --no-zebras'; envApplied = $applied }
+    settings    = [ordered]@{
+        seconds         = $Seconds
+        settleMs        = $SettleMs
+        presentedFrames = $PresentedFrames
+        dropFrameMode   = $DropFrameMode
+        # Records WHY the frame is (or is not) comparable across builds, so a reader never has to
+        # infer it from the flag list.
+        framePinned     = ($PresentedFrames -gt 0)
+        spatialComparable = if ($PresentedFrames -gt 0 -and $DropFrameMode -eq 'off') { $true }
+                            elseif ($PresentedFrames -gt 0) { 'COUNT pinned but pacing ON - timeline position may differ ACROSS builds' }
+                            else { 'NO - time-bounded capture lands on an arbitrary frame; colour only' }
+        scopeFlags      = '--scope none --no-zebras'
+        envApplied      = $applied
+    }
     exitCode    = $proc.ExitCode
 }
 $mf = Join-Path $OutDir 'reference-frame-candidate.json'
