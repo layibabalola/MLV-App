@@ -193,7 +193,23 @@ if ($halted) {
             try {
                 $row = $line | ConvertFrom-Json
                 $t = $row.PSObject.Properties['dispatchedUtc']
-                if ($t -and $t.Value -and ([datetime]::Parse($t.Value)).ToUniversalTime().ToString('yyyy-MM-dd') -eq $todayUtc) {
+                # ConvertFrom-Json already materialises an ISO-8601 'Z' timestamp as a
+                # [datetime] with Kind=Utc. Passing THAT to [datetime]::Parse() stringifies it in
+                # LOCAL format first, losing the Kind, so it re-parses as Local and
+                # ToUniversalTime() applies the offset A SECOND TIME. Every dispatch in the
+                # previous UTC day's final offset-hours then counts toward today, over-reporting
+                # the budget and halting the loop early. Measured 2026-09-04: 5 real dispatches
+                # reported as 12/12, autonomy idle 4.5 h.
+                $stamp = $null
+                if ($t -and $t.Value) {
+                    $v = $t.Value
+                    $stamp = if ($v -is [datetime]) {
+                        if ($v.Kind -eq [System.DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($v, [System.DateTimeKind]::Utc) } else { $v }
+                    } else {
+                        [datetime]::Parse([string]$v, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+                    }
+                }
+                if ($stamp -and $stamp.ToUniversalTime().ToString('yyyy-MM-dd') -eq $todayUtc) {
                     $spentToday++
                 }
             } catch { }
