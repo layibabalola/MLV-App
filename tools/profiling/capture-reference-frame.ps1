@@ -69,7 +69,15 @@ foreach ($p in @($Exe, $Clip)) {
 $env:MLVAPP_PLAYBACK_PHASE3_UNATTENDED = '1'
 $env:MLVAPP_PLAYBACK_SMOKE_TELEMETRY   = '1'
 $env:MLVAPP_INTERACTIVE_TRACE          = '1'
-$applied = @('MLVAPP_PLAYBACK_PHASE3_UNATTENDED','MLVAPP_PLAYBACK_SMOKE_TELEMETRY','MLVAPP_INTERACTIVE_TRACE')
+# MLVApp writes its telemetry to a LOG FILE, not to stderr: playback_smoke.summary carries
+# presented_fps (MainWindow.cpp:25179) via qInfo(), and on a Windows GUI-subsystem app that does
+# NOT reach the redirected stderr -- every arm of the 2026-09-04 scale sweep produced a 0-byte
+# capture.err.txt and no rate estimator at all. run-release-gui-smoke.ps1 has always known this:
+# it sets MLVAPP_CRASH_FORENSICS_LOG_DIR and then reads mlvapp-*.log out of it. This harness
+# never did, so a capture could measure colour but never a rate.
+$env:MLVAPP_CRASH_FORENSICS_LOG_DIR    = $OutDir
+
+$applied = @('MLVAPP_PLAYBACK_PHASE3_UNATTENDED','MLVAPP_PLAYBACK_SMOKE_TELEMETRY','MLVAPP_INTERACTIVE_TRACE','MLVAPP_CRASH_FORENSICS_LOG_DIR')
 foreach ($k in $ExtraEnv.Keys) { Set-Item -Path ("env:" + $k) -Value ([string]$ExtraEnv[$k]); $applied += $k }
 
 $shot = Join-Path $OutDir 'reference-frame.png'
@@ -158,6 +166,8 @@ $manifest = [ordered]@{
                             else { 'NO - time-bounded capture lands on an arbitrary frame; colour only' }
         scopeFlags      = '--scope none --no-zebras'
         envApplied      = $applied
+        appLog          = (Get-ChildItem -LiteralPath $OutDir -Filter 'mlvapp-*.log' -ErrorAction SilentlyContinue |
+                           Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1 -ExpandProperty Name)
     }
     exitCode    = $proc.ExitCode
 }
