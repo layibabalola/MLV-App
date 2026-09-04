@@ -200,16 +200,19 @@ if ($halted) {
                 # previous UTC day's final offset-hours then counts toward today, over-reporting
                 # the budget and halting the loop early. Measured 2026-09-04: 5 real dispatches
                 # reported as 12/12, autonomy idle 4.5 h.
-                $stamp = $null
+                # NAME-SCOPED DELIBERATELY: $stamp at the top of this script names the cycle receipt file.
+                # Reusing that name here overwrote it with a [datetime], and the receipt path
+                # became "cycle-09/04/2026 09:05:02.json" -- illegal on Windows.
+                $rowStamp = $null
                 if ($t -and $t.Value) {
                     $v = $t.Value
-                    $stamp = if ($v -is [datetime]) {
+                    $rowStamp = if ($v -is [datetime]) {
                         if ($v.Kind -eq [System.DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($v, [System.DateTimeKind]::Utc) } else { $v }
                     } else {
                         [datetime]::Parse([string]$v, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
                     }
                 }
-                if ($stamp -and $stamp.ToUniversalTime().ToString('yyyy-MM-dd') -eq $todayUtc) {
+                if ($rowStamp -and $rowStamp.ToUniversalTime().ToString('yyyy-MM-dd') -eq $todayUtc) {
                     $spentToday++
                 }
             } catch { }
