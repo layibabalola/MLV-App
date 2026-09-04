@@ -5376,12 +5376,71 @@ def is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
     return run_git(repo_root, ["merge-base", "--is-ancestor", ancestor, descendant]).returncode == 0
 
 
+def stale_locked_worktree_admin_entries(repo_root: Path) -> List[Dict[str, Any]]:
+    """Admin entries that `git worktree prune` can never clear on its own.
+
+    `git worktree add` locks a new worktree with reason "initializing" and unlocks it once
+    setup completes. When that process is killed midway -- which the bounded closeout runner
+    does deliberately on timeout or CPU stall -- the lock survives with no directory behind
+    it. `git worktree prune` skips locked worktrees BY DESIGN, so the stale registry entry is
+    structurally unprunable and keeps blocking closeout forever.
+
+    Only entries whose worktree directory is ALREADY GONE are reported, so unlocking them
+    cannot destroy anything that exists.
+    """
+    admin_root = repo_root / ".git" / "worktrees"
+    entries: List[Dict[str, Any]] = []
+    if not admin_root.is_dir():
+        return entries
+    for admin_dir in sorted(admin_root.iterdir()):
+        lock_file = admin_dir / "locked"
+        gitdir_file = admin_dir / "gitdir"
+        if not lock_file.is_file() or not gitdir_file.is_file():
+            continue
+        try:
+            gitdir_value = gitdir_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not gitdir_value:
+            continue
+        worktree_path = Path(gitdir_value).parent
+        if worktree_path.exists():
+            continue
+        try:
+            reason = lock_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            reason = ""
+        entries.append({"admin": admin_dir.name, "worktreePath": str(worktree_path), "lockReason": reason})
+    return entries
+
+
+def prune_worktrees(repo_root: Path) -> Dict[str, Any]:
+    """Prune, then clear stale LOCKED entries that prune structurally cannot, then prune again.
+
+    Unlocking is confined to entries whose directory is already gone -- see
+    stale_locked_worktree_admin_entries -- so no live or locked-for-a-reason worktree is touched.
+    """
+    prune = run_git_longpaths(repo_root, ["worktree", "prune"])
+    stale = stale_locked_worktree_admin_entries(repo_root)
+    unlocked: List[Dict[str, Any]] = []
+    for entry in stale:
+        unlock = run_git_longpaths(repo_root, ["worktree", "unlock", entry["worktreePath"]])
+        unlocked.append({**entry, "unlockReturncode": unlock.returncode, "unlockStderr": unlock.stderr[-500:]})
+    if unlocked:
+        prune = run_git_longpaths(repo_root, ["worktree", "prune"])
+    return {
+        "pruneReturncode": prune.returncode,
+        "pruneStderr": prune.stderr[-2000:],
+        "staleLockedUnlocked": unlocked,
+    }
+
+
 def remove_worktree(repo_root: Path, path: Path) -> Dict[str, Any]:
     result = run_git_longpaths(repo_root, ["worktree", "remove", "--force", "--force", str(path)])
     if result.returncode != 0 and path.exists():
         shutil.rmtree(path, ignore_errors=True)
-    prune = run_git_longpaths(repo_root, ["worktree", "prune"])
-    return {"path": str(path), "returncode": result.returncode, "stderr": result.stderr[-2000:], "pruneReturncode": prune.returncode, "pruneStderr": prune.stderr[-2000:]}
+    prune = prune_worktrees(repo_root)
+    return {"path": str(path), "returncode": result.returncode, "stderr": result.stderr[-2000:], **prune}
 
 
 def target_branch_worktrees(repo_root: Path, target_branch: str) -> List[Dict[str, Any]]:
