@@ -15,6 +15,8 @@ from jsonschema import Draft202012Validator
 
 from .brokered_closeout import (
     DEFAULT_CLOSEOUT_CONFIG,
+    prune_worktrees,
+    stale_locked_worktree_admin_entries,
     bounded_closeout_run,
     bounded_runner_exit_code,
     bounded_runner_exit_codes,
@@ -7428,3 +7430,80 @@ class CoordinationGateIdentityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaleLockedWorktreePruneTests(unittest.TestCase):
+    """A worktree whose creation was KILLED midway is locked with no directory behind it.
+
+    `git worktree add` locks a new worktree with reason "initializing" and unlocks it on
+    success. When the process dies first -- which the bounded closeout runner does
+    deliberately on timeout or CPU stall -- the lock outlives the directory.
+    `git worktree prune` skips locked worktrees BY DESIGN, so that entry can never clear
+    itself while closeout keeps blocking on stale worktrees. Observed live on 2026-09-04:
+    two such entries, with `git worktree prune -v` reporting nothing to do.
+    """
+
+    def setUp(self) -> None:
+        self.tempdir = Path(tempfile.mkdtemp(prefix="stale-locked-wt-"))
+        self.addCleanup(shutil.rmtree, self.tempdir, ignore_errors=True)
+        self.repo = self.tempdir / "repo"
+        self.repo.mkdir()
+        git(self.repo, "init", "-b", "master")
+        git(self.repo, "config", "user.email", "test@example.invalid")
+        git(self.repo, "config", "user.name", "Test User")
+        (self.repo / "README.md").write_text("hello", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "initial")
+
+    def _admin_names(self) -> set:
+        admin_root = self.repo / ".git" / "worktrees"
+        return {item.name for item in admin_root.iterdir()} if admin_root.is_dir() else set()
+
+    def _killed_mid_init(self, name: str) -> Path:
+        """Reproduce the exact on-disk state: locked "initializing", directory gone."""
+        path = self.tempdir / name
+        git(self.repo, "worktree", "add", "-b", "br-" + name, str(path))
+        git(self.repo, "worktree", "lock", "--reason", "initializing", str(path))
+        shutil.rmtree(path)
+        return path
+
+    def test_plain_git_prune_CANNOT_clear_a_stale_locked_worktree(self) -> None:
+        """Control probe. Without it the real test could pass for the wrong reason."""
+        self._killed_mid_init("wt-a")
+        before = self._admin_names()
+        result = subprocess.run(
+            ["git", "worktree", "prune", "-v"], cwd=str(self.repo), text=True, capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self._admin_names(),
+            before,
+            "git worktree prune cleared a locked entry; the defect this test guards is gone",
+        )
+
+    def test_prune_worktrees_clears_it(self) -> None:
+        self._killed_mid_init("wt-b")
+        detected = stale_locked_worktree_admin_entries(self.repo)
+        self.assertEqual(len(detected), 1, detected)
+        self.assertEqual(detected[0]["lockReason"], "initializing")
+
+        report = prune_worktrees(self.repo)
+        self.assertEqual(report["pruneReturncode"], 0, report)
+        self.assertEqual(len(report["staleLockedUnlocked"]), 1, report)
+        self.assertEqual(self._admin_names(), set(), "stale locked entry survived prune_worktrees")
+        self.assertEqual(stale_locked_worktree_admin_entries(self.repo), [])
+
+    def test_a_LIVE_locked_worktree_is_never_unlocked(self) -> None:
+        """The fix must stay narrow: a lock over a directory that EXISTS is left alone."""
+        live = self.tempdir / "wt-live"
+        git(self.repo, "worktree", "add", "-b", "br-live", str(live))
+        git(self.repo, "worktree", "lock", "--reason", "held by another lane", str(live))
+
+        self.assertEqual(stale_locked_worktree_admin_entries(self.repo), [])
+        report = prune_worktrees(self.repo)
+        self.assertEqual(report["staleLockedUnlocked"], [], report)
+        self.assertTrue(live.is_dir())
+        listing = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=str(self.repo), text=True, capture_output=True
+        ).stdout
+        self.assertIn("locked held by another lane", listing)
