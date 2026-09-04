@@ -107,6 +107,31 @@ if (-not $Commit) {
     if ($Commit) { $Commit = $Commit.Trim() }
 }
 
+# The persisted APPLICATION configuration the run inherited. The harness has always recorded
+# its own arguments thoroughly, but never this - so two candidate files could differ in
+# playback path, debayer or caching with nothing in the record to show it. On 2026-09-03 that
+# gap let a false claim about which code path the captures exercised stand for a full
+# iteration; the value cost one probe to read. QSettings(UserScope,"magiclantern.MLVApp",
+# "MLVApp") maps to HKCU on Windows (MainWindow.cpp restore/save of these exact keys).
+$appSettings = [ordered]@{ hive = 'HKCU:\Software\magiclantern.MLVApp\MLVApp'; user = $env:USERNAME }
+try {
+    if (Test-Path $appSettings.hive) {
+        $k = Get-ItemProperty -Path $appSettings.hive -ErrorAction Stop
+        foreach ($n in @('playbackProcessingSubset','playbackDebayerMode','caching','resizeEnable','resizeWidth')) {
+            $appSettings[$n] = if ($k.PSObject.Properties.Name -contains $n) { [string]$k.$n } else { '(unset)' }
+        }
+        $appSettings.present = $true
+    } else {
+        # Absent hive is NOT the same as defaults: it means this user has never run the GUI, so
+        # the app will apply its own compiled defaults. Say which, rather than implying a reading.
+        $appSettings.present = $false
+        $appSettings.note = 'no hive for this user - app will use compiled defaults, values NOT read'
+    }
+} catch {
+    $appSettings.present = 'error'
+    $appSettings.note = ('could not read: ' + $_.Exception.Message)
+}
+
 $manifest = [ordered]@{
     schema      = 'mlvapp.reference-frame-candidate.v1'
     # NOT "reviewed_instrumented_known_good". This script cannot review its own output.
@@ -119,6 +144,7 @@ $manifest = [ordered]@{
     executable  = [ordered]@{ path = $Exe; sha256 = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash; bytes = (Get-Item -LiteralPath $Exe).Length }
     clip        = [ordered]@{ path = $Clip; sha256 = (Get-FileHash -LiteralPath $Clip -Algorithm SHA256).Hash; bytes = (Get-Item -LiteralPath $Clip).Length }
     artifact    = [ordered]@{ path = $shot; sha256 = (Get-FileHash -LiteralPath $shot -Algorithm SHA256).Hash; bytes = $img.Length }
+    appSettings = $appSettings
     settings    = [ordered]@{
         seconds         = $Seconds
         settleMs        = $SettleMs
