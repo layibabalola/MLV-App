@@ -90,6 +90,7 @@ $settledValidationRecommendedSeconds = 30
 $validationWarnings = @()
 . (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')
 Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force
+. (Join-Path $PSScriptRoot 'provenance-stamp.ps1')
 
 if ($RequireFreshScreenshotRender -and -not $CaptureScreenshot) {
     throw "-RequireFreshScreenshotRender requires -CaptureScreenshot."
@@ -889,6 +890,43 @@ $inputPath =
     else {
         $resolvedClipPath.Path
     }
+$smokeReceiptPath = if ([string]::IsNullOrWhiteSpace($Receipt)) {
+    $null
+} else {
+    (Resolve-Path -LiteralPath $Receipt).ProviderPath
+}
+
+function Get-GuiSmokeImmutableFileBinding([string]$Path) {
+    $item = Get-Item -LiteralPath $Path
+    [pscustomobject]@{
+        path = $item.FullName
+        length = [long]$item.Length
+        sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+    }
+}
+
+$exeStamp = Get-MlvAppBuildStamp -ExePath $exe
+$clipBaseName = [IO.Path]::GetFileNameWithoutExtension($inputPath)
+$clipParts = @(Get-ChildItem -LiteralPath (Split-Path -Parent $inputPath) -File | Where-Object {
+    $_.BaseName -ceq $clipBaseName -and $_.Extension -match '^\.M(?:LV|\d\d)$'
+} | Sort-Object @{ Expression = { if ($_.Extension -ieq '.MLV') { -1 } else { [int]$_.Extension.Substring(2) } } } | ForEach-Object {
+    Get-GuiSmokeImmutableFileBinding -Path $_.FullName
+})
+if ($clipParts.Count -eq 0 -or -not $clipParts[0].path.Equals($inputPath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Could not build an ordered immutable multipart clip binding rooted at the requested .MLV file.'
+}
+$launchInputBindings = [pscustomobject]@{
+    executable = [pscustomobject]@{
+        path = $exe
+        length = [long](Get-Item -LiteralPath $exe).Length
+        sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+        embeddedCommit = $exeStamp.sha
+        dirty = $exeStamp.dirty
+        stampFound = [bool]$exeStamp.found
+    }
+    clipParts = $clipParts
+    receipt = if ($smokeReceiptPath) { Get-GuiSmokeImmutableFileBinding -Path $smokeReceiptPath } else { $null }
+}
 
 if ([string]::IsNullOrWhiteSpace($Output)) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -949,7 +987,7 @@ $arguments += @(
 # RULE 2026-06-26 (Layi): loop short clips so they play the whole -Seconds window (not one pass + stop).
 if (-not $NoLoop) { $arguments += "--loop" }
 if (-not [string]::IsNullOrWhiteSpace($Receipt)) {
-    $arguments += @("--receipt", (Resolve-Path -LiteralPath $Receipt).Path)
+    $arguments += @("--receipt", $smokeReceiptPath)
 }
 if (-not [string]::IsNullOrWhiteSpace($Scope)) {
     $arguments += @("--scope", $Scope)
@@ -1518,6 +1556,12 @@ if ($RequireFreshScreenshotRender -and $screenshotCapture) {
         -NotePropertyValue $screenshotProvenance `
         -Force
 }
+if ($RequireFreshScreenshotRender -and $screenshotCapture) {
+    $screenshotCapture | Add-Member `
+        -NotePropertyName provenance `
+        -NotePropertyValue $screenshotProvenance `
+        -Force
+}
 $windowScreenshotFpsStatusText = Get-ObjectPropertyValue $windowScreenshotLog "fps_status"
 $windowScreenshotFpsStatusValue = Convert-FpsStatusTextToValue $windowScreenshotFpsStatusText
 $requestedPlaybackDurationMs = [int]([Math]::Max(100, $Seconds * 1000))
@@ -1913,6 +1957,7 @@ $result = [pscustomobject]@{
     repoRoot = $root
     exePath = $exe
     clipPath = $inputPath
+    inputBindings = $launchInputBindings
     outputPath = $outputPath
     evidence = [pscustomobject]@{
         runNonce = $runNonce
