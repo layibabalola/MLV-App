@@ -178,3 +178,43 @@ def test_cycle_receipt_stamp_has_exactly_one_assignment():
         "$stamp must be formatted with an explicit invariant pattern; a culture-default "
         "ToString() yields '/' and ':' which are illegal in a Windows path."
     )
+
+
+def test_a_transient_fetch_failure_does_not_halt_the_cycle():
+    """One blip must not cost a whole 45-minute cycle.
+
+    Observed 2026-09-04T18:01:22Z: the loop wrote
+    haltedReason="git fetch fork failed (exit 128); driver worktree may be stale" and
+    dispatched nothing. The cause was lock contention with a concurrent git operation on the
+    same repository -- the identical fetch succeeded by hand moments later, and the driver
+    worktree was neither stale nor broken. The old code halted on the FIRST non-zero exit, so
+    a blip and a genuinely broken remote were indistinguishable.
+
+    Asserted on the source for the reason documented in
+    test_cycle_receipt_stamp_has_exactly_one_assignment: running the loop syncs a real git
+    worktree and writes into .claude-state, so it would mutate live board state.
+    """
+    text = LOOP.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    assert "function Invoke-GitFetchFork" in text, "no bounded retry helper"
+
+    # the helper must attempt more than once
+    attempts_line = [ln for ln in lines if "$Attempts" in ln and "param(" in ln]
+    assert attempts_line, "Invoke-GitFetchFork must take a bounded $Attempts parameter"
+    digits = "".join(ch for ch in attempts_line[0].split("$Attempts", 1)[1] if ch.isdigit())
+    assert digits and int(digits[0]) > 1, "a single attempt is not a retry"
+
+    # THE ANTI-PATTERN: a bare fetch whose very next line halts the cycle
+    stale = "driver worktree may be stale"
+    for i, ln in enumerate(lines):
+        is_bare_fetch = ("git -C $RepoRoot fetch fork" in ln) and ("Invoke-GitFetchFork" not in ln)
+        if not is_bare_fetch:
+            continue
+        following = lines[i + 1] if i + 1 < len(lines) else ""
+        assert stale not in following, (
+            "line %d halts the cycle on a single fetch attempt: %s" % (i + 1, ln.strip())
+        )
+
+    # the halt message reports the attempt count, so receipts stay diagnosable
+    assert "attempts; " + stale in text

@@ -78,18 +78,35 @@ $DriverRoot   = 'C:\mlvtmp\ws-driver'
 $TargetRef    = 'fork/master'
 $Dispatcher   = Join-Path $DriverRoot 'tools\coordination\Invoke-Workstream.ps1'
 
+function Invoke-GitFetchFork {
+    # A single TRANSIENT failure must not cost a whole cycle.
+    # Observed 2026-09-04T18:01:22Z: the loop halted on "git fetch fork failed (exit 128)"
+    # caused by lock contention with a concurrent git operation on the same repository. The
+    # identical fetch succeeded moments later by hand, so the cycle was lost to a blip, not
+    # to a stale worktree. Bounded retries; the attempt count is reported for the receipt.
+    param([int]$Attempts = 3, [int]$DelaySeconds = 5)
+    $last = 0
+    for ($i = 1; $i -le $Attempts; $i++) {
+        & git -C $RepoRoot fetch fork --quiet 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { return [pscustomobject]@{ Ok = $true; Attempts = $i; ExitCode = 0 } }
+        $last = $LASTEXITCODE
+        if ($i -lt $Attempts) { Start-Sleep -Seconds $DelaySeconds }
+    }
+    return [pscustomobject]@{ Ok = $false; Attempts = $Attempts; ExitCode = $last }
+}
+
 function Sync-DriverWorktree {
     # Returns $null on success, or a CANNOT-DETERMINE reason string.
     try {
         if (-not (Test-Path -LiteralPath (Join-Path $DriverRoot '.git'))) {
             if (Test-Path -LiteralPath $DriverRoot) { Remove-Item -LiteralPath $DriverRoot -Recurse -Force }
-            & git -C $RepoRoot fetch fork --quiet 2>&1 | Out-Null
+            Invoke-GitFetchFork | Out-Null
             & git -C $RepoRoot -c core.longpaths=true worktree add --detach $DriverRoot $TargetRef 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { return "could not create driver worktree at $DriverRoot" }
             return $null
         }
-        & git -C $RepoRoot fetch fork --quiet 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { return "git fetch fork failed (exit $LASTEXITCODE); driver worktree may be stale" }
+        $fetch = Invoke-GitFetchFork
+        if (-not $fetch.Ok) { return "git fetch fork failed (exit $($fetch.ExitCode)) after $($fetch.Attempts) attempts; driver worktree may be stale" }
         # Hard reset is safe here and ONLY here: this worktree is tool-owned, is
         # never edited by hand, and holds nothing anyone can lose.
         & git -C $DriverRoot reset --hard $TargetRef --quiet 2>&1 | Out-Null
