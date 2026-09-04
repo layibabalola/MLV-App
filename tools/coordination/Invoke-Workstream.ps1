@@ -331,6 +331,14 @@ operator-only. Any blocker naming GitHub is wrong unless token scopes are re-che
 This host (VIRTUAL-TEN) is a VMware VM with ZERO NVIDIA hardware. CUDA build and GPU playback
 legs are ROUTED to the GPU hosts (\\bachelor\mlv-agent). "CUDA blocked locally" is a ROUTING
 decision, never a lane blocker.
+A PATH UNDER \\bachelor\... OR C:\mlvtmp\mlv-agent\... IS ON ANOTHER MACHINE. That whole
+root does not exist here, so Test-Path/Get-FileHash on it from this host reports MISSING for
+EVERY file it contains. A LOCAL PROBE OF A REMOTE PATH IS A STATEMENT ABOUT THIS HOST, NOT
+ABOUT THE FILE. Report it as UNVERIFIED and name the venue - never as absent, and never as
+contradicting a deployment claim. A control proving your HASH CHECK discriminates does NOT
+prove you tested the right MACHINE: a falsifier on the mechanism is not a falsifier on the
+venue. (Measured 2026-09-04: a lane read PresentMon MISSING at C:\mlvtmp\mlv-agent\cache\
+from this VM and reported it as contradicting the card, while the GPU host was unreachable.)
 
 ## MEASUREMENT DISCIPLINE THAT ALREADY COST THIS BOARD REAL TIME
 - EVERY PLAYBACK NUMBER CARRIES ITS CONFIGURATION OR IT CARRIES NOTHING. Legs here have run with
