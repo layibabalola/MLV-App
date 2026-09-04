@@ -44,7 +44,20 @@ import re
 import sys
 
 ASSERTION_SOURCE = "tools/repo_hygiene/brokered_closeout.py"
-TEST_ASSERTION_SOURCE = "tools/repo_hygiene/test_brokered_closeout.py"
+# Every test module that pins substrings against a governed doc. Adding a source here also
+# fixes tools/docs/split_claude_md.py --refresh-tokens, which derives from this module.
+#
+# test_candidate_acceptance.py was the third surface and was missing: after a sanctioned
+# CLAUDE.md split its five authority-boundary sentences went absent, check_pinned_tokens
+# still exited 0, and the repo hygiene suite went red on
+# test_agent_doctrine_matches_two_phase_acceptance_authority_boundary. A checker that knows
+# about a subset of the pinning surfaces reports success for the surfaces it happens to know.
+TEST_ASSERTION_SOURCES = (
+    "tools/repo_hygiene/test_brokered_closeout.py",
+    "tools/repo_hygiene/test_candidate_acceptance.py",
+)
+# Retained for callers that referenced the single-source name.
+TEST_ASSERTION_SOURCE = TEST_ASSERTION_SOURCES[0]
 
 _ASSERTION_RE = re.compile(
     r'\{"path":\s*"([^"]+)",\s*"contains":\s*"((?:[^"\\]|\\.)*)"\}'
@@ -92,14 +105,25 @@ def _doc_path_of(node):
 
 
 def derive_test_pinned(repo_root: str):
-    """Parse the closeout TEST suite for `assertIn("literal", <doc>_text)` checks."""
-    src, err = _read(repo_root, TEST_ASSERTION_SOURCE)
+    """Parse every pinning TEST module for `assertIn("literal", <doc>_text)` checks."""
+    merged = {}
+    for source in TEST_ASSERTION_SOURCES:
+        one, err = _derive_test_pinned_one(repo_root, source)
+        if err:
+            return {}, err
+        for path, needles in one.items():
+            merged.setdefault(path, set()).update(needles)
+    return merged, None
+
+
+def _derive_test_pinned_one(repo_root: str, source: str):
+    src, err = _read(repo_root, source)
     if err:
         return {}, err
     try:
         tree = ast.parse(src)
     except SyntaxError as exc:
-        return {}, "cannot parse %s: %s" % (TEST_ASSERTION_SOURCE, exc)
+        return {}, "cannot parse %s: %s" % (source, exc)
 
     pinned = {}
 

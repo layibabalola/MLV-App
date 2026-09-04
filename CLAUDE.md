@@ -45,6 +45,10 @@ py -3 tools/docs/check_pinned_tokens.py
 - `dashboard-action-requests` -- detail in claude/session-closeout.md
 - `Evidence-preserving transaction prune` -- detail in claude/session-closeout.md
 - `Hard-clean final responses are blocked unless the repo-closed postcondition passes` -- detail in claude/session-closeout.md
+- `human content-review gate, which remains mandatory in both phases` -- detail in claude/session-closeout.md
+- `is now active (`enabled=true`,
+`requireReadyForFinalize=true`)` -- detail in claude/session-closeout.md
+- `non-authenticating process evidence and never replace` -- detail in claude/session-closeout.md
 - `PowerShell 7+` -- detail in claude/session-closeout.md
 - `protected-target-dirty-recovery` -- detail in claude/session-closeout.md
 - `protected-target-noop-closeout` -- detail in claude/session-closeout.md
@@ -55,7 +59,10 @@ py -3 tools/docs/check_pinned_tokens.py
 - `round-delta note` -- detail in claude/session-closeout.md
 - `semantic success authority` -- detail in claude/session-closeout.md
 - `start-closeout-dashboard.ps1` -- detail in claude/session-closeout.md
+- `tests, and tooling-baseline inventory are
+already mandatory` -- detail in claude/session-closeout.md
 - `validate-rollback-manifest.ps1` -- detail in claude/session-closeout.md
+- `was deliberately dormant (`enabled=false`, `requireReadyForFinalize=false`)` -- detail in claude/session-closeout.md
 - `webDashboardSpec` -- detail in claude/session-closeout.md
 - `workBlockBootstrap.autoBranchFromProtectedTarget` -- detail in claude/session-closeout.md
 - `workBlockBootstrap.requireIntegratedStartHeadForFinalize` -- detail in claude/session-closeout.md
