@@ -113,3 +113,30 @@ def test_heartbeat_resolves_watchdog_beside_wrapper_not_under_repo_root(tmp_path
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["state"] == "IDLE"
     assert not (tmp_path / "tools" / "coordination" / "coordination_watchdog.py").exists()
+
+
+def test_supplied_timestamp_must_be_a_real_instant(tmp_path):
+    """STAMP-APPENDER-1: --timestamp was written into the entry verbatim, so NOT-A-CLOCK
+    reached the ledger heading. The closeout gate BLOCKS on a heading it cannot parse
+    (content_approval_unparsable_heading), so this appender could stop finalize by itself.
+    A real instant must still pass through UNCHANGED: --timestamp exists for replay and
+    fixtures, and silently rewriting it would surprise those callers."""
+    start, feature = make_repo(tmp_path)
+
+    # subject: a non-instant is refused before anything is appended
+    command, ledgers = args(tmp_path, start, feature)
+    result = run(VALIDATOR, *command, "--timestamp", "NOT-A-CLOCK", cwd=tmp_path)
+    assert result.returncode != 0, result.stdout
+    assert "ISO-8601" in (result.stderr + result.stdout)
+    for ledger in ledgers:
+        assert "NOT-A-CLOCK" not in ledger.read_text()
+
+    # control: a real instant is accepted AND preserved byte-for-byte
+    second = tmp_path / "second"
+    second.mkdir()
+    start2, feature2 = make_repo(second)
+    command2, ledgers2 = args(second, start2, feature2)
+    exact = "2000-01-02T03:04:05+00:00"
+    ok = run(VALIDATOR, *command2, "--timestamp", exact, cwd=second)
+    assert ok.returncode == 0, ok.stderr
+    assert any(exact in ledger.read_text() for ledger in ledgers2)
