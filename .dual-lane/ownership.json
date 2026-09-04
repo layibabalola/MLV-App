@@ -23,6 +23,7 @@
         "tools/**",
         "tests/**",
         "docs/**",
+        ".github/**",
         ".claude/**",
         ".dual-lane/**",
         ".claude-state/coordination/dual-lane/claude.md"

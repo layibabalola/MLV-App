@@ -5,8 +5,10 @@ tree, one local-only branch) cannot hit the shared-tree hazards by accident inst
 
 ## The model
 - One repo, one branch (`build/provenance-p0`), one shared working tree. Both lanes commit to it.
-- Codex = implementer (`src/mlv/**`, `src/processing/**`). Claude = reviewer (`platform/qt/**`, `tools/**`,
-  `tests/**`, `docs/**`, `.claude/**`, `src/batch/**`).
+- Codex = implementer (`src/mlv/**`, `src/processing/**`, `src/dng/**`, `platform/qt/**`, `tools/gpu/**`, `tests/pipeline/**`).
+  Claude = reviewer + coordinator + gate/coordination tooling (`src/batch/**`, `tools/**`, `tests/**`, `docs/**`, `.github/**`, `.claude/**`, `.dual-lane/**`).
+  `platform/qt/**` and `tools/gpu/**` were reassigned to Codex on 2026-07-02; this list is derived from
+  `.dual-lane/ownership.json`, which is the single source of truth. Resolve with `owner-of.ps1`, never from here.
 - Coordination is append-only files under `.claude-state/coordination/dual-lane/`.
 
 ## Pieces
@@ -24,7 +26,7 @@ tree, one local-only branch) cannot hit the shared-tree hazards by accident inst
 $env:GIT_DUAL_LANE = 'claude'   # or 'codex'
 
 # Preview what your lane would stage (nothing committed):
-pwsh -File tools/dual-lane/owner-of.ps1 -Path platform/qt/MainWindow.cpp     # -> claude
+pwsh -File tools/dual-lane/owner-of.ps1 -Path platform/qt/MainWindow.cpp     # -> codex
 pwsh -File tools/dual-lane/lane-commit.ps1 -Lane claude -DryRun
 
 # Commit only your lane's files:
