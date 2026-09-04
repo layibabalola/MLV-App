@@ -52,8 +52,33 @@ def validate_range(repo: Path, start: str, feature: str) -> tuple[str, str, str]
     return start_sha, feature_sha, f"{start_sha}..{feature_sha}"
 
 
+
+def coordination_timestamp(supplied: "str | None") -> str:
+    """Return the entry timestamp, rejecting a caller value that is not a real instant.
+
+    The ledger heading grammar is `### [<timestamp>] ACTOR - KIND (free text)`, and the
+    closeout content-review gate BLOCKS on a heading it cannot parse
+    (`content_approval_unparsable_heading`). This appender previously used --timestamp
+    verbatim, so `--timestamp NOT-A-CLOCK` produced a heading that could stop finalize --
+    a denial of service on the gate, authored by our own tool.
+
+    Validate only; the caller's value is passed through unchanged when it parses, because
+    --timestamp exists for replay and fixtures and silently rewriting it would surprise
+    those callers.
+    """
+    if not supplied:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        datetime.fromisoformat(supplied)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"--timestamp must be an ISO-8601 instant, got {supplied!r}: {exc}"
+        )
+    return supplied
+
+
 def build_entry(args: argparse.Namespace, range_token: str) -> str:
-    timestamp = args.timestamp or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    timestamp = coordination_timestamp(args.timestamp)
     fields = [
         f"### [{timestamp}] CODEX - HANDOFF ({args.summary})",
         f"Range: {range_token}",
