@@ -1,3 +1,4 @@
+import re
 import json
 import subprocess
 import sys
@@ -140,3 +141,40 @@ def test_supplied_timestamp_must_be_a_real_instant(tmp_path):
     ok = run(VALIDATOR, *command2, "--timestamp", exact, cwd=second)
     assert ok.returncode == 0, ok.stderr
     assert any(exact in ledger.read_text() for ledger in ledgers2)
+
+
+LOOP = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
+
+
+def test_cycle_receipt_stamp_has_exactly_one_assignment():
+    """The cycle-receipt filename is built from $stamp, which must stay a formatted STRING.
+
+    On 2026-09-04 the daily-budget fix (PR #37) reused `$stamp` as a per-row [datetime]
+    inside the counting loop -- same script scope, between the assignment and the use. The
+    receipt path then interpolated with the current culture as
+    'cycle-09\04\2026 09:05:02.json': "/" became directory separators and ":" is illegal
+    in a Windows filename, so WriteAllText threw and the scheduled task exited 1 for ~4.5 h
+    while writing no audit record.
+
+    Asserted on the source rather than by running the loop: the loop syncs a git worktree,
+    reads the live dispatch log and writes into .claude-state, so executing it under test
+    would mutate real board state. The repo already asserts source shape this way in
+    tools/repo_hygiene/test_repo_hygiene.py.
+    """
+    text = LOOP.read_text(encoding="utf-8")
+
+    # the receipt is still built from $stamp
+    assert 'cycle-$stamp.json' in text
+
+    # ...and $stamp is assigned exactly once, at script scope
+    assignments = re.findall(r"^\s*\$stamp\s*=", text, re.MULTILINE)
+    assert len(assignments) == 1, (
+        "$stamp must have exactly one assignment; a second one clobbers the receipt "
+        "filename. Found %d." % len(assignments)
+    )
+
+    # ...and that one assignment produces a filename-safe format, not a culture default
+    assert re.search(r"\$stamp\s*=\s*\$cycleStart\.ToString\('yyyyMMddTHHmmssZ'\)", text), (
+        "$stamp must be formatted with an explicit invariant pattern; a culture-default "
+        "ToString() yields '/' and ':' which are illegal in a Windows path."
+    )
