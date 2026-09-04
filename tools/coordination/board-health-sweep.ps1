@@ -19,6 +19,23 @@ param(
     [switch]$Quiet
 )
 $ErrorActionPreference = 'SilentlyContinue'
+
+# Enforce the log clause of COORDINATION-PRUNE-POLICY.md -- "rotate at 1 MB, keep 2 rotations,
+# delete older" -- which names health.log explicitly. Measured 2026-09-04: NOTHING implemented that
+# clause, no writer rotated and no .log.N existed, so health.log had reached 8.3 MB and
+# codex-delivery-watcher.log 30.2 MB. This sweep is the writer of health.log, so it enforces its own
+# budget rather than relying on someone noticing. The helper is idempotent and returns immediately
+# below the cap.
+#
+# try/catch on purpose: a failed rotation is a log-size problem, a THROWN rotation is a lost health
+# reading -- and this sweep is the board's most-read liveness instrument.
+try {
+    $rotator = Join-Path $PSScriptRoot 'rotate-logs.ps1'
+    if (Test-Path -LiteralPath $rotator) {
+        & $rotator -Root (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.claude-state') | Out-Null
+    }
+} catch { }
+
 $dualLane = Split-Path $HealthDir -Parent
 $now = [DateTime]::UtcNow
 $registryPath = Join-Path $dualLane 'seat-registry.json'
