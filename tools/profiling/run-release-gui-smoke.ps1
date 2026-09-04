@@ -912,7 +912,11 @@ $clipParts = @(Get-ChildItem -LiteralPath (Split-Path -Parent $inputPath) -File 
 } | Sort-Object @{ Expression = { if ($_.Extension -ieq '.MLV') { -1 } else { [int]$_.Extension.Substring(2) } } } | ForEach-Object {
     Get-GuiSmokeImmutableFileBinding -Path $_.FullName
 })
-if ($clipParts.Count -eq 0 -or -not $clipParts[0].path.Equals($inputPath, [StringComparison]::OrdinalIgnoreCase)) {
+# The multipart binding is EVIDENCE ABOUT A REAL LAUNCH. Under -DryRun nothing launches and
+# $launchInputBindings is never consumed (its only reader is the evidence object emitted after
+# the -DryRun exit), so requiring a resolvable .MLV here would make a flag-contract dry run
+# depend on real input files. Strictness is unchanged for every non-dry run.
+if (-not $DryRun -and ($clipParts.Count -eq 0 -or -not $clipParts[0].path.Equals($inputPath, [StringComparison]::OrdinalIgnoreCase))) {
     throw 'Could not build an ordered immutable multipart clip binding rooted at the requested .MLV file.'
 }
 $launchInputBindings = [pscustomobject]@{
