@@ -179,6 +179,7 @@ function Get-LastDispatchAgeHours([string]$id) {
 # returns CANNOT-DETERMINE and NOTHING is skipped. An unreadable signal must never silently
 # shrink the board - that is how a queue goes quiet and looks healthy.
 $landedById = @{}
+$landedHow = @{}
 $landingProbe = 'skipped'
 if (-not $NoLandingProbe) {
     $gh = Get-Command gh -ErrorAction SilentlyContinue
@@ -187,7 +188,7 @@ if (-not $NoLandingProbe) {
     } else {
         try {
             $raw = & gh pr list --repo layibabalola/MLV-App --state merged --limit 100 `
-                       --json number,title 2>$null
+                       --json number,title,body 2>$null
             if ($LASTEXITCODE -ne 0 -or -not $raw) {
                 $landingProbe = "cannot-determine: gh exited $LASTEXITCODE"
             } else {
@@ -198,9 +199,25 @@ if (-not $NoLandingProbe) {
                     # Word-boundary match so C2-SUBMIT-2 never matches C2-SUBMIT-22.
                     $rx = '(?<![A-Za-z0-9-])' + [regex]::Escape($id) + '(?![A-Za-z0-9-])'
                     $hit = @($prs | Where-Object { $_.title -match $rx }) | Select-Object -First 1
-                    if ($hit) { $landedById[$id] = $hit }
+                    $how = 'title'
+                    if (-not $hit) {
+                        # A correct PR whose TITLE omits the card id is invisible to a title-only
+                        # probe, and the card silently becomes re-dispatchable once it passes
+                        # -StaleHours. Measured 2026-09-04: PR #38 landed OWN-GITHUB-1 with the id
+                        # only in its body, and the card stayed 'dispatched' and eligible.
+                        #
+                        # The body is matched ONLY behind an explicit landing verb. A bare id in
+                        # prose ("unlike OWN-GITHUB-1") must NOT count: a false positive here SKIPS
+                        # genuinely open work, which is strictly worse than re-dispatching finished
+                        # work. Tolerates markdown emphasis around the id.
+                        $rxBody = '(?i)(?:lands|closes|fixes|resolves)\s+(?:card\s+)?[*_`]*' +
+                                  [regex]::Escape($id) + '[*_`]*(?![A-Za-z0-9-])'
+                        $hit = @($prs | Where-Object { $_.body -and ($_.body -match $rxBody) }) | Select-Object -First 1
+                        if ($hit) { $how = 'body' }
+                    }
+                    if ($hit) { $landedById[$id] = $hit; $landedHow[$id] = $how }
                 }
-                $landingProbe = "ok: $($prs.Count) merged PR(s) scanned, $($landedById.Count) card(s) matched by title"
+                $landingProbe = "ok: $($prs.Count) merged PR(s) scanned, $($landedById.Count) card(s) matched by title or landing-verb body reference"
             }
         } catch {
             $landingProbe = "cannot-determine: $($_.Exception.Message)"
@@ -210,8 +227,8 @@ if (-not $NoLandingProbe) {
 Write-Output "WORKSTREAM: landing-probe $landingProbe"
 foreach ($id in $landedById.Keys) {
     $pr = $landedById[$id]
-    Write-Output ("WORKSTREAM: SKIP-LANDED card={0} merged in PR #{1} ({2}) but queue.json still says '{3}'. The queue is STALE on this card; this script does not mutate it - reconcile it." -f `
-        $id, $pr.number, $pr.title, (Get-Prop (@($live | Where-Object { (Get-Prop $_ 'id') -eq $id })[0]) 'state'))
+    Write-Output ("WORKSTREAM: SKIP-LANDED card={0} merged in PR #{1} ({2}) [matched by {4}] but queue.json still says '{3}'. The queue is STALE on this card; this script does not mutate it - reconcile it." -f `
+        $id, $pr.number, $pr.title, (Get-Prop (@($live | Where-Object { (Get-Prop $_ 'id') -eq $id })[0]) 'state'), $landedHow[$id])
 }
 
 # ------------------------------------------------------------------ selection
