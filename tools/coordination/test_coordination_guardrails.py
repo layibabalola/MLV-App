@@ -368,3 +368,107 @@ def test_the_read_only_board_diagnostics_actually_invoke_the_guard(tmp_path):
         body = script.read_text(encoding="utf-8")
         assert "assert-script-currency.ps1" in body, f"{script.name} no longer invokes the guard"
         assert "-ScriptPath $PSCommandPath" in body, f"{script.name} guards the wrong path"
+
+# --- Invoke-Workstream: a malformed priority must not stop dispatch -------------------------
+# Get-Rank used a bare [int] cast. On a non-numeric string that THROWS, and the throw lands
+# inside Sort-Object -Property { Get-Rank $_ }, killing selection -- while the script still
+# exits 0, so the loop records a normal cycle that dispatched nothing. Silent starvation is
+# worse than a halt because nothing reports it. queue.json demonstrably carries prose in this
+# field (DISPATCH-CDX-14, DISPATCH-CDX-15), so the authoring habit is real, not hypothetical.
+
+
+
+def workstream_dry_run(tmp_path, items, track="factory"):
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"schema": "test", "items": items}), encoding="ascii")
+    return subprocess.run(
+        [
+            "pwsh", "-NoProfile", "-File", str(WORKSTREAM),
+            "-Track", track, "-DryRun", "-NoLandingProbe", "-QueuePath", str(queue),
+        ],
+        text=True, capture_output=True,
+    )
+
+
+NUMERIC_CARD = {"id": "NUMERIC-1", "state": "booked", "track": "factory", "priority": 1, "title": "normal"}
+PROSE_CARD = {
+    "id": "PROSE-1", "state": "booked", "track": "factory",
+    "priority": "CRITICAL PATH - the cap is now two blocks away, not one",
+    "title": "prose in the priority field",
+}
+
+
+def test_a_prose_priority_does_not_stop_the_dispatcher_selecting(tmp_path):
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert "card=NUMERIC-1" in out.stdout, out.stdout + out.stderr
+    assert "Sort-Object" not in out.stderr, "selection still dies on the cast"
+
+
+def test_a_prose_priority_is_reported_loudly_rather_than_swallowed(tmp_path):
+    # Ranking it 999 silently would hide a card that someone deliberately marked urgent.
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert "NON-NUMERIC PRIORITY" in out.stderr
+    assert "PROSE-1" in out.stderr
+
+
+def test_the_priority_warning_stays_off_machine_readable_stdout(tmp_path):
+    # The [WORKSTREAM] stdout lines are parsed, and emitting inside a Sort-Object property
+    # block would make the sort key an array rather than an int.
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert "NON-NUMERIC PRIORITY" not in out.stdout
+
+
+def test_the_priority_warning_is_emitted_once_per_card(tmp_path):
+    # Sort-Object may evaluate the property block more than once per item.
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert out.stderr.count("NON-NUMERIC PRIORITY on card 'PROSE-1'") == 1
+
+
+def test_a_card_with_a_prose_priority_is_still_dispatchable(tmp_path):
+    # Ranked last, not excluded -- a malformed field must not make work unreachable.
+    out = workstream_dry_run(tmp_path, [PROSE_CARD])
+    assert "card=PROSE-1" in out.stdout, out.stdout + out.stderr
+
+
+def test_a_wholly_numeric_queue_produces_no_priority_warning(tmp_path):
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD])
+    assert "NON-NUMERIC PRIORITY" not in out.stderr
+    assert "card=NUMERIC-1" in out.stdout
+
+
+# --- Invoke-Lane: the exit code must be the truth ------------------------------------------
+# The script's own header says "it is alive because it is running and dead when it exits, and the
+# exit code is the truth" -- and it did not honour that at its own boundary. It computed the
+# lane's exit code, wrote it into the receipt, printed it, then fell off the end, which exits 0.
+# Invoke-Workstream captured that 0 and logged laneExitCode=0, so a failed lane was recorded as a
+# success. Measured 2026-09-05: two of twelve dispatches hit HTTP 429 ("You've hit your session
+# limit"), produced nothing, carried exitCode 1 in their receipts and laneExitCode 0 in the log.
+
+LANE_RUNNER = ROOT / "tools" / "coordination" / "Invoke-Lane.ps1"
+
+
+def test_invoke_lane_propagates_its_exit_code_instead_of_falling_off_the_end():
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "exit $propagated" in body, (
+        "Invoke-Lane must exit with the lane's outcome; falling off the end exits 0 and makes "
+        "every failed lane look successful to Invoke-Workstream's laneExitCode"
+    )
+
+
+def test_invoke_lane_maps_the_negative_sentinels_rather_than_passing_them_through():
+    # -1 would surface as 255 through a process exit code, and -999 does not survive at all.
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "-1      { 124 }" in body, "timeout sentinel is not mapped"
+    assert "-999    { 127 }" in body, "never-completed sentinel is not mapped"
+
+
+def test_the_timeout_code_matches_the_taxonomy_the_repo_already_uses():
+    # boundedRunnerExitCodes already fixes timeout=124; a second private meaning for the same
+    # condition is how two tools end up disagreeing about one event.
+    config = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
+    # The taxonomy lives under `locking`, not at the top level. Found by searching the config
+    # rather than assuming: the first version of this test guessed the top level, and a test that
+    # skips is a test that never fired.
+    codes = config["locking"]["boundedRunnerExitCodes"]
+    assert int(codes["timeout"]) == 124
+    assert "-1      { 124 }" in LANE_RUNNER.read_text(encoding="utf-8")
