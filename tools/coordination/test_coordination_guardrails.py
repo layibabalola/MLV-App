@@ -1,3 +1,4 @@
+import os
 import re
 import json
 import subprocess
@@ -795,3 +796,110 @@ def test_explicit_track_unset_still_dispatches_an_untracked_card():
         assert "WORKSTREAM: NOT-SCHEDULABLE" not in result.stdout
         assert "WORKSTREAM: track=UNSET card=TEST-UNTRACKED-2" in result.stdout
         assert result.returncode == 0
+
+
+# --- queue-derive.ps1: the ref it MEASURES AGAINST must not itself be stale -----------------
+# Every finding is "is <sha> an ancestor of -MasterRef". A -MasterRef behind its own upstream does
+# not make the tool fail, it makes it QUIETLY WRONG in both directions. Measured 2026-09-05: the
+# board's local `master` was 5 behind `fork/master`, so c043f6fc -- the commit that landed
+# B2-TOOLING-BASELINE -- was not an ancestor of `master` while being one of `fork/master`. It was
+# fast-forwarded by hand at 07:05Z and was behind AGAIN by 13:41Z. A hand fix is not a fix.
+
+def stale_ref_repo(tmp_path):
+    """A clone whose local branch is strictly BEHIND its upstream -- the exact live defect."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=origin, check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=origin, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=origin, check=True)
+    (origin / "f.txt").write_text("one")
+    subprocess.run(["git", "add", "-A"], cwd=origin, check=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=origin, check=True)
+
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=clone, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=clone, check=True)
+
+    # origin moves on; the clone fetches, so origin/main ends up ahead of the clone's own main.
+    for n in ("two", "three"):
+        (origin / "f.txt").write_text(n)
+        subprocess.run(["git", "commit", "-qam", n], cwd=origin, check=True)
+    subprocess.run(["git", "fetch", "-q"], cwd=clone, check=True)
+
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"schema": "dual-lane-queue.v1", "items": []}))
+    return clone, queue
+
+
+def run_derive(clone, queue, ref, extra_env=None):
+    e = dict(os.environ)
+    # We run the branch's own copy of the script, which by construction differs from fork/master
+    # while the PR is open; that is the currency guard's business, not this test's.
+    e["MLV_ALLOW_STALE_TOOLS"] = "1"
+    e.pop("MLV_ALLOW_STALE_MASTER_REF", None)
+    if extra_env:
+        e.update(extra_env)
+    return subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(DERIVE), "-RepoRoot", str(clone), "-QueueFile", str(queue),
+         "-MasterRef", ref, "-NoLandingProbe"],
+        text=True, capture_output=True, env=e,
+    )
+
+
+def test_queue_derive_REFUSES_a_master_ref_that_is_behind_its_upstream(tmp_path):
+    clone, queue = stale_ref_repo(tmp_path)
+    r = run_derive(clone, queue, "main")
+    assert r.returncode == 14, "expected refusal exit 14, got %d: %s%s" % (
+        r.returncode, r.stdout, r.stderr)
+    assert "STALE MEASURING REF REFUSED" in r.stderr
+    assert "2 commit(s) behind" in r.stderr, r.stderr
+    # The refusal must be ACTIONABLE, not merely correct: it names the fix and the escape hatch.
+    assert "git -C" in r.stderr and "fetch" in r.stderr
+    assert "MLV_ALLOW_STALE_MASTER_REF=1" in r.stderr
+
+
+def test_the_stale_ref_refusal_has_a_working_escape_hatch(tmp_path):
+    clone, queue = stale_ref_repo(tmp_path)
+    r = run_derive(clone, queue, "main", {"MLV_ALLOW_STALE_MASTER_REF": "1"})
+    assert r.returncode == 0, "escape hatch did not let the audit run: %s%s" % (r.stdout, r.stderr)
+    assert "NO MISMATCHES" in r.stdout
+
+
+def test_measuring_against_the_upstream_directly_is_never_refused(tmp_path):
+    """The refusal must not fire on the one ref that is current by definition."""
+    clone, queue = stale_ref_repo(tmp_path)
+    r = run_derive(clone, queue, "origin/main")
+    assert r.returncode == 0, "%s%s" % (r.stdout, r.stderr)
+
+
+def test_a_branch_that_is_AHEAD_of_its_upstream_is_not_refused(tmp_path):
+    """Unpushed local work is normal development, NOT the staleness defect. Refusing on it would
+    make the tool unusable exactly when someone is building a change to the board."""
+    clone, queue = stale_ref_repo(tmp_path)
+    subprocess.run(["git", "merge", "-q", "origin/main"], cwd=clone, check=True)
+    (clone / "f.txt").write_text("local")
+    subprocess.run(["git", "commit", "-qam", "unpushed"], cwd=clone, check=True)
+    r = run_derive(clone, queue, "main")
+    assert r.returncode == 0, "a branch AHEAD of its upstream was refused: %s%s" % (
+        r.stdout, r.stderr)
+
+
+def test_the_stale_ref_guard_fails_OPEN_when_there_is_no_upstream(tmp_path):
+    """Polarity copied from assert-script-currency.ps1: stop only on PROVEN drift. A repo with no
+    remote cannot prove anything, and a guard that blocked on 'I could not check' would be worse
+    than the bug it prevents."""
+    repo = tmp_path / "solo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("x")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "x"], cwd=repo, check=True)
+    queue = tmp_path / "q.json"
+    queue.write_text(json.dumps({"schema": "dual-lane-queue.v1", "items": []}))
+    r = run_derive(repo, queue, "main")
+    assert r.returncode == 0, "guard blocked a repo with no upstream to compare: %s" % r.stderr
+    assert "STALE MEASURING REF" not in r.stderr

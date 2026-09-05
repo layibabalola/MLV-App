@@ -50,7 +50,8 @@
 # run. Do not "fix" this to a relative path; that reintroduces the exact trap RESUME.md STEP 0
 # names for `.claude-state`.
 # Exit codes: 0 no mismatches (or -Json emitted regardless); 1 mismatch(es) found; 12 queue.json
-#             does not parse; 13 bad args / repo-root does not resolve / master ref does not resolve.
+#             does not parse; 13 bad args / repo-root does not resolve / master ref does not resolve;
+#             14 -MasterRef is provably behind its own upstream, so every answer would be wrong.
 param(
     [string]$QueueFile = 'C:\!Layi Wkspc\MLV-App\.claude-state\coordination\dual-lane\queue.json',
     [string]$RepoRoot  = 'C:\!Layi Wkspc\MLV-App',
@@ -116,6 +117,58 @@ $masterSha = $masterShaResult.StdOut.Trim()
 if ($masterShaResult.ExitCode -ne 0 -or [string]::IsNullOrEmpty($masterSha)) {
     [Console]::Error.WriteLine("queue-derive: -MasterRef '$MasterRef' does not resolve in $RepoRoot")
     exit 13
+}
+
+# ---- the ref this tool measures against must not itself be stale ------------------------
+# EVERY answer below is "is this sha an ancestor of -MasterRef". If -MasterRef is behind its own
+# upstream, the tool does not fail: it QUIETLY RETURNS WRONG ANSWERS. A card landed in the
+# missing commits reads SUSPECT-NOT-LANDED (a false red) and an open card that landed there
+# reads OK (a false green, which is the whole class this file exists to refuse).
+#
+# NOT HYPOTHETICAL, AND NOT A ONE-OFF. Measured 2026-09-05: the board's local `master` was 5
+# commits behind `fork/master`, so `c043f6fc` -- the commit that landed B2-TOOLING-BASELINE --
+# was NOT an ancestor of `master` while being an ancestor of `fork/master`. It was fast-forwarded
+# by hand at 07:05Z and was THREE COMMITS BEHIND AGAIN BY 13:41Z. A hand fix is not a fix; the
+# ref drifts on its own schedule, so the check has to be executable.
+#
+# POLARITY, copied deliberately from assert-script-currency.ps1 rather than reinvented: fail
+# CLOSED on PROVEN drift, fail OPEN on missing infrastructure. We stop only when we can
+# positively demonstrate the ref is strictly behind a resolvable upstream. No upstream, no
+# remote, a detached sha, a fresh clone -- all say nothing and let the caller run. A guard that
+# blocked on "I could not check" would be worse than the bug.
+if ($env:MLV_ALLOW_STALE_MASTER_REF -ne '1') {
+    $upstream = $null
+    $u = Invoke-Git @('rev-parse', '--abbrev-ref', "$MasterRef@{upstream}")
+    if ($u.ExitCode -eq 0 -and $u.StdOut.Trim()) {
+        $upstream = $u.StdOut.Trim()
+    }
+    if ($upstream) {
+        $upstreamSha = (Invoke-Git @('rev-parse', $upstream)).StdOut.Trim()
+        # Strictly behind: the ref IS an ancestor of its upstream, and they are not equal.
+        # Ahead or diverged is NOT this defect -- a local branch carrying unpushed work is
+        # normal, and refusing on it would make the tool unusable during ordinary development.
+        if ($upstreamSha -and $upstreamSha -ne $masterSha -and
+            (Test-IsAncestor $masterSha $upstream)) {
+            $behind = (Invoke-Git @('rev-list', '--count', "$masterSha..$upstreamSha")).StdOut.Trim()
+            [Console]::Error.WriteLine(@"
+STALE MEASURING REF REFUSED: -MasterRef '$MasterRef' is $behind commit(s) behind '$upstream'.
+  $MasterRef  = $($masterSha.Substring(0,12))
+  $upstream = $($upstreamSha.Substring(0,12))
+
+  Every finding below is 'is <sha> an ancestor of $MasterRef', so a ref that is behind does not
+  make this tool fail -- it makes it QUIETLY WRONG in both directions. Refusing is the point.
+
+  Fix it, then re-run:
+    git -C "$RepoRoot" fetch $($upstream.Split('/')[0]) $MasterRef`:$MasterRef
+
+  Or measure against the upstream directly:
+    -MasterRef $upstream
+
+  If you are DELIBERATELY auditing against an older ref, set MLV_ALLOW_STALE_MASTER_REF=1.
+"@)
+            exit 14
+        }
+    }
 }
 
 $queueRaw = [System.IO.File]::ReadAllText($QueueFile)
