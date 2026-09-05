@@ -1171,6 +1171,32 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn("separately reviewed activation is now landed with only the two activation\nbooleans enabled", dashboard)
         self.assertIn("must exactly match the\ncopy loaded from the pinned target commit", dashboard)
 
+    def test_every_default_tooling_baseline_path_is_also_tracked(self) -> None:
+        """The tooling baseline exists in TWO places and nothing compared them.
+
+        closeout.config.json carries toolingBaseline.paths, and
+        brokered_closeout.DEFAULT_CLOSEOUT_CONFIG carries its own copy. Measured 2026-09-05:
+        they had already drifted -- tracked held three entries DEFAULT lacked
+        (CLOSEOUT-CANONICAL-CONTRACT.md, its .sha256, and closeout_dashboard.py) -- and no test
+        looked. Registering a new path in one and not the other would have been silent.
+
+        The invariant asserted is a SUBSET, not equality, and the direction is deliberate.
+        Tracked is authoritative and may legitimately be richer than the fallback; but an entry
+        present in DEFAULT and missing from tracked means the LIVE policy is weaker than the
+        fallback it replaces, which is never intended. Equality would fail today on drift this
+        test is not chartered to adjudicate.
+        """
+        tracked = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
+        tracked_paths = set(tracked["toolingBaseline"]["paths"])
+        default_paths = set(DEFAULT_CLOSEOUT_CONFIG["toolingBaseline"]["paths"])
+        missing = sorted(default_paths - tracked_paths)
+        self.assertEqual(
+            missing,
+            [],
+            "tooling-baseline paths in DEFAULT_CLOSEOUT_CONFIG but absent from "
+            "closeout.config.json: the live policy is weaker than its fallback",
+        )
+
     def test_tracked_and_default_active_policy_and_tooling_guards_stay_in_parity(self) -> None:
         tracked = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
         self.assertEqual(tracked["candidateAcceptance"], DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"])
