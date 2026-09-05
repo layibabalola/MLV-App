@@ -1,0 +1,158 @@
+{
+  "schema": "mlvapp.output-budget-spec.v1",
+  "shippingDefaults": {
+    "path": "tools/gates/shipping-defaults.json",
+    "sha256": "CC4350BC8FF7C7015ACB4E8B1CBEA88F3CE68BA3A409A13CEC2C885E2112B1AC"
+  },
+  "baseline": {
+    "status": "pending_instrumented_known_good_bridge",
+    "commit": null,
+    "executableSha256": null,
+    "artifact": null
+  },
+  "receipt": {
+    "path": "Z:/receipt/lookassist-rawdefaults.marxml",
+    "length": 529,
+    "sha256": "A435B40F38062DE9F528B16EC8FCEABD3247EC07D65556C5C74A6733474AC81C"
+  },
+  "profiles": [
+    {
+      "id": "wb_locked",
+      "disableLookAssist": true,
+      "playbackProcessing": "none",
+      "qualityMode": "1",
+      "expectedQualityMode": 1,
+      "scaleFactor": "",
+      "expectedScaleRequest": 4,
+      "selectionAuthority": "shipping-default-controlled"
+    },
+    {
+      "id": "committed_receipt",
+      "disableLookAssist": true,
+      "playbackProcessing": "receipt",
+      "qualityMode": "1",
+      "expectedQualityMode": 1,
+      "scaleFactor": "",
+      "expectedScaleRequest": 4,
+      "selectionAuthority": "shipping-default-controlled"
+    }
+  ],
+  "clips": [
+    {
+      "id": "M16-1327",
+      "required": true,
+      "path": "C:/temp/MLV/M16-1327.MLV",
+      "length": 2654424576,
+      "sha256": "CFDCD64DA9931DB94B2B4F938FEC1E10B8A742C2E79847975BDD6A986E137A3F",
+      "parts": [
+        { "path": "C:/temp/MLV/M16-1327.MLV", "length": 2654424576, "sha256": "CFDCD64DA9931DB94B2B4F938FEC1E10B8A742C2E79847975BDD6A986E137A3F" },
+        { "path": "C:/temp/MLV/M16-1327.M00", "length": 1327107584, "sha256": "C13ED73D60A5767F58BEE0A22BBB046F8CF795A8C09511689BBFA6213E770CD7" }
+      ],
+      "startFrame": 120,
+      "aspect": { "mode": "presented-playback-stretch", "stretchX": 3.0, "stretchY": 1.0, "hStretchIndex": 0, "vStretchIndex": 3 }
+    },
+    {
+      "id": "M16-1347",
+      "required": true,
+      "path": "C:/temp/MLV/M16-1347.MLV",
+      "length": 2454400512,
+      "sha256": "763E5A302A8D04E97D84CA7D281D65752529A6ED00BF5A7FF8BBB1E46609934D",
+      "parts": [
+        { "path": "C:/temp/MLV/M16-1347.MLV", "length": 2454400512, "sha256": "763E5A302A8D04E97D84CA7D281D65752529A6ED00BF5A7FF8BBB1E46609934D" },
+        { "path": "C:/temp/MLV/M16-1347.M00", "length": 1236876288, "sha256": "E32C19B7B61619E1EA29C05358A23E863218BA021C4D2E8BDDA5D057417D5FB1" }
+      ],
+      "startFrame": 120,
+      "aspect": { "mode": "presented-playback-stretch", "stretchX": 3.0, "stretchY": 1.0, "hStretchIndex": 0, "vStretchIndex": 3 }
+    },
+    {
+      "id": "M17-1207",
+      "required": true,
+      "path": "C:/temp/MLV/M17-1207.MLV",
+      "length": 2367993856,
+      "sha256": "3BBB5034D8AB5D63A078517AF5A3098FFF89677BE37E78298317A19DEF043DCE",
+      "parts": [
+        { "path": "C:/temp/MLV/M17-1207.MLV", "length": 2367993856, "sha256": "3BBB5034D8AB5D63A078517AF5A3098FFF89677BE37E78298317A19DEF043DCE" },
+        { "path": "C:/temp/MLV/M17-1207.M00", "length": 1369447936, "sha256": "3AB34479A80363A693BCE3E13782B828B1ECCBC38E96DD11AD0EB8C2D919A54E" }
+      ],
+      "startFrame": 120,
+      "aspect": { "mode": "presented-playback-stretch", "stretchX": 3.0, "stretchY": 1.0, "hStretchIndex": 0, "vStretchIndex": 3 }
+    },
+    {
+      "id": "M15-1320",
+      "required": true,
+      "path": "C:/temp/MLV/M15-1320.MLV",
+      "length": 462899712,
+      "sha256": "B72347ACE4F18981A9EA66DB9FC2DB9413718C99D4818A1846413B86B703CA1E",
+      "parts": [
+        { "path": "C:/temp/MLV/M15-1320.MLV", "length": 462899712, "sha256": "B72347ACE4F18981A9EA66DB9FC2DB9413718C99D4818A1846413B86B703CA1E" },
+        { "path": "C:/temp/MLV/M15-1320.M00", "length": 228077056, "sha256": "8B7DE65F58E9118001E53E1B6490784C0FA2CDA0EF108E7EB63C8D62F5C7E999" }
+      ],
+      "startFrame": 80,
+      "aspect": { "mode": "presented-playback-stretch", "stretchX": 3.0, "stretchY": 1.0, "hStretchIndex": 0, "vStretchIndex": 3 }
+    },
+    {
+      "id": "M16-1210",
+      "required": true,
+      "path": "C:/temp/MLV/M16-1210.MLV",
+      "length": 793847808,
+      "sha256": "679EE976B0150C71CA26F7D8895C775AFDCA273FA7F907DB22CF7C3D58AF17CD",
+      "parts": [
+        { "path": "C:/temp/MLV/M16-1210.MLV", "length": 793847808, "sha256": "679EE976B0150C71CA26F7D8895C775AFDCA273FA7F907DB22CF7C3D58AF17CD" },
+        { "path": "C:/temp/MLV/M16-1210.M00", "length": 395081728, "sha256": "D7A31DBB9B2AFE717485A4F664619C7D4F2E747C3E13BE1D503F93904551AF84" }
+      ],
+      "startFrame": 80,
+      "aspect": { "mode": "presented-playback-stretch", "stretchX": 3.0, "stretchY": 1.0, "hStretchIndex": 0, "vStretchIndex": 3 }
+    },
+    {
+      "id": "M16-1243",
+      "required": true,
+      "path": "C:/temp/MLV/M16-1243.MLV",
+      "length": 2221399552,
+      "sha256": "C8F09E1EA8E6C40F673BF465D2D4ADB90CA218BC9F78C6461DB5CD22CD3E01B9",
+      "parts": [
+        { "path": "C:/temp/MLV/M16-1243.MLV", "length": 2221399552, "sha256": "C8F09E1EA8E6C40F673BF465D2D4ADB90CA218BC9F78C6461DB5CD22CD3E01B9" },
+        { "path": "C:/temp/MLV/M16-1243.M00", "length": 1174057472, "sha256": "5DD782178E1658DAD5DA31808BF3A7C249F7E282682220E4D72B7743DACC163B" }
+      ],
+      "startFrame": 120,
+      "aspect": { "mode": "presented-playback-stretch", "stretchX": 3.0, "stretchY": 1.0, "hStretchIndex": 0, "vStretchIndex": 3 }
+    },
+    {
+      "id": "M02-1344",
+      "required": true,
+      "path": "C:/temp/MLV/M02-1344.MLV",
+      "evidenceStatus": "required_corpus_not_acquired",
+      "length": null,
+      "sha256": null,
+      "parts": [],
+      "startFrame": 120,
+      "aspect": { "mode": "presented-playback-stretch", "stretchX": 3.0, "stretchY": 1.0, "hStretchIndex": 0, "vStretchIndex": 3 }
+    }
+  ],
+  "budgets": {
+    "values": {
+      "maxAbsLumaP05Delta": 0.0,
+      "maxAbsLumaP50Delta": 0.0,
+      "maxAbsLumaP95Delta": 0.0,
+      "maxAbsLumaMeanDelta": 0.0,
+      "maxAbsVisibleGreenAxisDelta": 0.0,
+      "maxAbsGreenArtifactRatioDelta": 0.0
+    },
+    "pixels": {
+      "maxMeanAbsRgb": 0.0,
+      "maxP95AbsRgb": 0.0,
+      "maxAbsRgb": 0,
+      "maxChangedPixelRatioGt0": 0.0,
+      "maxChangedPixelRatioGt2": 0.0,
+      "maxChangedPixelRatioGt8": 0.0,
+      "maxRmseRgb": 0.0
+    },
+    "cadence": {
+      "repeats": 3,
+      "seconds": 30,
+      "maxP99DeltaMs": 15.0,
+      "maxHitchFractionDelta": 0.02,
+      "authority": "advisory_only"
+    }
+  },
+  "legacyPolicyAllowlist": []
+}

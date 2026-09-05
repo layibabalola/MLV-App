@@ -116,15 +116,30 @@ $openStates = @(
     'blocked-operator', 'in-progress-operator-started', 'consult-open', 'blocked-redesign',
     'changes-requested-awaiting-acceptance-evidence', 'changes-requested-awaiting-implementer',
     'approved-awaiting-finalize', 'surfaced-awaiting-ordering', 'open-risk',
-    'adjudicated-provisional'
+    'adjudicated-provisional',
+    # Active work, not a disposition: the item is with a reviewer and can still change.
+    # Sibling of 'in-review'.
+    'handed-off-awaiting-review'
 )
-$landedStates = @('landed', 'landed-evidence', 'landed-local-proof', 'CLEARED', 'fixed')
+$landedStates = @(
+    'landed', 'landed-evidence', 'landed-local-proof', 'CLEARED', 'fixed',
+    # Sibling of 'fixed': it asserts a fix exists, which IS a claim about git ancestry, so it
+    # belongs here and not in the neutral bucket. If such an item records shas that never
+    # reached master, SUSPECT-NOT-LANDED is a real finding and should fire.
+    'closed-fixed'
+)
 # Deliberately excluded from either bucket: these describe a TERMINAL disposition that is not a
 # claim about git ancestry either way. Flagging a mismatch on them would manufacture a finding,
 # not report one.
 $neutralStates = @(
     'superseded', 'withdrawn', 'retracted-and-fixed', 'RETIRED', 'deferred-nonblocking',
-    'scoped-untracked-target', 'answered-folded', 'optional-validation'
+    'scoped-untracked-target', 'answered-folded', 'optional-validation',
+    # All terminal, and none asserts that any commit reached master, so by the rule above
+    # flagging ancestry on them would manufacture a finding rather than report one:
+    'closed-superseded',      # sibling of 'superseded' -- another item replaced it
+    'closed-transformed',     # became a different item; nothing shipped under THIS id
+    'closed-root-caused',     # an investigation concluded; a cause is not a commit
+    'closed-not-this-board'   # out of scope here; ancestry in this repo says nothing
 )
 
 function Get-CommitShasFromValue($value, [System.Collections.Generic.HashSet[string]]$acc) {

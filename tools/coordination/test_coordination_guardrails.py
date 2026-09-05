@@ -1,3 +1,4 @@
+import re
 import json
 import subprocess
 import sys
@@ -113,3 +114,107 @@ def test_heartbeat_resolves_watchdog_beside_wrapper_not_under_repo_root(tmp_path
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["state"] == "IDLE"
     assert not (tmp_path / "tools" / "coordination" / "coordination_watchdog.py").exists()
+
+
+def test_supplied_timestamp_must_be_a_real_instant(tmp_path):
+    """STAMP-APPENDER-1: --timestamp was written into the entry verbatim, so NOT-A-CLOCK
+    reached the ledger heading. The closeout gate BLOCKS on a heading it cannot parse
+    (content_approval_unparsable_heading), so this appender could stop finalize by itself.
+    A real instant must still pass through UNCHANGED: --timestamp exists for replay and
+    fixtures, and silently rewriting it would surprise those callers."""
+    start, feature = make_repo(tmp_path)
+
+    # subject: a non-instant is refused before anything is appended
+    command, ledgers = args(tmp_path, start, feature)
+    result = run(VALIDATOR, *command, "--timestamp", "NOT-A-CLOCK", cwd=tmp_path)
+    assert result.returncode != 0, result.stdout
+    assert "ISO-8601" in (result.stderr + result.stdout)
+    for ledger in ledgers:
+        assert "NOT-A-CLOCK" not in ledger.read_text()
+
+    # control: a real instant is accepted AND preserved byte-for-byte
+    second = tmp_path / "second"
+    second.mkdir()
+    start2, feature2 = make_repo(second)
+    command2, ledgers2 = args(second, start2, feature2)
+    exact = "2000-01-02T03:04:05+00:00"
+    ok = run(VALIDATOR, *command2, "--timestamp", exact, cwd=second)
+    assert ok.returncode == 0, ok.stderr
+    assert any(exact in ledger.read_text() for ledger in ledgers2)
+
+
+LOOP = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
+
+
+def test_cycle_receipt_stamp_has_exactly_one_assignment():
+    """The cycle-receipt filename is built from $stamp, which must stay a formatted STRING.
+
+    On 2026-09-04 the daily-budget fix (PR #37) reused `$stamp` as a per-row [datetime]
+    inside the counting loop -- same script scope, between the assignment and the use. The
+    receipt path then interpolated with the current culture as
+    'cycle-09\04\2026 09:05:02.json': "/" became directory separators and ":" is illegal
+    in a Windows filename, so WriteAllText threw and the scheduled task exited 1 for ~4.5 h
+    while writing no audit record.
+
+    Asserted on the source rather than by running the loop: the loop syncs a git worktree,
+    reads the live dispatch log and writes into .claude-state, so executing it under test
+    would mutate real board state. The repo already asserts source shape this way in
+    tools/repo_hygiene/test_repo_hygiene.py.
+    """
+    text = LOOP.read_text(encoding="utf-8")
+
+    # the receipt is still built from $stamp
+    assert 'cycle-$stamp.json' in text
+
+    # ...and $stamp is assigned exactly once, at script scope
+    assignments = re.findall(r"^\s*\$stamp\s*=", text, re.MULTILINE)
+    assert len(assignments) == 1, (
+        "$stamp must have exactly one assignment; a second one clobbers the receipt "
+        "filename. Found %d." % len(assignments)
+    )
+
+    # ...and that one assignment produces a filename-safe format, not a culture default
+    assert re.search(r"\$stamp\s*=\s*\$cycleStart\.ToString\('yyyyMMddTHHmmssZ'\)", text), (
+        "$stamp must be formatted with an explicit invariant pattern; a culture-default "
+        "ToString() yields '/' and ':' which are illegal in a Windows path."
+    )
+
+
+def test_a_transient_fetch_failure_does_not_halt_the_cycle():
+    """One blip must not cost a whole 45-minute cycle.
+
+    Observed 2026-09-04T18:01:22Z: the loop wrote
+    haltedReason="git fetch fork failed (exit 128); driver worktree may be stale" and
+    dispatched nothing. The cause was lock contention with a concurrent git operation on the
+    same repository -- the identical fetch succeeded by hand moments later, and the driver
+    worktree was neither stale nor broken. The old code halted on the FIRST non-zero exit, so
+    a blip and a genuinely broken remote were indistinguishable.
+
+    Asserted on the source for the reason documented in
+    test_cycle_receipt_stamp_has_exactly_one_assignment: running the loop syncs a real git
+    worktree and writes into .claude-state, so it would mutate live board state.
+    """
+    text = LOOP.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    assert "function Invoke-GitFetchFork" in text, "no bounded retry helper"
+
+    # the helper must attempt more than once
+    attempts_line = [ln for ln in lines if "$Attempts" in ln and "param(" in ln]
+    assert attempts_line, "Invoke-GitFetchFork must take a bounded $Attempts parameter"
+    digits = "".join(ch for ch in attempts_line[0].split("$Attempts", 1)[1] if ch.isdigit())
+    assert digits and int(digits[0]) > 1, "a single attempt is not a retry"
+
+    # THE ANTI-PATTERN: a bare fetch whose very next line halts the cycle
+    stale = "driver worktree may be stale"
+    for i, ln in enumerate(lines):
+        is_bare_fetch = ("git -C $RepoRoot fetch fork" in ln) and ("Invoke-GitFetchFork" not in ln)
+        if not is_bare_fetch:
+            continue
+        following = lines[i + 1] if i + 1 < len(lines) else ""
+        assert stale not in following, (
+            "line %d halts the cycle on a single fetch attempt: %s" % (i + 1, ln.strip())
+        )
+
+    # the halt message reports the attempt count, so receipts stay diagnosable
+    assert "attempts; " + stale in text

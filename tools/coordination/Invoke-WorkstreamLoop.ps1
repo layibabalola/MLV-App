@@ -78,18 +78,35 @@ $DriverRoot   = 'C:\mlvtmp\ws-driver'
 $TargetRef    = 'fork/master'
 $Dispatcher   = Join-Path $DriverRoot 'tools\coordination\Invoke-Workstream.ps1'
 
+function Invoke-GitFetchFork {
+    # A single TRANSIENT failure must not cost a whole cycle.
+    # Observed 2026-09-04T18:01:22Z: the loop halted on "git fetch fork failed (exit 128)"
+    # caused by lock contention with a concurrent git operation on the same repository. The
+    # identical fetch succeeded moments later by hand, so the cycle was lost to a blip, not
+    # to a stale worktree. Bounded retries; the attempt count is reported for the receipt.
+    param([int]$Attempts = 3, [int]$DelaySeconds = 5)
+    $last = 0
+    for ($i = 1; $i -le $Attempts; $i++) {
+        & git -C $RepoRoot fetch fork --quiet 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { return [pscustomobject]@{ Ok = $true; Attempts = $i; ExitCode = 0 } }
+        $last = $LASTEXITCODE
+        if ($i -lt $Attempts) { Start-Sleep -Seconds $DelaySeconds }
+    }
+    return [pscustomobject]@{ Ok = $false; Attempts = $Attempts; ExitCode = $last }
+}
+
 function Sync-DriverWorktree {
     # Returns $null on success, or a CANNOT-DETERMINE reason string.
     try {
         if (-not (Test-Path -LiteralPath (Join-Path $DriverRoot '.git'))) {
             if (Test-Path -LiteralPath $DriverRoot) { Remove-Item -LiteralPath $DriverRoot -Recurse -Force }
-            & git -C $RepoRoot fetch fork --quiet 2>&1 | Out-Null
+            Invoke-GitFetchFork | Out-Null
             & git -C $RepoRoot -c core.longpaths=true worktree add --detach $DriverRoot $TargetRef 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { return "could not create driver worktree at $DriverRoot" }
             return $null
         }
-        & git -C $RepoRoot fetch fork --quiet 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { return "git fetch fork failed (exit $LASTEXITCODE); driver worktree may be stale" }
+        $fetch = Invoke-GitFetchFork
+        if (-not $fetch.Ok) { return "git fetch fork failed (exit $($fetch.ExitCode)) after $($fetch.Attempts) attempts; driver worktree may be stale" }
         # Hard reset is safe here and ONLY here: this worktree is tool-owned, is
         # never edited by hand, and holds nothing anyone can lose.
         & git -C $DriverRoot reset --hard $TargetRef --quiet 2>&1 | Out-Null
@@ -193,7 +210,26 @@ if ($halted) {
             try {
                 $row = $line | ConvertFrom-Json
                 $t = $row.PSObject.Properties['dispatchedUtc']
-                if ($t -and $t.Value -and ([datetime]::Parse($t.Value)).ToUniversalTime().ToString('yyyy-MM-dd') -eq $todayUtc) {
+                # ConvertFrom-Json already materialises an ISO-8601 'Z' timestamp as a
+                # [datetime] with Kind=Utc. Passing THAT to [datetime]::Parse() stringifies it in
+                # LOCAL format first, losing the Kind, so it re-parses as Local and
+                # ToUniversalTime() applies the offset A SECOND TIME. Every dispatch in the
+                # previous UTC day's final offset-hours then counts toward today, over-reporting
+                # the budget and halting the loop early. Measured 2026-09-04: 5 real dispatches
+                # reported as 12/12, autonomy idle 4.5 h.
+                # NAME-SCOPED DELIBERATELY: $stamp at the top of this script names the cycle receipt file.
+                # Reusing that name here overwrote it with a [datetime], and the receipt path
+                # became "cycle-09/04/2026 09:05:02.json" -- illegal on Windows.
+                $rowStamp = $null
+                if ($t -and $t.Value) {
+                    $v = $t.Value
+                    $rowStamp = if ($v -is [datetime]) {
+                        if ($v.Kind -eq [System.DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($v, [System.DateTimeKind]::Utc) } else { $v }
+                    } else {
+                        [datetime]::Parse([string]$v, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+                    }
+                }
+                if ($rowStamp -and $rowStamp.ToUniversalTime().ToString('yyyy-MM-dd') -eq $todayUtc) {
                     $spentToday++
                 }
             } catch { }
