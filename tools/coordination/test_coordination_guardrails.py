@@ -144,6 +144,7 @@ def test_supplied_timestamp_must_be_a_real_instant(tmp_path):
 
 
 LOOP = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
+WORKSTREAM = ROOT / "tools" / "coordination" / "Invoke-Workstream.ps1"
 
 
 def test_cycle_receipt_stamp_has_exactly_one_assignment():
@@ -218,3 +219,40 @@ def test_a_transient_fetch_failure_does_not_halt_the_cycle():
 
     # the halt message reports the attempt count, so receipts stay diagnosable
     assert "attempts; " + stale in text
+
+
+def test_landing_probe_knows_the_verbs_and_connectors_that_actually_get_used():
+    """Two MEASURED misses on 2026-09-05, both from real merged PR bodies.
+
+    PR #53: "Closes OWN-2 and delivers GATE-RESIDUALS-1(b)" -- OWN-2 was skipped,
+    GATE-RESIDUALS-1 was not, and the loop spent a lane on it at 02:11Z.
+    PR #52: "Closes queue item OWN-1-PRECEDENCE" -- only "card" was permitted between the verb
+    and the id, so that missed too, and the near-miss diagnostic surfaced it on its first run.
+
+    The vocabulary is a fixed list, and every writer who does not know it costs a dispatch.
+    """
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    assert "delivers" in text, "landing verb 'delivers' not accepted"
+    assert "queue" in text, "'queue item' connector not accepted"
+
+
+def test_a_bare_id_in_prose_still_does_NOT_count_as_landing():
+    """The load-bearing asymmetry, from the probe's own comment: a false positive SKIPS
+    genuinely open work, which is strictly worse than re-dispatching finished work. Widening
+    the vocabulary must never reach a bare mention."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    line = [l for l in text.splitlines() if "$rxBody =" in l]
+    assert line, "landing-verb body regex not found"
+    assert "(?:lands|closes|fixes|resolves|delivers)" in line[0], (
+        "body match is no longer gated behind an explicit landing verb"
+    )
+
+
+def test_near_misses_are_summarised_not_printed_per_card():
+    """The first draft printed one line per near-miss and produced TEN on a single run, mostly
+    genuine prose mentions. A diagnostic that fires every run is one nobody reads -- which is
+    exactly the failure it exists to prevent."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    assert "$nearMisses" in text, "near-miss diagnostic absent"
+    assert "NEAR-MISS ($($nearMisses.Count))" in text, "near-misses are not summarised into one line"
+    assert "NOT skipped" in text, "the diagnostic must say it did not act on the near-miss"
