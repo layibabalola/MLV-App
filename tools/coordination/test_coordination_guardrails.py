@@ -178,6 +178,11 @@ def test_supplied_timestamp_must_be_a_real_instant(tmp_path):
 
 LOOP = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
 WORKSTREAM = ROOT / "tools" / "coordination" / "Invoke-Workstream.ps1"
+# The landing probe was extracted out of Invoke-Workstream.ps1 so queue-derive.ps1 could consult
+# the SAME rules instead of growing a second copy that would be widened once and left stale. The
+# three probe tests below follow it: their subject never changed, only which file owns it.
+PROBE = ROOT / "tools" / "coordination" / "landing-probe.ps1"
+DERIVE = ROOT / "tools" / "coordination" / "queue-derive.ps1"
 
 
 def test_cycle_receipt_stamp_has_exactly_one_assignment():
@@ -264,7 +269,7 @@ def test_landing_probe_knows_the_verbs_and_connectors_that_actually_get_used():
 
     The vocabulary is a fixed list, and every writer who does not know it costs a dispatch.
     """
-    text = WORKSTREAM.read_text(encoding="utf-8")
+    text = PROBE.read_text(encoding="utf-8")
     assert "delivers" in text, "landing verb 'delivers' not accepted"
     assert "queue" in text, "'queue item' connector not accepted"
 
@@ -273,11 +278,11 @@ def test_a_bare_id_in_prose_still_does_NOT_count_as_landing():
     """The load-bearing asymmetry, from the probe's own comment: a false positive SKIPS
     genuinely open work, which is strictly worse than re-dispatching finished work. Widening
     the vocabulary must never reach a bare mention."""
-    text = WORKSTREAM.read_text(encoding="utf-8")
-    line = [l for l in text.splitlines() if "$rxBody =" in l]
-    assert line, "landing-verb body regex not found"
-    assert "(?:lands|closes|fixes|resolves|delivers)" in line[0], (
-        "body match is no longer gated behind an explicit landing verb"
+    text = PROBE.read_text(encoding="utf-8")
+    line = [l for l in text.splitlines() if "$script:LandingVerbs" in l and "=" in l]
+    assert line, "landing verb list not found"
+    assert "lands|closes|fixes|resolves|delivers" in line[0], (
+        "the match is no longer gated behind an explicit landing verb"
     )
 
 
@@ -369,6 +374,87 @@ def test_dry_run_admits_the_export_already_happened():
     assert dry, "no dry-run notice"
     assert "on disk" in dry[0], "dry run does not disclose that the export is real"
 
+
+
+def test_the_title_match_is_verb_gated_exactly_like_the_body_match():
+    """MEASURED 2026-09-05. The title match used to be unconditional, on the theory that a card id
+    in a merge subject implies a landing. PR #41 falsifies it: titled "(addresses
+    STAMP-APPENDER-1)", body saying "this PR says addresses, not lands: a false landing signal
+    would mark the card done and skip remaining work". The probe skipped the open card anyway.
+
+    Gating costs nothing: across all 51 merged PRs and 117 queue ids there are exactly three title
+    matches, and both real landings (#23, #38) read "lands".
+    """
+    text = PROBE.read_text(encoding="utf-8")
+    body = text[text.index("function Get-CardLandingEvidence"):]
+    # Only the LANDING decision is under test. The near-miss detector below it legitimately
+    # matches a bare mention against the title -- that is its whole job, and it reports rather
+    # than acting. The line that assigns $hit is the one that decides "landed".
+    decisions = [l for l in body.splitlines() if "$hit = " in l and "-match" in l]
+    assert len(decisions) == 2, "expected exactly a title and a body landing decision, got %d" % len(decisions)
+    for line in decisions:
+        assert "$rxLanding" in line and "$rxMention" not in line, (
+            "a landing decision is made on something other than the verb-gated regex: %s" % line.strip()
+        )
+    assert any("$_.title" in l for l in decisions), "the title is no longer consulted at all"
+
+
+def test_the_near_miss_matcher_has_a_word_boundary_on_BOTH_sides():
+    """MEASURED 2026-09-05. The landing regex always had a leading `(?<![A-Za-z0-9-])`; the
+    near-miss regex did not, and nobody noticed because it only ever over-reports. PR #42's body
+    names the PROMPT FILE `ws-GATE-ID-3`, and the unanchored matcher found the card id inside that
+    filename -- a near-miss for a card that PR never mentioned. Every generated prompt on this
+    board is named `ws-<CARD-ID>-<stamp>.md`, so this misfires structurally, not by bad luck."""
+    text = PROBE.read_text(encoding="utf-8")
+    fn = text[text.index("function Get-MentionRegex"):text.index("function Get-CardLandingEvidence")]
+    assert "(?<![A-Za-z0-9-])" in fn, "the mention regex can match inside a longer token (e.g. ws-<ID>)"
+    assert "(?![A-Za-z0-9-])" in fn, "the mention regex can match a longer id (C2-SUBMIT-2 vs -22)"
+
+
+def test_the_probe_is_shared_and_not_copied_into_its_callers():
+    """Two tools ask 'did this card land'. A second copy of the vocabulary would be widened once
+    and left stale -- this board's most frequently paid failure. Both must DOT-SOURCE the probe,
+    and neither may carry its own matcher."""
+    for caller in (WORKSTREAM, DERIVE):
+        text = caller.read_text(encoding="utf-8")
+        assert "landing-probe.ps1" in text, "%s does not consult the shared probe" % caller.name
+        assert "Get-CardLandingEvidence" in text, "%s does not call the shared probe" % caller.name
+        assert "gh pr list" not in text, (
+            "%s re-implements the probe instead of consulting it" % caller.name
+        )
+
+
+def test_the_shared_probe_sets_no_strictmode_on_its_callers():
+    """It is DOT-SOURCED, so anything it sets lands in the CALLER's scope. An earlier draft set
+    `-Version Latest` and immediately broke queue-derive.ps1, which reads optional queue fields
+    that are legitimately absent -- a shared helper silently changing an unrelated script's
+    semantics just by being consulted."""
+    text = PROBE.read_text(encoding="utf-8")
+    active = [l for l in text.splitlines() if "Set-StrictMode" in l and not l.strip().startswith("#")]
+    assert not active, "the dot-sourced probe imposes strictness on its callers: %s" % active
+
+
+def test_queue_derive_fails_open_when_the_landing_probe_cannot_run():
+    """An unreadable signal must never silently shrink the board. The probe's status is printed on
+    EVERY run, including when it could not run: a check whose failure looks identical to a pass is
+    the defect queue-derive.ps1 exists to refuse."""
+    text = DERIVE.read_text(encoding="utf-8")
+    assert "queue-derive: landing-probe {0}" in text, "probe status is not reported unconditionally"
+    assert "NoLandingProbe" in text, "no way to run the ancestry axis without the network"
+    probe = PROBE.read_text(encoding="utf-8")
+    assert probe.count("cannot-determine:") >= 3, "the probe does not fail open on every failure path"
+
+
+def test_an_open_card_naming_no_sha_is_reported_not_silently_passed():
+    """THE BLIND SPOT THIS EXISTS TO CLOSE. On 2026-09-05 six landed cards named no sha and the
+    tool printed NO MISMATCHES. An item the sha axis cannot judge must be VISIBLE, and if a merged
+    PR claims it behind a landing verb it must be a MISMATCH -- not folded into either."""
+    text = DERIVE.read_text(encoding="utf-8")
+    assert "NO-SHA-EVIDENCE" in text, "items the sha axis cannot judge are not tracked"
+    assert "STALE-LANDED-IN-PR" in text, "the PR axis produces no finding"
+    assert "NOT a mismatch, nothing to check them against" in text, (
+        "an unjudgeable item must not be reported as a disagreement"
+    )
 
 # --- assert-script-currency.ps1 -------------------------------------------------------------
 # The board root is the only checkout carrying .claude-state/, and it routinely sits on a peer
