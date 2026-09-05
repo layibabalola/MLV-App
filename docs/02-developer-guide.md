@@ -1014,23 +1014,67 @@ All workflows live under `.github/workflows/`.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| [`tests.yml`](../.github/workflows/tests.yml) | `workflow_dispatch`, PR and `push` to `master` (paths filter on `tests/**`, `src/**`, `platform/qt/**`, `AGENTS.md`, `CLAUDE.md`) | Windows test runner. The blocking `windows-scaffold` job runs `console_tests --check-golden` and `pipeline_tests --check-golden`; the independent `windows-gui-pilot` job runs `gui_tests` with job-level `continue-on-error` until promotion. |
+| [`tests.yml`](../.github/workflows/tests.yml) | `workflow_dispatch`, every `pull_request`, and `push` to `master`. **No `paths` filter** — see the note below. | Five jobs. `protected-check-route` (ubuntu) derives a fail-closed route; `repo-hygiene-python` (ubuntu + windows matrix) and `factory-bridge-regressions` (windows) run independently of it; `windows-product-oracles` and `windows-gui-pilot` (both windows) `needs: protected-check-route` and run `console_tests`/`pipeline_tests --check-golden` and `gui_tests` respectively. |
 | [`Windows.yml`](../.github/workflows/Windows.yml) | `workflow_dispatch` on `master` | Release artifact. Chocolatey-installs Qt 5.15.2 + MinGW 8.1 + OpenSSL, runs `qmake` + `make` + `windeployqt`, unpacks `ffmpegWin64.zip` and `raw2mlvWin64.zip` with 7-Zip, uploads `MLVApp.Win64.zip`. |
 | [`Linux.yml`](../.github/workflows/Linux.yml) | `workflow_dispatch` on `master` | Ubuntu 22.04 runner. Installs the apt dependencies listed in [§3.4](#34-linux), runs `qmake` + `make -j8`, unpacks the bundled ffmpeg/raw2mlv, wraps it all with `linuxdeploy` + the Qt plugin to produce `MLVApp.AppImage`. |
 | [`macOS-Intel.yml`](../.github/workflows/macOS-Intel.yml) | `workflow_dispatch` on `master` | macOS 13 runner. `brew install llvm qt5 openssl` (alias to `qt@5`), `qmake -r`, `make -j8`, `macdeployqt -dmg` from `/usr/local/opt/qt@5/bin`. Artifact: `MLV App.dmg`. |
 | [`macOS-Arm64.yml`](../.github/workflows/macOS-Arm64.yml) | `workflow_dispatch` on `master` | macOS 14 runner, same recipe as Intel but `QTDIR=/opt/homebrew/opt/qt@5/bin`. Artifact: `MLV App.dmg`. |
 
-Blocking vs. pilot status:
+### 14.1 What actually blocks a merge
 
-- **Blocking** (must pass before merge): `console_tests --check-golden`,
-  `pipeline_tests --check-golden`.
-- **Pilot** (independent non-blocking job, runs with job-level
-  `continue-on-error: true` until two
-  consecutive greens on hosted runners): `gui_tests`. Background and rationale
-  for this rollout are in
-  [`.claude/analysis/testing-scaffold-implementation.md`](../.claude/analysis/testing-scaffold-implementation.md).
-- `perf_tests` is intentionally **not** in CI because VM noise makes the
-  thresholds flaky; it runs locally only.
+`tests.yml` has five jobs, and `repo-hygiene-python` is a two-leg matrix, so a run
+reports six check runs. **Five of them are required status checks** on `master`:
+`Repo Hygiene Python (ubuntu-latest)`, `Repo Hygiene Python (windows-latest)`,
+`Factory Bridge Regressions`, `Windows Product Oracles`, `Windows GUI Pilot`.
+`Protected Check Route` is deliberately **not** required — the two jobs that
+depend on it already fail closed when it does not produce a usable answer, so
+requiring it as well would add a second way to say the same thing. Protection is
+`strict` (the branch must be up to date), `enforce_admins` is on, and
+`required_approving_review_count` is `0` — the merge bar is five green checks on
+an up-to-date ref, not a second reviewer. One repository ruleset also applies to
+`master`: `CodeQL high-severity merge protection`, which is `code_scanning`-only
+and adds no status check of its own.
+
+**There is no `continue-on-error` anywhere in `tests.yml`, and no pilot tier.**
+`gui_tests` was promoted out of pilot status; `Windows GUI Pilot` keeps the old
+name but is a required check like the rest.
+
+`perf_tests` is intentionally **not** in CI because VM noise makes the
+thresholds flaky; it runs locally only.
+
+### 14.2 Why there is no `paths` filter
+
+Selective skipping is done by the `protected-check-route` job, **not** by a
+workflow-level `paths:` key. The route runs
+[`tools/repo_hygiene/protected_check_router.py`](../tools/repo_hygiene/protected_check_router.py)
+over the base..head range and emits `product` and `gui` booleans; the two Windows
+jobs run with `if: ${{ always() }}`, fail closed if the route did not produce a
+usable answer, and otherwise either do the real work or record an explicit N/A.
+
+The distinction is load-bearing. A `paths:` filter makes the job **not run at
+all**, and a required status check that never runs is never satisfied — so a
+docs-only PR would hang instead of merging, and worse, path filtering makes a
+required check *suppressible by the shape of the diff*. Routing inside a job that
+always runs keeps the check reportable while still skipping the expensive build.
+
+This is enforced, not merely preferred:
+[`tools/repo_hygiene/test_repo_hygiene.py`](../tools/repo_hygiene/test_repo_hygiene.py)
+(`test_ci_workflow_hardening_is_fail_closed_and_coordination_aware`) asserts that
+the trigger block contains no `paths:` or `paths-ignore:` key, with the reason
+*"required PR and master CI must not be suppressible by path filtering"*, and pins
+the job set and each job's `timeout-minutes`. **Reintroducing a path filter, or
+renaming a job key, reds that test.** Renaming a job's display `name:` is the more
+dangerous edit: no test catches it, and it silently orphans the required status
+check that carries that name in branch protection.
+
+Historical note: this section previously described a `paths` filter, a blocking
+`windows-scaffold` job, and a `windows-gui-pilot` running under
+`continue-on-error`. All three are retired. The first two are actively forbidden
+by the test above; job-level `continue-on-error` is simply absent, and is not
+separately asserted against at the job level. Background on the original pilot
+rollout is in
+[`.claude/analysis/testing-scaffold-implementation.md`](../.claude/analysis/testing-scaffold-implementation.md),
+which is kept as history and does not describe current CI.
 
 ---
 

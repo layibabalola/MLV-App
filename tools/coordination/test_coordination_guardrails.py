@@ -257,6 +257,86 @@ def test_near_misses_are_summarised_not_printed_per_card():
     assert "NEAR-MISS ($($nearMisses.Count))" in text, "near-misses are not summarised into one line"
     assert "NOT skipped" in text, "the diagnostic must say it did not act on the near-miss"
 
+
+# --- pre-dispatch hosted GitHub evidence ----------------------------------------------------
+# MEASURED 2026-09-05: FACTORY-MATURITY-1-CLAUDE and FACTORY-MATURITY-1-OPUS, both priority 1,
+# consumed two lane slots each and both returned the same wall -- `gh` answers "Access is denied"
+# inside the read-only lane sandbox. The same gh, token and machine work from an interactive
+# session; gh resolves its token through the Windows credential keyring and the sandbox denies
+# that read. PR #55 had already TOLD lanes this might happen and that saying so is a FINDING, and
+# both lanes did say so, correctly -- and were dispatched into the wall anyway, because the brief
+# only taught them to report the limitation and never removed it.
+#
+# Asserted on the source, for the reason given in
+# test_cycle_receipt_stamp_has_exactly_one_assignment: running Invoke-Workstream reads the live
+# queue and writes a prompt and a run directory into real .claude-state, so executing it under
+# test would mutate board state. Behavioural verification is a subject/falsifier pair run by hand
+# (real gh -> "gh-evidence 5/5 export(s) ok"; a stub gh on PATH that exits 1 with "Access is
+# denied" -> "gh-evidence 0/4", the section headed "THE EXPORT FAILED", and dispatch continues).
+
+
+def test_hosted_evidence_is_collected_by_the_dispatcher_not_left_to_the_lane():
+    """A warning in a prompt is not a fix; it is a nicer way to fail. The dispatcher runs in the
+    venue where gh works and was already calling it for the landing probe, so the evidence was
+    always one command away from the process doing the dispatching."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    assert "$needsHostedEvidence" in text, "no hosted-evidence classification"
+    assert "github-evidence" in text, "no export directory beside the run"
+    # the export must actually shell out to gh from here, not merely describe it
+    assert "& gh @ghArgs" in text, "the dispatcher does not itself invoke gh for the export"
+    # ...and the brief must forbid the lane from retrying it. Doubled backticks: inside the
+    # here-string a backtick is PowerShell's escape character, so ``gh`` is what renders as `gh`.
+    assert "DO NOT RETRY ``gh`` YOURSELF" in text, "the brief does not stop the lane re-hitting the wall"
+
+
+def test_the_run_directory_is_named_before_the_brief_that_cites_it():
+    """The brief has to name files this script is about to write. $runDir was originally computed
+    at dispatch time, AFTER the brief and only on the non-dry-run path -- so a section naming the
+    export directory could not exist, and -DryRun could not be used to inspect one.
+
+    Exactly one assignment, for the same reason $stamp has exactly one: a second one further down
+    would silently point the lane at a directory that never receives the export.
+    """
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    for var in ("$runDir", "$stamp"):
+        assignments = re.findall(r"(?m)^\s*" + re.escape(var) + r"\s*=", text)
+        assert len(assignments) == 1, (
+            "%s must have exactly one assignment; found %d" % (var, len(assignments))
+        )
+    assert text.index("$runDir = Join-Path") < text.index("$brief = @\""), (
+        "$runDir is assigned after the brief is built, so the brief cannot name the export"
+    )
+
+
+def test_the_export_fails_open_and_says_why_rather_than_only_that_it_failed():
+    """Fail-open, exactly like the landing probe: an unreadable signal must never silently shrink
+    the board. And the REASON is kept, not just the exit code -- 'Access is denied' and a 404 send
+    a reader to completely different places, and collapsing both to 'gh failed' is how a venue
+    problem gets misfiled as an authorization problem for a second time."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    assert "CANNOT-DETERMINE: gh not on PATH" in text, "a missing gh must not be fatal"
+    assert "$why" in text and "no stderr" in text, "the failure reason is not preserved"
+
+    # nothing between the export block and the dispatch may exit: a failed export must still
+    # dispatch, with the lane told plainly that those facts are UNVERIFIED.
+    start = text.index("$needsHostedEvidence =")
+    end = text.index("if ($DryRun)")
+    assert not re.search(r"(?m)^\s*exit\s+\d", text[start:end]), (
+        "the hosted-evidence export can halt dispatch; it must fail open"
+    )
+    assert "UNVERIFIED" in text[start:end], "a failed export must tell the lane the facts are UNVERIFIED"
+
+
+def test_dry_run_admits_the_export_already_happened():
+    """-DryRun really does write the export -- that is the point, it is how you inspect what a
+    lane would receive. Printing a bare 'nothing dispatched' would be a lie by omission about a
+    directory this command just created."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    dry = [ln for ln in text.splitlines() if "DRY RUN" in ln and "Write-Output" in ln]
+    assert dry, "no dry-run notice"
+    assert "on disk" in dry[0], "dry run does not disclose that the export is real"
+
+
 # --- assert-script-currency.ps1 -------------------------------------------------------------
 # The board root is the only checkout carrying .claude-state/, and it routinely sits on a peer
 # branch. Running a tool from there by absolute path silently executes a stale copy: the script
