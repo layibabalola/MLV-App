@@ -169,6 +169,12 @@ jobs:
             tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation `
             -v
 
+      - name: Run full agent-bridge test suite
+        run: |
+          python -m pytest `
+            tools\agent-bridge\test_agent_bridge.py `
+            -q
+
       - name: Run coordination and self-healing guardrails
         run: |
           python -m pytest `
