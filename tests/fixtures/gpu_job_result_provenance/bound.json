@@ -1,0 +1,8 @@
+{
+  "schema": "mlvapp-gpu-job-result-provenance.v1",
+  "jobId": "mlvapp-cdng-export-fixture-bound",
+  "rangeHeadSha": "57b25b2fcff179ad0130075323431b114ef5722e",
+  "llrawprocBlobId": "998bf51750bc3956932d39d14af334010ece7ed3",
+  "dllSha256": "2d31bc8580871475677682eb0e5bdd80767a70d34f0e97b8c90147c3c068d1e1",
+  "pendingSymbolPresence": true
+}

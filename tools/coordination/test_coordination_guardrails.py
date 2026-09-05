@@ -257,6 +257,86 @@ def test_near_misses_are_summarised_not_printed_per_card():
     assert "NEAR-MISS ($($nearMisses.Count))" in text, "near-misses are not summarised into one line"
     assert "NOT skipped" in text, "the diagnostic must say it did not act on the near-miss"
 
+
+# --- pre-dispatch hosted GitHub evidence ----------------------------------------------------
+# MEASURED 2026-09-05: FACTORY-MATURITY-1-CLAUDE and FACTORY-MATURITY-1-OPUS, both priority 1,
+# consumed two lane slots each and both returned the same wall -- `gh` answers "Access is denied"
+# inside the read-only lane sandbox. The same gh, token and machine work from an interactive
+# session; gh resolves its token through the Windows credential keyring and the sandbox denies
+# that read. PR #55 had already TOLD lanes this might happen and that saying so is a FINDING, and
+# both lanes did say so, correctly -- and were dispatched into the wall anyway, because the brief
+# only taught them to report the limitation and never removed it.
+#
+# Asserted on the source, for the reason given in
+# test_cycle_receipt_stamp_has_exactly_one_assignment: running Invoke-Workstream reads the live
+# queue and writes a prompt and a run directory into real .claude-state, so executing it under
+# test would mutate board state. Behavioural verification is a subject/falsifier pair run by hand
+# (real gh -> "gh-evidence 5/5 export(s) ok"; a stub gh on PATH that exits 1 with "Access is
+# denied" -> "gh-evidence 0/4", the section headed "THE EXPORT FAILED", and dispatch continues).
+
+
+def test_hosted_evidence_is_collected_by_the_dispatcher_not_left_to_the_lane():
+    """A warning in a prompt is not a fix; it is a nicer way to fail. The dispatcher runs in the
+    venue where gh works and was already calling it for the landing probe, so the evidence was
+    always one command away from the process doing the dispatching."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    assert "$needsHostedEvidence" in text, "no hosted-evidence classification"
+    assert "github-evidence" in text, "no export directory beside the run"
+    # the export must actually shell out to gh from here, not merely describe it
+    assert "& gh @ghArgs" in text, "the dispatcher does not itself invoke gh for the export"
+    # ...and the brief must forbid the lane from retrying it. Doubled backticks: inside the
+    # here-string a backtick is PowerShell's escape character, so ``gh`` is what renders as `gh`.
+    assert "DO NOT RETRY ``gh`` YOURSELF" in text, "the brief does not stop the lane re-hitting the wall"
+
+
+def test_the_run_directory_is_named_before_the_brief_that_cites_it():
+    """The brief has to name files this script is about to write. $runDir was originally computed
+    at dispatch time, AFTER the brief and only on the non-dry-run path -- so a section naming the
+    export directory could not exist, and -DryRun could not be used to inspect one.
+
+    Exactly one assignment, for the same reason $stamp has exactly one: a second one further down
+    would silently point the lane at a directory that never receives the export.
+    """
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    for var in ("$runDir", "$stamp"):
+        assignments = re.findall(r"(?m)^\s*" + re.escape(var) + r"\s*=", text)
+        assert len(assignments) == 1, (
+            "%s must have exactly one assignment; found %d" % (var, len(assignments))
+        )
+    assert text.index("$runDir = Join-Path") < text.index("$brief = @\""), (
+        "$runDir is assigned after the brief is built, so the brief cannot name the export"
+    )
+
+
+def test_the_export_fails_open_and_says_why_rather_than_only_that_it_failed():
+    """Fail-open, exactly like the landing probe: an unreadable signal must never silently shrink
+    the board. And the REASON is kept, not just the exit code -- 'Access is denied' and a 404 send
+    a reader to completely different places, and collapsing both to 'gh failed' is how a venue
+    problem gets misfiled as an authorization problem for a second time."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    assert "CANNOT-DETERMINE: gh not on PATH" in text, "a missing gh must not be fatal"
+    assert "$why" in text and "no stderr" in text, "the failure reason is not preserved"
+
+    # nothing between the export block and the dispatch may exit: a failed export must still
+    # dispatch, with the lane told plainly that those facts are UNVERIFIED.
+    start = text.index("$needsHostedEvidence =")
+    end = text.index("if ($DryRun)")
+    assert not re.search(r"(?m)^\s*exit\s+\d", text[start:end]), (
+        "the hosted-evidence export can halt dispatch; it must fail open"
+    )
+    assert "UNVERIFIED" in text[start:end], "a failed export must tell the lane the facts are UNVERIFIED"
+
+
+def test_dry_run_admits_the_export_already_happened():
+    """-DryRun really does write the export -- that is the point, it is how you inspect what a
+    lane would receive. Printing a bare 'nothing dispatched' would be a lie by omission about a
+    directory this command just created."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    dry = [ln for ln in text.splitlines() if "DRY RUN" in ln and "Write-Output" in ln]
+    assert dry, "no dry-run notice"
+    assert "on disk" in dry[0], "dry run does not disclose that the export is real"
+
+
 # --- assert-script-currency.ps1 -------------------------------------------------------------
 # The board root is the only checkout carrying .claude-state/, and it routinely sits on a peer
 # branch. Running a tool from there by absolute path silently executes a stale copy: the script
@@ -368,3 +448,231 @@ def test_the_read_only_board_diagnostics_actually_invoke_the_guard(tmp_path):
         body = script.read_text(encoding="utf-8")
         assert "assert-script-currency.ps1" in body, f"{script.name} no longer invokes the guard"
         assert "-ScriptPath $PSCommandPath" in body, f"{script.name} guards the wrong path"
+
+# --- Invoke-Workstream: a malformed priority must not stop dispatch -------------------------
+# Get-Rank used a bare [int] cast. On a non-numeric string that THROWS, and the throw lands
+# inside Sort-Object -Property { Get-Rank $_ }, killing selection -- while the script still
+# exits 0, so the loop records a normal cycle that dispatched nothing. Silent starvation is
+# worse than a halt because nothing reports it. queue.json demonstrably carries prose in this
+# field (DISPATCH-CDX-14, DISPATCH-CDX-15), so the authoring habit is real, not hypothetical.
+
+
+
+def workstream_dry_run(tmp_path, items, track="factory"):
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"schema": "test", "items": items}), encoding="ascii")
+    return subprocess.run(
+        [
+            "pwsh", "-NoProfile", "-File", str(WORKSTREAM),
+            "-Track", track, "-DryRun", "-NoLandingProbe", "-QueuePath", str(queue),
+        ],
+        text=True, capture_output=True,
+    )
+
+
+# 'queued', not 'booked': PR #63 made the dispatcher's admission an ALLOWLIST derived from
+# queue.json's own note, where booked means "named trigger, not schedulable". These fixtures
+# exist to reach Get-Rank, so they must carry a state a lane actually owns. The rule is right;
+# the fixture was relying on booked being dispatchable, which it never should have been.
+NUMERIC_CARD = {"id": "NUMERIC-1", "state": "queued", "track": "factory", "priority": 1, "title": "normal"}
+PROSE_CARD = {
+    "id": "PROSE-1", "state": "queued", "track": "factory",
+    "priority": "CRITICAL PATH - the cap is now two blocks away, not one",
+    "title": "prose in the priority field",
+}
+
+
+def test_a_prose_priority_does_not_stop_the_dispatcher_selecting(tmp_path):
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert "card=NUMERIC-1" in out.stdout, out.stdout + out.stderr
+    assert "Sort-Object" not in out.stderr, "selection still dies on the cast"
+
+
+def test_a_prose_priority_is_reported_loudly_rather_than_swallowed(tmp_path):
+    # Ranking it 999 silently would hide a card that someone deliberately marked urgent.
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert "NON-NUMERIC PRIORITY" in out.stderr
+    assert "PROSE-1" in out.stderr
+
+
+def test_the_priority_warning_stays_off_machine_readable_stdout(tmp_path):
+    # The [WORKSTREAM] stdout lines are parsed, and emitting inside a Sort-Object property
+    # block would make the sort key an array rather than an int.
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert "NON-NUMERIC PRIORITY" not in out.stdout
+
+
+def test_the_priority_warning_is_emitted_once_per_card(tmp_path):
+    # Sort-Object may evaluate the property block more than once per item.
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert out.stderr.count("NON-NUMERIC PRIORITY on card 'PROSE-1'") == 1
+
+
+def test_a_card_with_a_prose_priority_is_still_dispatchable(tmp_path):
+    # Ranked last, not excluded -- a malformed field must not make work unreachable.
+    out = workstream_dry_run(tmp_path, [PROSE_CARD])
+    assert "card=PROSE-1" in out.stdout, out.stdout + out.stderr
+
+
+def test_a_wholly_numeric_queue_produces_no_priority_warning(tmp_path):
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD])
+    assert "NON-NUMERIC PRIORITY" not in out.stderr
+    assert "card=NUMERIC-1" in out.stdout
+
+
+# --- Invoke-Lane: the exit code must be the truth ------------------------------------------
+# The script's own header says "it is alive because it is running and dead when it exits, and the
+# exit code is the truth" -- and it did not honour that at its own boundary. It computed the
+# lane's exit code, wrote it into the receipt, printed it, then fell off the end, which exits 0.
+# Invoke-Workstream captured that 0 and logged laneExitCode=0, so a failed lane was recorded as a
+# success. Measured 2026-09-05: two of twelve dispatches hit HTTP 429 ("You've hit your session
+# limit"), produced nothing, carried exitCode 1 in their receipts and laneExitCode 0 in the log.
+
+LANE_RUNNER = ROOT / "tools" / "coordination" / "Invoke-Lane.ps1"
+
+
+def test_invoke_lane_propagates_its_exit_code_instead_of_falling_off_the_end():
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "exit $propagated" in body, (
+        "Invoke-Lane must exit with the lane's outcome; falling off the end exits 0 and makes "
+        "every failed lane look successful to Invoke-Workstream's laneExitCode"
+    )
+
+
+def test_invoke_lane_maps_the_negative_sentinels_rather_than_passing_them_through():
+    # -1 would surface as 255 through a process exit code, and -999 does not survive at all.
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "-1      { 124 }" in body, "timeout sentinel is not mapped"
+    assert "-999    { 127 }" in body, "never-completed sentinel is not mapped"
+
+
+def test_the_timeout_code_matches_the_taxonomy_the_repo_already_uses():
+    # boundedRunnerExitCodes already fixes timeout=124; a second private meaning for the same
+    # condition is how two tools end up disagreeing about one event.
+    config = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
+    # The taxonomy lives under `locking`, not at the top level. Found by searching the config
+    # rather than assuming: the first version of this test guessed the top level, and a test that
+    # skips is a test that never fired.
+    codes = config["locking"]["boundedRunnerExitCodes"]
+    assert int(codes["timeout"]) == 124
+    assert "-1      { 124 }" in LANE_RUNNER.read_text(encoding="utf-8")
+
+DISPATCHER = ROOT / "tools" / "coordination" / "Invoke-Workstream.ps1"
+
+
+def run_dispatcher(tmp_path, items, *extra):
+    """Run the real dispatcher against a synthetic queue fixture, -DryRun and
+    -NoLandingProbe so it never calls gh or Invoke-Lane.ps1 for real. Uses -QueuePath,
+    which exists precisely so a fixture queue can be substituted (the script refuses to
+    ever mutate the canonical one). A successful (non-empty-candidates) run still writes
+    a real prompt file under the live repo's .claude-state\\fleet-runs\\prompts\\ -- that
+    is the dispatcher's normal side effect even under -DryRun -- so the caller must clean
+    up any path reported on a "WORKSTREAM: prompt=" line.
+    """
+    queue_path = tmp_path / "queue.json"
+    queue_path.write_text(json.dumps({"schema": "dual-lane-queue.v1", "note": "test fixture", "items": items}))
+    result = subprocess.run(
+        [
+            "pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", str(DISPATCHER), "-QueuePath", str(queue_path), "-NoLandingProbe", "-DryRun", *extra,
+        ],
+        text=True, capture_output=True,
+    )
+    prompt_path = None
+    for line in result.stdout.splitlines():
+        if line.startswith("WORKSTREAM: prompt="):
+            prompt_path = Path(line.split("=", 1)[1].strip())
+    if prompt_path and prompt_path.exists():
+        prompt_path.unlink()
+    return result
+
+
+def test_booked_card_is_reported_not_dispatched():
+    """B2-TOOLING-BASELINE (state=booked) burned a dispatch slot on 2026-09-05: the old
+    $Terminal blocklist did not name 'booked', so it was treated as ordinary live work.
+    queue.json's own note defines 'booked' as "named trigger, not schedulable". A card in
+    that state must be reported via a NOT-SCHEDULABLE line and must never be selected,
+    even when it is the only candidate on its track."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        result = run_dispatcher(
+            tmp_path,
+            [{"id": "TEST-BOOKED-1", "state": "booked", "track": "factory", "priority": 1}],
+            "-Track", "factory",
+        )
+        assert "NOT-SCHEDULABLE card=TEST-BOOKED-1 state=booked" in result.stdout
+        assert "WORKSTREAM: track=factory card=TEST-BOOKED-1" not in result.stdout
+        assert result.returncode != 0
+
+
+def test_queued_card_on_a_track_is_still_dispatched():
+    """Control for the rule above: a card in a genuinely schedulable state (queued) with
+    a real track must still be picked and dry-run dispatched, so the allowlist does not
+    over-exclude ordinary live work."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        result = run_dispatcher(
+            tmp_path,
+            [{"id": "TEST-QUEUED-1", "state": "queued", "track": "factory", "priority": 1}],
+            "-Track", "factory",
+        )
+        assert "WORKSTREAM: NOT-SCHEDULABLE" not in result.stdout
+        assert "WORKSTREAM: track=factory card=TEST-QUEUED-1" in result.stdout
+        assert result.returncode == 0
+
+
+def test_untracked_card_is_not_auto_selected():
+    """Root cause of the same defect: Get-Track returns 'UNSET' for a card with no track,
+    and the default -Track auto pool never filtered by track at all, so an untracked card
+    was always a candidate once the tracked pools ran dry. A schedulable-state card with
+    no track (queue field) must be reported and skipped under the default auto selection."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        result = run_dispatcher(
+            tmp_path,
+            [{"id": "TEST-UNTRACKED-1", "state": "queued", "priority": 1}],
+        )
+        assert "NOT-SCHEDULABLE card=TEST-UNTRACKED-1" in result.stdout
+        assert "no-board-track-set" in result.stdout
+        assert "WORKSTREAM: track=" not in result.stdout
+        assert result.returncode != 0
+
+
+def test_dispatched_untracked_target_state_is_still_schedulable():
+    """'dispatched-untracked-target' is a REAL state already live in the board's queue
+    (SIDECAR-COVERAGE-1, track=factory, priority=7, owner=codex) - its own stateReason
+    explains that "untracked" means the deliverable is gitignored and has no gate, which
+    is unrelated to whether this script's `track` field is set. Excluding this state from
+    the allowlist would silently strand a card a lane genuinely still owns, which is the
+    exact class of defect this fix exists to remove, just aimed at a different card."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        result = run_dispatcher(
+            tmp_path,
+            [{"id": "TEST-DUT-1", "state": "dispatched-untracked-target", "track": "factory", "priority": 7}],
+            "-Track", "factory",
+        )
+        assert "WORKSTREAM: NOT-SCHEDULABLE" not in result.stdout
+        assert "WORKSTREAM: track=factory card=TEST-DUT-1" in result.stdout
+        assert result.returncode == 0
+
+
+def test_explicit_track_unset_still_dispatches_an_untracked_card():
+    """Control for the rule above: Invoke-WorkstreamLoop.ps1 rotates through '-Track UNSET'
+    on purpose as its own named track, so an explicit request for the UNSET pool must keep
+    working even though the default AUTO pool now excludes it."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        result = run_dispatcher(
+            tmp_path,
+            [{"id": "TEST-UNTRACKED-2", "state": "queued", "priority": 1}],
+            "-Track", "UNSET",
+        )
+        assert "WORKSTREAM: NOT-SCHEDULABLE" not in result.stdout
+        assert "WORKSTREAM: track=UNSET card=TEST-UNTRACKED-2" in result.stdout
+        assert result.returncode == 0

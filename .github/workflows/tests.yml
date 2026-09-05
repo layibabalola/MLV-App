@@ -129,6 +129,11 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          # tests/coordination/test_process_hygiene_contract.py verifies the sealed A/B
+          # receipts against the historical commit each one names. At the default depth of
+          # 1 that commit is absent and the check cannot run. The two jobs above already
+          # check out at full depth.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
