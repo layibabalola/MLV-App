@@ -899,12 +899,41 @@ def test_sealed_real_clip_receipt_is_closed_and_source_bound() -> None:
             receipt["renderContract"]["receiptGitBlob"],
         ),
     )
+    # Read each bound subject AT THE SEALED VERIFIER COMMIT, not out of the current
+    # worktree.  A sealed receipt attests what ran AT SEAL TIME; asserting that today's
+    # bytes still equal the seal does not strengthen that attestation -- it silently
+    # converts every sealed receipt into a permanent FREEZE on the files it names.
+    # There are two receipts here, so two freezes, and no future change to the smoke
+    # runner could ever land.  sealed_real_clip_receipt._assert_source_binding already
+    # binds at verifier["head"]; this loop was the only place that did not, and the two
+    # disagreed: with an edited runner the library reported SEALED_RECEIPT_PASS while
+    # this test failed on the very same tree.
+    verifier_head = receipt["verifier"]["head"]
+    # The head is now the anchor for every binding below, so it has to be pinned itself.
+    # Without this a receipt could name ANY commit whose copies of the three subjects
+    # happen to match, and the bindings would still pass -- verified by control probe.
+    # sealed_real_clip_receipt makes the same head/tree check for the same reason.
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", f"{verifier_head}^{{tree}}"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout.strip()
+        == receipt["verifier"]["tree"]
+    )
     for path, expected_sha256, expected_git_blob in source_bindings:
-        # Git stores these text subjects with LF bytes, while a Windows
-        # checkout can materialize all or only some lines as CRLF.  Bind the
-        # portable committed-object bytes rather than an autocrlf-dependent
-        # worktree representation.
-        canonical_bytes = path.read_bytes().replace(b"\r\n", b"\n")
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        # Git objects are stored with LF, which is exactly the receipt's declared
+        # GIT_BLOB_BYTES_CANONICAL_LF convention, so no autocrlf-dependent worktree
+        # representation is involved and no normalization is needed.
+        canonical_bytes = subprocess.run(
+            ["git", "cat-file", "blob", f"{verifier_head}:{rel}"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout
         assert (
             hashlib.sha256(canonical_bytes).hexdigest().upper()
             == expected_sha256
