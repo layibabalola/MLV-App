@@ -99,12 +99,32 @@ if (-not (Test-Path -LiteralPath $PromptDir)) {
     New-Item -ItemType Directory -Path $PromptDir -Force | Out-Null
 }
 
-# A card in one of these states is done. Anything else is live work.
+# A card in one of these states is done. Anything else is non-terminal (live) work.
 $Terminal = @(
     'closed-fixed','closed-not-this-board','closed-root-caused','closed-superseded',
     'closed-transformed','landed','landed-evidence','landed-local-proof','CLEARED',
     'RETIRED','withdrawn','superseded','retracted-and-fixed','fixed','answered-folded'
 )
+
+# ALLOWLIST, not blocklist. Measured 2026-09-05: card B2-TOOLING-BASELINE carried
+# state=booked, track=UNSET, priority=999 and was still dispatched, burning a lane slot on
+# work no lane can act on - queue.json's OWN top-level "note" field defines 'booked' as "a
+# named trigger, not schedulable". A blocklist here would require enumerating every state
+# that ALSO names a party or trigger other than a lane (booked-rule, consult-open,
+# deferred-nonblocking, open-risk, optional-validation, surfaced-awaiting-ordering,
+# handed-off-awaiting-review, changes-requested-awaiting-acceptance-evidence,
+# blocked-operator, ...) and the queue keeps growing that vocabulary. An allowlist of the
+# states the note itself says a LANE owns needs no such enumeration: anything non-terminal
+# and not in this list is reported, never dispatched.
+#
+# 'dispatched-untracked-target' IS schedulable, despite the name - CHECKED AGAINST THE LIVE
+# QUEUE, not assumed: SIDECAR-COVERAGE-1 (track=factory, priority=7, owner=codex) carries
+# it right now. Its own stateReason explains the word "untracked": the deliverable lives
+# under gitignored .claude-state/, so it has no git-trackable range and no gate - "untracked"
+# there means git tracking, unrelated to this script's own `track` field. The work is real
+# and still owned by a lane; excluding this state would silently strand it, which is the
+# same class of defect this fix exists to remove, just aimed at a different card.
+$Schedulable = @('queued', 'dispatched', 'in-review', 'waiting-evidence', 'dispatched-untracked-target')
 
 function Get-Prop($obj, [string]$name) {
     if ($null -eq $obj) { return $null }
@@ -258,6 +278,36 @@ foreach ($id in $landedById.Keys) {
         $id, $pr.number, $pr.title, (Get-Prop (@($live | Where-Object { (Get-Prop $_ 'id') -eq $id })[0]) 'state'), $landedHow[$id])
 }
 
+# ------------------------------------------------------------------ schedulability
+# TWO independent rules, both structural (like $Terminal above): neither is bypassable by
+# -Force, which only ever waived the landed-probe and staleness filters below.
+#   1. state must be in $Schedulable.
+#   2. AUTO track selection must not fall through to an untracked card. 'UNSET' remains a
+#      real, INTENTIONAL dispatch target (Invoke-WorkstreamLoop.ps1 rotates through it
+#      explicitly as its own -Track value) - this only closes the silent fallthrough where
+#      the default $Track='auto' pool never filtered by track at all, so an untracked card
+#      was always a candidate whenever the tracked pools ran dry.
+function Get-NotSchedulableReason($item) {
+    $state = Get-Prop $item 'state'
+    if ($Schedulable -notcontains $state) {
+        return "state '$state' is not in the schedulable allowlist (queued, dispatched, in-review, waiting-evidence, dispatched-untracked-target) - queue.json's own note names this class a named trigger, not schedulable"
+    }
+    if ($Track -eq 'auto' -and (Get-Track $item) -eq 'UNSET') {
+        # NAMED DELIBERATELY UNLIKE THE STATE 'dispatched-untracked-target' above, which
+        # means something unrelated (its DELIVERABLE is untracked BY GIT). This is about the
+        # QUEUE'S OWN `track` FIELD (factory/playback/product/...) being absent.
+        return 'no-board-track-set - auto-select requires an explicit track field on the card; pass -Track UNSET to pick this card on purpose'
+    }
+    return $null
+}
+
+foreach ($item in $live) {
+    $reason = Get-NotSchedulableReason $item
+    if ($reason) {
+        Write-Output ("WORKSTREAM: NOT-SCHEDULABLE card={0} state={1} reason={2}" -f (Get-Prop $item 'id'), (Get-Prop $item 'state'), $reason)
+    }
+}
+
 # ------------------------------------------------------------------ selection
 $script:WarnedNonNumericPriority = @{}
 function Get-Rank($item) {
@@ -295,9 +345,9 @@ if ($CardId) {
         exit 3
     }
 } else {
-    $pool = $live
+    $pool = @($live | Where-Object { -not (Get-NotSchedulableReason $_) })
     if ($Track -ne 'auto') {
-        $pool = @($live | Where-Object { (Get-Track $_) -eq $Track })
+        $pool = @($pool | Where-Object { (Get-Track $_) -eq $Track })
     }
     # Landed-elsewhere cards are excluded here, never earlier: $live must keep its meaning
     # ("non-terminal per the queue") so the NO-LIVE-CARDS vs ALL-FILTERED distinction below

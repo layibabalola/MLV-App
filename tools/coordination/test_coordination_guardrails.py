@@ -390,9 +390,13 @@ def workstream_dry_run(tmp_path, items, track="factory"):
     )
 
 
-NUMERIC_CARD = {"id": "NUMERIC-1", "state": "booked", "track": "factory", "priority": 1, "title": "normal"}
+# 'queued', not 'booked': PR #63 made the dispatcher's admission an ALLOWLIST derived from
+# queue.json's own note, where booked means "named trigger, not schedulable". These fixtures
+# exist to reach Get-Rank, so they must carry a state a lane actually owns. The rule is right;
+# the fixture was relying on booked being dispatchable, which it never should have been.
+NUMERIC_CARD = {"id": "NUMERIC-1", "state": "queued", "track": "factory", "priority": 1, "title": "normal"}
 PROSE_CARD = {
-    "id": "PROSE-1", "state": "booked", "track": "factory",
+    "id": "PROSE-1", "state": "queued", "track": "factory",
     "priority": "CRITICAL PATH - the cap is now two blocks away, not one",
     "title": "prose in the priority field",
 }
@@ -472,3 +476,123 @@ def test_the_timeout_code_matches_the_taxonomy_the_repo_already_uses():
     codes = config["locking"]["boundedRunnerExitCodes"]
     assert int(codes["timeout"]) == 124
     assert "-1      { 124 }" in LANE_RUNNER.read_text(encoding="utf-8")
+
+DISPATCHER = ROOT / "tools" / "coordination" / "Invoke-Workstream.ps1"
+
+
+def run_dispatcher(tmp_path, items, *extra):
+    """Run the real dispatcher against a synthetic queue fixture, -DryRun and
+    -NoLandingProbe so it never calls gh or Invoke-Lane.ps1 for real. Uses -QueuePath,
+    which exists precisely so a fixture queue can be substituted (the script refuses to
+    ever mutate the canonical one). A successful (non-empty-candidates) run still writes
+    a real prompt file under the live repo's .claude-state\\fleet-runs\\prompts\\ -- that
+    is the dispatcher's normal side effect even under -DryRun -- so the caller must clean
+    up any path reported on a "WORKSTREAM: prompt=" line.
+    """
+    queue_path = tmp_path / "queue.json"
+    queue_path.write_text(json.dumps({"schema": "dual-lane-queue.v1", "note": "test fixture", "items": items}))
+    result = subprocess.run(
+        [
+            "pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", str(DISPATCHER), "-QueuePath", str(queue_path), "-NoLandingProbe", "-DryRun", *extra,
+        ],
+        text=True, capture_output=True,
+    )
+    prompt_path = None
+    for line in result.stdout.splitlines():
+        if line.startswith("WORKSTREAM: prompt="):
+            prompt_path = Path(line.split("=", 1)[1].strip())
+    if prompt_path and prompt_path.exists():
+        prompt_path.unlink()
+    return result
+
+
+def test_booked_card_is_reported_not_dispatched():
+    """B2-TOOLING-BASELINE (state=booked) burned a dispatch slot on 2026-09-05: the old
+    $Terminal blocklist did not name 'booked', so it was treated as ordinary live work.
+    queue.json's own note defines 'booked' as "named trigger, not schedulable". A card in
+    that state must be reported via a NOT-SCHEDULABLE line and must never be selected,
+    even when it is the only candidate on its track."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        result = run_dispatcher(
+            tmp_path,
+            [{"id": "TEST-BOOKED-1", "state": "booked", "track": "factory", "priority": 1}],
+            "-Track", "factory",
+        )
+        assert "NOT-SCHEDULABLE card=TEST-BOOKED-1 state=booked" in result.stdout
+        assert "WORKSTREAM: track=factory card=TEST-BOOKED-1" not in result.stdout
+        assert result.returncode != 0
+
+
+def test_queued_card_on_a_track_is_still_dispatched():
+    """Control for the rule above: a card in a genuinely schedulable state (queued) with
+    a real track must still be picked and dry-run dispatched, so the allowlist does not
+    over-exclude ordinary live work."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        result = run_dispatcher(
+            tmp_path,
+            [{"id": "TEST-QUEUED-1", "state": "queued", "track": "factory", "priority": 1}],
+            "-Track", "factory",
+        )
+        assert "WORKSTREAM: NOT-SCHEDULABLE" not in result.stdout
+        assert "WORKSTREAM: track=factory card=TEST-QUEUED-1" in result.stdout
+        assert result.returncode == 0
+
+
+def test_untracked_card_is_not_auto_selected():
+    """Root cause of the same defect: Get-Track returns 'UNSET' for a card with no track,
+    and the default -Track auto pool never filtered by track at all, so an untracked card
+    was always a candidate once the tracked pools ran dry. A schedulable-state card with
+    no track (queue field) must be reported and skipped under the default auto selection."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        result = run_dispatcher(
+            tmp_path,
+            [{"id": "TEST-UNTRACKED-1", "state": "queued", "priority": 1}],
+        )
+        assert "NOT-SCHEDULABLE card=TEST-UNTRACKED-1" in result.stdout
+        assert "no-board-track-set" in result.stdout
+        assert "WORKSTREAM: track=" not in result.stdout
+        assert result.returncode != 0
+
+
+def test_dispatched_untracked_target_state_is_still_schedulable():
+    """'dispatched-untracked-target' is a REAL state already live in the board's queue
+    (SIDECAR-COVERAGE-1, track=factory, priority=7, owner=codex) - its own stateReason
+    explains that "untracked" means the deliverable is gitignored and has no gate, which
+    is unrelated to whether this script's `track` field is set. Excluding this state from
+    the allowlist would silently strand a card a lane genuinely still owns, which is the
+    exact class of defect this fix exists to remove, just aimed at a different card."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        result = run_dispatcher(
+            tmp_path,
+            [{"id": "TEST-DUT-1", "state": "dispatched-untracked-target", "track": "factory", "priority": 7}],
+            "-Track", "factory",
+        )
+        assert "WORKSTREAM: NOT-SCHEDULABLE" not in result.stdout
+        assert "WORKSTREAM: track=factory card=TEST-DUT-1" in result.stdout
+        assert result.returncode == 0
+
+
+def test_explicit_track_unset_still_dispatches_an_untracked_card():
+    """Control for the rule above: Invoke-WorkstreamLoop.ps1 rotates through '-Track UNSET'
+    on purpose as its own named track, so an explicit request for the UNSET pool must keep
+    working even though the default AUTO pool now excludes it."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        result = run_dispatcher(
+            tmp_path,
+            [{"id": "TEST-UNTRACKED-2", "state": "queued", "priority": 1}],
+            "-Track", "UNSET",
+        )
+        assert "WORKSTREAM: NOT-SCHEDULABLE" not in result.stdout
+        assert "WORKSTREAM: track=UNSET card=TEST-UNTRACKED-2" in result.stdout
+        assert result.returncode == 0
