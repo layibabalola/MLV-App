@@ -19,8 +19,41 @@ def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=True).stdout.strip()
 
 
+def init_repo(tmp_path):
+    r"""`git init` a throwaway repo that survives a long TMPDIR.
+
+    MEASURED 2026-09-05. With TMPDIR under a deep path, eleven tests in this file failed with
+    `git add` reporting `Filename too long`. pytest's tmp_path adds
+    `pytest-of-<user>/pytest-N/<testname>0/` on top of TMPDIR -- 220 chars here -- and Windows
+    MAX_PATH bites at 260. The suite passed from `C:\mlvtmp\pt` and failed from the agent
+    scratchpad, on the same commit and interpreter, so the result depended on WHERE it ran.
+    A test that passes or fails by its temp directory is not testing what it claims to.
+
+    THE ORDER MATTERS AND WAS FALSIFIED, because the obvious fix does not work:
+      `git init` then `git config core.longpaths true`  -> init ITSELF dies, stat'ing
+          .git/hooks/fsmonitor-watchman.sample, before any config can be set.
+      `git -c core.longpaths=true init` alone           -> init succeeds, but -c is transient,
+          so the very next bare `git add` fails exactly as before.
+    Only -c ON THE INIT, followed by persisting it into the new repo, makes every later bare
+    git call in these helpers safe.
+
+    The repo already reaches for this mitigation elsewhere -- brokered_closeout.py's
+    run_git_longpaths() and Invoke-WorkstreamLoop.ps1's worktree add both pass
+    `-c core.longpaths=true`. These helpers were simply never given it.
+
+    CI never sees this: hosted runners put RUNNER_TEMP at a short path like D:\_temp, which
+    is why the trap survived to bite local runs only.
+    """
+    subprocess.run(
+        ["git", "-c", "core.longpaths=true", "init", "-q"], cwd=tmp_path, check=True
+    )
+    subprocess.run(
+        ["git", "config", "core.longpaths", "true"], cwd=tmp_path, check=True
+    )
+
+
 def make_repo(tmp_path):
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    init_repo(tmp_path)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
     (tmp_path / "seed.txt").write_text("seed\n")
@@ -369,7 +402,7 @@ def guard_status(script_path, ref="fork/master", env=None):
 
 def currency_repo(tmp_path):
     """A repo with a 'fork/master' ref and a tracked script, so the guard has something to compare."""
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    init_repo(tmp_path)
     subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
     script = tmp_path / "tool.ps1"
