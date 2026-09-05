@@ -19,6 +19,20 @@
 #                          into either side -- a new state string must be classified explicitly,
 #                          never silently guessed at (RESUME STEP 4: "when you add a check, name
 #                          its three outcomes").
+#   STALE-LANDED-IN-PR     state says "still open", the item names NO verifiable sha at all, and a
+#                          MERGED PR claims it behind a landing verb. This is the ancestry check's
+#                          blind spot and the reason it was added: on 2026-09-05 SIX cards had
+#                          landed and this tool printed `NO MISMATCHES`, because a card that names
+#                          no commit gives the sha scan nothing to check. The tool was right about
+#                          what it checked and silent about what it could not -- a green result
+#                          scoped narrower than the question being asked of it.
+#
+# THE PR PROBE IS A SECOND, INDEPENDENT AXIS AND IS DELIBERATELY NOT MERGED WITH THE FIRST.
+# Ancestry is local, offline and certain. The PR probe is remote, needs `gh`, and is a claim a
+# human wrote. So it runs ONLY for items the sha axis could not judge (no verifiable sha), it is
+# FAIL-OPEN (no `gh` -> CANNOT-DETERMINE, nothing flagged, and the tool says so out loud), and the
+# match rules live in landing-probe.ps1, shared byte-for-byte with the dispatch loop that already
+# uses them. A bare mention without a landing verb is a NEAR-MISS: reported, never acted on.
 #
 # Prose fields (blocker/note/scope/etc.) are NEVER read as authority here -- only 40-hex commit
 # shas that resolve to real, reachable commit objects in THIS repo are evidence. This tool NEVER
@@ -36,11 +50,15 @@
 # run. Do not "fix" this to a relative path; that reintroduces the exact trap RESUME.md STEP 0
 # names for `.claude-state`.
 # Exit codes: 0 no mismatches (or -Json emitted regardless); 1 mismatch(es) found; 12 queue.json
-#             does not parse; 13 bad args / repo-root does not resolve / master ref does not resolve.
+#             does not parse; 13 bad args / repo-root does not resolve / master ref does not resolve;
+#             14 -MasterRef is provably behind its own upstream, so every answer would be wrong.
 param(
     [string]$QueueFile = 'C:\!Layi Wkspc\MLV-App\.claude-state\coordination\dual-lane\queue.json',
     [string]$RepoRoot  = 'C:\!Layi Wkspc\MLV-App',
     [string]$MasterRef = 'master',
+    # Skip the merged-PR landing probe (offline, or a deterministic run that must not touch the
+    # network). The sha-ancestry axis is unaffected; only STALE-LANDED-IN-PR stops being derivable.
+    [switch]$NoLandingProbe,
     [switch]$Json
 )
 $ErrorActionPreference = 'Stop'
@@ -50,6 +68,8 @@ $ErrorActionPreference = 'Stop'
 # copy and print a WRONG board reading. Refuse that. See assert-script-currency.ps1.
 $__guard = Join-Path $PSScriptRoot 'assert-script-currency.ps1'
 if (Test-Path -LiteralPath $__guard) { & $__guard -ScriptPath $PSCommandPath }
+# ONE definition of "did this card land", shared with Invoke-Workstream.ps1. Never a second copy.
+. (Join-Path $PSScriptRoot 'landing-probe.ps1')
 # ---------------------------------------------------------------------------------------
 
 
@@ -97,6 +117,84 @@ $masterSha = $masterShaResult.StdOut.Trim()
 if ($masterShaResult.ExitCode -ne 0 -or [string]::IsNullOrEmpty($masterSha)) {
     [Console]::Error.WriteLine("queue-derive: -MasterRef '$MasterRef' does not resolve in $RepoRoot")
     exit 13
+}
+
+# ---- the ref this tool measures against must not itself be stale ------------------------
+# EVERY answer below is "is this sha an ancestor of -MasterRef". If -MasterRef is behind its own
+# upstream, the tool does not fail: it QUIETLY RETURNS WRONG ANSWERS. A card landed in the
+# missing commits reads SUSPECT-NOT-LANDED (a false red) and an open card that landed there
+# reads OK (a false green, which is the whole class this file exists to refuse).
+#
+# NOT HYPOTHETICAL, AND NOT A ONE-OFF. Measured 2026-09-05: the board's local `master` was 5
+# commits behind `fork/master`, so `c043f6fc` -- the commit that landed B2-TOOLING-BASELINE --
+# was NOT an ancestor of `master` while being an ancestor of `fork/master`. It was fast-forwarded
+# by hand at 07:05Z and was THREE COMMITS BEHIND AGAIN BY 13:41Z. A hand fix is not a fix; the
+# ref drifts on its own schedule, so the check has to be executable.
+#
+# POLARITY, copied deliberately from assert-script-currency.ps1 rather than reinvented: fail
+# CLOSED on PROVEN drift, fail OPEN on missing infrastructure. We stop only when we can
+# positively demonstrate the ref is strictly behind a resolvable upstream. No upstream, no
+# remote, a detached sha, a fresh clone -- all say nothing and let the caller run. A guard that
+# blocked on "I could not check" would be worse than the bug.
+if ($env:MLV_ALLOW_STALE_MASTER_REF -ne '1') {
+    $upstream = $null
+    $u = Invoke-Git @('rev-parse', '--abbrev-ref', "$MasterRef@{upstream}")
+    if ($u.ExitCode -eq 0 -and $u.StdOut.Trim()) {
+        $upstream = $u.StdOut.Trim()
+    }
+    if ($upstream) {
+        $upstreamSha = (Invoke-Git @('rev-parse', $upstream)).StdOut.Trim()
+        # Strictly behind: the ref IS an ancestor of its upstream, and they are not equal.
+        # Ahead or diverged is NOT this defect -- a local branch carrying unpushed work is
+        # normal, and refusing on it would make the tool unusable during ordinary development.
+        if ($upstreamSha -and $upstreamSha -ne $masterSha -and
+            (Test-IsAncestor $masterSha $upstream)) {
+            $behind = (Invoke-Git @('rev-list', '--count', "$masterSha..$upstreamSha")).StdOut.Trim()
+            # WHICH FIX TO PRINT DEPENDS ON WHETHER THE REF IS CHECKED OUT, and getting this wrong
+            # makes the refusal useless. MEASURED while using this very guard on 2026-09-05: it
+            # printed `git fetch fork master:master`, which git REFUSES with "refusing to fetch
+            # into branch 'refs/heads/master' checked out at ..." -- and the board root had moved
+            # onto master hours earlier, so the one command the tool suggested was the one command
+            # that could not work. A refusal that names an impossible fix is a refusal nobody can
+            # act on.
+            $remote = $upstream.Split('/')[0]
+            $checkedOutAt = $null
+            $wt = Invoke-Git @('worktree', 'list', '--porcelain')
+            if ($wt.ExitCode -eq 0) {
+                $currentPath = $null
+                foreach ($line in ($wt.StdOut -split "`r?`n")) {
+                    if ($line -like 'worktree *') { $currentPath = $line.Substring(9).Trim() }
+                    elseif ($line -eq "branch refs/heads/$MasterRef") { $checkedOutAt = $currentPath; break }
+                }
+            }
+            if ($checkedOutAt) {
+                $fixLine = @"
+    git -C "$checkedOutAt" fetch $remote
+    git -C "$checkedOutAt" merge --ff-only $upstream
+  ('$MasterRef' is CHECKED OUT at that path, so 'fetch $remote ${MasterRef}:${MasterRef}' is refused by git.)
+"@
+            } else {
+                $fixLine = "    git -C `"$RepoRoot`" fetch $remote ${MasterRef}:${MasterRef}"
+            }
+            [Console]::Error.WriteLine(@"
+STALE MEASURING REF REFUSED: -MasterRef '$MasterRef' is $behind commit(s) behind '$upstream'.
+  $MasterRef  = $($masterSha.Substring(0,12))
+  $upstream = $($upstreamSha.Substring(0,12))
+
+  Every finding below is 'is <sha> an ancestor of $MasterRef', so a ref that is behind does not
+  make this tool fail -- it makes it QUIETLY WRONG in both directions. Refusing is the point.
+
+  Fix it, then re-run:
+$fixLine
+
+  Or measure against the upstream directly:
+    -MasterRef $upstream
+
+  If you are DELIBERATELY auditing against an older ref, set MLV_ALLOW_STALE_MASTER_REF=1.
+"@)
+            exit 14
+        }
+    }
 }
 
 $queueRaw = [System.IO.File]::ReadAllText($QueueFile)
@@ -169,6 +267,7 @@ function Get-CommitShasFromValue($value, [System.Collections.Generic.HashSet[str
 $results = @()
 $shaCache = @{}  # sha -> @{ exists = bool; ancestor = bool }
 
+# ---- PASS 1: sha ancestry, per item. Local, offline, certain. -----------------------------
 foreach ($item in $queue.items) {
     $id = $item.id
     $state = $item.state
@@ -198,6 +297,11 @@ foreach ($item in $queue.items) {
     $finding = 'OK'
     if ($bucket -eq 'OPEN' -and $ancestorShas.Count -gt 0) {
         $finding = 'STALE-ALREADY-LANDED'
+    } elseif ($bucket -eq 'OPEN' -and $ancestorShas.Count -eq 0 -and $nonAncestorShas.Count -eq 0) {
+        # THE BLIND SPOT, marked here and judged in pass 2. An OPEN item naming no verifiable sha
+        # is exactly the case the ancestry axis cannot speak to, and staying silent on it is what
+        # produced `NO MISMATCHES` over six landed cards. Nothing is asserted yet.
+        $finding = 'NO-SHA-EVIDENCE'
     } elseif ($bucket -eq 'LANDED' -and $ancestorShas.Count -eq 0 -and $shas.Count -gt 0) {
         # Only flagged when the item names at least one candidate sha but none of them checks
         # out. An item claiming 'landed' with NO sha at all is a documentation gap, a different
@@ -217,11 +321,38 @@ foreach ($item in $queue.items) {
         ancestorShas    = ($ancestorShas -join ',')
         nonAncestorShas = ($nonAncestorShas -join ',')
         finding         = $finding
+        landedInPr      = ''
     }
 }
 
-$mismatches = $results | Where-Object { $_.finding -eq 'STALE-ALREADY-LANDED' -or $_.finding -eq 'SUSPECT-NOT-LANDED' }
+# ---- PASS 2: merged-PR landing claims, ONLY for the items pass 1 could not judge. ---------
+# Remote, needs `gh`, and reads a claim a human wrote -- so it is a separate axis, runs on a
+# strictly smaller set, and fails OPEN. `landedInPr` is recorded on every item it judges so a
+# reader can see WHY a finding fired without re-running the probe.
+$probeStatus = 'skipped: -NoLandingProbe'
+$nearMisses = @()
+$unjudged = @($results | Where-Object { $_.finding -eq 'NO-SHA-EVIDENCE' })
+if (-not $NoLandingProbe -and $unjudged.Count -gt 0) {
+    $probe = Get-CardLandingEvidence -CardId @($unjudged | ForEach-Object { $_.id })
+    $probeStatus = $probe.status
+    $nearMisses = @($probe.nearMiss)
+    foreach ($row in $unjudged) {
+        if ($probe.landed.ContainsKey($row.id)) {
+            $hit = $probe.landed[$row.id]
+            $row.finding = 'STALE-LANDED-IN-PR'
+            $row.landedInPr = "PR #$($hit.number) [matched by $($hit.how)] $($hit.title)"
+        }
+    }
+}
+# An item the probe did not match stays NO-SHA-EVIDENCE, which is NOT a mismatch: it means this
+# tool has nothing to check it against, and that is a documentation gap, not a disagreement.
+$mismatches = $results | Where-Object {
+    $_.finding -eq 'STALE-ALREADY-LANDED' -or $_.finding -eq 'SUSPECT-NOT-LANDED' -or
+    $_.finding -eq 'STALE-LANDED-IN-PR'
+}
 $unknownStateItems = $results | Where-Object { $_.finding -eq 'UNKNOWN-STATE' }
+
+$noShaItems = @($results | Where-Object { $_.finding -eq 'NO-SHA-EVIDENCE' })
 
 if ($Json) {
     [pscustomobject]@{
@@ -231,10 +362,22 @@ if ($Json) {
         itemCount          = $results.Count
         mismatchCount      = $mismatches.Count
         unknownStateCount  = $unknownStateItems.Count
+        landingProbe       = $probeStatus
+        nearMisses         = $nearMisses
+        noShaEvidenceCount = $noShaItems.Count
         results            = $results
     } | ConvertTo-Json -Depth 6
 } else {
     Write-Output ("queue-derive: repoRoot={0} master={1} ({2}) items={3}" -f $RepoRoot, $MasterRef, $masterSha.Substring(0, 8), $results.Count)
+    # The probe's status is printed on EVERY run, including when it could not run. A check whose
+    # failure looks identical to a pass is the defect this whole file exists to refuse.
+    Write-Output ("queue-derive: landing-probe {0}" -f $probeStatus)
+    if ($nearMisses.Count -gt 0) {
+        Write-Output ("queue-derive: landing-probe NEAR-MISS ({0}): {1} - named in a merged PR without a landing verb, NOT flagged" -f $nearMisses.Count, ($nearMisses -join ', '))
+    }
+    if ($noShaItems.Count -gt 0) {
+        Write-Output ("queue-derive: {0} open item(s) name no verifiable sha and no merged PR claims them - NOT a mismatch, nothing to check them against: {1}" -f $noShaItems.Count, (($noShaItems | ForEach-Object { $_.id }) -join ', '))
+    }
     if ($unknownStateItems.Count -gt 0) {
         $uniqueUnknown = ($unknownStateItems | ForEach-Object { "$($_.id)=$($_.typedState)" } | Sort-Object -Unique) -join ', '
         Write-Output ""
@@ -247,7 +390,11 @@ if ($Json) {
         Write-Output ""
         Write-Output ("{0} MISMATCH(ES) between typed state and git-derived state:" -f $mismatches.Count)
         foreach ($m in $mismatches) {
-            Write-Output ("  [{0}] {1}: typed='{2}' owner={3} ancestorShas=[{4}]" -f $m.id, $m.finding, $m.typedState, $m.owner, $m.ancestorShas)
+            if ($m.finding -eq 'STALE-LANDED-IN-PR') {
+                Write-Output ("  [{0}] {1}: typed='{2}' owner={3} evidence={4}" -f $m.id, $m.finding, $m.typedState, $m.owner, $m.landedInPr)
+            } else {
+                Write-Output ("  [{0}] {1}: typed='{2}' owner={3} ancestorShas=[{4}]" -f $m.id, $m.finding, $m.typedState, $m.owner, $m.ancestorShas)
+            }
         }
     }
 }

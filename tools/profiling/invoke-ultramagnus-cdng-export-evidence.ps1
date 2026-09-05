@@ -287,6 +287,8 @@ $expandedPacket = $null
 $localRepoHead = ""
 $localRepoBranch = ""
 $localRepoStatus = @()
+$localLlrawprocBlobId = ""
+$LlrawprocRelativePath = "src/mlv/llrawproc/llrawproc.c"
 
 New-Item -ItemType Directory -Force -Path $localOutputRootResolved | Out-Null
 
@@ -324,6 +326,22 @@ if ($failures.Count -eq 0) {
     }
     else {
         $localRepoHead = ([string]($localRepoHeadOutput | Select-Object -First 1)).Trim()
+    }
+}
+
+if ($failures.Count -eq 0) {
+    # The blob id of the CPU reference the GPU kernel is proven against (via
+    # -RequireDngHashMatch below), pinned at the same HEAD as the rest of the
+    # evidence. Source-sha alone does not bind a build: byte-identical source has
+    # been observed to produce different DLL hashes across runs, so this and the
+    # DLL's own sha256 travel with the job so a result can self-bind instead of
+    # being trusted by filename adjacency.
+    $localLlrawprocBlobIdOutput = @(& git -C $repo rev-parse "${localRepoHead}:${LlrawprocRelativePath}" 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        Add-Failure $failures "Unable to resolve blob id for ${LlrawprocRelativePath} at local HEAD ${localRepoHead}."
+    }
+    else {
+        $localLlrawprocBlobId = ([string]($localLlrawprocBlobIdOutput | Select-Object -First 1)).Trim()
     }
 }
 
@@ -396,6 +414,8 @@ if ($failures.Count -eq 0) {
     $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
     $localRepoBranchLiteral = Convert-ToPowerShellSingleQuotedString $localRepoBranch
     $localRepoStatusLiteral = Convert-ToPowerShellArrayLiteral $localRepoStatus
+    $localLlrawprocBlobIdLiteral = Convert-ToPowerShellSingleQuotedString $localLlrawprocBlobId
+    $remoteProvenanceFileLiteral = Convert-ToPowerShellSingleQuotedString (Join-Path $AgentRoot "outbox\$jobId.provenance.json")
     $candidateGpuExportBackendLiteral = Convert-ToPowerShellSingleQuotedString $CandidateGpuExportBackend
     $jobScript = @"
 `$ErrorActionPreference = 'Stop'
@@ -412,6 +432,11 @@ if ($failures.Count -eq 0) {
 `$evidenceRepoHead = $localRepoHeadLiteral
 `$evidenceBranch = $localRepoBranchLiteral
 `$evidenceGitStatus = $localRepoStatusLiteral
+`$rangeHeadSha = $localRepoHeadLiteral
+`$llrawprocBlobId = $localLlrawprocBlobIdLiteral
+`$provenanceFile = $remoteProvenanceFileLiteral
+`$dllSha256 = `$null
+`$pendingSymbolPresence = `$null
 `$skipBuild = $skipBuildLiteral
 `$skipBackendBuild = $skipBackendBuildLiteral
 `$useReceiptAsIs = $useReceiptAsIsLiteral
@@ -447,6 +472,45 @@ function Copy-EvidenceFiles {
         }
 }
 
+function Write-ProvenanceFile {
+    # Written for the agent to pick up and echo into its generic job result
+    # (outbox\<jobId>.result.json), so the result self-binds instead of being
+    # trusted by filename adjacency to a submit-time claim it never proved. Called
+    # once up front (rangeHeadSha/llrawprocBlobId only - both known before this job
+    # ever runs) and again once the backend build resolves dllSha256 and
+    # pendingSymbolPresence, so a job that dies mid-build still leaves the source
+    # binding on record.
+    Write-JsonFile -Value ([ordered]@{
+        rangeHeadSha = `$rangeHeadSha
+        llrawprocBlobId = `$llrawprocBlobId
+        pendingSymbolPresence = `$pendingSymbolPresence
+        dllSha256 = `$dllSha256
+    }) -Path `$provenanceFile
+}
+
+function Test-BackendDllExportsPending {
+    # Mirrors tools\gpu\backend\verify-exports.ps1's dumpbin discovery: proves the
+    # just-built DLL actually exports the igpu_recon_ ABI rather than being a stale
+    # or stub artifact. `$null (never `$false) when the check itself could not run,
+    # so an inconclusive venue is never reported as a failed proof.
+    param([string]`$DllPath)
+    if (!(Test-Path -LiteralPath `$DllPath)) { return `$null }
+    try {
+        `$vswhereExe = "`${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (!(Test-Path -LiteralPath `$vswhereExe)) { return `$null }
+        `$vsInstallPath = & `$vswhereExe -latest -property installationPath
+        if ([string]::IsNullOrWhiteSpace(`$vsInstallPath)) { return `$null }
+        `$dumpbinExe = Get-ChildItem -Path (Join-Path `$vsInstallPath 'VC\Tools\MSVC') -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+            Where-Object { `$_.FullName -match '\\x64\\' } | Select-Object -First 1
+        if (!`$dumpbinExe) { return `$null }
+        `$exportLines = @(& `$dumpbinExe.FullName /EXPORTS `$DllPath 2>`$null | Select-String 'igpu_recon_')
+        return (`$exportLines.Count -gt 0)
+    }
+    catch {
+        return `$null
+    }
+}
+
 `$runRoot = Join-Path (Split-Path -Parent `$packet) ('run-' + '$stamp')
 `$matrixDir = Join-Path `$runRoot 'matrix'
 `$packetRoot = Join-Path `$runRoot 'packet'
@@ -468,6 +532,8 @@ function Copy-EvidenceFiles {
 `$backendArtifacts = @()
 `$deployedBackendArtifacts = @()
 `$nvidiaSmi = @()
+
+Write-ProvenanceFile
 
 try {
     if ([Environment]::MachineName -ine `$expectedHost) {
@@ -539,6 +605,9 @@ try {
                 sha256 = (Get-FileHash -LiteralPath `$item.FullName -Algorithm SHA256).Hash
             }
         })
+        `$dllSha256 = (@(`$backendArtifacts | Where-Object { `$_.name -eq 'igpu_recon_cuda.dll' }) | Select-Object -First 1).sha256
+        `$pendingSymbolPresence = Test-BackendDllExportsPending -DllPath `$backendDll
+        Write-ProvenanceFile
     }
     if (-not `$skipBuild) {
         `$makeExe = 'C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe'
@@ -740,6 +809,12 @@ try {
             evidenceBranch = `$evidenceBranch
             evidenceStatus = `$evidenceGitStatus
         }
+        provenance = [ordered]@{
+            rangeHeadSha = `$rangeHeadSha
+            llrawprocBlobId = `$llrawprocBlobId
+            dllSha256 = `$dllSha256
+            pendingSymbolPresence = `$pendingSymbolPresence
+        }
         release = [ordered]@{
             exe = `$releaseInfo
             sha256 = `$releaseHash
@@ -823,6 +898,12 @@ catch {
             evidenceHead = `$evidenceRepoHead
             evidenceBranch = `$evidenceBranch
             evidenceStatus = `$evidenceGitStatus
+        }
+        provenance = [ordered]@{
+            rangeHeadSha = `$rangeHeadSha
+            llrawprocBlobId = `$llrawprocBlobId
+            dllSha256 = `$dllSha256
+            pendingSymbolPresence = `$pendingSymbolPresence
         }
         outputs = [ordered]@{
             runRoot = `$runRoot

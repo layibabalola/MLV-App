@@ -1256,6 +1256,23 @@ $toastSettings = Get-ToastSettings -Path $SettingsPath
 $bridgeState = Get-BridgeRuntimeState -RegistryPath $SessionRegistryPath -WatcherConfigPath $WatcherConfigPath -WatcherPidPath $WatcherPidPath -ProjectName $ProjectBucket -PrivateSession $resolvedPrivateBucket
 $resolvedBridgeRoot = Resolve-BridgeRoot -CandidatePaths @($SessionRegistryPath, $WatcherConfigPath, $WatcherPidPath, $SettingsPath, $BridgeWatchFlagPath, $LogPath) -Fallback $bridgeRoot
 $resolvedStateDir = Join-Path $resolvedBridgeRoot "state"
+$recentDuplicate = $null
+$duplicateToastSuppressed = $false
+if (-not $Force) {
+    $recentDuplicate = Get-RecentReminderDuplicate -Path $LogPath -Phase $HookPhase -ProjectName $ProjectBucket -WindowSeconds $DedupSeconds
+}
+if ($recentDuplicate) {
+    Write-ReminderLog -Path $LogPath -Line "$timestamp suppressed reason=duplicate phase=$HookPhase project=$ProjectBucket delta_seconds=$($recentDuplicate.delta_seconds) previous=$($recentDuplicate.previous.ToString('o'))" | Out-Null
+    if ($HookPhase -ne "final") {
+        exit 0
+    }
+    # Final-hook guards must still run even when toast/reminder noise is
+    # deduplicated; otherwise newly-created debt can be hidden for DedupSeconds.
+    $duplicateToastSuppressed = $true
+}
+# Runs after the duplicate check so a suppressed response-phase reminder exits
+# above without invoking or announcing remediation; a final-phase duplicate
+# still falls through to here, matching the final-guard contract above.
 $dirtyStateRemediation = Invoke-DirtyStateRemediation -RepoRoot $WorkspaceRoot -HookPhase $HookPhase
 $dirtyStateRemediationSummary = $null
 if ($null -ne $dirtyStateRemediation) {
@@ -1272,20 +1289,6 @@ if ($null -ne $dirtyStateRemediation) {
         $dirtyStateRemediationSummary = "dirty_repair=$($dirtyStateRemediation.status)"
     }
     Write-Output ("Dirty-state remediation ($HookPhase): " + $dirtyStateRemediationSummary)
-}
-$recentDuplicate = $null
-$duplicateToastSuppressed = $false
-if (-not $Force) {
-    $recentDuplicate = Get-RecentReminderDuplicate -Path $LogPath -Phase $HookPhase -ProjectName $ProjectBucket -WindowSeconds $DedupSeconds
-}
-if ($recentDuplicate) {
-    Write-ReminderLog -Path $LogPath -Line "$timestamp suppressed reason=duplicate phase=$HookPhase project=$ProjectBucket delta_seconds=$($recentDuplicate.delta_seconds) previous=$($recentDuplicate.previous.ToString('o'))" | Out-Null
-    if ($HookPhase -ne "final") {
-        exit 0
-    }
-    # Final-hook guards must still run even when toast/reminder noise is
-    # deduplicated; otherwise newly-created debt can be hidden for DedupSeconds.
-    $duplicateToastSuppressed = $true
 }
 if ($HookPhase -eq "response") {
     Set-ResponseDebtTurnStart -StateDir $resolvedStateDir -ProjectName $ProjectBucket -PrivateSession $resolvedPrivateBucket -Timestamp $timestamp
