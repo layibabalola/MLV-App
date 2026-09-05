@@ -1351,8 +1351,13 @@ class CandidateAcceptanceTests(unittest.TestCase):
                 self.assertIn("baseline_enabled", {row.get("kind") for row in result["missing"]})
 
         workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
-        invocation = "python -m unittest tools.repo_hygiene.test_candidate_acceptance -v"
-        self.assertEqual(1, workflow.count(invocation))
+        # This pin exists to guarantee CI RUNS THIS FILE. It used to assert the exact
+        # per-file invocation; the workflow now uses a directory target, which runs it by
+        # construction and also catches files added later -- a named list silently omits
+        # what it forgets to name. Both halves of the mechanism are pinned, so weakening
+        # either the search root or the pattern still fails here.
+        self.assertEqual(1, workflow.count("unittest discover -s tools/repo_hygiene"))
+        self.assertIn('-p "test_*.py"', workflow)
 
     def test_github_capture_is_exact_head_terminal_and_fail_closed(self) -> None:
         source = (ROOT / "tools/factory/capture-github-acceptance.ps1").read_text(encoding="utf-8")
