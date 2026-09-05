@@ -304,6 +304,8 @@ $importResult = $null
 $localRepoHead = ""
 $localRepoBranch = ""
 $localRepoStatus = @()
+$localLlrawprocBlobId = ""
+$LlrawprocRelativePath = "src/mlv/llrawproc/llrawproc.c"
 
 if (!(Test-Path -LiteralPath $validatorScript)) {
     Add-Failure $failures "Missing validator script: $validatorScript"
@@ -368,6 +370,21 @@ elseif ($failures.Count -eq 0) {
         }
         else {
             $localRepoHead = ([string]($localRepoHeadOutput | Select-Object -First 1)).Trim()
+        }
+    }
+
+    if ($failures.Count -eq 0) {
+        # See tools\profiling\invoke-ultramagnus-cdng-export-evidence.ps1 for why this
+        # travels with the job: source-sha alone does not bind a build, so the blob id
+        # of the CPU reference and the built DLL's own sha256 go along too, letting a
+        # result self-bind instead of being trusted by filename adjacency.
+        $localLlrawprocBlobIdOutput = @(& git -C $repo rev-parse "${localRepoHead}:${LlrawprocRelativePath}" 2>$null)
+        $gitExitCode = $LASTEXITCODE
+        if ($gitExitCode -ne 0) {
+            Add-Failure $failures "Unable to resolve blob id for ${LlrawprocRelativePath} at local HEAD ${localRepoHead}."
+        }
+        else {
+            $localLlrawprocBlobId = ([string]($localLlrawprocBlobIdOutput | Select-Object -First 1)).Trim()
         }
     }
 
@@ -438,6 +455,8 @@ elseif ($failures.Count -eq 0) {
         $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
         $localRepoBranchLiteral = Convert-ToPowerShellSingleQuotedString $localRepoBranch
         $localRepoStatusLiteral = Convert-ToPowerShellArrayLiteral $localRepoStatus
+        $localLlrawprocBlobIdLiteral = Convert-ToPowerShellSingleQuotedString $localLlrawprocBlobId
+        $remoteProvenanceFileLiteral = Convert-ToPowerShellSingleQuotedString (Join-Path $AgentRoot "outbox\$jobId.provenance.json")
         $dropFrameModeLiteral = Convert-ToPowerShellSingleQuotedString $DropFrameMode
         $gpuPlaybackReconBackendLiteral = Convert-ToPowerShellSingleQuotedString $GpuPlaybackReconBackend
         $cudaAmazeLiveTileStreamsLiteral = [string]$CudaAmazeLiveTileStreams
@@ -463,6 +482,11 @@ elseif ($failures.Count -eq 0) {
 `$evidenceRepoHead = $localRepoHeadLiteral
 `$evidenceBranch = $localRepoBranchLiteral
 `$evidenceGitStatus = $localRepoStatusLiteral
+`$rangeHeadSha = $localRepoHeadLiteral
+`$llrawprocBlobId = $localLlrawprocBlobIdLiteral
+`$provenanceFile = $remoteProvenanceFileLiteral
+`$dllSha256 = `$null
+`$pendingSymbolPresence = `$null
 `$dropFrameMode = $dropFrameModeLiteral
 `$skipBackendBuild = $skipBackendBuildLiteral
 `$speedLeg = $speedLegLiteral
@@ -488,6 +512,46 @@ elseif ($failures.Count -eq 0) {
 `$releaseDir = Join-Path `$repo 'platform\qt\build-release\release'
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
+
+function Write-ProvenanceFile {
+    # Written for the agent to pick up and echo into its generic job result
+    # (outbox\<jobId>.result.json), so the result self-binds instead of being
+    # trusted by filename adjacency to a submit-time claim it never proved. Called
+    # once up front (rangeHeadSha/llrawprocBlobId only - both known before this job
+    # ever runs) and again once the backend build resolves dllSha256 and
+    # pendingSymbolPresence, so a job that dies mid-build still leaves the source
+    # binding on record.
+    [ordered]@{
+        rangeHeadSha = `$rangeHeadSha
+        llrawprocBlobId = `$llrawprocBlobId
+        pendingSymbolPresence = `$pendingSymbolPresence
+        dllSha256 = `$dllSha256
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath `$provenanceFile -Encoding UTF8
+}
+
+function Test-BackendDllExportsPending {
+    # Mirrors tools\gpu\backend\verify-exports.ps1's dumpbin discovery: proves the
+    # just-built DLL actually exports the igpu_recon_ ABI rather than being a stale
+    # or stub artifact. `$null (never `$false) when the check itself could not run,
+    # so an inconclusive venue is never reported as a failed proof.
+    param([string]`$DllPath)
+    if (!(Test-Path -LiteralPath `$DllPath)) { return `$null }
+    try {
+        `$vswhereExe = "`${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (!(Test-Path -LiteralPath `$vswhereExe)) { return `$null }
+        `$vsInstallPath = & `$vswhereExe -latest -property installationPath
+        if ([string]::IsNullOrWhiteSpace(`$vsInstallPath)) { return `$null }
+        `$dumpbinExe = Get-ChildItem -Path (Join-Path `$vsInstallPath 'VC\Tools\MSVC') -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+            Where-Object { `$_.FullName -match '\\x64\\' } | Select-Object -First 1
+        if (!`$dumpbinExe) { return `$null }
+        `$exportLines = @(& `$dumpbinExe.FullName /EXPORTS `$DllPath 2>`$null | Select-String 'igpu_recon_')
+        return (`$exportLines.Count -gt 0)
+    }
+    catch {
+        return `$null
+    }
+}
+
 `$payload = [ordered]@{
     schema = 'mlvapp-p3-agent-job-output.v1'
     startedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
@@ -495,6 +559,12 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     repoRoot = `$repo
     packet = `$packet
     validator = `$validator
+    provenance = [ordered]@{
+        rangeHeadSha = `$rangeHeadSha
+        llrawprocBlobId = `$llrawprocBlobId
+        dllSha256 = `$dllSha256
+        pendingSymbolPresence = `$pendingSymbolPresence
+    }
     backend = [ordered]@{
         skipped = [bool]`$skipBackendBuild
         dir = `$backendDir
@@ -522,6 +592,7 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     validatorExitCode = `$null
     packetInfo = `$null
 }
+Write-ProvenanceFile
 try {
     if (!(Test-Path -LiteralPath `$validator)) {
         throw "Missing validator script: `$validator"
@@ -607,6 +678,11 @@ try {
                 sha256 = (Get-FileHash -LiteralPath `$item.FullName -Algorithm SHA256).Hash
             }
         })
+        `$dllSha256 = (@(`$payload.backend.artifacts | Where-Object { `$_.name -eq 'igpu_recon_cuda.dll' }) | Select-Object -First 1).sha256
+        `$pendingSymbolPresence = Test-BackendDllExportsPending -DllPath `$backendDll
+        `$payload.provenance.dllSha256 = `$dllSha256
+        `$payload.provenance.pendingSymbolPresence = `$pendingSymbolPresence
+        Write-ProvenanceFile
     }
     `$args = @(
         '-NoLogo',

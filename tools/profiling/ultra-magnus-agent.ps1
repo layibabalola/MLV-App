@@ -249,6 +249,10 @@ while ($true) {
         $killedProcessIds = @()
         $rootIdentitySource = $null
         $rootIdentityHasImage = $false
+        $rangeHeadSha = $null
+        $llrawprocBlobId = $null
+        $pendingSymbolPresence = $null
+        $dllSha256 = $null
         Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
 
         # Run the dropped script in a child PowerShell with a wall-clock timeout
@@ -321,6 +325,31 @@ while ($true) {
         }
 
         $ended  = (Get-Date).ToUniversalTime().ToString("o")
+
+        # Optional per-job provenance sidecar. The agent has no knowledge of what a
+        # job script does - it is an opaque .ps1 - so it cannot derive source-sha or
+        # build-artifact bindings itself. A job that wants its result to self-bind
+        # (rather than being trusted by filename adjacency to a submit-time claim it
+        # never proved) writes these fields itself, mid-run, to
+        # outbox\<jobId>.provenance.json using a path baked in by its own submitter
+        # (which knows $AgentRoot at submit time). Absent or unparseable is $null on
+        # every field, never a guess.
+        $provenanceFile = Join-Path $outbox "$jobId.provenance.json"
+        if (Test-Path -LiteralPath $provenanceFile) {
+            try {
+                $provenance = Get-Content -LiteralPath $provenanceFile -Raw | ConvertFrom-Json
+                $rangeHeadSha = $provenance.rangeHeadSha
+                $llrawprocBlobId = $provenance.llrawprocBlobId
+                $pendingSymbolPresence = $provenance.pendingSymbolPresence
+                $dllSha256 = $provenance.dllSha256
+            }
+            catch {
+                "failed to parse job provenance sidecar '$provenanceFile': $($_.Exception.Message)" |
+                    Add-Content -Encoding ASCII $errFile
+            }
+            Remove-Item -LiteralPath $provenanceFile -Force -ErrorAction SilentlyContinue
+        }
+
         $stdout = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { "" }
         $stderr = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { "" }
 
@@ -336,6 +365,10 @@ while ($true) {
             rootIdentitySource = $rootIdentitySource
             rootIdentityHasImage = $rootIdentityHasImage
             rootIdentityToleranceMs = 0
+            rangeHeadSha = $rangeHeadSha
+            llrawprocBlobId = $llrawprocBlobId
+            pendingSymbolPresence = $pendingSymbolPresence
+            dllSha256 = $dllSha256
             stdout     = $stdout
             stderr     = $stderr
         }
