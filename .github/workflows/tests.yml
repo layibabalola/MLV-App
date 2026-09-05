@@ -189,6 +189,20 @@ jobs:
             tests\profiling `
             -q
 
+      - name: Run tools/profiling test suite
+        run: |
+          # Directory target, minus ONE file. test_frame_colour_spatial_metrics.py imports
+          # numpy and Pillow, which are pinned in neither .github/requirements/pip.txt nor
+          # repo-hygiene.txt, and this repo installs under --require-hashes -- so collecting
+          # it fails immediately. Covering the other two now is worth more than covering
+          # none: test_perf_field_log_playback_rollup.py arrived with PR #64 and was already
+          # CI-invisible hours later, which is the recurrence this whole conversion exists
+          # to stop. Follow-up: pin numpy+Pillow, then drop the --ignore.
+          python -m pytest `
+            tools\profiling `
+            --ignore=tools\profiling	est_frame_colour_spatial_metrics.py `
+            -q
+
   windows-product-oracles:
     name: Windows Product Oracles
     needs: protected-check-route
