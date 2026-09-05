@@ -150,6 +150,32 @@ if ($env:MLV_ALLOW_STALE_MASTER_REF -ne '1') {
         if ($upstreamSha -and $upstreamSha -ne $masterSha -and
             (Test-IsAncestor $masterSha $upstream)) {
             $behind = (Invoke-Git @('rev-list', '--count', "$masterSha..$upstreamSha")).StdOut.Trim()
+            # WHICH FIX TO PRINT DEPENDS ON WHETHER THE REF IS CHECKED OUT, and getting this wrong
+            # makes the refusal useless. MEASURED while using this very guard on 2026-09-05: it
+            # printed `git fetch fork master:master`, which git REFUSES with "refusing to fetch
+            # into branch 'refs/heads/master' checked out at ..." -- and the board root had moved
+            # onto master hours earlier, so the one command the tool suggested was the one command
+            # that could not work. A refusal that names an impossible fix is a refusal nobody can
+            # act on.
+            $remote = $upstream.Split('/')[0]
+            $checkedOutAt = $null
+            $wt = Invoke-Git @('worktree', 'list', '--porcelain')
+            if ($wt.ExitCode -eq 0) {
+                $currentPath = $null
+                foreach ($line in ($wt.StdOut -split "`r?`n")) {
+                    if ($line -like 'worktree *') { $currentPath = $line.Substring(9).Trim() }
+                    elseif ($line -eq "branch refs/heads/$MasterRef") { $checkedOutAt = $currentPath; break }
+                }
+            }
+            if ($checkedOutAt) {
+                $fixLine = @"
+    git -C "$checkedOutAt" fetch $remote
+    git -C "$checkedOutAt" merge --ff-only $upstream
+  ('$MasterRef' is CHECKED OUT at that path, so 'fetch $remote ${MasterRef}:${MasterRef}' is refused by git.)
+"@
+            } else {
+                $fixLine = "    git -C `"$RepoRoot`" fetch $remote ${MasterRef}:${MasterRef}"
+            }
             [Console]::Error.WriteLine(@"
 STALE MEASURING REF REFUSED: -MasterRef '$MasterRef' is $behind commit(s) behind '$upstream'.
   $MasterRef  = $($masterSha.Substring(0,12))
@@ -159,7 +185,7 @@ STALE MEASURING REF REFUSED: -MasterRef '$MasterRef' is $behind commit(s) behind
   make this tool fail -- it makes it QUIETLY WRONG in both directions. Refusing is the point.
 
   Fix it, then re-run:
-    git -C "$RepoRoot" fetch $($upstream.Split('/')[0]) $MasterRef`:$MasterRef
+$fixLine
 
   Or measure against the upstream directly:
     -MasterRef $upstream

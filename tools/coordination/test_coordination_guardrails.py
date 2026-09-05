@@ -903,3 +903,40 @@ def test_the_stale_ref_guard_fails_OPEN_when_there_is_no_upstream(tmp_path):
     r = run_derive(repo, queue, "main")
     assert r.returncode == 0, "guard blocked a repo with no upstream to compare: %s" % r.stderr
     assert "STALE MEASURING REF" not in r.stderr
+
+
+def test_the_refusal_suggests_a_fix_that_actually_WORKS_when_the_ref_is_checked_out(tmp_path):
+    """MEASURED while using this guard on 2026-09-05, minutes after writing it.
+
+    It printed `git fetch fork master:master`. Git REFUSES that with "refusing to fetch into
+    branch 'refs/heads/master' checked out at ..." -- and the board root had moved onto master
+    hours earlier, so the single command the tool suggested was the one command that could not
+    work. A refusal that names an impossible fix is a refusal nobody can act on, which is most of
+    the way back to being silent.
+    """
+    clone, queue = stale_ref_repo(tmp_path)   # 'main' IS checked out in this clone
+    r = run_derive(clone, queue, "main")
+    assert r.returncode == 14
+    assert "merge --ff-only origin/main" in r.stderr, r.stderr
+    assert "is CHECKED OUT at that path" in r.stderr, r.stderr
+    # The impossible form must not be OFFERED AS A COMMAND. It may still be NAMED in the prose
+    # that explains why it is not offered -- an earlier draft of this test failed on exactly that
+    # sentence, which is the test being wrong rather than the message.
+    commands = [l for l in r.stderr.splitlines() if l.strip().startswith("git -C")]
+    assert commands, "the refusal offered no command at all"
+    assert not [l for l in commands if "main:main" in l], (
+        "still OFFERING the refspec fetch that git refuses for a checked-out branch: %s" % commands
+    )
+
+
+def test_the_refusal_suggests_the_refspec_fetch_when_the_ref_is_NOT_checked_out(tmp_path):
+    """The other half of the same decision. With the ref not checked out anywhere, the one-line
+    refspec fetch is correct and is the better advice -- it does not touch any working tree."""
+    clone, queue = stale_ref_repo(tmp_path)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=clone, text=True,
+                          capture_output=True, check=True).stdout.strip()
+    subprocess.run(["git", "checkout", "-q", "--detach", head], cwd=clone, check=True)
+    r = run_derive(clone, queue, "main")
+    assert r.returncode == 14
+    assert "fetch origin main:main" in r.stderr, r.stderr
+    assert "is CHECKED OUT at that path" not in r.stderr, r.stderr
