@@ -99,12 +99,32 @@ if (-not (Test-Path -LiteralPath $PromptDir)) {
     New-Item -ItemType Directory -Path $PromptDir -Force | Out-Null
 }
 
-# A card in one of these states is done. Anything else is live work.
+# A card in one of these states is done. Anything else is non-terminal (live) work.
 $Terminal = @(
     'closed-fixed','closed-not-this-board','closed-root-caused','closed-superseded',
     'closed-transformed','landed','landed-evidence','landed-local-proof','CLEARED',
     'RETIRED','withdrawn','superseded','retracted-and-fixed','fixed','answered-folded'
 )
+
+# ALLOWLIST, not blocklist. Measured 2026-09-05: card B2-TOOLING-BASELINE carried
+# state=booked, track=UNSET, priority=999 and was still dispatched, burning a lane slot on
+# work no lane can act on - queue.json's OWN top-level "note" field defines 'booked' as "a
+# named trigger, not schedulable". A blocklist here would require enumerating every state
+# that ALSO names a party or trigger other than a lane (booked-rule, consult-open,
+# deferred-nonblocking, open-risk, optional-validation, surfaced-awaiting-ordering,
+# handed-off-awaiting-review, changes-requested-awaiting-acceptance-evidence,
+# blocked-operator, ...) and the queue keeps growing that vocabulary. An allowlist of the
+# states the note itself says a LANE owns needs no such enumeration: anything non-terminal
+# and not in this list is reported, never dispatched.
+#
+# 'dispatched-untracked-target' IS schedulable, despite the name - CHECKED AGAINST THE LIVE
+# QUEUE, not assumed: SIDECAR-COVERAGE-1 (track=factory, priority=7, owner=codex) carries
+# it right now. Its own stateReason explains the word "untracked": the deliverable lives
+# under gitignored .claude-state/, so it has no git-trackable range and no gate - "untracked"
+# there means git tracking, unrelated to this script's own `track` field. The work is real
+# and still owned by a lane; excluding this state would silently strand it, which is the
+# same class of defect this fix exists to remove, just aimed at a different card.
+$Schedulable = @('queued', 'dispatched', 'in-review', 'waiting-evidence', 'dispatched-untracked-target')
 
 function Get-Prop($obj, [string]$name) {
     if ($null -eq $obj) { return $null }
@@ -179,6 +199,7 @@ function Get-LastDispatchAgeHours([string]$id) {
 # returns CANNOT-DETERMINE and NOTHING is skipped. An unreadable signal must never silently
 # shrink the board - that is how a queue goes quiet and looks healthy.
 $landedById = @{}
+    $nearMisses = @()
 $landedHow = @{}
 $landingProbe = 'skipped'
 if (-not $NoLandingProbe) {
@@ -210,14 +231,40 @@ if (-not $NoLandingProbe) {
                         # prose ("unlike OWN-GITHUB-1") must NOT count: a false positive here SKIPS
                         # genuinely open work, which is strictly worse than re-dispatching finished
                         # work. Tolerates markdown emphasis around the id.
-                        $rxBody = '(?i)(?:lands|closes|fixes|resolves)\s+(?:card\s+)?[*_`]*' +
+                        # 'delivers' added 2026-09-05 from a MEASURED miss: PR #53's body read
+                        # "Closes OWN-2 and delivers GATE-RESIDUALS-1(b)". OWN-2 was skipped;
+                        # GATE-RESIDUALS-1 was NOT, and the loop spent a lane on it at 02:11Z.
+                        # The vocabulary is fixed and no writer can be expected to know it, so the
+                        # near-miss diagnostic below reports rather than widening this further:
+                        # a false positive SKIPS open work, which stays strictly worse.
+                        # 'queue item' connector added the same day, from a SECOND measured miss the
+                        # near-miss diagnostic surfaced on its first run: PR #52 read "Closes queue
+                        # item OWN-1-PRECEDENCE" and only 'card' was permitted between verb and id.
+                        $rxBody = '(?i)(?:lands|closes|fixes|resolves|delivers)\s+(?:(?:card|queue\s+item)\s+)?[*_`]*' +
                                   [regex]::Escape($id) + '[*_`]*(?![A-Za-z0-9-])'
                         $hit = @($prs | Where-Object { $_.body -and ($_.body -match $rxBody) }) | Select-Object -First 1
                         if ($hit) { $how = 'body' }
+                        else {
+                            # NEAR-MISS. A merged PR naming this card WITHOUT a landing verb is either prose
+                            # ('unlike OWN-GITHUB-1', correctly ignored) or a landing phrased in a verb this
+                            # probe does not know. Both were silent before; the second cost a dispatch.
+                            # REPORT it and cite the PR - do NOT skip on it. Skipping open work stays worse.
+                            $rxMention = '(?i)[*_`]*' + [regex]::Escape($id) + '[*_`]*(?![A-Za-z0-9-])'
+                            $near = @($prs | Where-Object { $_.body -and ($_.body -match $rxMention) }) | Select-Object -First 1
+                            # COLLECTED, not printed per card. The first draft of this emitted one line per
+                            # near-miss and produced TEN on a single run - mostly genuine prose mentions. A
+                            # diagnostic that fires every run is one nobody reads, which is the failure it was
+                            # meant to prevent. One summary line keeps the signal and loses the noise.
+                            if ($near) { $nearMisses += "$id(PR #$($near.number))" }
+                        }
                     }
                     if ($hit) { $landedById[$id] = $hit; $landedHow[$id] = $how }
                 }
-                $landingProbe = "ok: $($prs.Count) merged PR(s) scanned, $($landedById.Count) card(s) matched by title or landing-verb body reference"
+                if ($nearMisses.Count -gt 0) {
+        Write-Output ("WORKSTREAM: landing-probe NEAR-MISS ($($nearMisses.Count)): " +
+            ($nearMisses -join ', ') + " - named in a merged PR without a landing verb, NOT skipped")
+    }
+    $landingProbe = "ok: $($prs.Count) merged PR(s) scanned, $($landedById.Count) card(s) matched by title or landing-verb body reference"
             }
         } catch {
             $landingProbe = "cannot-determine: $($_.Exception.Message)"
@@ -231,12 +278,64 @@ foreach ($id in $landedById.Keys) {
         $id, $pr.number, $pr.title, (Get-Prop (@($live | Where-Object { (Get-Prop $_ 'id') -eq $id })[0]) 'state'), $landedHow[$id])
 }
 
+# ------------------------------------------------------------------ schedulability
+# TWO independent rules, both structural (like $Terminal above): neither is bypassable by
+# -Force, which only ever waived the landed-probe and staleness filters below.
+#   1. state must be in $Schedulable.
+#   2. AUTO track selection must not fall through to an untracked card. 'UNSET' remains a
+#      real, INTENTIONAL dispatch target (Invoke-WorkstreamLoop.ps1 rotates through it
+#      explicitly as its own -Track value) - this only closes the silent fallthrough where
+#      the default $Track='auto' pool never filtered by track at all, so an untracked card
+#      was always a candidate whenever the tracked pools ran dry.
+function Get-NotSchedulableReason($item) {
+    $state = Get-Prop $item 'state'
+    if ($Schedulable -notcontains $state) {
+        return "state '$state' is not in the schedulable allowlist (queued, dispatched, in-review, waiting-evidence, dispatched-untracked-target) - queue.json's own note names this class a named trigger, not schedulable"
+    }
+    if ($Track -eq 'auto' -and (Get-Track $item) -eq 'UNSET') {
+        # NAMED DELIBERATELY UNLIKE THE STATE 'dispatched-untracked-target' above, which
+        # means something unrelated (its DELIVERABLE is untracked BY GIT). This is about the
+        # QUEUE'S OWN `track` FIELD (factory/playback/product/...) being absent.
+        return 'no-board-track-set - auto-select requires an explicit track field on the card; pass -Track UNSET to pick this card on purpose'
+    }
+    return $null
+}
+
+foreach ($item in $live) {
+    $reason = Get-NotSchedulableReason $item
+    if ($reason) {
+        Write-Output ("WORKSTREAM: NOT-SCHEDULABLE card={0} state={1} reason={2}" -f (Get-Prop $item 'id'), (Get-Prop $item 'state'), $reason)
+    }
+}
+
 # ------------------------------------------------------------------ selection
+$script:WarnedNonNumericPriority = @{}
 function Get-Rank($item) {
     # Unset priority sorts LAST, so an unprioritised card never outranks a p1.
     $pr = Get-Prop $item 'priority'
     if ($null -eq $pr) { return 999 }
-    return [int]$pr
+    $n = 0
+    if ([int]::TryParse([string]$pr, [ref]$n)) { return $n }
+
+    # A bare [int] cast here THROWS on a non-numeric string, and the throw lands inside
+    # Sort-Object -Property { Get-Rank $_ }, so the whole selection dies -- while the script
+    # still exits 0. The loop then records a normal cycle that dispatched nothing. Silent
+    # starvation is worse than a halt, because nothing reports it.
+    #
+    # This is not hypothetical: queue.json carries prose in this field on DISPATCH-CDX-14
+    # ("HIGHEST - outranks the control-plane three") and DISPATCH-CDX-15 ("CRITICAL PATH -
+    # the cap is now two blocks away, not one"). Both happen to be terminal today, so they
+    # never reach this function -- the dispatcher is one live prose-priority card away from
+    # dispatching nothing at all, and the authoring habit that produces them is demonstrated.
+    #
+    # Rank it as unset and SAY SO on stderr. Not stdout: the [WORKSTREAM] lines are parsed,
+    # and emitting into a Sort-Object property block would make the sort key an array.
+    $id = [string](Get-Prop $item 'id')
+    if (-not $script:WarnedNonNumericPriority.ContainsKey($id)) {
+        $script:WarnedNonNumericPriority[$id] = $true
+        [Console]::Error.WriteLine(("WORKSTREAM: NON-NUMERIC PRIORITY on card '{0}': {1}. Ranked as unset (999) so selection continues; give the card a numeric priority to restore its rank." -f $id, ([string]$pr).Trim()))
+    }
+    return 999
 }
 
 if ($CardId) {
@@ -246,9 +345,9 @@ if ($CardId) {
         exit 3
     }
 } else {
-    $pool = $live
+    $pool = @($live | Where-Object { -not (Get-NotSchedulableReason $_) })
     if ($Track -ne 'auto') {
-        $pool = @($live | Where-Object { (Get-Track $_) -eq $Track })
+        $pool = @($pool | Where-Object { (Get-Track $_) -eq $Track })
     }
     # Landed-elsewhere cards are excluded here, never earlier: $live must keep its meaning
     # ("non-terminal per the queue") so the NO-LIVE-CARDS vs ALL-FILTERED distinction below
@@ -299,6 +398,166 @@ $needsShell = $cardText -match '(?i)re-derive|derive|measure|reproduce|proving c
 if (-not $Lane) { $Lane = if ($needsShell) { 'luna' } else { 'fable' } }
 $engine = if ($Lane -eq 'sol' -or $Lane -eq 'luna') { 'codex' } else { 'claude' }
 
+# The run directory is named here, not at dispatch, because the brief has to be able to NAME
+# files that this script is about to write into it. -DryRun still exports, and still writes into
+# this path, so what you inspect under -DryRun is byte-identical to what a lane would receive.
+$stamp  = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+$runDir = Join-Path $RepoRoot ".claude-state\fleet-runs\ws-$cardId-$stamp"
+
+# ------------------------------------------------------------------ hosted GitHub evidence
+# WHY THIS EXISTS, AND WHY A WARNING IN THE BRIEF WAS NOT ENOUGH.
+#
+# MEASURED 2026-09-05. Two priority-1 cards, FACTORY-MATURITY-1-CLAUDE and FACTORY-MATURITY-1-OPUS,
+# consumed two lane slots each and both returned the SAME wall: `gh` answers "Access is denied"
+# inside the read-only lane sandbox, so every hosted fact stayed UNVERIFIED. The same `gh`, the same
+# token and the same machine work from an interactive session - `gh` resolves its token through the
+# Windows credential keyring, and the sandbox denies that read. The failure is the VENUE, not the
+# installation and not the credential.
+#
+# PR #55 had ALREADY told lanes that `gh` may be unusable and that saying so is a FINDING. Both
+# lanes did exactly that, correctly, and were dispatched into the wall anyway - because the brief
+# only taught them how to REPORT the limitation, never removed it. A WARNING IN A PROMPT IS NOT A
+# FIX; IT IS A NICER WAY TO FAIL. This script already runs `gh` for the landing probe from the venue
+# where it works, so the evidence was always one command away from the process doing the dispatching.
+#
+# THE ASYMMETRY IS THE OPPOSITE OF THE LANDING PROBE'S, and that is deliberate. There, a false
+# positive SKIPS live work, so the match is kept narrow. Here, a false positive costs a handful of
+# read-only API calls and ~30 KB in a run directory nobody reads, while a false NEGATIVE costs a
+# whole lane slot. So the trigger below is broad ON PURPOSE. Over-exporting is not a defect.
+#
+# FAIL-OPEN, exactly like the landing probe: if `gh` is missing, denied, offline or slow, the brief
+# SAYS SO IN THOSE WORDS and the lane is dispatched anyway. Silence would put the lane straight back
+# into the wall while looking like a clean brief.
+$needsHostedEvidence = $cardText -match '(?i)\bgh\b|github|branch protection|ruleset|status check|actions run|workflow run|ci history|consecutive failure|hosted evidence|pull request|\bPR #'
+$ghRows    = @()   # one row per attempted export: name, file, bytes-or-reason
+$ghSection = ''
+
+if ($needsHostedEvidence) {
+    $ghDir = Join-Path $runDir 'github-evidence'
+    New-Item -ItemType Directory -Path $ghDir -Force | Out-Null
+
+    # A FIXED, PREDICTABLE SET. Not derived from the card text: a lane must be able to rely on the
+    # same filenames every time, and a card-shaped guess would silently omit whatever the card
+    # forgot to name. Anything missing is a FINDING the lane reports, not a gap it works around.
+    $ghJobs = [ordered]@{
+        'repo-metadata.json' = @(
+            'api','repos/layibabalola/MLV-App','--jq',
+            '{visibility,private,fork,archived,default_branch,pushed_at}')
+        'branch-protection-master.json' = @(
+            'api','repos/layibabalola/MLV-App/branches/master/protection')
+        'rulesets.json' = @('api','repos/layibabalola/MLV-App/rulesets')
+        'runs-tests-master-push-completed.json' = @(
+            'run','list','--repo','layibabalola/MLV-App','--workflow','tests.yml',
+            '--branch','master','--event','push','--status','completed','--limit','50',
+            '--json','databaseId,conclusion,createdAt,headSha,displayTitle')
+    }
+
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    if (-not $gh) {
+        $ghRows += [pscustomobject]@{ Name = '(all)'; Result = 'CANNOT-DETERMINE: gh not on PATH' }
+    } else {
+        foreach ($name in $ghJobs.Keys) {
+            $outFile = Join-Path $ghDir $name
+            $errFile = "$outFile.err.txt"
+            try {
+                $ghArgs = $ghJobs[$name]
+                & gh @ghArgs 1>$outFile 2>$errFile
+                $code = $LASTEXITCODE
+            } catch {
+                $code = -1
+                Set-Content -LiteralPath $errFile -Value $_.Exception.Message -Encoding UTF8
+            }
+            $len = if (Test-Path -LiteralPath $outFile) { (Get-Item -LiteralPath $outFile).Length } else { 0 }
+            if ($code -eq 0 -and $len -gt 0) {
+                Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
+                $ghRows += [pscustomobject]@{ Name = $name; Result = "$len bytes" }
+            } else {
+                # THE REASON IS KEPT, NOT JUST THE EXIT CODE. "Access is denied" and "404" send a
+                # reader to completely different places, and collapsing both to "gh failed" is how
+                # a venue problem gets misfiled as an authorization problem for a second time.
+                $why = ''
+                if (Test-Path -LiteralPath $errFile) {
+                    $why = ((Get-Content -LiteralPath $errFile -Raw) -replace '\s+', ' ').Trim()
+                }
+                if (-not $why) { $why = "gh exit $code, no stderr" }
+                if ($why.Length -gt 160) { $why = $why.Substring(0, 160) + '...' }
+                Remove-Item -LiteralPath $outFile -ErrorAction SilentlyContinue
+                $ghRows += [pscustomobject]@{ Name = $name; Result = "FAILED - $why" }
+            }
+        }
+
+        # The job graph is a SECOND call keyed on the first one's newest row, so it can only be made
+        # after the run list lands. Skipped without complaint when that export failed.
+        $runsFile = Join-Path $ghDir 'runs-tests-master-push-completed.json'
+        if (Test-Path -LiteralPath $runsFile) {
+            try {
+                $runs = @(Get-Content -LiteralPath $runsFile -Raw | ConvertFrom-Json |
+                          Sort-Object -Property createdAt -Descending)
+                if ($runs.Count -gt 0) {
+                    $newest  = $runs[0].databaseId
+                    $jobsOut = Join-Path $ghDir "jobs-latest-$newest.json"
+                    $jobsErr = "$jobsOut.err.txt"
+                    & gh api "repos/layibabalola/MLV-App/actions/runs/$newest/jobs" 1>$jobsOut 2>$jobsErr
+                    $jcode = $LASTEXITCODE
+                    $jlen  = if (Test-Path -LiteralPath $jobsOut) { (Get-Item -LiteralPath $jobsOut).Length } else { 0 }
+                    if ($jcode -eq 0 -and $jlen -gt 0) {
+                        Remove-Item -LiteralPath $jobsErr -ErrorAction SilentlyContinue
+                        $ghRows += [pscustomobject]@{ Name = "jobs-latest-$newest.json"; Result = "$jlen bytes (run $newest, newest by createdAt)" }
+                    } else {
+                        Remove-Item -LiteralPath $jobsOut -ErrorAction SilentlyContinue
+                        $ghRows += [pscustomobject]@{ Name = "jobs-latest-$newest.json"; Result = "FAILED - gh exit $jcode" }
+                    }
+                }
+            } catch {
+                $ghRows += [pscustomobject]@{ Name = '(job graph)'; Result = "FAILED - $($_.Exception.Message)" }
+            }
+        }
+    }
+
+    $ghLines  = ($ghRows | ForEach-Object { "    {0,-42} {1}" -f $_.Name, $_.Result }) -join "`n"
+    $ghOk     = @($ghRows | Where-Object { $_.Result -notlike 'FAILED*' -and $_.Result -notlike 'CANNOT-DETERMINE*' }).Count
+    $ghFailed = $ghRows.Count - $ghOk
+
+    # THE HEADING AND THE CLOSING INSTRUCTION BOTH TRACK THE OUTCOME. A section headed "already
+    # exported for you" that closes with "read these files" above a list of five FAILED rows tells
+    # the lane to read files that do not exist - which is the same class of defect as the brief line
+    # that told two lanes their own correct observation must be false.
+    if ($ghOk -eq 0) {
+        $ghHead    = 'HOSTED GITHUB EVIDENCE - THE EXPORT FAILED. THERE IS NOTHING TO READ.'
+        $ghVerdict = @"
+EVERY EXPORT FAILED ($ghFailed of $($ghRows.Count)) - the rows above carry the exact reason.
+So the hosted facts are UNVERIFIED and you must SAY SO rather than substituting a remembered value.
+This is a VENUE finding about the dispatcher, not a failing of yours and not ``operator-only``.
+Do the parts of the card that need no hosted evidence, and report the rest as UNVERIFIED.
+"@
+    } else {
+        # Single backticks here, NOT doubled: this string is INTERPOLATED into the here-string
+        # below as a value, so the here-string's backtick escaping never runs over it.
+        $ghHead    = 'HOSTED GITHUB EVIDENCE - ALREADY EXPORTED FOR YOU. DO NOT RUN `gh`.'
+        $ghVerdict = if ($ghFailed -eq 0) {
+            "ALL $ghOk EXPORTS SUCCEEDED. Read them instead of calling ``gh``: they are plain JSON`nfrom the GitHub API, so cite the file name and the field you relied on."
+        } else {
+            "$ghOk EXPORT(S) SUCCEEDED, $ghFailed FAILED - the rows above say why. Read the ones that landed`nand cite file and field. Treat every fact the failed ones would have carried as UNVERIFIED and`nSAY SO; do not substitute a remembered value."
+        }
+    }
+
+    $ghSection = @"
+
+## $ghHead
+This card needs facts that live on GitHub. ``gh`` DOES NOT WORK FROM YOUR SANDBOX - it reads its
+token from the Windows credential keyring and your sandbox denies that read, so it answers
+``Access is denied``, which looks like an authorization failure and is not one. MEASURED 2026-09-05:
+two lanes burned two slots each proving exactly that. So this dispatcher, which runs in a venue
+where ``gh`` usually works, ran the calls for you. Attempted at $stamp into:
+    $ghDir
+$ghLines
+$ghVerdict
+DO NOT RETRY ``gh`` YOURSELF - it will fail the same way and cost you the card. If you need a fact
+that is not in the exports, do not work around it: report it as a FINDING naming the exact ``gh``
+command that would produce it, so the export set can be widened.
+"@
+}
+
 # ------------------------------------------------------------------ the brief
 if ($engine -eq 'codex') {
     $capability = @'
@@ -326,7 +585,7 @@ $brief = @"
 
 ## YOUR CAPABILITIES ON THIS INVOCATION - read before planning
 $capability
-
+$ghSection
 ## HARD READING BUDGET - a previous lane died of prompt_too_long after 16 turns and 51 dollars
 It blew its context reading this board's coordination surface whole. NEVER read these without a
 narrow offset/limit, or a grep-then-slice:
@@ -359,7 +618,11 @@ MEASURED 2026-09-05: two lanes (FACTORY-MATURITY-1-CLAUDE and -OPUS) both got ``
 previously stated flatly that gh IS authenticated and that any GitHub blocker is wrong - which told
 both lanes their own correct observation must be false. If ``gh`` fails for you, say so plainly and
 name it a VENUE limitation: that is a real finding, not a lane error, and it is NOT the same as
-``operator-only``. Do not spend the card working around it.
+``operator-only``. Do not spend the card working around it. AND SINCE 2026-09-05 YOU SHOULD NOT
+NEED TO: when a card wants hosted facts, this dispatcher runs the ``gh`` calls itself, from the
+venue where they work, and a HOSTED GITHUB EVIDENCE section above names the exported JSON. If that
+section is absent, this card was not classified as needing hosted evidence - report that as the
+finding rather than reaching for ``gh``.
 
 ## STANDING ROUTING FACT
 This host (VIRTUAL-TEN) is a VMware VM with ZERO NVIDIA hardware. CUDA build and GPU playback
@@ -400,7 +663,6 @@ $fence
    and who owns it.
 "@
 
-$stamp      = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
 $promptPath = Join-Path $PromptDir ("ws-$cardId-$stamp.md")
 [System.IO.File]::WriteAllText($promptPath, $brief, [System.Text.UTF8Encoding]::new($false))
 
@@ -411,13 +673,20 @@ Write-Output "WORKSTREAM: track=$cardTrack card=$cardId priority=$(Get-Rank $car
 Write-Output "WORKSTREAM: lane=$Lane engine=$engine needsShell=$needsShell briefKB=$briefKb"
 Write-Output "WORKSTREAM: live cards on this track = $onTrack (live overall = $($live.Count))"
 Write-Output "WORKSTREAM: prompt=$promptPath"
+if ($needsHostedEvidence) {
+    $okCount = @($ghRows | Where-Object { $_.Result -notlike 'FAILED*' -and $_.Result -notlike 'CANNOT-DETERMINE*' }).Count
+    Write-Output "WORKSTREAM: gh-evidence $okCount/$($ghRows.Count) export(s) ok -> $(Join-Path $runDir 'github-evidence')"
+} else {
+    Write-Output 'WORKSTREAM: gh-evidence not-needed (card text names no hosted-evidence subject)'
+}
 
 if ($DryRun) {
-    Write-Output 'WORKSTREAM: DRY RUN - nothing dispatched.'
+    # The exports above ALREADY RAN and are on disk. Saying "nothing dispatched" without saying
+    # that would be a lie by omission about a directory this command created.
+    Write-Output 'WORKSTREAM: DRY RUN - no lane dispatched. Any gh-evidence export above is real and on disk.'
     exit 0
 }
 
-$runDir = Join-Path $RepoRoot ".claude-state\fleet-runs\ws-$cardId-$stamp"
 & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $LaneRunner `
     -Lane $Lane -PromptFile $promptPath -Card $cardId -RunDir $runDir -TimeoutSec $TimeoutSec
 $laneExit = $LASTEXITCODE
@@ -434,6 +703,7 @@ $record = [ordered]@{
     promptPath      = $promptPath
     promptBytes     = $brief.Length
     runDir          = $runDir
+    ghEvidence      = if ($needsHostedEvidence) { @($ghRows | ForEach-Object { "$($_.Name)=$($_.Result)" }) } else { @() }
     dispatchedUtc   = (Get-Date).ToUniversalTime().ToString('o')
     laneExitCode    = $laneExit
 }
