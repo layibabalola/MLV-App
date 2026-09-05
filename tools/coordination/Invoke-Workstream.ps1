@@ -398,6 +398,166 @@ $needsShell = $cardText -match '(?i)re-derive|derive|measure|reproduce|proving c
 if (-not $Lane) { $Lane = if ($needsShell) { 'luna' } else { 'fable' } }
 $engine = if ($Lane -eq 'sol' -or $Lane -eq 'luna') { 'codex' } else { 'claude' }
 
+# The run directory is named here, not at dispatch, because the brief has to be able to NAME
+# files that this script is about to write into it. -DryRun still exports, and still writes into
+# this path, so what you inspect under -DryRun is byte-identical to what a lane would receive.
+$stamp  = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+$runDir = Join-Path $RepoRoot ".claude-state\fleet-runs\ws-$cardId-$stamp"
+
+# ------------------------------------------------------------------ hosted GitHub evidence
+# WHY THIS EXISTS, AND WHY A WARNING IN THE BRIEF WAS NOT ENOUGH.
+#
+# MEASURED 2026-09-05. Two priority-1 cards, FACTORY-MATURITY-1-CLAUDE and FACTORY-MATURITY-1-OPUS,
+# consumed two lane slots each and both returned the SAME wall: `gh` answers "Access is denied"
+# inside the read-only lane sandbox, so every hosted fact stayed UNVERIFIED. The same `gh`, the same
+# token and the same machine work from an interactive session - `gh` resolves its token through the
+# Windows credential keyring, and the sandbox denies that read. The failure is the VENUE, not the
+# installation and not the credential.
+#
+# PR #55 had ALREADY told lanes that `gh` may be unusable and that saying so is a FINDING. Both
+# lanes did exactly that, correctly, and were dispatched into the wall anyway - because the brief
+# only taught them how to REPORT the limitation, never removed it. A WARNING IN A PROMPT IS NOT A
+# FIX; IT IS A NICER WAY TO FAIL. This script already runs `gh` for the landing probe from the venue
+# where it works, so the evidence was always one command away from the process doing the dispatching.
+#
+# THE ASYMMETRY IS THE OPPOSITE OF THE LANDING PROBE'S, and that is deliberate. There, a false
+# positive SKIPS live work, so the match is kept narrow. Here, a false positive costs a handful of
+# read-only API calls and ~30 KB in a run directory nobody reads, while a false NEGATIVE costs a
+# whole lane slot. So the trigger below is broad ON PURPOSE. Over-exporting is not a defect.
+#
+# FAIL-OPEN, exactly like the landing probe: if `gh` is missing, denied, offline or slow, the brief
+# SAYS SO IN THOSE WORDS and the lane is dispatched anyway. Silence would put the lane straight back
+# into the wall while looking like a clean brief.
+$needsHostedEvidence = $cardText -match '(?i)\bgh\b|github|branch protection|ruleset|status check|actions run|workflow run|ci history|consecutive failure|hosted evidence|pull request|\bPR #'
+$ghRows    = @()   # one row per attempted export: name, file, bytes-or-reason
+$ghSection = ''
+
+if ($needsHostedEvidence) {
+    $ghDir = Join-Path $runDir 'github-evidence'
+    New-Item -ItemType Directory -Path $ghDir -Force | Out-Null
+
+    # A FIXED, PREDICTABLE SET. Not derived from the card text: a lane must be able to rely on the
+    # same filenames every time, and a card-shaped guess would silently omit whatever the card
+    # forgot to name. Anything missing is a FINDING the lane reports, not a gap it works around.
+    $ghJobs = [ordered]@{
+        'repo-metadata.json' = @(
+            'api','repos/layibabalola/MLV-App','--jq',
+            '{visibility,private,fork,archived,default_branch,pushed_at}')
+        'branch-protection-master.json' = @(
+            'api','repos/layibabalola/MLV-App/branches/master/protection')
+        'rulesets.json' = @('api','repos/layibabalola/MLV-App/rulesets')
+        'runs-tests-master-push-completed.json' = @(
+            'run','list','--repo','layibabalola/MLV-App','--workflow','tests.yml',
+            '--branch','master','--event','push','--status','completed','--limit','50',
+            '--json','databaseId,conclusion,createdAt,headSha,displayTitle')
+    }
+
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    if (-not $gh) {
+        $ghRows += [pscustomobject]@{ Name = '(all)'; Result = 'CANNOT-DETERMINE: gh not on PATH' }
+    } else {
+        foreach ($name in $ghJobs.Keys) {
+            $outFile = Join-Path $ghDir $name
+            $errFile = "$outFile.err.txt"
+            try {
+                $ghArgs = $ghJobs[$name]
+                & gh @ghArgs 1>$outFile 2>$errFile
+                $code = $LASTEXITCODE
+            } catch {
+                $code = -1
+                Set-Content -LiteralPath $errFile -Value $_.Exception.Message -Encoding UTF8
+            }
+            $len = if (Test-Path -LiteralPath $outFile) { (Get-Item -LiteralPath $outFile).Length } else { 0 }
+            if ($code -eq 0 -and $len -gt 0) {
+                Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
+                $ghRows += [pscustomobject]@{ Name = $name; Result = "$len bytes" }
+            } else {
+                # THE REASON IS KEPT, NOT JUST THE EXIT CODE. "Access is denied" and "404" send a
+                # reader to completely different places, and collapsing both to "gh failed" is how
+                # a venue problem gets misfiled as an authorization problem for a second time.
+                $why = ''
+                if (Test-Path -LiteralPath $errFile) {
+                    $why = ((Get-Content -LiteralPath $errFile -Raw) -replace '\s+', ' ').Trim()
+                }
+                if (-not $why) { $why = "gh exit $code, no stderr" }
+                if ($why.Length -gt 160) { $why = $why.Substring(0, 160) + '...' }
+                Remove-Item -LiteralPath $outFile -ErrorAction SilentlyContinue
+                $ghRows += [pscustomobject]@{ Name = $name; Result = "FAILED - $why" }
+            }
+        }
+
+        # The job graph is a SECOND call keyed on the first one's newest row, so it can only be made
+        # after the run list lands. Skipped without complaint when that export failed.
+        $runsFile = Join-Path $ghDir 'runs-tests-master-push-completed.json'
+        if (Test-Path -LiteralPath $runsFile) {
+            try {
+                $runs = @(Get-Content -LiteralPath $runsFile -Raw | ConvertFrom-Json |
+                          Sort-Object -Property createdAt -Descending)
+                if ($runs.Count -gt 0) {
+                    $newest  = $runs[0].databaseId
+                    $jobsOut = Join-Path $ghDir "jobs-latest-$newest.json"
+                    $jobsErr = "$jobsOut.err.txt"
+                    & gh api "repos/layibabalola/MLV-App/actions/runs/$newest/jobs" 1>$jobsOut 2>$jobsErr
+                    $jcode = $LASTEXITCODE
+                    $jlen  = if (Test-Path -LiteralPath $jobsOut) { (Get-Item -LiteralPath $jobsOut).Length } else { 0 }
+                    if ($jcode -eq 0 -and $jlen -gt 0) {
+                        Remove-Item -LiteralPath $jobsErr -ErrorAction SilentlyContinue
+                        $ghRows += [pscustomobject]@{ Name = "jobs-latest-$newest.json"; Result = "$jlen bytes (run $newest, newest by createdAt)" }
+                    } else {
+                        Remove-Item -LiteralPath $jobsOut -ErrorAction SilentlyContinue
+                        $ghRows += [pscustomobject]@{ Name = "jobs-latest-$newest.json"; Result = "FAILED - gh exit $jcode" }
+                    }
+                }
+            } catch {
+                $ghRows += [pscustomobject]@{ Name = '(job graph)'; Result = "FAILED - $($_.Exception.Message)" }
+            }
+        }
+    }
+
+    $ghLines  = ($ghRows | ForEach-Object { "    {0,-42} {1}" -f $_.Name, $_.Result }) -join "`n"
+    $ghOk     = @($ghRows | Where-Object { $_.Result -notlike 'FAILED*' -and $_.Result -notlike 'CANNOT-DETERMINE*' }).Count
+    $ghFailed = $ghRows.Count - $ghOk
+
+    # THE HEADING AND THE CLOSING INSTRUCTION BOTH TRACK THE OUTCOME. A section headed "already
+    # exported for you" that closes with "read these files" above a list of five FAILED rows tells
+    # the lane to read files that do not exist - which is the same class of defect as the brief line
+    # that told two lanes their own correct observation must be false.
+    if ($ghOk -eq 0) {
+        $ghHead    = 'HOSTED GITHUB EVIDENCE - THE EXPORT FAILED. THERE IS NOTHING TO READ.'
+        $ghVerdict = @"
+EVERY EXPORT FAILED ($ghFailed of $($ghRows.Count)) - the rows above carry the exact reason.
+So the hosted facts are UNVERIFIED and you must SAY SO rather than substituting a remembered value.
+This is a VENUE finding about the dispatcher, not a failing of yours and not ``operator-only``.
+Do the parts of the card that need no hosted evidence, and report the rest as UNVERIFIED.
+"@
+    } else {
+        # Single backticks here, NOT doubled: this string is INTERPOLATED into the here-string
+        # below as a value, so the here-string's backtick escaping never runs over it.
+        $ghHead    = 'HOSTED GITHUB EVIDENCE - ALREADY EXPORTED FOR YOU. DO NOT RUN `gh`.'
+        $ghVerdict = if ($ghFailed -eq 0) {
+            "ALL $ghOk EXPORTS SUCCEEDED. Read them instead of calling ``gh``: they are plain JSON`nfrom the GitHub API, so cite the file name and the field you relied on."
+        } else {
+            "$ghOk EXPORT(S) SUCCEEDED, $ghFailed FAILED - the rows above say why. Read the ones that landed`nand cite file and field. Treat every fact the failed ones would have carried as UNVERIFIED and`nSAY SO; do not substitute a remembered value."
+        }
+    }
+
+    $ghSection = @"
+
+## $ghHead
+This card needs facts that live on GitHub. ``gh`` DOES NOT WORK FROM YOUR SANDBOX - it reads its
+token from the Windows credential keyring and your sandbox denies that read, so it answers
+``Access is denied``, which looks like an authorization failure and is not one. MEASURED 2026-09-05:
+two lanes burned two slots each proving exactly that. So this dispatcher, which runs in a venue
+where ``gh`` usually works, ran the calls for you. Attempted at $stamp into:
+    $ghDir
+$ghLines
+$ghVerdict
+DO NOT RETRY ``gh`` YOURSELF - it will fail the same way and cost you the card. If you need a fact
+that is not in the exports, do not work around it: report it as a FINDING naming the exact ``gh``
+command that would produce it, so the export set can be widened.
+"@
+}
+
 # ------------------------------------------------------------------ the brief
 if ($engine -eq 'codex') {
     $capability = @'
@@ -425,7 +585,7 @@ $brief = @"
 
 ## YOUR CAPABILITIES ON THIS INVOCATION - read before planning
 $capability
-
+$ghSection
 ## HARD READING BUDGET - a previous lane died of prompt_too_long after 16 turns and 51 dollars
 It blew its context reading this board's coordination surface whole. NEVER read these without a
 narrow offset/limit, or a grep-then-slice:
@@ -458,7 +618,11 @@ MEASURED 2026-09-05: two lanes (FACTORY-MATURITY-1-CLAUDE and -OPUS) both got ``
 previously stated flatly that gh IS authenticated and that any GitHub blocker is wrong - which told
 both lanes their own correct observation must be false. If ``gh`` fails for you, say so plainly and
 name it a VENUE limitation: that is a real finding, not a lane error, and it is NOT the same as
-``operator-only``. Do not spend the card working around it.
+``operator-only``. Do not spend the card working around it. AND SINCE 2026-09-05 YOU SHOULD NOT
+NEED TO: when a card wants hosted facts, this dispatcher runs the ``gh`` calls itself, from the
+venue where they work, and a HOSTED GITHUB EVIDENCE section above names the exported JSON. If that
+section is absent, this card was not classified as needing hosted evidence - report that as the
+finding rather than reaching for ``gh``.
 
 ## STANDING ROUTING FACT
 This host (VIRTUAL-TEN) is a VMware VM with ZERO NVIDIA hardware. CUDA build and GPU playback
@@ -499,7 +663,6 @@ $fence
    and who owns it.
 "@
 
-$stamp      = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
 $promptPath = Join-Path $PromptDir ("ws-$cardId-$stamp.md")
 [System.IO.File]::WriteAllText($promptPath, $brief, [System.Text.UTF8Encoding]::new($false))
 
@@ -510,13 +673,20 @@ Write-Output "WORKSTREAM: track=$cardTrack card=$cardId priority=$(Get-Rank $car
 Write-Output "WORKSTREAM: lane=$Lane engine=$engine needsShell=$needsShell briefKB=$briefKb"
 Write-Output "WORKSTREAM: live cards on this track = $onTrack (live overall = $($live.Count))"
 Write-Output "WORKSTREAM: prompt=$promptPath"
+if ($needsHostedEvidence) {
+    $okCount = @($ghRows | Where-Object { $_.Result -notlike 'FAILED*' -and $_.Result -notlike 'CANNOT-DETERMINE*' }).Count
+    Write-Output "WORKSTREAM: gh-evidence $okCount/$($ghRows.Count) export(s) ok -> $(Join-Path $runDir 'github-evidence')"
+} else {
+    Write-Output 'WORKSTREAM: gh-evidence not-needed (card text names no hosted-evidence subject)'
+}
 
 if ($DryRun) {
-    Write-Output 'WORKSTREAM: DRY RUN - nothing dispatched.'
+    # The exports above ALREADY RAN and are on disk. Saying "nothing dispatched" without saying
+    # that would be a lie by omission about a directory this command created.
+    Write-Output 'WORKSTREAM: DRY RUN - no lane dispatched. Any gh-evidence export above is real and on disk.'
     exit 0
 }
 
-$runDir = Join-Path $RepoRoot ".claude-state\fleet-runs\ws-$cardId-$stamp"
 & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $LaneRunner `
     -Lane $Lane -PromptFile $promptPath -Card $cardId -RunDir $runDir -TimeoutSec $TimeoutSec
 $laneExit = $LASTEXITCODE
@@ -533,6 +703,7 @@ $record = [ordered]@{
     promptPath      = $promptPath
     promptBytes     = $brief.Length
     runDir          = $runDir
+    ghEvidence      = if ($needsHostedEvidence) { @($ghRows | ForEach-Object { "$($_.Name)=$($_.Result)" }) } else { @() }
     dispatchedUtc   = (Get-Date).ToUniversalTime().ToString('o')
     laneExitCode    = $laneExit
 }
