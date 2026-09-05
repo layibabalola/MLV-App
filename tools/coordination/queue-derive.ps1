@@ -44,6 +44,14 @@ param(
     [switch]$Json
 )
 $ErrorActionPreference = 'Stop'
+# --- staleness guard -------------------------------------------------------------------
+# The board root is the ONLY checkout that carries .claude-state/, and it routinely sits on a
+# peer branch -- so an absolute-path invocation of this script can silently run a months-old
+# copy and print a WRONG board reading. Refuse that. See assert-script-currency.ps1.
+$__guard = Join-Path $PSScriptRoot 'assert-script-currency.ps1'
+if (Test-Path -LiteralPath $__guard) { & $__guard -ScriptPath $PSCommandPath }
+# ---------------------------------------------------------------------------------------
+
 
 if (-not (Test-Path $QueueFile)) {
     [Console]::Error.WriteLine("queue-derive: queue file not found: $QueueFile")

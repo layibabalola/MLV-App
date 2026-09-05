@@ -899,12 +899,73 @@ def test_sealed_real_clip_receipt_is_closed_and_source_bound() -> None:
             receipt["renderContract"]["receiptGitBlob"],
         ),
     )
+    # Read each bound subject AT THE SEALED VERIFIER COMMIT, not out of the current
+    # worktree.  A sealed receipt attests what ran AT SEAL TIME; asserting that today's
+    # bytes still equal the seal does not strengthen that attestation -- it silently
+    # converts every sealed receipt into a permanent FREEZE on the files it names.
+    # There are two receipts here, so two freezes, and no future change to the smoke
+    # runner could ever land.  sealed_real_clip_receipt._assert_source_binding already
+    # binds at verifier["head"]; this loop was the only place that did not, and the two
+    # disagreed: with an edited runner the library reported SEALED_RECEIPT_PASS while
+    # this test failed on the very same tree.
+    verifier_head = receipt["verifier"]["head"]
+    # A sealed receipt names a HISTORICAL commit, and a shallow clone may simply not have
+    # it -- CI's Factory Bridge Regressions job checked out at depth 1, which is exactly why
+    # the original loop read the worktree instead: that worked in a shallow clone, at the
+    # cost of the semantics.  Distinguish the two cases rather than papering over both:
+    #   shallow clone + commit absent  -> missing INFRASTRUCTURE, skip loudly
+    #   full clone   + commit absent   -> the receipt names history this repo does not have,
+    #                                     which is a real defect and must fail
+    # The workflow now checks this job out at fetch-depth: 0, so the strict path is the one
+    # CI actually takes; without that pairing this skip would quietly retire the check.
+    head_known = subprocess.run(
+        ["git", "cat-file", "-e", f"{verifier_head}^{{commit}}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    ).returncode == 0
+    if not head_known:
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout.strip()
+        assert shallow == "true", (
+            f"receipt names verifier commit {verifier_head}, which is absent from a "
+            f"NON-shallow clone -- the seal points at history this repository does not have"
+        )
+        pytest.skip(
+            f"sealed verifier commit {verifier_head} is not present in this shallow clone; "
+            f"check out with fetch-depth: 0 to verify the source bindings"
+        )
+
+    # The head is now the anchor for every binding below, so it has to be pinned itself.
+    # Without this a receipt could name ANY commit whose copies of the three subjects
+    # happen to match, and the bindings would still pass -- verified by control probe.
+    # sealed_real_clip_receipt makes the same head/tree check for the same reason.
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", f"{verifier_head}^{{tree}}"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout.strip()
+        == receipt["verifier"]["tree"]
+    )
     for path, expected_sha256, expected_git_blob in source_bindings:
-        # Git stores these text subjects with LF bytes, while a Windows
-        # checkout can materialize all or only some lines as CRLF.  Bind the
-        # portable committed-object bytes rather than an autocrlf-dependent
-        # worktree representation.
-        canonical_bytes = path.read_bytes().replace(b"\r\n", b"\n")
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        # Git objects are stored with LF, which is exactly the receipt's declared
+        # GIT_BLOB_BYTES_CANONICAL_LF convention, so no autocrlf-dependent worktree
+        # representation is involved and no normalization is needed.
+        canonical_bytes = subprocess.run(
+            ["git", "cat-file", "blob", f"{verifier_head}:{rel}"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout
         assert (
             hashlib.sha256(canonical_bytes).hexdigest().upper()
             == expected_sha256

@@ -144,6 +144,7 @@ def test_supplied_timestamp_must_be_a_real_instant(tmp_path):
 
 
 LOOP = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
+WORKSTREAM = ROOT / "tools" / "coordination" / "Invoke-Workstream.ps1"
 
 
 def test_cycle_receipt_stamp_has_exactly_one_assignment():
@@ -218,3 +219,152 @@ def test_a_transient_fetch_failure_does_not_halt_the_cycle():
 
     # the halt message reports the attempt count, so receipts stay diagnosable
     assert "attempts; " + stale in text
+
+
+def test_landing_probe_knows_the_verbs_and_connectors_that_actually_get_used():
+    """Two MEASURED misses on 2026-09-05, both from real merged PR bodies.
+
+    PR #53: "Closes OWN-2 and delivers GATE-RESIDUALS-1(b)" -- OWN-2 was skipped,
+    GATE-RESIDUALS-1 was not, and the loop spent a lane on it at 02:11Z.
+    PR #52: "Closes queue item OWN-1-PRECEDENCE" -- only "card" was permitted between the verb
+    and the id, so that missed too, and the near-miss diagnostic surfaced it on its first run.
+
+    The vocabulary is a fixed list, and every writer who does not know it costs a dispatch.
+    """
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    assert "delivers" in text, "landing verb 'delivers' not accepted"
+    assert "queue" in text, "'queue item' connector not accepted"
+
+
+def test_a_bare_id_in_prose_still_does_NOT_count_as_landing():
+    """The load-bearing asymmetry, from the probe's own comment: a false positive SKIPS
+    genuinely open work, which is strictly worse than re-dispatching finished work. Widening
+    the vocabulary must never reach a bare mention."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    line = [l for l in text.splitlines() if "$rxBody =" in l]
+    assert line, "landing-verb body regex not found"
+    assert "(?:lands|closes|fixes|resolves|delivers)" in line[0], (
+        "body match is no longer gated behind an explicit landing verb"
+    )
+
+
+def test_near_misses_are_summarised_not_printed_per_card():
+    """The first draft printed one line per near-miss and produced TEN on a single run, mostly
+    genuine prose mentions. A diagnostic that fires every run is one nobody reads -- which is
+    exactly the failure it exists to prevent."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    assert "$nearMisses" in text, "near-miss diagnostic absent"
+    assert "NEAR-MISS ($($nearMisses.Count))" in text, "near-misses are not summarised into one line"
+    assert "NOT skipped" in text, "the diagnostic must say it did not act on the near-miss"
+
+# --- assert-script-currency.ps1 -------------------------------------------------------------
+# The board root is the only checkout carrying .claude-state/, and it routinely sits on a peer
+# branch. Running a tool from there by absolute path silently executes a stale copy: the script
+# exits 0 and prints a wrong answer. These tests pin the guard that refuses that, and pin the
+# fail-OPEN direction -- a guard that blocked on "I could not check" would be worse than the bug.
+
+GUARD = ROOT / "tools" / "coordination" / "assert-script-currency.ps1"
+GUARDED = [
+    ROOT / "tools" / "coordination" / "queue-derive.ps1",
+    ROOT / "tools" / "coordination" / "board-health-sweep.ps1",
+]
+
+
+def guard_status(script_path, ref="fork/master", env=None):
+    """Run the guard with -PassThru and return its status, or 'THREW' when it refuses."""
+    cmd = (
+        "try { (& '%s' -ScriptPath '%s' -Ref '%s' -PassThru).status } "
+        "catch { 'THREW' }" % (GUARD.as_posix(), Path(script_path).as_posix(), ref)
+    )
+    import os
+    e = dict(os.environ)
+    e.pop("MLV_ALLOW_STALE_TOOLS", None)
+    if env:
+        e.update(env)
+    out = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", cmd], text=True, capture_output=True, env=e
+    ).stdout.strip().splitlines()
+    return out[-1].strip() if out else ""
+
+
+def currency_repo(tmp_path):
+    """A repo with a 'fork/master' ref and a tracked script, so the guard has something to compare."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
+    script = tmp_path / "tool.ps1"
+    script.write_text("Write-Output 'original'\n")
+    subprocess.run(["git", "add", "tool.ps1"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=tmp_path, check=True)
+    # A local ref literally named refs/remotes/fork/master, so no network or remote is needed.
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/fork/master", git(tmp_path, "rev-parse", "HEAD")],
+        cwd=tmp_path, check=True,
+    )
+    return script
+
+
+def test_currency_guard_passes_when_the_file_matches_the_reference(tmp_path):
+    script = currency_repo(tmp_path)
+    assert guard_status(script) == "current"
+
+
+def test_currency_guard_refuses_when_the_file_differs_from_the_reference(tmp_path):
+    script = currency_repo(tmp_path)
+    script.write_text("Write-Output 'a stale peer-branch copy'\n")
+    assert guard_status(script) == "THREW"
+
+
+def test_currency_guard_refusal_names_the_branch_the_checkout_is_on(tmp_path):
+    # The message has to say WHY, or the reader treats it as noise and sets the hatch reflexively.
+    script = currency_repo(tmp_path)
+    subprocess.run(["git", "checkout", "-qb", "diag/some-peer-branch"], cwd=tmp_path, check=True)
+    script.write_text("Write-Output 'drifted'\n")
+    cmd = "try { & '%s' -ScriptPath '%s' } catch { $_.Exception.Message }" % (
+        GUARD.as_posix(), script.as_posix(),
+    )
+    import os
+    e = dict(os.environ)
+    e.pop("MLV_ALLOW_STALE_TOOLS", None)  # an inherited hatch would make this pass vacuously
+    out = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", cmd], text=True, capture_output=True, env=e
+    )
+    blob = out.stdout + out.stderr
+    assert "diag/some-peer-branch" in blob
+    assert "MLV_ALLOW_STALE_TOOLS" in blob
+
+
+def test_currency_guard_honours_the_escape_hatch(tmp_path):
+    script = currency_repo(tmp_path)
+    script.write_text("Write-Output 'deliberately modified'\n")
+    assert guard_status(script, env={"MLV_ALLOW_STALE_TOOLS": "1"}) == "skipped"
+
+
+def test_currency_guard_allows_a_file_not_yet_present_on_the_reference(tmp_path):
+    # A brand-new script is not stale. Blocking here would make it impossible to add one.
+    script = currency_repo(tmp_path)
+    fresh = script.parent / "brand-new.ps1"
+    fresh.write_text("Write-Output 'new'\n")
+    assert guard_status(fresh) == "untracked-on-ref"
+
+
+def test_currency_guard_fails_open_when_the_reference_does_not_resolve(tmp_path):
+    # A lane sandbox or a fresh clone has no 'fork' remote. That is missing infrastructure,
+    # not proven drift, so the guard must stay silent rather than halt the caller.
+    script = currency_repo(tmp_path)
+    script.write_text("Write-Output 'differs'\n")
+    assert guard_status(script, ref="nonexistent/ref") == "unknown"
+
+
+def test_currency_guard_fails_open_outside_a_git_working_tree(tmp_path):
+    loose = tmp_path / "loose.ps1"
+    loose.write_text("Write-Output 'x'\n")
+    assert guard_status(loose) == "unknown"
+
+
+def test_the_read_only_board_diagnostics_actually_invoke_the_guard(tmp_path):
+    # Without this, the guard could quietly stop being wired and nothing would notice.
+    for script in GUARDED:
+        body = script.read_text(encoding="utf-8")
+        assert "assert-script-currency.ps1" in body, f"{script.name} no longer invokes the guard"
+        assert "-ScriptPath $PSCommandPath" in body, f"{script.name} guards the wrong path"

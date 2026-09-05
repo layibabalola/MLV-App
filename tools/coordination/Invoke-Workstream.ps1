@@ -179,6 +179,7 @@ function Get-LastDispatchAgeHours([string]$id) {
 # returns CANNOT-DETERMINE and NOTHING is skipped. An unreadable signal must never silently
 # shrink the board - that is how a queue goes quiet and looks healthy.
 $landedById = @{}
+    $nearMisses = @()
 $landedHow = @{}
 $landingProbe = 'skipped'
 if (-not $NoLandingProbe) {
@@ -210,14 +211,40 @@ if (-not $NoLandingProbe) {
                         # prose ("unlike OWN-GITHUB-1") must NOT count: a false positive here SKIPS
                         # genuinely open work, which is strictly worse than re-dispatching finished
                         # work. Tolerates markdown emphasis around the id.
-                        $rxBody = '(?i)(?:lands|closes|fixes|resolves)\s+(?:card\s+)?[*_`]*' +
+                        # 'delivers' added 2026-09-05 from a MEASURED miss: PR #53's body read
+                        # "Closes OWN-2 and delivers GATE-RESIDUALS-1(b)". OWN-2 was skipped;
+                        # GATE-RESIDUALS-1 was NOT, and the loop spent a lane on it at 02:11Z.
+                        # The vocabulary is fixed and no writer can be expected to know it, so the
+                        # near-miss diagnostic below reports rather than widening this further:
+                        # a false positive SKIPS open work, which stays strictly worse.
+                        # 'queue item' connector added the same day, from a SECOND measured miss the
+                        # near-miss diagnostic surfaced on its first run: PR #52 read "Closes queue
+                        # item OWN-1-PRECEDENCE" and only 'card' was permitted between verb and id.
+                        $rxBody = '(?i)(?:lands|closes|fixes|resolves|delivers)\s+(?:(?:card|queue\s+item)\s+)?[*_`]*' +
                                   [regex]::Escape($id) + '[*_`]*(?![A-Za-z0-9-])'
                         $hit = @($prs | Where-Object { $_.body -and ($_.body -match $rxBody) }) | Select-Object -First 1
                         if ($hit) { $how = 'body' }
+                        else {
+                            # NEAR-MISS. A merged PR naming this card WITHOUT a landing verb is either prose
+                            # ('unlike OWN-GITHUB-1', correctly ignored) or a landing phrased in a verb this
+                            # probe does not know. Both were silent before; the second cost a dispatch.
+                            # REPORT it and cite the PR - do NOT skip on it. Skipping open work stays worse.
+                            $rxMention = '(?i)[*_`]*' + [regex]::Escape($id) + '[*_`]*(?![A-Za-z0-9-])'
+                            $near = @($prs | Where-Object { $_.body -and ($_.body -match $rxMention) }) | Select-Object -First 1
+                            # COLLECTED, not printed per card. The first draft of this emitted one line per
+                            # near-miss and produced TEN on a single run - mostly genuine prose mentions. A
+                            # diagnostic that fires every run is one nobody reads, which is the failure it was
+                            # meant to prevent. One summary line keeps the signal and loses the noise.
+                            if ($near) { $nearMisses += "$id(PR #$($near.number))" }
+                        }
                     }
                     if ($hit) { $landedById[$id] = $hit; $landedHow[$id] = $how }
                 }
-                $landingProbe = "ok: $($prs.Count) merged PR(s) scanned, $($landedById.Count) card(s) matched by title or landing-verb body reference"
+                if ($nearMisses.Count -gt 0) {
+        Write-Output ("WORKSTREAM: landing-probe NEAR-MISS ($($nearMisses.Count)): " +
+            ($nearMisses -join ', ') + " - named in a merged PR without a landing verb, NOT skipped")
+    }
+    $landingProbe = "ok: $($prs.Count) merged PR(s) scanned, $($landedById.Count) card(s) matched by title or landing-verb body reference"
             }
         } catch {
             $landingProbe = "cannot-determine: $($_.Exception.Message)"
@@ -335,6 +362,17 @@ narrow offset/limit, or a grep-then-slice:
     .claude-state\RESUME.md                                   ~27 KB (fine to read once)
 THE CARD IS INLINED BELOW IN FULL. You do not need to open the queue. Budget ~12 tool calls.
 
+## THOSE PATHS ARE AT THE BOARD ROOT, NOT IN YOUR WORKDIR. ABSENT THERE MEANS NOTHING.
+``.claude-state/`` is GITIGNORED, so it is never checked out into a worktree - and your workDir IS a
+worktree. Resolve those paths against the BOARD ROOT by absolute path, never against your cwd.
+MEASURED 2026-09-05: a lane on C2-PROV-1 reported the content-review gate file had been ``rotated
+away`` because it was not in the driver worktree. It was intact at the board root: 1,342,684 bytes,
+modified 2026-08-26, exactly where closeout.config.json points. The worktree even HAS a nearly-empty
+``.claude-state/``, so the absence reads as deletion rather than as never-having-been-there.
+DO NOT report a ``.claude-state`` file missing, deleted or rotated away unless you checked the board
+root by absolute path. brokered_closeout.py already resolves it that way (GATE-ID-4); only
+hand-reading gets this wrong.
+
 ## STANDING OPERATOR RULING (2026-08-31), binding on your output
 Layi, verbatim: "use the wisdom of the hub lanes to adjudicate decisions rather than ask me my
 opinion. I am not qualified." DO NOT return "ask Layi". Return a DECISION. If some part is
@@ -342,7 +380,13 @@ genuinely operator-only you must be able to write this line in full, or it is no
     BLOCKED ON Layi (<action>) -- delegation check: <lane> <why not> ... Operator-only because
     <1 physical access | 2 external account/UI-only surface | 3 policy-reserved>.
 NOTE: ``gh`` IS installed and authenticated on this box, so GitHub PR create/merge is NOT
-operator-only. Any blocker naming GitHub is wrong unless token scopes are re-checked.
+operator-only. A GitHub blocker is USUALLY wrong - but VERIFY before asserting either way.
+MEASURED 2026-09-05: two lanes (FACTORY-MATURITY-1-CLAUDE and -OPUS) both got ``gh auth status`` ->
+``Access is denied`` under a read-only sandbox, and both correctly returned UNVERIFIED. This brief
+previously stated flatly that gh IS authenticated and that any GitHub blocker is wrong - which told
+both lanes their own correct observation must be false. If ``gh`` fails for you, say so plainly and
+name it a VENUE limitation: that is a real finding, not a lane error, and it is NOT the same as
+``operator-only``. Do not spend the card working around it.
 
 ## STANDING ROUTING FACT
 This host (VIRTUAL-TEN) is a VMware VM with ZERO NVIDIA hardware. CUDA build and GPU playback

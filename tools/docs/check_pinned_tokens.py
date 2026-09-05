@@ -55,6 +55,12 @@ ASSERTION_SOURCE = "tools/repo_hygiene/brokered_closeout.py"
 TEST_ASSERTION_SOURCES = (
     "tools/repo_hygiene/test_brokered_closeout.py",
     "tools/repo_hygiene/test_candidate_acceptance.py",
+    # Fourth surface, found 2026-09-05 the same way the third was: an AGENTS.md split passed
+    # this checker and still reddened the suite. test_repo_hygiene.py pins
+    # "Human approval remains mandatory today" against AGENTS.md -- an AUTHORITY BOUNDARY, the
+    # same category as the CLAUDE.md sentences that motivated adding the third source.
+    # The lesson repeats: this list is only as complete as the last time someone looked.
+    "tools/repo_hygiene/test_repo_hygiene.py",
 )
 # Retained for callers that referenced the single-source name.
 TEST_ASSERTION_SOURCE = TEST_ASSERTION_SOURCES[0]
