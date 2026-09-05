@@ -95,14 +95,12 @@ jobs:
 
       - name: Run repo hygiene Python tests
         run: |
-          python -m unittest tools.repo_hygiene.test_repo_hygiene -v
-          python -m unittest tools.repo_hygiene.test_candidate_acceptance -v
-          python -m unittest tools.repo_hygiene.test_brokered_closeout -v
-          python -m unittest tools.repo_hygiene.test_pipeline_golden_provenance -v
-          python -m unittest tools.repo_hygiene.test_vendored_native_payloads -v
+          # Directory target: a new tools/repo_hygiene/test_*.py file is collected
+          # automatically, unlike the per-file list this replaced. A named-file
+          # inclusion list silently omits every file it forgets to name.
+          python -m unittest discover -s tools/repo_hygiene -p "test_*.py" -t . -v
           python -m unittest tools.release.test_release_evidence -v
           python -m unittest tools.gates.test_output_budget -v
-          python -m unittest tools.repo_hygiene.test_shipping_defaults -v
           python -m tools.repo_hygiene.pipeline_golden_provenance --repo-root .
           python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
@@ -171,8 +169,11 @@ jobs:
 
       - name: Run full agent-bridge test suite
         run: |
+          # Directory target: also collects tools/agent-bridge/test_phase0_contract.py
+          # and the full tools/agent-bridge/test_server_wrapper_phase2.py suite, neither
+          # of which the prior single-file invocation covered.
           python -m pytest `
-            tools\agent-bridge\test_agent_bridge.py `
+            tools\agent-bridge `
             -q
 
       - name: Run coordination and self-healing guardrails
@@ -180,6 +181,12 @@ jobs:
           python -m pytest `
             tools\coordination\test_coordination_guardrails.py `
             tests\coordination `
+            -q
+
+      - name: Run profiling test suite
+        run: |
+          python -m pytest `
+            tests\profiling `
             -q
 
   windows-product-oracles:
