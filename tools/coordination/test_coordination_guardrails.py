@@ -940,3 +940,104 @@ def test_the_refusal_suggests_the_refspec_fetch_when_the_ref_is_NOT_checked_out(
     assert r.returncode == 14
     assert "fetch origin main:main" in r.stderr, r.stderr
     assert "is CHECKED OUT at that path" not in r.stderr, r.stderr
+
+
+# --- the refund rule: a dispatch that FAILED and spent NOTHING is refunded ------------------
+# Measured 2026-09-05: two of twelve dispatches hit HTTP 429 "You've hit your session limit",
+# and the loop then halted the rest of the UTC day at "daily budget exhausted (12/12)" having
+# done ten units of work. The budget caps CONSUMPTION, not success -- so the test is
+# costUsd == 0, NOT "it failed": CITE-TXN-1 failed after burning USD 2.24 and must still be
+# charged, or the loop gets to spend the same money twice. And costReported must be TRUE,
+# because an unreported cost read as free is the permissive branch of a fail-open.
+
+LOOP_SCRIPT = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
+
+
+def test_the_dispatch_log_records_the_lane_spend_beside_its_exit_code():
+    # Without cost in the row, the budget scan would have to open every runDir receipt --
+    # one file scan becomes N file opens, and the budget couples to receipt layout.
+    body = WORKSTREAM.read_text(encoding="utf-8")
+    assert "laneCostUsd" in body, "dispatch-log row does not carry the lane cost"
+    assert "laneCostReported" in body, "dispatch-log row does not carry cost reportedness"
+
+
+def test_an_unreadable_receipt_leaves_the_cost_UNREPORTED_not_zero():
+    # Failing to read a cost must never look like a zero cost.
+    body = WORKSTREAM.read_text(encoding="utf-8")
+    assert "$laneCostReported = $false" in body, "cost reportedness does not default to false"
+
+
+def test_the_refund_requires_all_three_conditions():
+    body = LOOP_SCRIPT.read_text(encoding="utf-8")
+    assert "-ne 0) -and" in body, "refund does not require a non-zero exit"
+    assert "$repProp.Value)" in body, "refund does not require costReported"
+    assert "-eq 0)" in body, "refund does not require a zero cost"
+
+
+def test_the_refund_is_announced_rather_than_silent():
+    # A budget that silently un-spends itself is indistinguishable from a miscount.
+    assert "LOOP: refunded dispatch" in LOOP_SCRIPT.read_text(encoding="utf-8")
+
+
+def _budget_of(tmp_path, rows):
+    """Run the SHIPPED budget derivation over a synthetic dispatch log.
+
+    The refund block is EXTRACTED FROM Invoke-WorkstreamLoop.ps1 at test time, not
+    reimplemented here. An earlier version of this helper inlined a copy of the logic while
+    carrying a comment claiming it did not -- so reverting the real script left these tests
+    green, which is exactly the "validator fed only by itself" failure this suite exists to
+    catch. Extracting means a revert breaks them, which is the point.
+    """
+    log = tmp_path / "workstream-dispatch-log.jsonl"
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="ascii")
+
+    loop = LOOP_SCRIPT.read_text(encoding="utf-8")
+    begin = loop.index("# REFUND RULE.")
+    finish = loop.index("$spentToday++", loop.index("} else {", begin))
+    block = loop[begin:finish] + "$spentToday++" + chr(10) + "                    }"
+
+    lines = [
+        '$LogPath = "' + log.as_posix() + '"',
+        "$spentToday = 0",
+        "foreach ($line in (Get-Content -LiteralPath $LogPath)) {",
+        "    if (-not $line.Trim()) { continue }",
+        "    $row = $line | ConvertFrom-Json",
+        block,
+        "}",
+        "Write-Output $spentToday",
+    ]
+    out = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", chr(10).join(lines)],
+        text=True, capture_output=True,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+    return int(out.stdout.strip().splitlines()[-1])
+
+
+def _row(card, exit_code, cost, reported=True):
+    return {
+        "cardId": card, "dispatchedUtc": "2026-09-05T03:49:26.0000000Z",
+        "laneExitCode": exit_code, "laneCostUsd": cost, "laneCostReported": reported,
+    }
+
+
+def test_the_three_real_receipts_from_20260905_score_correctly(tmp_path):
+    rows = [
+        _row("GATE-FAMILY-BOOKED", 1, 0.0),        # 429 in 2.8s, bought nothing -> REFUND
+        _row("CITE-TXN-1", 1, 2.244599),           # failed, but USD 2.24 is gone -> CHARGE
+        _row("CLEANUP-1", 0, 2.048145),            # succeeded                    -> CHARGE
+    ]
+    assert _budget_of(tmp_path, rows) == 2
+
+
+def test_a_failed_but_EXPENSIVE_lane_is_still_charged(tmp_path):
+    assert _budget_of(tmp_path, [_row("X", 1, 2.24)]) == 1
+
+
+def test_an_unreported_cost_is_never_treated_as_free(tmp_path):
+    assert _budget_of(tmp_path, [_row("X", 1, None, reported=False)]) == 1
+
+
+def test_a_successful_free_lane_is_still_charged(tmp_path):
+    # exit 0 means work happened, whatever it cost.
+    assert _budget_of(tmp_path, [_row("X", 0, 0.0)]) == 1

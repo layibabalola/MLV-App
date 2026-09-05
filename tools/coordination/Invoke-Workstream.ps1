@@ -633,6 +633,31 @@ if ($DryRun) {
     -Lane $Lane -PromptFile $promptPath -Card $cardId -RunDir $runDir -TimeoutSec $TimeoutSec
 $laneExit = $LASTEXITCODE
 
+# Read the lane's SPEND from the receipt it just wrote, so the dispatch log is
+# self-sufficient. The loop derives its daily budget from this log in ONE pass over ONE
+# file; making that scan open every runDir receipt instead would turn it into N file opens
+# and couple the budget to receipt layout. One read here, at the moment the receipt is
+# freshly written, is the cheap place to pay for it.
+#
+# costReported is carried SEPARATELY and is not a convenience: an UNREPORTED cost must
+# never be read as free. See the refund rule in Invoke-WorkstreamLoop.ps1.
+$laneCostUsd = $null
+$laneCostReported = $false
+try {
+    $rcpt = Get-ChildItem -LiteralPath $runDir -Filter '*.receipt.json' -ErrorAction Stop |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if ($rcpt) {
+        $spend = (Get-Content -LiteralPath $rcpt.FullName -Raw | ConvertFrom-Json).spend
+        if ($null -ne $spend) {
+            $laneCostReported = [bool]$spend.costReported
+            if ($laneCostReported) { $laneCostUsd = [double]$spend.costUsd }
+        }
+    }
+} catch {
+    # A missing or unparsable receipt leaves costReported FALSE, which the refund rule
+    # treats as "not free". Failing to read the cost must never look like a zero cost.
+}
+
 $record = [ordered]@{
     schema          = 'mlv-app/workstream-dispatch/v1'
     cardId          = $cardId
@@ -648,8 +673,10 @@ $record = [ordered]@{
     ghEvidence      = if ($needsHostedEvidence) { @($ghRows | ForEach-Object { "$($_.Name)=$($_.Result)" }) } else { @() }
     dispatchedUtc   = (Get-Date).ToUniversalTime().ToString('o')
     laneExitCode    = $laneExit
+    laneCostUsd     = $laneCostUsd
+    laneCostReported = $laneCostReported
 }
 Add-Content -LiteralPath $LogPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
 
-Write-Output "WORKSTREAM: dispatched, laneExit=$laneExit runDir=$runDir"
+Write-Output ("WORKSTREAM: dispatched, laneExit={0} cost={1} runDir={2}" -f $laneExit, $(if ($laneCostReported) { "USD $laneCostUsd" } else { "unreported" }), $runDir)
 exit 0
