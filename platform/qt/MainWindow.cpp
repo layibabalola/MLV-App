@@ -1087,6 +1087,42 @@ static QJsonObject gpuPlaybackReconAsyncH2dTelemetry(
     return result;
 }
 
+static QJsonObject buildAsyncH2dRollup(
+    const QJsonObject &booleanSampleCounts,
+    const QJsonObject &booleanTrueCounts,
+    const QJsonObject &timingSums,
+    const QJsonObject &timingMaxima,
+    const QJsonObject &timingSampleCounts )
+{
+    QJsonObject rollup;
+    const QStringList keys = gpuPlaybackReconAsyncH2dTelemetryKeys();
+    for( const QString &key : keys )
+    {
+        const int booleanSamples = booleanSampleCounts.value( key ).toInt();
+        const int timingSamples = timingSampleCounts.value( key ).toInt();
+        QJsonObject field;
+        if( booleanSamples > 0 )
+        {
+            const int trueFrames = booleanTrueCounts.value( key ).toInt();
+            field.insert( QStringLiteral("samples"), booleanSamples );
+            field.insert( QStringLiteral("true_frames"), trueFrames );
+            field.insert( QStringLiteral("false_frames"),
+                          booleanSamples - trueFrames );
+        }
+        else if( timingSamples > 0 )
+        {
+            field.insert( QStringLiteral("samples"), timingSamples );
+            field.insert( QStringLiteral("mean_ms"),
+                          timingSums.value( key ).toDouble()
+                              / static_cast<double>( timingSamples ) );
+            field.insert( QStringLiteral("max_ms"),
+                          timingMaxima.value( key ).toDouble() );
+        }
+        if( !field.isEmpty() ) rollup.insert( key, field );
+    }
+    return rollup;
+}
+
 static QJsonObject buildPlaybackProfileSummary( const QJsonArray &frames )
 {
     QJsonObject pipelineCounts;
@@ -1142,34 +1178,12 @@ static QJsonObject buildPlaybackProfileSummary( const QJsonArray &frames )
         }
     }
 
-    QJsonObject asyncH2dRollup;
-    const QStringList asyncH2dKeys = gpuPlaybackReconAsyncH2dTelemetryKeys();
-    for( const QString &key : asyncH2dKeys )
-    {
-        const int booleanSamples =
-            asyncH2dBooleanSampleCounts.value( key ).toInt();
-        const int timingSamples =
-            asyncH2dTimingSampleCounts.value( key ).toInt();
-        QJsonObject field;
-        if( booleanSamples > 0 )
-        {
-            const int trueFrames = asyncH2dBooleanTrueCounts.value( key ).toInt();
-            field.insert( QStringLiteral("samples"), booleanSamples );
-            field.insert( QStringLiteral("true_frames"), trueFrames );
-            field.insert( QStringLiteral("false_frames"),
-                          booleanSamples - trueFrames );
-        }
-        else if( timingSamples > 0 )
-        {
-            field.insert( QStringLiteral("samples"), timingSamples );
-            field.insert( QStringLiteral("mean_ms"),
-                          asyncH2dTimingSums.value( key ).toDouble()
-                              / static_cast<double>( timingSamples ) );
-            field.insert( QStringLiteral("max_ms"),
-                          asyncH2dTimingMaxima.value( key ).toDouble() );
-        }
-        if( !field.isEmpty() ) asyncH2dRollup.insert( key, field );
-    }
+    const QJsonObject asyncH2dRollup = buildAsyncH2dRollup(
+        asyncH2dBooleanSampleCounts,
+        asyncH2dBooleanTrueCounts,
+        asyncH2dTimingSums,
+        asyncH2dTimingMaxima,
+        asyncH2dTimingSampleCounts );
 
     QJsonObject summary;
     summary.insert( QStringLiteral("schema"),
@@ -22801,6 +22815,11 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeGpuStatusTextureNoReadbackFrames = 0;
     m_playbackSmokeFallbackCount = 0;
     m_playbackSmokeFallbackReasonCounts = QJsonObject();
+    m_playbackSmokeAsyncH2dBooleanTrueCounts = QJsonObject();
+    m_playbackSmokeAsyncH2dBooleanSampleCounts = QJsonObject();
+    m_playbackSmokeAsyncH2dTimingSums = QJsonObject();
+    m_playbackSmokeAsyncH2dTimingMaxima = QJsonObject();
+    m_playbackSmokeAsyncH2dTimingSampleCounts = QJsonObject();
     m_playbackSmokeBorrowedPreparedRgb8Bytes = 0;
     m_playbackSmokeOwnedPreparedRgb8Bytes = 0;
     m_playbackSmokeMovedPreparedRgb8Bytes = 0;
@@ -23818,6 +23837,34 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     case GpuPlaybackPipelineStatus::GpuTextureNoReadback:
         ++m_playbackSmokeGpuStatusTextureNoReadbackFrames;
         break;
+    }
+    {
+        const QJsonObject asyncH2d = gpuPlaybackReconAsyncH2dTelemetry( timing );
+        for( auto it = asyncH2d.constBegin(); it != asyncH2d.constEnd(); ++it )
+        {
+            if( it.value().isBool() )
+            {
+                incrementJsonCounter( &m_playbackSmokeAsyncH2dBooleanSampleCounts,
+                                      it.key() );
+                if( it.value().toBool() )
+                    incrementJsonCounter( &m_playbackSmokeAsyncH2dBooleanTrueCounts,
+                                          it.key() );
+            }
+            else if( it.value().isDouble() )
+            {
+                const double timingMs = it.value().toDouble();
+                m_playbackSmokeAsyncH2dTimingSums.insert(
+                    it.key(),
+                    m_playbackSmokeAsyncH2dTimingSums.value( it.key() ).toDouble()
+                        + timingMs );
+                m_playbackSmokeAsyncH2dTimingMaxima.insert(
+                    it.key(),
+                    qMax( m_playbackSmokeAsyncH2dTimingMaxima.value( it.key() ).toDouble(),
+                          timingMs ) );
+                incrementJsonCounter( &m_playbackSmokeAsyncH2dTimingSampleCounts,
+                                      it.key() );
+            }
+        }
     }
     {
         const QString fallbackReason =
@@ -25410,6 +25457,22 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
             QStringLiteral("gpu_playback_recon_async_h2d_last_presented"),
             gpuPlaybackReconAsyncH2dTelemetry(
                 m_lastPresentedStageTimingTelemetry ) );
+        fieldLog.insert(
+            QStringLiteral("gpu_playback_recon_async_h2d_session_rollup"),
+            buildAsyncH2dRollup(
+                m_playbackSmokeAsyncH2dBooleanSampleCounts,
+                m_playbackSmokeAsyncH2dBooleanTrueCounts,
+                m_playbackSmokeAsyncH2dTimingSums,
+                m_playbackSmokeAsyncH2dTimingMaxima,
+                m_playbackSmokeAsyncH2dTimingSampleCounts ) );
+        fieldLog.insert(
+            QStringLiteral("playback_prep_region_clock_resolution_ns"),
+            telemetryDoubleValue( m_lastPresentedStageTimingTelemetry,
+                                 "playback_prep_region_clock_resolution_ns" ) );
+        fieldLog.insert(
+            QStringLiteral("playback_prep_region_clock_monotonic"),
+            telemetryBoolValue( m_lastPresentedStageTimingTelemetry,
+                               "playback_prep_region_clock_monotonic" ) );
         fieldLog.insert( QStringLiteral("bottleneck"), bottleneck );
         fieldLog.insert( QStringLiteral("suggested_optimization"),
                          bottleneck.value(
