@@ -448,3 +448,27 @@ if ($timedOut) { Write-Host "  TIMED OUT after ${TimeoutSec}s - output is partia
 
 # Emit the receipt so a caller can pipeline on it.
 [pscustomobject]$receipt
+
+# PROPAGATE THE OUTCOME. This script's own header says "it is alive because it is running and
+# dead when it exits, and THE EXIT CODE IS THE TRUTH" -- and until now it did not honour that at
+# its own boundary. It computed $exitCode, wrote it into the receipt, printed it, and then fell
+# off the end, which in PowerShell exits 0. Invoke-Workstream.ps1 faithfully captured that
+# $LASTEXITCODE and logged laneExitCode=0, so EVERY failed lane was recorded as a success in the
+# only durable log the loop consults.
+#
+# Measured 2026-09-05, two dispatches of twelve:
+#   CITE-TXN-1          181.5s  USD 2.24  api_error_status 429 "You've hit your session limit"
+#   GATE-FAMILY-BOOKED    2.8s  USD 0     api_error_status 429
+# Both receipts carried exitCode 1. Both dispatch-log rows carried laneExitCode 0. Two of the
+# day's twelve dispatches produced nothing and were indistinguishable from work that succeeded.
+#
+# Sentinels are mapped rather than passed through: a negative value does not survive a process
+# exit code intact, and -1 would surface as 255. 124 for a timeout matches the taxonomy the repo
+# already uses in boundedRunnerExitCodes; 127 marks "reserved but never completed", which the
+# receipt also records as complete=false with the failure carried.
+$propagated = switch ($exitCode) {
+    -1      { 124 }   # timed out
+    -999    { 127 }   # slot reserved, no completion recorded
+    default { if ($exitCode -ge 0 -and $exitCode -le 255) { $exitCode } else { 1 } }
+}
+exit $propagated
