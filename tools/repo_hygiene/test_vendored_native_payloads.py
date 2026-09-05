@@ -1518,7 +1518,13 @@ class VendoredNativePayloadTests(unittest.TestCase):
         self.assertIn("tar -C $$(HOME)/bin", qmake)
 
         tests_workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
-        self.assertIn("python -m unittest tools.repo_hygiene.test_vendored_native_payloads -v", tests_workflow)
+        # This pin exists to guarantee CI RUNS THIS FILE. It used to assert the exact
+        # per-file invocation; the workflow now uses a directory target, which runs it by
+        # construction and also catches files added later -- a named list silently omits
+        # what it forgets to name. Both halves of the mechanism are pinned, so weakening
+        # either the search root or the pattern still fails here.
+        self.assertIn("unittest discover -s tools/repo_hygiene", tests_workflow)
+        self.assertIn('-p "test_*.py"', tests_workflow)
         self.assertIn("python -m tools.repo_hygiene.vendored_native_payloads --repo-root .", tests_workflow)
 
     def test_macos_release_toolchains_install_before_python_and_fail_closed(self) -> None:
