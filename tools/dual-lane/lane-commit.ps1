@@ -5,6 +5,22 @@
 #
 #   pwsh -File tools/dual-lane/lane-commit.ps1 -Lane claude -DryRun
 #   pwsh -File tools/dual-lane/lane-commit.ps1 -Lane claude -Message "subject line"
+#
+# WHAT THE `Dual-Lane:` TRAILER MEANS, AND WHAT IT DOES NOT (OWN-2)
+#
+# -Lane is CALLER-DECLARED. It is validated against the two-value set below and nothing else: no
+# caller is identified, challenged, or authenticated. So the `Dual-Lane: <lane>` trailer this script
+# writes is a PATH-OWNERSHIP LABEL and a typo-guard -- it records which lane's globs the staged paths
+# fall under. It is NOT an authorship attestation and must never be read as one.
+#
+# This is not hypothetical. Landed commits 48e9cd2f and 90d49ee4 (CDX-3) carry `Dual-Lane: claude`
+# on tools/** paths: the codex lane ran -Lane claude and nothing objected, because nothing could.
+# The ledger reads as though the claude lane authored them. In a month nobody would remember it did
+# not -- which is precisely why the label is written down here rather than inferred later.
+#
+# Same class as the content-review gate's `Seat:` line, which CLAUDE.md already states "validates a
+# CLAIMED identity from the ledger; it does NOT authenticate that actor or session". A control that
+# names an identity and authenticates nothing is useful as a guard-rail and dangerous as evidence.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateSet('codex','claude')][string]$Lane,
