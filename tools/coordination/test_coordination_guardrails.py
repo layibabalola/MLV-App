@@ -144,6 +144,7 @@ def test_supplied_timestamp_must_be_a_real_instant(tmp_path):
 
 
 LOOP = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
+WORKSTREAM = ROOT / "tools" / "coordination" / "Invoke-Workstream.ps1"
 
 
 def test_cycle_receipt_stamp_has_exactly_one_assignment():
@@ -218,3 +219,256 @@ def test_a_transient_fetch_failure_does_not_halt_the_cycle():
 
     # the halt message reports the attempt count, so receipts stay diagnosable
     assert "attempts; " + stale in text
+
+
+def test_landing_probe_knows_the_verbs_and_connectors_that_actually_get_used():
+    """Two MEASURED misses on 2026-09-05, both from real merged PR bodies.
+
+    PR #53: "Closes OWN-2 and delivers GATE-RESIDUALS-1(b)" -- OWN-2 was skipped,
+    GATE-RESIDUALS-1 was not, and the loop spent a lane on it at 02:11Z.
+    PR #52: "Closes queue item OWN-1-PRECEDENCE" -- only "card" was permitted between the verb
+    and the id, so that missed too, and the near-miss diagnostic surfaced it on its first run.
+
+    The vocabulary is a fixed list, and every writer who does not know it costs a dispatch.
+    """
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    assert "delivers" in text, "landing verb 'delivers' not accepted"
+    assert "queue" in text, "'queue item' connector not accepted"
+
+
+def test_a_bare_id_in_prose_still_does_NOT_count_as_landing():
+    """The load-bearing asymmetry, from the probe's own comment: a false positive SKIPS
+    genuinely open work, which is strictly worse than re-dispatching finished work. Widening
+    the vocabulary must never reach a bare mention."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    line = [l for l in text.splitlines() if "$rxBody =" in l]
+    assert line, "landing-verb body regex not found"
+    assert "(?:lands|closes|fixes|resolves|delivers)" in line[0], (
+        "body match is no longer gated behind an explicit landing verb"
+    )
+
+
+def test_near_misses_are_summarised_not_printed_per_card():
+    """The first draft printed one line per near-miss and produced TEN on a single run, mostly
+    genuine prose mentions. A diagnostic that fires every run is one nobody reads -- which is
+    exactly the failure it exists to prevent."""
+    text = WORKSTREAM.read_text(encoding="utf-8")
+    assert "$nearMisses" in text, "near-miss diagnostic absent"
+    assert "NEAR-MISS ($($nearMisses.Count))" in text, "near-misses are not summarised into one line"
+    assert "NOT skipped" in text, "the diagnostic must say it did not act on the near-miss"
+
+# --- assert-script-currency.ps1 -------------------------------------------------------------
+# The board root is the only checkout carrying .claude-state/, and it routinely sits on a peer
+# branch. Running a tool from there by absolute path silently executes a stale copy: the script
+# exits 0 and prints a wrong answer. These tests pin the guard that refuses that, and pin the
+# fail-OPEN direction -- a guard that blocked on "I could not check" would be worse than the bug.
+
+GUARD = ROOT / "tools" / "coordination" / "assert-script-currency.ps1"
+GUARDED = [
+    ROOT / "tools" / "coordination" / "queue-derive.ps1",
+    ROOT / "tools" / "coordination" / "board-health-sweep.ps1",
+]
+
+
+def guard_status(script_path, ref="fork/master", env=None):
+    """Run the guard with -PassThru and return its status, or 'THREW' when it refuses."""
+    cmd = (
+        "try { (& '%s' -ScriptPath '%s' -Ref '%s' -PassThru).status } "
+        "catch { 'THREW' }" % (GUARD.as_posix(), Path(script_path).as_posix(), ref)
+    )
+    import os
+    e = dict(os.environ)
+    e.pop("MLV_ALLOW_STALE_TOOLS", None)
+    if env:
+        e.update(env)
+    out = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", cmd], text=True, capture_output=True, env=e
+    ).stdout.strip().splitlines()
+    return out[-1].strip() if out else ""
+
+
+def currency_repo(tmp_path):
+    """A repo with a 'fork/master' ref and a tracked script, so the guard has something to compare."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
+    script = tmp_path / "tool.ps1"
+    script.write_text("Write-Output 'original'\n")
+    subprocess.run(["git", "add", "tool.ps1"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=tmp_path, check=True)
+    # A local ref literally named refs/remotes/fork/master, so no network or remote is needed.
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/fork/master", git(tmp_path, "rev-parse", "HEAD")],
+        cwd=tmp_path, check=True,
+    )
+    return script
+
+
+def test_currency_guard_passes_when_the_file_matches_the_reference(tmp_path):
+    script = currency_repo(tmp_path)
+    assert guard_status(script) == "current"
+
+
+def test_currency_guard_refuses_when_the_file_differs_from_the_reference(tmp_path):
+    script = currency_repo(tmp_path)
+    script.write_text("Write-Output 'a stale peer-branch copy'\n")
+    assert guard_status(script) == "THREW"
+
+
+def test_currency_guard_refusal_names_the_branch_the_checkout_is_on(tmp_path):
+    # The message has to say WHY, or the reader treats it as noise and sets the hatch reflexively.
+    script = currency_repo(tmp_path)
+    subprocess.run(["git", "checkout", "-qb", "diag/some-peer-branch"], cwd=tmp_path, check=True)
+    script.write_text("Write-Output 'drifted'\n")
+    cmd = "try { & '%s' -ScriptPath '%s' } catch { $_.Exception.Message }" % (
+        GUARD.as_posix(), script.as_posix(),
+    )
+    import os
+    e = dict(os.environ)
+    e.pop("MLV_ALLOW_STALE_TOOLS", None)  # an inherited hatch would make this pass vacuously
+    out = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", cmd], text=True, capture_output=True, env=e
+    )
+    blob = out.stdout + out.stderr
+    assert "diag/some-peer-branch" in blob
+    assert "MLV_ALLOW_STALE_TOOLS" in blob
+
+
+def test_currency_guard_honours_the_escape_hatch(tmp_path):
+    script = currency_repo(tmp_path)
+    script.write_text("Write-Output 'deliberately modified'\n")
+    assert guard_status(script, env={"MLV_ALLOW_STALE_TOOLS": "1"}) == "skipped"
+
+
+def test_currency_guard_allows_a_file_not_yet_present_on_the_reference(tmp_path):
+    # A brand-new script is not stale. Blocking here would make it impossible to add one.
+    script = currency_repo(tmp_path)
+    fresh = script.parent / "brand-new.ps1"
+    fresh.write_text("Write-Output 'new'\n")
+    assert guard_status(fresh) == "untracked-on-ref"
+
+
+def test_currency_guard_fails_open_when_the_reference_does_not_resolve(tmp_path):
+    # A lane sandbox or a fresh clone has no 'fork' remote. That is missing infrastructure,
+    # not proven drift, so the guard must stay silent rather than halt the caller.
+    script = currency_repo(tmp_path)
+    script.write_text("Write-Output 'differs'\n")
+    assert guard_status(script, ref="nonexistent/ref") == "unknown"
+
+
+def test_currency_guard_fails_open_outside_a_git_working_tree(tmp_path):
+    loose = tmp_path / "loose.ps1"
+    loose.write_text("Write-Output 'x'\n")
+    assert guard_status(loose) == "unknown"
+
+
+def test_the_read_only_board_diagnostics_actually_invoke_the_guard(tmp_path):
+    # Without this, the guard could quietly stop being wired and nothing would notice.
+    for script in GUARDED:
+        body = script.read_text(encoding="utf-8")
+        assert "assert-script-currency.ps1" in body, f"{script.name} no longer invokes the guard"
+        assert "-ScriptPath $PSCommandPath" in body, f"{script.name} guards the wrong path"
+
+# --- Invoke-Workstream: a malformed priority must not stop dispatch -------------------------
+# Get-Rank used a bare [int] cast. On a non-numeric string that THROWS, and the throw lands
+# inside Sort-Object -Property { Get-Rank $_ }, killing selection -- while the script still
+# exits 0, so the loop records a normal cycle that dispatched nothing. Silent starvation is
+# worse than a halt because nothing reports it. queue.json demonstrably carries prose in this
+# field (DISPATCH-CDX-14, DISPATCH-CDX-15), so the authoring habit is real, not hypothetical.
+
+
+
+def workstream_dry_run(tmp_path, items, track="factory"):
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"schema": "test", "items": items}), encoding="ascii")
+    return subprocess.run(
+        [
+            "pwsh", "-NoProfile", "-File", str(WORKSTREAM),
+            "-Track", track, "-DryRun", "-NoLandingProbe", "-QueuePath", str(queue),
+        ],
+        text=True, capture_output=True,
+    )
+
+
+NUMERIC_CARD = {"id": "NUMERIC-1", "state": "booked", "track": "factory", "priority": 1, "title": "normal"}
+PROSE_CARD = {
+    "id": "PROSE-1", "state": "booked", "track": "factory",
+    "priority": "CRITICAL PATH - the cap is now two blocks away, not one",
+    "title": "prose in the priority field",
+}
+
+
+def test_a_prose_priority_does_not_stop_the_dispatcher_selecting(tmp_path):
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert "card=NUMERIC-1" in out.stdout, out.stdout + out.stderr
+    assert "Sort-Object" not in out.stderr, "selection still dies on the cast"
+
+
+def test_a_prose_priority_is_reported_loudly_rather_than_swallowed(tmp_path):
+    # Ranking it 999 silently would hide a card that someone deliberately marked urgent.
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert "NON-NUMERIC PRIORITY" in out.stderr
+    assert "PROSE-1" in out.stderr
+
+
+def test_the_priority_warning_stays_off_machine_readable_stdout(tmp_path):
+    # The [WORKSTREAM] stdout lines are parsed, and emitting inside a Sort-Object property
+    # block would make the sort key an array rather than an int.
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert "NON-NUMERIC PRIORITY" not in out.stdout
+
+
+def test_the_priority_warning_is_emitted_once_per_card(tmp_path):
+    # Sort-Object may evaluate the property block more than once per item.
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD, PROSE_CARD])
+    assert out.stderr.count("NON-NUMERIC PRIORITY on card 'PROSE-1'") == 1
+
+
+def test_a_card_with_a_prose_priority_is_still_dispatchable(tmp_path):
+    # Ranked last, not excluded -- a malformed field must not make work unreachable.
+    out = workstream_dry_run(tmp_path, [PROSE_CARD])
+    assert "card=PROSE-1" in out.stdout, out.stdout + out.stderr
+
+
+def test_a_wholly_numeric_queue_produces_no_priority_warning(tmp_path):
+    out = workstream_dry_run(tmp_path, [NUMERIC_CARD])
+    assert "NON-NUMERIC PRIORITY" not in out.stderr
+    assert "card=NUMERIC-1" in out.stdout
+
+
+# --- Invoke-Lane: the exit code must be the truth ------------------------------------------
+# The script's own header says "it is alive because it is running and dead when it exits, and the
+# exit code is the truth" -- and it did not honour that at its own boundary. It computed the
+# lane's exit code, wrote it into the receipt, printed it, then fell off the end, which exits 0.
+# Invoke-Workstream captured that 0 and logged laneExitCode=0, so a failed lane was recorded as a
+# success. Measured 2026-09-05: two of twelve dispatches hit HTTP 429 ("You've hit your session
+# limit"), produced nothing, carried exitCode 1 in their receipts and laneExitCode 0 in the log.
+
+LANE_RUNNER = ROOT / "tools" / "coordination" / "Invoke-Lane.ps1"
+
+
+def test_invoke_lane_propagates_its_exit_code_instead_of_falling_off_the_end():
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "exit $propagated" in body, (
+        "Invoke-Lane must exit with the lane's outcome; falling off the end exits 0 and makes "
+        "every failed lane look successful to Invoke-Workstream's laneExitCode"
+    )
+
+
+def test_invoke_lane_maps_the_negative_sentinels_rather_than_passing_them_through():
+    # -1 would surface as 255 through a process exit code, and -999 does not survive at all.
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "-1      { 124 }" in body, "timeout sentinel is not mapped"
+    assert "-999    { 127 }" in body, "never-completed sentinel is not mapped"
+
+
+def test_the_timeout_code_matches_the_taxonomy_the_repo_already_uses():
+    # boundedRunnerExitCodes already fixes timeout=124; a second private meaning for the same
+    # condition is how two tools end up disagreeing about one event.
+    config = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
+    # The taxonomy lives under `locking`, not at the top level. Found by searching the config
+    # rather than assuming: the first version of this test guessed the top level, and a test that
+    # skips is a test that never fired.
+    codes = config["locking"]["boundedRunnerExitCodes"]
+    assert int(codes["timeout"]) == 124
+    assert "-1      { 124 }" in LANE_RUNNER.read_text(encoding="utf-8")

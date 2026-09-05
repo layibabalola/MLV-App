@@ -179,6 +179,7 @@ function Get-LastDispatchAgeHours([string]$id) {
 # returns CANNOT-DETERMINE and NOTHING is skipped. An unreadable signal must never silently
 # shrink the board - that is how a queue goes quiet and looks healthy.
 $landedById = @{}
+    $nearMisses = @()
 $landedHow = @{}
 $landingProbe = 'skipped'
 if (-not $NoLandingProbe) {
@@ -210,14 +211,40 @@ if (-not $NoLandingProbe) {
                         # prose ("unlike OWN-GITHUB-1") must NOT count: a false positive here SKIPS
                         # genuinely open work, which is strictly worse than re-dispatching finished
                         # work. Tolerates markdown emphasis around the id.
-                        $rxBody = '(?i)(?:lands|closes|fixes|resolves)\s+(?:card\s+)?[*_`]*' +
+                        # 'delivers' added 2026-09-05 from a MEASURED miss: PR #53's body read
+                        # "Closes OWN-2 and delivers GATE-RESIDUALS-1(b)". OWN-2 was skipped;
+                        # GATE-RESIDUALS-1 was NOT, and the loop spent a lane on it at 02:11Z.
+                        # The vocabulary is fixed and no writer can be expected to know it, so the
+                        # near-miss diagnostic below reports rather than widening this further:
+                        # a false positive SKIPS open work, which stays strictly worse.
+                        # 'queue item' connector added the same day, from a SECOND measured miss the
+                        # near-miss diagnostic surfaced on its first run: PR #52 read "Closes queue
+                        # item OWN-1-PRECEDENCE" and only 'card' was permitted between verb and id.
+                        $rxBody = '(?i)(?:lands|closes|fixes|resolves|delivers)\s+(?:(?:card|queue\s+item)\s+)?[*_`]*' +
                                   [regex]::Escape($id) + '[*_`]*(?![A-Za-z0-9-])'
                         $hit = @($prs | Where-Object { $_.body -and ($_.body -match $rxBody) }) | Select-Object -First 1
                         if ($hit) { $how = 'body' }
+                        else {
+                            # NEAR-MISS. A merged PR naming this card WITHOUT a landing verb is either prose
+                            # ('unlike OWN-GITHUB-1', correctly ignored) or a landing phrased in a verb this
+                            # probe does not know. Both were silent before; the second cost a dispatch.
+                            # REPORT it and cite the PR - do NOT skip on it. Skipping open work stays worse.
+                            $rxMention = '(?i)[*_`]*' + [regex]::Escape($id) + '[*_`]*(?![A-Za-z0-9-])'
+                            $near = @($prs | Where-Object { $_.body -and ($_.body -match $rxMention) }) | Select-Object -First 1
+                            # COLLECTED, not printed per card. The first draft of this emitted one line per
+                            # near-miss and produced TEN on a single run - mostly genuine prose mentions. A
+                            # diagnostic that fires every run is one nobody reads, which is the failure it was
+                            # meant to prevent. One summary line keeps the signal and loses the noise.
+                            if ($near) { $nearMisses += "$id(PR #$($near.number))" }
+                        }
                     }
                     if ($hit) { $landedById[$id] = $hit; $landedHow[$id] = $how }
                 }
-                $landingProbe = "ok: $($prs.Count) merged PR(s) scanned, $($landedById.Count) card(s) matched by title or landing-verb body reference"
+                if ($nearMisses.Count -gt 0) {
+        Write-Output ("WORKSTREAM: landing-probe NEAR-MISS ($($nearMisses.Count)): " +
+            ($nearMisses -join ', ') + " - named in a merged PR without a landing verb, NOT skipped")
+    }
+    $landingProbe = "ok: $($prs.Count) merged PR(s) scanned, $($landedById.Count) card(s) matched by title or landing-verb body reference"
             }
         } catch {
             $landingProbe = "cannot-determine: $($_.Exception.Message)"
@@ -232,11 +259,33 @@ foreach ($id in $landedById.Keys) {
 }
 
 # ------------------------------------------------------------------ selection
+$script:WarnedNonNumericPriority = @{}
 function Get-Rank($item) {
     # Unset priority sorts LAST, so an unprioritised card never outranks a p1.
     $pr = Get-Prop $item 'priority'
     if ($null -eq $pr) { return 999 }
-    return [int]$pr
+    $n = 0
+    if ([int]::TryParse([string]$pr, [ref]$n)) { return $n }
+
+    # A bare [int] cast here THROWS on a non-numeric string, and the throw lands inside
+    # Sort-Object -Property { Get-Rank $_ }, so the whole selection dies -- while the script
+    # still exits 0. The loop then records a normal cycle that dispatched nothing. Silent
+    # starvation is worse than a halt, because nothing reports it.
+    #
+    # This is not hypothetical: queue.json carries prose in this field on DISPATCH-CDX-14
+    # ("HIGHEST - outranks the control-plane three") and DISPATCH-CDX-15 ("CRITICAL PATH -
+    # the cap is now two blocks away, not one"). Both happen to be terminal today, so they
+    # never reach this function -- the dispatcher is one live prose-priority card away from
+    # dispatching nothing at all, and the authoring habit that produces them is demonstrated.
+    #
+    # Rank it as unset and SAY SO on stderr. Not stdout: the [WORKSTREAM] lines are parsed,
+    # and emitting into a Sort-Object property block would make the sort key an array.
+    $id = [string](Get-Prop $item 'id')
+    if (-not $script:WarnedNonNumericPriority.ContainsKey($id)) {
+        $script:WarnedNonNumericPriority[$id] = $true
+        [Console]::Error.WriteLine(("WORKSTREAM: NON-NUMERIC PRIORITY on card '{0}': {1}. Ranked as unset (999) so selection continues; give the card a numeric priority to restore its rank." -f $id, ([string]$pr).Trim()))
+    }
+    return 999
 }
 
 if ($CardId) {
