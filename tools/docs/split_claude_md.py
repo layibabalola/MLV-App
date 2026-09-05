@@ -22,6 +22,11 @@ import os
 import re
 import sys
 
+# Per-parent profiles. AGENTS.md added 2026-09-05: also entry-tier (65,157 bytes vs a 12,000 cap)
+# and auto-loaded into every session INCLUDING every dispatched lane, so its size is paid per lane
+# run rather than once.
+PROFILES = {}
+
 PARENT = "CLAUDE.md"
 CHILD_DIR = "claude"
 
@@ -53,6 +58,59 @@ RETAIN = [
     "## Behavioral Rules for Claude Code",
 ]
 
+PROFILES["CLAUDE.md"] = {
+    "child_dir": CHILD_DIR, "plan": PLAN, "titles": CHILD_TITLES, "retain": RETAIN,
+}
+
+# AGENTS.md. RETENTION RULE: keep anything an agent must obey WITHOUT being told to open another
+# file. Where a section was arguable it was RETAINED. An oversized parent is a cost; an operative
+# rule moved out of auto-load is a defect. That is why this lands OVER the 12,000 cap rather than
+# under it -- closing the remainder is a separate decision about which rules may stop being
+# auto-loaded, and it is deliberately not smuggled in here.
+AGENTS_PLAN = [
+    ("## Brokered Auto-Closeout", "brokered-auto-closeout.md"),
+    ("## GUI Release Build Verification", "release-and-regression.md"),
+    ('## Output-Regression Prevention -- "behavior-preserving" is the HIGHEST-risk class',
+     "release-and-regression.md"),
+    ("## Tier-B lane-health contract", "lane-health.md"),
+    ("## Implemented Test Scaffold", "testing-and-notes.md"),
+    ("## Active Investigation Notes", "testing-and-notes.md"),
+    ("## Runtime helper", "testing-and-notes.md"),
+]
+AGENTS_TITLES = {
+    "brokered-auto-closeout.md": "Brokered Auto-Closeout (detail)",
+    "release-and-regression.md": "Release build verification and output-regression prevention (detail)",
+    "lane-health.md": "Tier-B lane-health contract (detail)",
+    "testing-and-notes.md": "Test scaffold, runtime helper and investigation notes (detail)",
+}
+AGENTS_RETAIN = [
+    "## Sensitive Folders -- Write Policy",
+    "## Investigation Discipline",
+    "## Agent Bridge Startup",
+    "## Runtime Execution Rules (Windows)",
+    # Says "apply in EVERY present/output/screenshot path" and is a dated operator directive.
+    # A rule whose own text says EVERY cannot live behind a pointer.
+    "## Aspect / RAWC de-squeeze -- apply in EVERY present/output/screenshot path (Layi 2026-06-30)",
+]
+PROFILES["AGENTS.md"] = {
+    "child_dir": "agents", "plan": AGENTS_PLAN, "titles": AGENTS_TITLES, "retain": AGENTS_RETAIN,
+}
+
+
+def use_profile(parent):
+    """Point the module globals at one parent's profile.
+
+    The tool was written single-parent. Rebinding globals keeps every downstream function
+    untouched, which is a far smaller and more reviewable diff than threading a config object
+    through all of them for no behavioural gain.
+    """
+    global PARENT, CHILD_DIR, PLAN, CHILD_TITLES, RETAIN
+    if parent not in PROFILES:
+        raise SystemExit("no profile for %s; known: %s" % (parent, ", ".join(sorted(PROFILES))))
+    prof = PROFILES[parent]
+    PARENT, CHILD_DIR = parent, prof["child_dir"]
+    PLAN, CHILD_TITLES, RETAIN = prof["plan"], prof["titles"], prof["retain"]
+
 
 def split_sections(text):
     """Return (preamble, [(heading, body_including_heading), ...]) verbatim."""
@@ -75,7 +133,8 @@ def derive_pinned(repo_root):
     src = os.path.join(repo_root, "tools/repo_hygiene/brokered_closeout.py")
     with open(src, encoding="utf-8") as fh:
         text = fh.read()
-    rx = re.compile(r'\{"path":\s*"CLAUDE\.md",\s*"contains":\s*"((?:[^"\\]|\\.)*)"\}')
+    rx = re.compile(r'\{"path":\s*"' + re.escape(PARENT) +
+                    r'",\s*"contains":\s*"((?:[^"\\]|\\.)*)"\}')
     return [m.encode().decode("unicode_escape") for m in rx.findall(text)]
 
 
@@ -146,7 +205,7 @@ def refresh_tokens(root, dry_run):
     if err:
         print("cannot derive pinned tokens: %s" % err)
         return 1
-    tokens = pinned_all.get("CLAUDE.md", [])
+    tokens = pinned_all.get(PARENT, [])
 
     child_dir = os.path.join(root, CHILD_DIR)
     child_bodies = {}
@@ -194,7 +253,7 @@ def refresh_tokens(root, dry_run):
         return 1
 
     print("pinned tokens: %d -> %d" % (len(lines[start:end]) - 7, len(tokens)))
-    print("CLAUDE.md: %d -> %d bytes on disk"
+    print(PARENT + ": %d -> %d bytes on disk"
           % (len(raw), len(new_text.replace("\n", newline).encode("utf-8"))))
     if dry_run:
         print("--dry-run: nothing written.")
@@ -209,11 +268,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo-root", default=os.getcwd())
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--parent", default="CLAUDE.md",
+                    help="which entry-tier parent to split; see PROFILES")
     ap.add_argument("--refresh-tokens", action="store_true",
                     help="rebuild the pinned-token block in an already-split CLAUDE.md")
     args = ap.parse_args()
     root = os.path.abspath(args.repo_root)
 
+    use_profile(args.parent)
     if args.refresh_tokens:
         return refresh_tokens(root, args.dry_run)
 
@@ -294,7 +356,7 @@ def main():
         """Byte length as it will actually land, honouring the newline convention."""
         return len(s.replace("\n", newline).encode("utf-8"))
 
-    print("CLAUDE.md split plan (verbatim demotion)")
+    print("%s split plan (verbatim demotion)" % PARENT)
     print("  line endings: %s (preserved)" % ("CRLF" if newline == "\r\n" else "LF"))
     print("  before: %d bytes on disk, %d sections" % (len(raw), len(sections)))
     print("  after : %d bytes on disk, %d retained sections + index"
