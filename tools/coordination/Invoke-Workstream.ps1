@@ -259,11 +259,33 @@ foreach ($id in $landedById.Keys) {
 }
 
 # ------------------------------------------------------------------ selection
+$script:WarnedNonNumericPriority = @{}
 function Get-Rank($item) {
     # Unset priority sorts LAST, so an unprioritised card never outranks a p1.
     $pr = Get-Prop $item 'priority'
     if ($null -eq $pr) { return 999 }
-    return [int]$pr
+    $n = 0
+    if ([int]::TryParse([string]$pr, [ref]$n)) { return $n }
+
+    # A bare [int] cast here THROWS on a non-numeric string, and the throw lands inside
+    # Sort-Object -Property { Get-Rank $_ }, so the whole selection dies -- while the script
+    # still exits 0. The loop then records a normal cycle that dispatched nothing. Silent
+    # starvation is worse than a halt, because nothing reports it.
+    #
+    # This is not hypothetical: queue.json carries prose in this field on DISPATCH-CDX-14
+    # ("HIGHEST - outranks the control-plane three") and DISPATCH-CDX-15 ("CRITICAL PATH -
+    # the cap is now two blocks away, not one"). Both happen to be terminal today, so they
+    # never reach this function -- the dispatcher is one live prose-priority card away from
+    # dispatching nothing at all, and the authoring habit that produces them is demonstrated.
+    #
+    # Rank it as unset and SAY SO on stderr. Not stdout: the [WORKSTREAM] lines are parsed,
+    # and emitting into a Sort-Object property block would make the sort key an array.
+    $id = [string](Get-Prop $item 'id')
+    if (-not $script:WarnedNonNumericPriority.ContainsKey($id)) {
+        $script:WarnedNonNumericPriority[$id] = $true
+        [Console]::Error.WriteLine(("WORKSTREAM: NON-NUMERIC PRIORITY on card '{0}': {1}. Ranked as unset (999) so selection continues; give the card a numeric priority to restore its rank." -f $id, ([string]$pr).Trim()))
+    }
+    return 999
 }
 
 if ($CardId) {
