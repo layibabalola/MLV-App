@@ -256,3 +256,115 @@ def test_near_misses_are_summarised_not_printed_per_card():
     assert "$nearMisses" in text, "near-miss diagnostic absent"
     assert "NEAR-MISS ($($nearMisses.Count))" in text, "near-misses are not summarised into one line"
     assert "NOT skipped" in text, "the diagnostic must say it did not act on the near-miss"
+
+# --- assert-script-currency.ps1 -------------------------------------------------------------
+# The board root is the only checkout carrying .claude-state/, and it routinely sits on a peer
+# branch. Running a tool from there by absolute path silently executes a stale copy: the script
+# exits 0 and prints a wrong answer. These tests pin the guard that refuses that, and pin the
+# fail-OPEN direction -- a guard that blocked on "I could not check" would be worse than the bug.
+
+GUARD = ROOT / "tools" / "coordination" / "assert-script-currency.ps1"
+GUARDED = [
+    ROOT / "tools" / "coordination" / "queue-derive.ps1",
+    ROOT / "tools" / "coordination" / "board-health-sweep.ps1",
+]
+
+
+def guard_status(script_path, ref="fork/master", env=None):
+    """Run the guard with -PassThru and return its status, or 'THREW' when it refuses."""
+    cmd = (
+        "try { (& '%s' -ScriptPath '%s' -Ref '%s' -PassThru).status } "
+        "catch { 'THREW' }" % (GUARD.as_posix(), Path(script_path).as_posix(), ref)
+    )
+    import os
+    e = dict(os.environ)
+    e.pop("MLV_ALLOW_STALE_TOOLS", None)
+    if env:
+        e.update(env)
+    out = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", cmd], text=True, capture_output=True, env=e
+    ).stdout.strip().splitlines()
+    return out[-1].strip() if out else ""
+
+
+def currency_repo(tmp_path):
+    """A repo with a 'fork/master' ref and a tracked script, so the guard has something to compare."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
+    script = tmp_path / "tool.ps1"
+    script.write_text("Write-Output 'original'\n")
+    subprocess.run(["git", "add", "tool.ps1"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=tmp_path, check=True)
+    # A local ref literally named refs/remotes/fork/master, so no network or remote is needed.
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/fork/master", git(tmp_path, "rev-parse", "HEAD")],
+        cwd=tmp_path, check=True,
+    )
+    return script
+
+
+def test_currency_guard_passes_when_the_file_matches_the_reference(tmp_path):
+    script = currency_repo(tmp_path)
+    assert guard_status(script) == "current"
+
+
+def test_currency_guard_refuses_when_the_file_differs_from_the_reference(tmp_path):
+    script = currency_repo(tmp_path)
+    script.write_text("Write-Output 'a stale peer-branch copy'\n")
+    assert guard_status(script) == "THREW"
+
+
+def test_currency_guard_refusal_names_the_branch_the_checkout_is_on(tmp_path):
+    # The message has to say WHY, or the reader treats it as noise and sets the hatch reflexively.
+    script = currency_repo(tmp_path)
+    subprocess.run(["git", "checkout", "-qb", "diag/some-peer-branch"], cwd=tmp_path, check=True)
+    script.write_text("Write-Output 'drifted'\n")
+    cmd = "try { & '%s' -ScriptPath '%s' } catch { $_.Exception.Message }" % (
+        GUARD.as_posix(), script.as_posix(),
+    )
+    import os
+    e = dict(os.environ)
+    e.pop("MLV_ALLOW_STALE_TOOLS", None)  # an inherited hatch would make this pass vacuously
+    out = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", cmd], text=True, capture_output=True, env=e
+    )
+    blob = out.stdout + out.stderr
+    assert "diag/some-peer-branch" in blob
+    assert "MLV_ALLOW_STALE_TOOLS" in blob
+
+
+def test_currency_guard_honours_the_escape_hatch(tmp_path):
+    script = currency_repo(tmp_path)
+    script.write_text("Write-Output 'deliberately modified'\n")
+    assert guard_status(script, env={"MLV_ALLOW_STALE_TOOLS": "1"}) == "skipped"
+
+
+def test_currency_guard_allows_a_file_not_yet_present_on_the_reference(tmp_path):
+    # A brand-new script is not stale. Blocking here would make it impossible to add one.
+    script = currency_repo(tmp_path)
+    fresh = script.parent / "brand-new.ps1"
+    fresh.write_text("Write-Output 'new'\n")
+    assert guard_status(fresh) == "untracked-on-ref"
+
+
+def test_currency_guard_fails_open_when_the_reference_does_not_resolve(tmp_path):
+    # A lane sandbox or a fresh clone has no 'fork' remote. That is missing infrastructure,
+    # not proven drift, so the guard must stay silent rather than halt the caller.
+    script = currency_repo(tmp_path)
+    script.write_text("Write-Output 'differs'\n")
+    assert guard_status(script, ref="nonexistent/ref") == "unknown"
+
+
+def test_currency_guard_fails_open_outside_a_git_working_tree(tmp_path):
+    loose = tmp_path / "loose.ps1"
+    loose.write_text("Write-Output 'x'\n")
+    assert guard_status(loose) == "unknown"
+
+
+def test_the_read_only_board_diagnostics_actually_invoke_the_guard(tmp_path):
+    # Without this, the guard could quietly stop being wired and nothing would notice.
+    for script in GUARDED:
+        body = script.read_text(encoding="utf-8")
+        assert "assert-script-currency.ps1" in body, f"{script.name} no longer invokes the guard"
+        assert "-ScriptPath $PSCommandPath" in body, f"{script.name} guards the wrong path"
