@@ -2449,6 +2449,10 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         state2 = h2_root / "bridge-root" / "state"
         state2.mkdir(parents=True)
         shutil.copy2(str(snap1), str(state2 / "code-watcher-snapshot.json"))
+        # The seeded snapshot ALREADY EXISTS, so any wait that only checks for existence is
+        # satisfied instantly and proves nothing about the post-restart rewrite. Capture its
+        # mtime now so the wait below can key on the file actually CHANGING.
+        seeded_snapshot_mtime_ns = (state2 / "code-watcher-snapshot.json").stat().st_mtime_ns
 
         h2 = SupervisorHarness(h2_root, watch_paths=[trigger_file], config=tight_config, storage=self.storage)
         self._harnesses.append(h2)
@@ -2459,8 +2463,17 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         h2.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
         h2.wait_for_audit_events("mcp_server_self_restarted")
 
-        # Give the post-restart snapshot write a moment to land.
-        h2.wait_for_snapshot()
+        # Wait for the post-restart snapshot REWRITE, not merely for the file to exist.
+        #
+        # This previously called wait_for_snapshot(), which returns as soon as
+        # code-watcher-snapshot.json is present -- and it is present from the seed above, so
+        # it returned immediately and the assertion below read the STALE seeded snapshot.
+        # That is why CI saw mtimes ~1.05 s apart while three consecutive local runs passed:
+        # a race whose outcome depends on whether the rewrite happens to land first.
+        #
+        # wait_for_snapshot_ready(old_file_mtime_ns=...) exists for exactly this and polls
+        # until the file's own mtime differs AND the content is valid schema_version=1.
+        h2.wait_for_snapshot_ready(old_file_mtime_ns=seeded_snapshot_mtime_ns)
 
         # Record snapshot mtime after the first (successful) restart.
         snap2_data_after_restart1 = json.loads((state2 / "code-watcher-snapshot.json").read_text(encoding="utf-8"))
