@@ -189,86 +189,28 @@ function Get-LastDispatchAgeHours([string]$id) {
 # on work that is already on master. Measured 2026-09-03: the loop's first unattended fire
 # dispatched a lane for SIDECAR-FIX-1, which PR #23 had merged nine hours earlier.
 #
-# RAW OUTRANKS THE QUEUE, so ask GitHub, not the card. Two strengths, never merged:
-#   TITLE match  -> strong. A maintainer wrote the card id into the merge subject
-#                   ("...(lands SIDECAR-FIX-1)"). This SKIPS the card, with the PR cited.
-#   BODY-ONLY    -> weak. `gh --search` is full text, so a card id in a body or comment is a
-#                   MENTION, not a landing (QUEUE-DERIVE-1 appears in PR #22 and did not land
-#                   there). This is REPORTED and the card is still dispatched.
-# FAIL-OPEN BY CONSTRUCTION: if gh is missing, unauthenticated, offline or slow, the probe
-# returns CANNOT-DETERMINE and NOTHING is skipped. An unreadable signal must never silently
-# shrink the board - that is how a queue goes quiet and looks healthy.
+# RAW OUTRANKS THE QUEUE, so ask GitHub, not the card. THE MATCH RULES, THE LANDING VOCABULARY
+# AND THE NEAR-MISS ASYMMETRY NOW LIVE IN ONE PLACE: landing-probe.ps1, in this directory.
+# queue-derive.ps1 asks GitHub the same question for a different purpose, and two copies of this
+# vocabulary would be widened once and left stale - the single most frequently paid failure on
+# this board. Read that file for the rules and for the measured incident behind each one.
+. (Join-Path $PSScriptRoot 'landing-probe.ps1')
+
 $landedById = @{}
-    $nearMisses = @()
 $landedHow = @{}
+$nearMisses = @()
 $landingProbe = 'skipped'
 if (-not $NoLandingProbe) {
-    $gh = Get-Command gh -ErrorAction SilentlyContinue
-    if (-not $gh) {
-        $landingProbe = 'cannot-determine: gh not on PATH'
-    } else {
-        try {
-            $raw = & gh pr list --repo layibabalola/MLV-App --state merged --limit 100 `
-                       --json number,title,body 2>$null
-            if ($LASTEXITCODE -ne 0 -or -not $raw) {
-                $landingProbe = "cannot-determine: gh exited $LASTEXITCODE"
-            } else {
-                $prs = $raw | ConvertFrom-Json
-                foreach ($item in $live) {
-                    $id = Get-Prop $item 'id'
-                    if (-not $id) { continue }
-                    # Word-boundary match so C2-SUBMIT-2 never matches C2-SUBMIT-22.
-                    $rx = '(?<![A-Za-z0-9-])' + [regex]::Escape($id) + '(?![A-Za-z0-9-])'
-                    $hit = @($prs | Where-Object { $_.title -match $rx }) | Select-Object -First 1
-                    $how = 'title'
-                    if (-not $hit) {
-                        # A correct PR whose TITLE omits the card id is invisible to a title-only
-                        # probe, and the card silently becomes re-dispatchable once it passes
-                        # -StaleHours. Measured 2026-09-04: PR #38 landed OWN-GITHUB-1 with the id
-                        # only in its body, and the card stayed 'dispatched' and eligible.
-                        #
-                        # The body is matched ONLY behind an explicit landing verb. A bare id in
-                        # prose ("unlike OWN-GITHUB-1") must NOT count: a false positive here SKIPS
-                        # genuinely open work, which is strictly worse than re-dispatching finished
-                        # work. Tolerates markdown emphasis around the id.
-                        # 'delivers' added 2026-09-05 from a MEASURED miss: PR #53's body read
-                        # "Closes OWN-2 and delivers GATE-RESIDUALS-1(b)". OWN-2 was skipped;
-                        # GATE-RESIDUALS-1 was NOT, and the loop spent a lane on it at 02:11Z.
-                        # The vocabulary is fixed and no writer can be expected to know it, so the
-                        # near-miss diagnostic below reports rather than widening this further:
-                        # a false positive SKIPS open work, which stays strictly worse.
-                        # 'queue item' connector added the same day, from a SECOND measured miss the
-                        # near-miss diagnostic surfaced on its first run: PR #52 read "Closes queue
-                        # item OWN-1-PRECEDENCE" and only 'card' was permitted between verb and id.
-                        $rxBody = '(?i)(?:lands|closes|fixes|resolves|delivers)\s+(?:(?:card|queue\s+item)\s+)?[*_`]*' +
-                                  [regex]::Escape($id) + '[*_`]*(?![A-Za-z0-9-])'
-                        $hit = @($prs | Where-Object { $_.body -and ($_.body -match $rxBody) }) | Select-Object -First 1
-                        if ($hit) { $how = 'body' }
-                        else {
-                            # NEAR-MISS. A merged PR naming this card WITHOUT a landing verb is either prose
-                            # ('unlike OWN-GITHUB-1', correctly ignored) or a landing phrased in a verb this
-                            # probe does not know. Both were silent before; the second cost a dispatch.
-                            # REPORT it and cite the PR - do NOT skip on it. Skipping open work stays worse.
-                            $rxMention = '(?i)[*_`]*' + [regex]::Escape($id) + '[*_`]*(?![A-Za-z0-9-])'
-                            $near = @($prs | Where-Object { $_.body -and ($_.body -match $rxMention) }) | Select-Object -First 1
-                            # COLLECTED, not printed per card. The first draft of this emitted one line per
-                            # near-miss and produced TEN on a single run - mostly genuine prose mentions. A
-                            # diagnostic that fires every run is one nobody reads, which is the failure it was
-                            # meant to prevent. One summary line keeps the signal and loses the noise.
-                            if ($near) { $nearMisses += "$id(PR #$($near.number))" }
-                        }
-                    }
-                    if ($hit) { $landedById[$id] = $hit; $landedHow[$id] = $how }
-                }
-                if ($nearMisses.Count -gt 0) {
+    $probe = Get-CardLandingEvidence -CardId @($live | ForEach-Object { Get-Prop $_ 'id' } | Where-Object { $_ })
+    $landingProbe = $probe.status
+    foreach ($id in $probe.landed.Keys) {
+        $landedById[$id] = $probe.landed[$id]
+        $landedHow[$id]  = $probe.landed[$id].how
+    }
+    $nearMisses = @($probe.nearMiss)
+    if ($nearMisses.Count -gt 0) {
         Write-Output ("WORKSTREAM: landing-probe NEAR-MISS ($($nearMisses.Count)): " +
             ($nearMisses -join ', ') + " - named in a merged PR without a landing verb, NOT skipped")
-    }
-    $landingProbe = "ok: $($prs.Count) merged PR(s) scanned, $($landedById.Count) card(s) matched by title or landing-verb body reference"
-            }
-        } catch {
-            $landingProbe = "cannot-determine: $($_.Exception.Message)"
-        }
     }
 }
 Write-Output "WORKSTREAM: landing-probe $landingProbe"
