@@ -12,6 +12,7 @@
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -101,6 +102,19 @@ QJsonValue stringOrNull(const QString & value)
 QJsonValue integerOrNull(qint64 value)
 {
     return value < 0 ? QJsonValue() : QJsonValue(value);
+}
+
+/* build_sha (MLVAPP_GIT_SHA) identifies the commit the build was compiled
+ * from; it says nothing about the bytes actually on disk right now. This
+ * hashes the running executable itself, so a rebuilt-but-unstamped binary
+ * or a stale copy of the exe is distinguishable from the commit it claims. */
+QString executableSha256Hex()
+{
+    QFile exe(QCoreApplication::applicationFilePath());
+    if (!exe.open(QIODevice::ReadOnly)) return QString();
+    return QString::fromLatin1(
+        QCryptographicHash::hash(exe.readAll(), QCryptographicHash::Sha256)
+            .toHex());
 }
 
 QString cpuFeatureList()
@@ -593,6 +607,7 @@ QJsonObject machineFingerprintObject()
     QJsonObject root;
     root.insert(QStringLiteral("schema"), QStringLiteral("machine-fingerprint.v1"));
     root.insert(QStringLiteral("build_sha"), QString::fromLatin1(MLVAPP_GIT_SHA));
+    root.insert(QStringLiteral("executable_sha256"), stringOrNull(executableSha256Hex()));
     root.insert(QStringLiteral("gpu_name"),
                 gpu.contains(QStringLiteral("gpu_name"))
                     ? gpu.value(QStringLiteral("gpu_name"))
