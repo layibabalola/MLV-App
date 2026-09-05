@@ -19,6 +19,14 @@ param(
     [switch]$Quiet
 )
 $ErrorActionPreference = 'SilentlyContinue'
+# --- staleness guard -------------------------------------------------------------------
+# The board root is the ONLY checkout that carries .claude-state/, and it routinely sits on a
+# peer branch -- so an absolute-path invocation of this script can silently run a months-old
+# copy and print a WRONG board reading. Refuse that. See assert-script-currency.ps1.
+$__guard = Join-Path $PSScriptRoot 'assert-script-currency.ps1'
+if (Test-Path -LiteralPath $__guard) { & $__guard -ScriptPath $PSCommandPath }
+# ---------------------------------------------------------------------------------------
+
 
 # Enforce the log clause of COORDINATION-PRUNE-POLICY.md -- "rotate at 1 MB, keep 2 rotations,
 # delete older" -- which names health.log explicitly. Measured 2026-09-04: NOTHING implemented that
