@@ -2,6 +2,8 @@
   "version": 1,
   "description": "Machine-readable lane ownership for the dual-lane Codex<->Claude collaboration. owner-of.ps1 resolves a repo-relative path to codex|claude|shared|unknown. Resolution order: exact override > shared > lane globs > unknown. Consumers (lane-commit.ps1, the pre-commit lane-guard) MUST treat 'unknown' as a HARD BLOCK -- add the path to a lane's globs or to overrides rather than bypassing. Glob forms supported: 'prefix/**' (prefix match), '**/*.ext' (suffix match), exact path.",
   "resolutionOrder": ["overrides", "shared", "laneGlobs", "unknown=BLOCK"],
+  "_lanePrecedence": "Inter-lane precedence when two lanes' globs overlap the SAME path. Before this key existed, owner-of.ps1 iterated lanes in JSON property order and returned the first match, so codex:tools/gpu/** beat claude:tools/** only because codex happens to be listed first (OWN-1-PRECEDENCE: 'undocumented luck, not policy'). This declares the SAME resolution explicitly; behaviour is unchanged. A lane absent from this list is tried after every listed lane, in JSON order.",
+  "lanePrecedence": ["codex", "claude"],
   "lanes": {
     "codex": {
       "role": "implementer (playback + recon + GPU) -- owns the playback/present/GPU implementation surfaces for the beyond-36 goal (Layi 2026-07-02, to enable autonomous multi-hour Codex commits). NOTE: platform/qt/MainWindow.cpp + src/mlv/* carry FOREIGN uncommitted WIP in the MAIN tree -- Codex must commit ONLY in its side worktrees, NEVER run lane-commit in the main tree, and NEVER git add -A.",
