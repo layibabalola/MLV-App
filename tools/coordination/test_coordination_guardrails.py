@@ -390,9 +390,13 @@ def workstream_dry_run(tmp_path, items, track="factory"):
     )
 
 
-NUMERIC_CARD = {"id": "NUMERIC-1", "state": "booked", "track": "factory", "priority": 1, "title": "normal"}
+# 'queued', not 'booked': PR #63 made the dispatcher's admission an ALLOWLIST derived from
+# queue.json's own note, where booked means "named trigger, not schedulable". These fixtures
+# exist to reach Get-Rank, so they must carry a state a lane actually owns. The rule is right;
+# the fixture was relying on booked being dispatchable, which it never should have been.
+NUMERIC_CARD = {"id": "NUMERIC-1", "state": "queued", "track": "factory", "priority": 1, "title": "normal"}
 PROSE_CARD = {
-    "id": "PROSE-1", "state": "booked", "track": "factory",
+    "id": "PROSE-1", "state": "queued", "track": "factory",
     "priority": "CRITICAL PATH - the cap is now two blocks away, not one",
     "title": "prose in the priority field",
 }
