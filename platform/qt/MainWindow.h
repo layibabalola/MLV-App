@@ -1268,6 +1268,11 @@ private:
     int m_playbackSmokeGpuStatusTextureNoReadbackFrames = 0;
     int m_playbackSmokeFallbackCount = 0;
     QJsonObject m_playbackSmokeFallbackReasonCounts;
+    QJsonObject m_playbackSmokeAsyncH2dBooleanTrueCounts;
+    QJsonObject m_playbackSmokeAsyncH2dBooleanSampleCounts;
+    QJsonObject m_playbackSmokeAsyncH2dTimingSums;
+    QJsonObject m_playbackSmokeAsyncH2dTimingMaxima;
+    QJsonObject m_playbackSmokeAsyncH2dTimingSampleCounts;
     uint64_t m_playbackSmokeQueuedPlaybackDropSum = 0;
     uint64_t m_playbackSmokeQueuedPlaybackDropMax = 0;
     int m_playbackSmokeLastWorkerThreads = 0;
