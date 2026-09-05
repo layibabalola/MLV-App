@@ -771,6 +771,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "AGENTS.md",
             "CLAUDE.md",
             "closeout.config.json",
+            "tools/testing/test-ultra-magnus-agent-timeout.ps1",
             "tools/repo_hygiene/brokered_closeout.py",
             "tools/repo_hygiene/candidate_acceptance.py",
             "tools/repo_hygiene/test_candidate_acceptance.py",
