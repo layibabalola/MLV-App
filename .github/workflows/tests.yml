@@ -200,7 +200,7 @@ jobs:
           # to stop. Follow-up: pin numpy+Pillow, then drop the --ignore.
           python -m pytest `
             tools\profiling `
-            --ignore=tools\profiling	est_frame_colour_spatial_metrics.py `
+            --ignore=tools\profiling\test_frame_colour_spatial_metrics.py `
             -q
 
   windows-product-oracles:
