@@ -13,7 +13,7 @@ exit 2 : fail-CLOSED, with ``hook-error: <detail>`` on stderr, for ANY exception
          accepted, because an argument this hook does not understand may be the venue
          under a name it no longer reads).
 
-This is the PROJECT hook described by ``never-authorized.json`` (schema v22) and by
+This is the PROJECT hook described by ``never-authorized.json`` (schema v23) and by
 ``prompts/v2/card-TOOL-HOOK-ENFORCE-1.md``.  It is NOT the global machine hook
 ``~/.claude/hooks/check-continuity-boundaries.py``, which is shared by every project on
 this machine and fails OPEN.  This one fails CLOSED and is tracked on the same ref as the
@@ -137,9 +137,11 @@ non-negative integer and a ``bool`` is NOT one; ``list`` = a JSON array.  Per re
   * ``0.5-factory-frozen.json``   queueSha256, dryRunDiffSha256 (sha256); frozenCount (int);
     scopelessIds (list).
   * ``execution-control-<step>.json`` for <step> in {0.1, 0.35, 0.4c-i, 0.4b-i, 0.6, 0.7} --
-    THE SIX CHAIN NAMES AND NO OTHER: ``reviewedHeadSha`` (sha); ``solVerdictPath`` (path)
-    whose TERMINAL JSON block carries ``verdict`` APPROVE and ``subject_sha`` equal to that
-    ``reviewedHeadSha`` (S120); ``hashes``, an object whose KEY SET is EXACTLY the step's
+    THE SIX CHAIN NAMES AND NO OTHER: ``reviewedHeadSha`` (sha -- the PR HEAD the second
+    key reviewed BEFORE the merge); ``mergeSha`` (sha -- the post-merge commit the
+    receipt's hashes were taken at, S123); ``solVerdictPath`` (path) whose TERMINAL JSON
+    block carries ``verdict`` APPROVE and ``subject_sha`` equal to that ``reviewedHeadSha``
+    (S120); ``hashes``, an object whose KEY SET is EXACTLY the step's
     fixed set in ``EXECUTION_CONTROL_HASH_TABLE`` and whose values are all sha256 (S120 --
     a missing or an extra key is INVALID); 0.1 additionally ``composerStatus`` ==
     ``not-yet-created`` plus ``composedPromptPath``, ``prChecksPath`` and ``prReviewPath``
@@ -175,8 +177,9 @@ complete receipt.  The gate the whole chain exists to close is "the tooling that
 board is the tooling the second key approved", and that reading of ``hashes`` proved neither
 half.  Three arms close it:
 
-  * S120 -- ``reviewedHeadSha`` (40 lowercase hex, the head the second key reviewed) and
-    ``solVerdictPath``, a file that exists whose TERMINAL JSON block -- the last ```json
+  * S120 -- ``reviewedHeadSha`` (40 lowercase hex, the PR head the second key reviewed
+    BEFORE the merge -- see S123 below) and ``solVerdictPath``, a file that exists whose
+    TERMINAL JSON block -- the last ```json
     fenced block, else the last top-level JSON object in the file, which is how the
     ``sol-review-PR-TEMPLATE`` ends -- parses to an object carrying ``verdict`` ==
     ``APPROVE`` and ``subject_sha`` == that ``reviewedHeadSha``.  Absent, unreadable, a
@@ -206,6 +209,27 @@ were: the ONE amendment to "carried forward unchanged".  The hook needs no new a
 it binds every chain receipt to the 0.18 bytes on disk already -- which is exactly why a
 repair that re-points all but one receipt is refused naming the one left behind, and the
 suite measures both halves.
+
+THE TWO SHAS OF A CONTROL RECEIPT (S123, register v23)
+------------------------------------------------------
+``reviewedHeadSha`` is the PR HEAD the second key reviewed BEFORE the merge -- the sha the
+verdict's ``subject_sha`` binds to.  It is not the merge sha and can never be: a GitHub
+merge lands a DIFFERENT commit, so a receipt recording the merge commit under this key
+could never carry a verdict of it, and the ninth commit's one-sha reading, applied to a
+real merge, would have made every post-merge control receipt INVALID.  ``mergeSha`` is the
+SECOND required key -- 40 lowercase hex, the post-merge fork/master commit at which the
+receipt's ``hashes`` were taken.  Absent or malformed on ANY of the six chain receipts is
+INVALID, the refusal names the file and the key, and under O152 that makes the newest
+undecidable.
+
+What this hook does NOT judge, and why.  It never denies ``mergeSha == reviewedHeadSha``:
+a rebase or a fast-forward lands the reviewed commit itself as the tip, and the hook does
+not know the merge method -- shape only.  It makes NO git call: the equality of the step's
+fixed set at the two shas (``git show <sha>:<path>`` piped to sha256, each path, at both
+shas) is a HUB assertion made BEFORE the receipt is written, outside this hook.  A mismatch
+there means the merge carried something the review did not see, and no control receipt is
+written until sol has reviewed the merge commit itself.  The hook checks shape and the
+subject binding only, never git (S123).
 
 THE ENABLE LITERAL IS VALIDATED SEMANTICALLY, NOT FOR PRESENCE (S112, register v21)
 -----------------------------------------------------------------------------------
@@ -411,11 +435,20 @@ CONTROL_SELECTED_FALLBACK = EXECUTION_CONTROL_PREFIX + "0.6" + EXECUTION_CONTROL
 CONTROL_HASHES_KEY = "hashes"
 
 # S120 -- EVERY CONTROL RECEIPT CARRIES THE SECOND KEY'S APPROVAL OF THIS HEAD.
-# `reviewedHeadSha` is the head sol reviewed for this step; `solVerdictPath` names that
-# review, whose TERMINAL JSON block -- the `sol-review-PR-TEMPLATE` ends with exactly one
-# -- must carry `verdict` APPROVE and `subject_sha` equal to that head.  The verdict
-# literal and the key names are the template's, compared exactly.
+# `reviewedHeadSha` is the PR HEAD sol reviewed for this step BEFORE the merge;
+# `solVerdictPath` names that review, whose TERMINAL JSON block -- the
+# `sol-review-PR-TEMPLATE` ends with exactly one -- must carry `verdict` APPROVE and
+# `subject_sha` equal to that head.  The verdict literal and the key names are the
+# template's, compared exactly.
 CONTROL_REVIEWED_HEAD_KEY = "reviewedHeadSha"
+# S123 -- AND THE SECOND SHA.  A GitHub merge lands a DIFFERENT commit from the reviewed
+# head, so `reviewedHeadSha` can never be the merge sha; `mergeSha` is the post-merge
+# fork/master commit the receipt's `hashes` were taken at.  Both are REQUIRED, 40 lowercase
+# hex.  Their EQUALITY is neither required nor denied -- a rebase lands the reviewed commit
+# itself as the tip and the hook does not know the merge method -- and the fixed set hashing
+# equal at both shas is the HUB's assertion before the receipt is written, never a git call
+# from here: shape and the subject binding only.
+CONTROL_MERGE_SHA_KEY = "mergeSha"
 CONTROL_VERDICT_PATH_KEY = "solVerdictPath"
 CONTROL_VERDICT_KEY = "verdict"
 CONTROL_VERDICT_APPROVE = "APPROVE"
@@ -1156,15 +1189,24 @@ def _fixed_receipt_why(ctx, name, document, required):
 
 
 def _control_approval_why(ctx, name, document):
-    """S120: `reviewedHeadSha` and the second key's APPROVE of exactly that head, else why.
+    """S120/S123: the two shas, and the second key's APPROVE of exactly the REVIEWED one, else why.
+
+    `reviewedHeadSha` is the PR head sol reviewed BEFORE the merge -- the sha the verdict's
+    `subject_sha` is compared to.  `mergeSha` is the post-merge commit the hashes were taken
+    at, judged for SHAPE only (S123): it is never compared to the verdict, because a GitHub
+    merge lands a different commit and the verdict is of the reviewed head; it is never
+    compared to `reviewedHeadSha` either way, because the hook does not know the merge
+    method; and no git is consulted, because the fixed set hashing equal at both shas is
+    the hub's assertion before the receipt exists.
 
     The verdict file is read through ``_terminal_json_block``: the last ```json fence, else
     the last top-level object.  Every arm is a refusal, never an exclusion (O152), and each
     names the receipt, the key and -- once the file is open -- the verdict path, so a
-    near-miss is attributable to the one thing that failed: the key absent, the sha
+    near-miss is attributable to the one thing that failed: either key absent, either sha
     malformed, the path absent, the file unreadable or without a terminal block, a verdict
     other than APPROVE, or an APPROVE of some OTHER head, which is the second key's approval
-    of something else.
+    of something else.  The arms run in the plan's row order: `reviewedHeadSha`,
+    `mergeSha`, `solVerdictPath`.
     """
     if CONTROL_REVIEWED_HEAD_KEY not in document:
         return "execution-control receipt %s lacks %s (S120/O152)" % (
@@ -1177,6 +1219,19 @@ def _control_approval_why(ctx, name, document):
             name,
             CONTROL_REVIEWED_HEAD_KEY,
             head,
+            _VALUE_CLASS_PROSE["sha"],
+        )
+    if CONTROL_MERGE_SHA_KEY not in document:
+        return "execution-control receipt %s lacks %s (S123/O152)" % (
+            name,
+            CONTROL_MERGE_SHA_KEY,
+        )
+    merge = document[CONTROL_MERGE_SHA_KEY]
+    if not _is_sha(merge):
+        return "execution-control receipt %s carries %s %r, which is not %s (S123/O152)" % (
+            name,
+            CONTROL_MERGE_SHA_KEY,
+            merge,
             _VALUE_CLASS_PROSE["sha"],
         )
     if CONTROL_VERDICT_PATH_KEY not in document:
@@ -1342,15 +1397,20 @@ def _control_receipt_why(ctx, name, document, parity_sha):
     rewrite of the offending receipt carrying a conforming stamp and every required key,
     which the receipts carve-out allows; never a delete.
 
-    The arms run in the plan's row order -- shape, stamp, the second key's approval (S120),
-    the fixed hash set (S120), the step's own keys (S120), the provenance (S118) -- and each
-    returns the FIRST failure, so a receipt with two faults is attributed to the one the
-    plan lists first.
+    The arms run in the plan's row order -- shape, stamp, the two shas and the second key's
+    approval of the reviewed one (S120/S123), the fixed hash set (S120), the step's own keys
+    (S120), the provenance (S118) -- and each returns the FIRST failure, so a receipt with
+    two faults is attributed to the one the plan lists first.
     """
     why = _receipt_shape_why(
         name,
         document,
-        (CONTROL_REVIEWED_HEAD_KEY, CONTROL_VERDICT_PATH_KEY, CONTROL_HASHES_KEY),
+        (
+            CONTROL_REVIEWED_HEAD_KEY,
+            CONTROL_MERGE_SHA_KEY,
+            CONTROL_VERDICT_PATH_KEY,
+            CONTROL_HASHES_KEY,
+        ),
     )
     if why:
         return why
@@ -1446,9 +1506,12 @@ def _kill_switch_receipts_ok(ctx):
 
     The execution-control arm's candidate set is the SIX CHAIN NAMES and no other; any other
     ``execution-control-*.json`` present is INVALID and fails the exception closed by name.
-    Each chain receipt carries ``reviewedHeadSha`` and a ``solVerdictPath`` whose terminal
-    JSON block is the second key's APPROVE of exactly that head (S120), ``hashes`` whose KEY
-    SET is exactly its step's fixed set with sha256 values (S120), its step's own keys, and,
+    Each chain receipt carries ``reviewedHeadSha`` (the PR head reviewed BEFORE the merge)
+    and ``mergeSha`` (the post-merge commit its hashes were taken at -- S123, shape only,
+    never compared to each other and never to git), a ``solVerdictPath`` whose terminal
+    JSON block is the second key's APPROVE of exactly the REVIEWED head (S120), ``hashes``
+    whose KEY SET is exactly its step's fixed set with sha256 values (S120), its step's own
+    keys, and,
     from 0.35 on, ``roadmapParityReceiptSha256`` EQUAL to the sha256 of
     ``0.18-roadmap-parity.json`` as it is on disk, a well-formed ``queueSha256``, and
     ``productLiveCount`` exactly 15.  The O158 re-hash of the SELECTED receipt's fixed set

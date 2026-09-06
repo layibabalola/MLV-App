@@ -101,6 +101,21 @@ edited after the receipt was written, one is deleted.  The O159 pair rewrites
 (ALLOW), then leaves 0.35 behind (DENY, naming it) -- the hub procedure measured through
 the hook's strict rule.
 
+THE TWO SHAS (S123, register v23).  ``reviewedHeadSha`` is the PR HEAD sol reviewed BEFORE
+the merge -- the sha the verdict's ``subject_sha`` binds to -- and ``mergeSha`` is the
+post-merge commit the receipt's ``hashes`` were taken at.  A GitHub merge lands a DIFFERENT
+commit, so the normal post-merge receipt carries TWO different shas and the verdict binds
+to the FIRST.  Every chain receipt the fixtures write carries both, DERIVED so that they
+differ (``_head_sha`` and ``_merge_sha``), and every verdict is written at the reviewed
+head and never at the merge sha -- so a hook that bound the verdict to ``mergeSha`` would
+go RED on every ALLOW row, which is the reading S123 exists to rule out.  Four DENY rows
+vary ``mergeSha`` alone (absent on the selected 0.7 and on the non-selected 0.6, uppercase,
+39 characters); one ALLOW row carries an EXPLICITLY different merge sha; one ALLOW row
+carries ``mergeSha == reviewedHeadSha``, because a rebase lands the reviewed commit itself
+as the tip and the hook, not knowing the merge method, judges SHAPE only.  The equality of
+the fixed set's hashes at the two shas is the HUB's assertion before the receipt is
+written, outside the hook, and no row models git.
+
 NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
 payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
 strings are data -- including the O129 rows, whose ``setx`` and ``SetEnvironmentVariable``
@@ -1999,6 +2014,95 @@ CASES = [
         ),
         "fixture": "o159_partial_repair_at_board",
     },
+    # ------------- S123: the TWO shas -- the reviewed PR head and the merge commit
+    #
+    # `reviewedHeadSha` is the PR HEAD sol reviewed BEFORE the merge and `mergeSha` the
+    # post-merge commit the hashes were taken at.  Four DENY rows vary `mergeSha` alone, at
+    # the board venue, one keyword of one chain receipt from the ALLOW rows.  Two ALLOW rows
+    # pin what the hook must NOT judge: the two shas DIFFERING (the normal post-merge shape,
+    # the verdict bound to the REVIEWED head and not to the merge sha) and the two shas
+    # being EQUAL (a rebase; the hook does not know the merge method and judges shape only).
+    {
+        "name": "enable canonical compound with a chain receipt lacking mergeSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json lacks mergeSha",
+            "(S123/O152)",
+        ),
+        "fixture": "control_without_merge_sha",
+    },
+    {
+        # The NON-selected receipt.  O152's strict rule reaches every present chain receipt,
+        # so a 0.6 without its merge sha refuses the enable even though 0.7 is the one taken.
+        "name": "enable canonical compound with the non-selected 0.6 lacking mergeSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.6.json lacks mergeSha",
+            "(S123/O152)",
+        ),
+        "fixture": "control_06_without_merge_sha",
+    },
+    {
+        # The RIGHT merge sha, uppercased -- the exactness the reviewedHeadSha row carries.
+        "name": "enable canonical compound with an uppercase mergeSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries mergeSha",
+            "not a 40-character LOWERCASE hex sha",
+            "(S123/O152)",
+        ),
+        "fixture": "control_merge_sha_uppercase",
+    },
+    {
+        # 39 characters, on the non-selected 0.6: a prefix of a sha is not a sha.
+        "name": "enable canonical compound with a 39 character mergeSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.6.json carries mergeSha",
+            "not a 40-character LOWERCASE hex sha",
+            "(S123/O152)",
+        ),
+        "fixture": "control_06_merge_sha_39_chars",
+    },
+    {
+        # THE NORMAL POST-MERGE SHAPE, ALLOW.  0.7's `mergeSha` is set EXPLICITLY to a sha
+        # that differs from its `reviewedHeadSha`, and the verdict it names is sol's APPROVE
+        # of the REVIEWED head.  A hook that compared the verdict's `subject_sha` to the
+        # merge sha -- the ninth commit's one-sha reading, met by a real merge -- refuses it.
+        "name": "enable canonical compound whose mergeSha differs from its reviewedHeadSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "ALLOW",
+        "fixture": "control_merge_sha_differs_from_reviewed_head",
+    },
+    {
+        # A REBASE lands the reviewed commit itself as the tip, so the two shas are EQUAL.
+        # The hook does not know the merge method and judges shape only: ALLOW, and this row
+        # is what keeps an inequality test from ever being added without a red test.
+        "name": "enable canonical compound whose mergeSha equals its reviewedHeadSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "ALLOW",
+        "fixture": "control_merge_sha_equals_reviewed_head",
+    },
     {
         # S99.  The row the old table had as an ALLOW.  Every precondition of exception (i)
         # holds -- six receipts valid, the enable unspent -- and the delete is STILL
@@ -3004,8 +3108,19 @@ def _board_hashes(paths, step):
 
 
 def _head_sha(step):
-    """The head sol reviewed for a step -- derived, 40 lowercase hex, never written down."""
+    """The PR HEAD sol reviewed for a step BEFORE the merge -- derived, 40 lowercase hex."""
     return _derived_sha("head:" + step)
+
+
+def _merge_sha(step):
+    """The post-merge commit a step's hashes were taken at -- derived, and NOT the head (S123).
+
+    A GitHub merge lands a DIFFERENT commit from the reviewed PR head, so the conforming
+    fixture carries two different shas and writes the verdict at the FIRST;
+    `test_every_chain_receipt_the_fixture_writes_carries_two_different_shas_...` asserts the
+    two never coincide by accident.
+    """
+    return _derived_sha("merge:" + step)
 
 
 def _chain_stamp(step):
@@ -3164,16 +3279,18 @@ def _execution_control(
     queue_sha=None,
     product_live_count=15,
     reviewed_head=None,
+    merge_sha=None,
     verdict_path=None,
     drop=(),
 ):
     """One chain receipt.  Every keyword is ONE degree of freedom of the chain schema.
 
     The defaults are the CONFORMING receipt for `step`, computed from the tmp board (S120):
-    `reviewedHeadSha` is the step's derived head and `solVerdictPath` the fixture's APPROVE
-    of exactly that head; `hashes` is the step's fixed set mapped to the REAL digest of each
-    file under the tmp board (O158); 0.1 carries `composerStatus` and the three evidence
-    paths, 0.35 the three paths.  A row that wants a near miss passes ONE keyword.
+    `reviewedHeadSha` is the step's derived REVIEWED head, `mergeSha` its derived -- and
+    DIFFERENT -- post-merge commit (S123), and `solVerdictPath` the fixture's APPROVE of
+    exactly the reviewed head; `hashes` is the step's fixed set mapped to the REAL digest of
+    each file under the tmp board (O158); 0.1 carries `composerStatus` and the three
+    evidence paths, 0.35 the three paths.  A row that wants a near miss passes ONE keyword.
     """
     _write_evidence(paths)
     _write_verdicts(paths)
@@ -3183,6 +3300,7 @@ def _execution_control(
     document["reviewedHeadSha"] = (
         reviewed_head if reviewed_head is not None else _head_sha(step)
     )
+    document["mergeSha"] = merge_sha if merge_sha is not None else _merge_sha(step)
     document["solVerdictPath"] = (
         verdict_path if verdict_path is not None else _verdict_relative(step)
     )
@@ -3712,6 +3830,58 @@ def fixture_control_product_live_string(paths):
     return _control_at_board(paths, "0.7", CONTROL_STAMP_07, product_live_count="15")
 
 
+# ------------------------------------------- S123: the second sha, the merge commit
+#
+# Each S123 fixture differs from `fixture_receipts_all_six_at_board` in EXACTLY the `mergeSha`
+# of one chain receipt, at the board venue.  The verdict every receipt names is untouched --
+# sol's APPROVE of the REVIEWED head -- so the ALLOW rows prove the verdict is bound to
+# `reviewedHeadSha` and the DENY rows are attributable to the merge sha's shape alone.
+
+
+def fixture_control_without_merge_sha(paths):
+    return _control_at_board(paths, "0.7", CONTROL_STAMP_07, drop=("mergeSha",))
+
+
+def fixture_control_06_without_merge_sha(paths):
+    """0.6 -- NOT the selected receipt -- without its merge sha: O152's reach, measured again."""
+    return _control_at_board(paths, "0.6", CONTROL_STAMP_06, drop=("mergeSha",))
+
+
+def fixture_control_merge_sha_uppercase(paths):
+    """The RIGHT merge sha, uppercased -- a git object name is lowercase, compared exactly."""
+    return _control_at_board(
+        paths, "0.7", CONTROL_STAMP_07, merge_sha=_merge_sha("0.7").upper()
+    )
+
+
+def fixture_control_06_merge_sha_39_chars(paths):
+    """The right merge sha cut to 39 characters, on 0.6: a prefix of a sha is not a sha."""
+    return _control_at_board(paths, "0.6", CONTROL_STAMP_06, merge_sha=_merge_sha("0.6")[:39])
+
+
+# The EXPLICIT merge sha of the normal-shape ALLOW row: derived from its own label, so it is
+# neither the default `_merge_sha("0.7")` nor the reviewed head, and the structural test
+# below asserts both.
+MERGE_SHA_EXPLICIT_LABEL = "merge:0.7:the-github-merge-commit"
+
+
+def fixture_control_merge_sha_differs_from_reviewed_head(paths):
+    """The normal post-merge shape: an EXPLICIT merge sha that is not the reviewed head, ALLOW.
+
+    The verdict the receipt names is sol's APPROVE of `_head_sha("0.7")`, the REVIEWED head;
+    the merge sha is a different derived commit.  The row is ALLOW only while the hook binds
+    the verdict to `reviewedHeadSha` and judges `mergeSha` for shape alone.
+    """
+    return _control_at_board(
+        paths, "0.7", CONTROL_STAMP_07, merge_sha=_derived_sha(MERGE_SHA_EXPLICIT_LABEL)
+    )
+
+
+def fixture_control_merge_sha_equals_reviewed_head(paths):
+    """A rebase lands the reviewed commit itself as the tip: the two shas are EQUAL, ALLOW."""
+    return _control_at_board(paths, "0.7", CONTROL_STAMP_07, merge_sha=_head_sha("0.7"))
+
+
 # ------------------------------------------- O158: the BOARD drifts from the selected receipt
 #
 # Neither fixture touches a receipt.  Both write the default conforming set, then mutate the
@@ -3951,6 +4121,13 @@ FIXTURES = {
     "control_hashes_extra_key": fixture_control_hashes_extra_key,
     "control_01_without_composer_status": fixture_control_01_without_composer_status,
     "control_product_live_string": fixture_control_product_live_string,
+    # S123
+    "control_without_merge_sha": fixture_control_without_merge_sha,
+    "control_06_without_merge_sha": fixture_control_06_without_merge_sha,
+    "control_merge_sha_uppercase": fixture_control_merge_sha_uppercase,
+    "control_06_merge_sha_39_chars": fixture_control_06_merge_sha_39_chars,
+    "control_merge_sha_differs_from_reviewed_head": fixture_control_merge_sha_differs_from_reviewed_head,
+    "control_merge_sha_equals_reviewed_head": fixture_control_merge_sha_equals_reviewed_head,
     "control_rehash_drift_at_board": fixture_control_rehash_drift_at_board,
     "control_rehash_file_missing_at_board": fixture_control_rehash_file_missing_at_board,
     "chain_step_01_complete_at_board": fixture_chain_step_01_complete_at_board,
@@ -4305,7 +4482,22 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # tmp board's `tools/` tree, and 0.1/0.35's composer keys.  The historical falsifier
         # groups -- `control` 3, `round1` 16, `round2` 12, `failclosed` 4, `benign` 6 -- are
         # untouched, as are `carveout`, `manifest`, `na3`, `na3_persistent` and `na10`.
-        self.assertEqual(counts.get("killswitch"), 85, "85 kill-switch / 0.2-enable rows")
+        #
+        # PINNED DELIBERATELY, 0.05 TENTH review delta (S123): 85 -> 91, six new rows and NO
+        # row dropped, no row re-expected.  A chain receipt now carries TWO shas: the
+        # `reviewedHeadSha` the ninth commit already validated -- whose MEANING is pinned as
+        # the PR head sol reviewed BEFORE the merge, the sha the verdict binds to, never the
+        # merge commit -- and a second required `mergeSha`, the post-merge commit the hashes
+        # were taken at.  FOUR are DENY, one keyword of one receipt from the ALLOW rows:
+        # `mergeSha` absent on the selected 0.7 and on the NON-selected 0.6 (O152's reach),
+        # then uppercased, then cut to 39 characters.  TWO are ALLOW: an EXPLICITLY different
+        # merge sha beside a verdict of the reviewed head (the normal post-merge shape -- a
+        # hook binding the verdict to the merge sha refuses it), and the two shas EQUAL (a
+        # rebase; the hook judges shape only and never the merge method).  Every existing
+        # chain fixture carries both keys, derived to differ.  The historical falsifier
+        # groups -- `control` 3, `round1` 16, `round2` 12, `failclosed` 4, `benign` 6 -- are
+        # untouched, as are `carveout`, `manifest`, `na3`, `na3_persistent` and `na10`.
+        self.assertEqual(counts.get("killswitch"), 91, "91 kill-switch / 0.2-enable rows")
         # PINNED DELIBERATELY, 0.05 fourth review delta (O125): 3 -> 4.  The carve-out is a
         # PATH permission, not a TOOL permission, and the pair that proves it -- the `Write`
         # create ALLOW beside the shell `Set-Content` create DENY -- must not be separable.
@@ -4491,6 +4683,55 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
                 document = json.loads(handle.read().decode("utf-8"))
             expected = original_sha if step == "0.35" else repaired_sha
             self.assertEqual(document["roadmapParityReceiptSha256"], expected, step)
+
+    def test_every_chain_receipt_the_fixture_writes_carries_two_different_shas_bound_to_the_reviewed_one(self):
+        """S123: the fixtures model the NORMAL post-merge shape, and the two ALLOW rows are what they claim.
+
+        Three claims, asserted rather than described.  (1) Every chain receipt the whole-chain
+        fixture writes carries BOTH `reviewedHeadSha` and `mergeSha`, each 40 lowercase hex,
+        and they DIFFER -- a GitHub merge lands a different commit, so a fixture whose two
+        shas coincided would leave every ALLOW row green against a hook that bound the
+        verdict to the wrong one.  (2) The verdict each receipt names is the APPROVE of the
+        REVIEWED head and mentions the merge sha nowhere: `reviewedHeadSha` is the subject
+        the fixture wrote the verdict at, `mergeSha` is not.  (3) The explicit-difference
+        fixture's 0.7 carries a merge sha that is neither the default nor the head, and the
+        equality fixture's 0.7 carries the SAME value in both keys -- so the one row measures
+        the binding and the other measures equality, and neither is a typo.
+        """
+        fixture_chain_all_six_names_at_board(self.paths)
+        for step in CHAIN_STEPS:
+            with open(os.path.join(self.paths["RECEIPTS"], _control_name(step)), "rb") as handle:
+                document = json.loads(handle.read().decode("utf-8"))
+            reviewed = document["reviewedHeadSha"]
+            merge = document["mergeSha"]
+            self.assertRegex(reviewed, r"\A[0-9a-f]{40}\Z", step)
+            self.assertRegex(merge, r"\A[0-9a-f]{40}\Z", step)
+            self.assertNotEqual(reviewed, merge, step)
+            self.assertEqual(reviewed, _head_sha(step), step)
+            verdict_path = os.path.join(
+                self.paths["BOARD"], document["solVerdictPath"].replace("/", os.sep)
+            )
+            with open(verdict_path, "r", encoding="utf-8") as handle:
+                verdict_text = handle.read()
+            self.assertIn('"subject_sha": "%s"' % reviewed, verdict_text, step)
+            self.assertNotIn(merge, verdict_text, step)
+
+        shutil.rmtree(self.paths["RECEIPTS"])
+        os.makedirs(self.paths["RECEIPTS"])
+        fixture_control_merge_sha_differs_from_reviewed_head(self.paths)
+        with open(os.path.join(self.paths["RECEIPTS"], _control_name("0.7")), "rb") as handle:
+            document = json.loads(handle.read().decode("utf-8"))
+        self.assertRegex(document["mergeSha"], r"\A[0-9a-f]{40}\Z")
+        self.assertNotEqual(document["mergeSha"], document["reviewedHeadSha"])
+        self.assertNotEqual(document["mergeSha"], _merge_sha("0.7"), "explicit, not the default")
+
+        shutil.rmtree(self.paths["RECEIPTS"])
+        os.makedirs(self.paths["RECEIPTS"])
+        fixture_control_merge_sha_equals_reviewed_head(self.paths)
+        with open(os.path.join(self.paths["RECEIPTS"], _control_name("0.7")), "rb") as handle:
+            document = json.loads(handle.read().decode("utf-8"))
+        self.assertEqual(document["mergeSha"], document["reviewedHeadSha"])
+        self.assertEqual(document["mergeSha"], _head_sha("0.7"))
 
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""
