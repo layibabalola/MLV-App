@@ -52,6 +52,11 @@
             "type": "command",
             "command": "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"C:/!Layi Wkspc/MLV-App/.claude-state/coordination/dual-lane/assert-resume-readiness.ps1\"",
             "statusMessage": "Resume-readiness check"
+          },
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/tools/session-checkpoint.py\"",
+            "timeout": 60
           }
         ]
       }
@@ -64,6 +69,11 @@
             "type": "command",
             "command": "node \"C:/!Layi Wkspc/softwarefactory-fleet-doctrine/tools/doctrine-sync.mjs\" check --project mlv-app --consumer \"${CLAUDE_PROJECT_DIR}\" || exit 0",
             "statusMessage": "Fleet doctrine currency check"
+          },
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/tools/session-checkpoint.py\"",
+            "timeout": 60
           }
         ]
       }
