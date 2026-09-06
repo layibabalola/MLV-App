@@ -3210,6 +3210,44 @@ CASES = [
         "input": {"command": "$env:MLV_BOARD_ROOT = 'C:/lane/worktree'"},
         "expect": "ALLOW",
     },
+    # --------------------------------------- S131: the `.exe` and fully-qualified bypasses
+    #
+    # Round-27 sol-key finding, reproduced by the hub: `setx.exe <NAME>` (the explicit form
+    # of the same Windows binary `setx` resolves to) and
+    # `[System.Environment]::SetEnvironmentVariable(...)` (the fully-qualified form of the
+    # same .NET API as `[Environment]::SetEnvironmentVariable`) were NOT denied, while their
+    # bare/unqualified forms were -- two bypasses of the same act, not two different acts.
+    # A group of its own rather than an addition to `round2` or `na3_persistent`: those
+    # counts are historical facts about earlier ratifications and must not move.
+    {
+        "name": "s131 setx.exe of the board root name is the same act as setx",
+        "group": "s131",
+        "tool": "PowerShell",
+        "input": {"command": "%s.exe MLV_BOARD_ROOT x" % _PERSIST_VERB},
+        "expect": "DENY",
+        "na": "NA-3",
+        "reason_contains": "PERSISTENT MLV_BOARD_ROOT",
+    },
+    {
+        "name": "s131 setx.exe of an openai credential is the same act as setx",
+        "group": "s131",
+        "tool": "Bash",
+        "input": {"command": "%s.exe OPENAI_API_KEY x" % _PERSIST_VERB},
+        "expect": "DENY",
+        "na": "NA-3",
+    },
+    {
+        "name": "s131 fully qualified SetEnvironmentVariable is the same act as unqualified",
+        "group": "s131",
+        "tool": "PowerShell",
+        "input": {
+            "command": "[System.Environment]::%s('MLV_BOARD_ROOT', 'x', "
+            "[System.EnvironmentVariableTarget]::User)" % _PERSIST_API
+        },
+        "expect": "DENY",
+        "na": "NA-3",
+        "reason_contains": "PERSISTENT MLV_BOARD_ROOT",
+    },
     # ------------------------------------------------- NA-10: a lane editing its own gate
     #
     # O129, hub extension.  This hook and `.claude/settings.json` are BOTH re-read on every
@@ -5234,6 +5272,11 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self.assertEqual(counts.get("na3"), 5, "5 NA-3 claude-auth rows")
         self.assertEqual(counts.get("na3_persistent"), 6, "6 NA-3 O129 persistent-scope rows")
         self.assertEqual(counts.get("na10"), 6, "6 NA-10 self-edit rows")
+        # PINNED, NEW at the thirteenth commit (S131): a NEW group, 3 rows -- the `setx.exe`
+        # credential-prefix bypass, the `setx.exe` persistent-name bypass, and the fully
+        # qualified `[System.Environment]::SetEnvironmentVariable` persistent-name bypass.
+        # `round2` (12) and `na3_persistent` (6) are historical and unchanged.
+        self.assertEqual(counts.get("s131"), 3, "3 S131 .exe / fully-qualified bypass rows")
 
     def test_the_fixture_offers_an_older_valid_execution_control_receipt(self):
         """S112: the "not the newest" row must compare two DIFFERENT valid receipts.

@@ -2697,7 +2697,7 @@ _NA3_RULES = (
         "`set` assignment of a name starting ANTHROPIC_/OPENAI_/CLAUDE_CODE_",
     ),
     (
-        re.compile(r"\bsetx\s+" + _TOKEN_PREFIXES, re.I),
+        re.compile(r"\bsetx(?:\.exe)?\s+" + _TOKEN_PREFIXES, re.I),
         "`setx` of a name starting ANTHROPIC_/OPENAI_/CLAUDE_CODE_",
     ),
     (
@@ -2740,11 +2740,11 @@ _NA3_PERSISTENT_NAMES = (
     r"|MLV_CLIP_CACHE_ROOT)"
 )
 _NA3_PERSISTENT_SCOPE = (
-    r"(?:['\"](?:User|Machine)['\"]|\[EnvironmentVariableTarget\]\s*::\s*(?:User|Machine))"
+    r"(?:['\"](?:User|Machine)['\"]|\[(?:System\.)?EnvironmentVariableTarget\]\s*::\s*(?:User|Machine))"
 )
 _NA3_PERSISTENT_RULES = (
     (
-        re.compile(r"\bsetx\s+['\"]?" + _NA3_PERSISTENT_NAMES + r"\b", re.I),
+        re.compile(r"\bsetx(?:\.exe)?\s+['\"]?" + _NA3_PERSISTENT_NAMES + r"\b", re.I),
         "`setx` writes a PERSISTENT %s, inherited by every later hook process (O129)",
     ),
     (
