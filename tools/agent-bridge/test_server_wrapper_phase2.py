@@ -131,7 +131,7 @@ class BufferOutputStream:
             return bytes(self._buffer)
 
     def wait_for(self, needle: bytes, timeout: float = 2.0) -> bytes:
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         with self._condition:
             while needle not in self._buffer:
                 remaining = deadline - time.time()
@@ -141,10 +141,44 @@ class BufferOutputStream:
             return bytes(self._buffer)
 
 
+# --- venue-scaled wait budgets -----------------------------------------------------------
+# Every wait_* helper below had a 2-3 second budget, calibrated on a developer machine. That
+# is a VENUE parameter, not a correctness property: a correct implementation still passes at
+# the same speed, it just needs longer to get there on a loaded runner.
+#
+# Measured on this repo's Windows CI: an identical pipeline_tests job ran every shard ~2x
+# slower than a passing run of the same job, and degraded progressively across the job. At
+# 3 seconds, spawning a Python subprocess and observing two launches is tight there. Three
+# distinct symptom shapes have blocked unrelated PRs from this one harness --
+# wait_for_launch_count timeouts, an mtime read (#74), and a lock race (#75) -- all passing
+# locally every time.
+#
+# So the budgets scale on CI rather than each call site being hand-tuned. GitHub Actions
+# sets CI=true; AGENT_BRIDGE_TEST_TIMEOUT_SCALE overrides explicitly for a slow local box or
+# for reproducing a CI timing failure by hand.
+def _timeout_scale() -> float:
+    explicit = os.environ.get("AGENT_BRIDGE_TEST_TIMEOUT_SCALE")
+    if explicit:
+        try:
+            value = float(explicit)
+        except ValueError:
+            return 1.0
+        return value if value > 0 else 1.0
+    return 4.0 if os.environ.get("CI") else 1.0
+
+
+TIMEOUT_SCALE = _timeout_scale()
+
+
+def scaled(seconds: float) -> float:
+    """Wait budgets are venue-dependent; correctness is not."""
+    return seconds * TIMEOUT_SCALE
+
+
 def write_and_wait_new_mtime(path: Path, content: str, timeout: float = 2.0) -> None:
     before_mtime = path.stat().st_mtime_ns if path.exists() else None
     path.write_text(content, encoding="utf-8")
-    deadline = time.time() + timeout
+    deadline = time.time() + scaled(timeout)
     while time.time() < deadline:
         after_mtime = path.stat().st_mtime_ns if path.exists() else None
         if after_mtime != before_mtime:
@@ -242,7 +276,7 @@ class SupervisorHarness:
         self.thread.join(timeout=3.0)
 
     def wait_for_launch_count(self, expected: int, timeout: float = 3.0) -> List[int]:
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             launches = self.launch_pids()
             if len(launches) >= expected:
@@ -251,7 +285,7 @@ class SupervisorHarness:
         raise AssertionError("timed out waiting for %s launch(es); saw %s" % (expected, self.launch_pids()))
 
     def wait_for_exit(self, timeout: float = 3.0) -> int:
-        self.thread.join(timeout=timeout)
+        self.thread.join(timeout=scaled(timeout))
         if self.thread.is_alive():
             raise AssertionError("supervisor thread did not exit")
         error = self.result.get("error")
@@ -276,7 +310,7 @@ class SupervisorHarness:
         return self.storage.read_jsonl(self.state_dir / "messages.jsonl")
 
     def wait_for_audit_events(self, action: str, expected: int = 1, timeout: float = 3.0) -> List[dict]:
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             events = [event for event in self.audit_events() if event.get("action") == action]
             if len(events) >= expected:
@@ -292,7 +326,7 @@ class SupervisorHarness:
     def wait_for_snapshot(self, timeout: float = 3.0) -> Path:
         """Wait until the code-watcher-snapshot.json file appears in state_dir."""
         snapshot_path = self.state_dir / "code-watcher-snapshot.json"
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             if snapshot_path.exists():
                 return snapshot_path
@@ -317,7 +351,7 @@ class SupervisorHarness:
         every write_json call.
         """
         snapshot_path = self.state_dir / "code-watcher-snapshot.json"
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             try:
                 mtime_ns = snapshot_path.stat().st_mtime_ns
@@ -1780,7 +1814,7 @@ class ServerWrapperTrampolineMcpSmokeTests(unittest.TestCase):
         *,
         timeout: float = 10.0,
     ) -> dict:
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         line = bytearray()
         while time.time() < deadline:
             try:
@@ -1797,7 +1831,7 @@ class ServerWrapperTrampolineMcpSmokeTests(unittest.TestCase):
         raise AssertionError("timed out waiting for MCP response; stderr=%r" % "".join(stderr_lines))
 
     def _wait_for_audit_count(self, audit_path: Path, action: str, expected: int, timeout: float = 12.0) -> List[dict]:
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             rows = self.storage.read_jsonl(audit_path) if audit_path.exists() else []
             matches = [row for row in rows if row.get("action") == action]
@@ -1944,7 +1978,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         """
         before_mtime = path.stat().st_mtime_ns if path.exists() else None
         path.write_text(content, encoding="utf-8")
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             after_mtime = path.stat().st_mtime_ns if path.exists() else None
             if after_mtime != before_mtime:
