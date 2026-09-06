@@ -112,6 +112,43 @@ RECEIPT_SHORT = json.dumps({"step": "0.4b"})
 CHECKPOINT_LONG = "# orchestrator resume\n" + ("derived value line\n" * 40)
 
 
+# ------------------------------------------- the 0.2 enable as ONE dedicated act
+#
+# The canonical compound is the ONLY input that may delete the marker (S99/O118).  Every
+# builder below emits a SINGLE-QUOTE-FREE JSON literal, because the canonical shape's
+# literals are single-quoted and the hook refuses a quote of their own (fail-closed).
+ENABLE_RECEIPT = "{RECEIPTS}/0.2-loop-enabled.json"
+ENABLE_MARKER = "{DUAL}/WORKSTREAM-LOOP-DISABLED"
+
+
+def _enable_literal(**overrides):
+    document = {
+        "state": "enabling",
+        "enabledUtc": "2026-09-06T12:00:00Z",
+        "executionControlReceipt": "receipts/execution-control-0.7.json",
+        "executionControlSha256": "3" * 64,
+        "recordedUtc": "2026-09-06T12:00:00Z",
+    }
+    document.update(overrides)
+    for key in [key for key, value in document.items() if value is None]:
+        del document[key]
+    literal = json.dumps(document)
+    assert "'" not in literal, literal
+    return literal
+
+
+ENABLE_LITERAL = _enable_literal()
+
+
+def _canonical_enable(literal=ENABLE_LITERAL, receipt=ENABLE_RECEIPT, marker=ENABLE_MARKER):
+    """The register's canonical compound, verbatim."""
+    return (
+        "$r = '" + literal + "'; "
+        "Set-Content -LiteralPath '" + receipt + "' -Value $r; "
+        "Remove-Item -LiteralPath '" + marker + "'"
+    )
+
+
 # --------------------------------------------------------------------------- table
 #
 # Columns: name | tool | input (or raw stdin) | EXPECTED | na (register row, DENY only)
@@ -470,49 +507,171 @@ CASES = [
         "fixture": "existing_receipt",
     },
     # ------------------------------------------------- NA-2 exception (i) and (iii)
+    #
+    # THE 0.2 ENABLE IS ONE DEDICATED ACT (S99/O118).  There is no longer an ALLOW row for
+    # a bare marker delete: the register does not authorize a verb plus a path, it
+    # authorizes ONE canonical compound, and the delete lives only inside it.  Rows 1-6
+    # vary the canonical shape's PRECONDITIONS; rows 7-12 vary its SHAPE, and every one of
+    # those is refused BEFORE generic attribution, so the answer never depends on which
+    # protected token the scan reaches first.
     {
-        # The ALLOW half of the S98 pair.  Its fixture writes the six receipts and NOT
+        # The ALLOW half.  Its fixture writes the six receipts and NOT
         # `0.2-loop-enabled.json`: the enable is unspent, so exception (i) is open.
-        "name": "killswitch delete with all six receipts",
+        "name": "enable canonical compound with all six receipts",
         "group": "killswitch",
-        "tool": "Bash",
-        "input": {"command": 'rm -f "{DUAL}/WORKSTREAM-LOOP-DISABLED"'},
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
         "expect": "ALLOW",
         "fixture": "receipts_all_six",
     },
     {
-        # S98, the DENY half: the SAME six receipts, all valid, differing from the row
-        # above in exactly ONE variable -- `0.2-loop-enabled.json` is now PRESENT, so the
-        # single ratified authorization is spent and a RE-ARMED marker cannot be deleted
-        # again.  `reason_contains` is what makes this row attributable: without it the row
-        # would also pass if the receipt set arm fired, which is what the row above proves
-        # does NOT fire under this fixture.
-        "name": "killswitch delete with all six receipts but the enable receipt present",
+        "name": "enable canonical compound with one receipt absent",
         "group": "killswitch",
-        "tool": "Bash",
-        "input": {"command": 'rm -f "{DUAL}/WORKSTREAM-LOOP-DISABLED"'},
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "receipt 0.6-ratio-guard.json is absent",
+        "fixture": "receipts_missing_one",
+    },
+    {
+        # S98, and it fires FIRST: the SAME six receipts, all valid, differing from the
+        # ALLOW row in exactly ONE variable -- `0.2-loop-enabled.json` is now PRESENT, so
+        # the single ratified authorization is spent and a RE-ARMED marker cannot be
+        # deleted again.  `reason_contains` is what makes the row attributable: without it
+        # it would also pass if some other arm refused.
+        "name": "enable canonical compound with the enable receipt already present",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
         "expect": "DENY",
         "na": "NA-2",
         "reason_contains": "ONE-SHOT",
         "fixture": "receipts_all_six_plus_enable",
     },
     {
-        "name": "killswitch delete with one receipt absent",
+        # O105: an execution-control receipt LACKING `recordedUtc` makes the newest
+        # undecidable, so the whole exception fails closed -- now proved through the
+        # dedicated act, which is the only surface that consults the receipt set at all.
+        "name": "enable canonical compound with an execution-control receipt lacking recordedUtc",
         "group": "killswitch",
-        "tool": "Bash",
-        "input": {"command": 'rm -f "{DUAL}/WORKSTREAM-LOOP-DISABLED"'},
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
         "expect": "DENY",
         "na": "NA-2",
-        "fixture": "receipts_missing_one",
+        "reason_contains": "lacks recordedUtc",
+        "fixture": "receipts_no_recorded_utc",
     },
     {
-        "name": "killswitch delete with an execution-control receipt lacking recordedUtc",
+        "name": "enable canonical compound whose literal lacks recordedUtc",
         "group": "killswitch",
-        "tool": "Bash",
-        "input": {"command": 'rm -f "{DUAL}/WORKSTREAM-LOOP-DISABLED"'},
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable(literal=_enable_literal(recordedUtc=None))},
         "expect": "DENY",
         "na": "NA-2",
-        "fixture": "receipts_no_recorded_utc",
+        "reason_contains": "the enable literal lacks a non-empty string recordedUtc",
+        "fixture": "receipts_all_six",
+    },
+    {
+        "name": "enable canonical compound whose literal state is not enabling",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable(literal=_enable_literal(state="enabled"))},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": 'state is not "enabling"',
+        "fixture": "receipts_all_six",
+    },
+    {
+        # S99.  The row the old table had as an ALLOW.  Every precondition of exception (i)
+        # holds -- six receipts valid, the enable unspent -- and the delete is STILL
+        # refused, because the receipts are not a standing key: they are conditions ON the
+        # canonical act, and this input is not it.
+        "name": "killswitch bare delete with all six receipts",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": "Remove-Item -LiteralPath '{DUAL}/WORKSTREAM-LOOP-DISABLED'"},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "outside the canonical enable is never authorized (S99)",
+        "fixture": "receipts_all_six",
+    },
+    {
+        # O118: the same two paths, the same two verbs, the ORDER reversed.  Generic
+        # attribution would reach the marker token first here and the receipt token first
+        # in the canonical form; neither may be what decides the enable.
+        "name": "killswitch delete before the receipt write",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Remove-Item -LiteralPath '{DUAL}/WORKSTREAM-LOOP-DISABLED'; "
+            "Set-Content -LiteralPath '{RECEIPTS}/0.2-loop-enabled.json' -Value '"
+            + ENABLE_LITERAL
+            + "'"
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "(S99/O118)",
+        "fixture": "receipts_all_six",
+    },
+    {
+        "name": "killswitch enable written with Out-File instead of Set-Content",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": "$r = '"
+            + ENABLE_LITERAL
+            + "'; Out-File -LiteralPath '{RECEIPTS}/0.2-loop-enabled.json' -InputObject $r; "
+            "Remove-Item -LiteralPath '{DUAL}/WORKSTREAM-LOOP-DISABLED'"
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "(S99/O118)",
+        "fixture": "receipts_all_six",
+    },
+    {
+        "name": "killswitch enable written with a truncating redirect",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": "$r = '"
+            + ENABLE_LITERAL
+            + "'; $r > '{RECEIPTS}/0.2-loop-enabled.json'; "
+            "Remove-Item -LiteralPath '{DUAL}/WORKSTREAM-LOOP-DISABLED'"
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "(S99/O118)",
+        "fixture": "receipts_all_six",
+    },
+    {
+        # Fail-closed reading, proved: `-Path` is not `-LiteralPath`.  It resolves
+        # wildcards, so it is not the act the register pinned.
+        "name": "killswitch enable with Path instead of LiteralPath",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": "$r = '"
+            + ENABLE_LITERAL
+            + "'; Set-Content -Path '{RECEIPTS}/0.2-loop-enabled.json' -Value $r; "
+            "Remove-Item -LiteralPath '{DUAL}/WORKSTREAM-LOOP-DISABLED'"
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "(S99/O118)",
+        "fixture": "receipts_all_six",
+    },
+    {
+        # Fail-closed reading, proved: the canonical form is a PowerShell input.  The
+        # byte-identical text arriving as a Bash input is a different act.
+        "name": "killswitch canonical enable text delivered as a Bash input",
+        "group": "killswitch",
+        "tool": "Bash",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "(S99/O118)",
+        "fixture": "receipts_all_six",
     },
     {
         "name": "killswitch create via Write with no receipts",
@@ -527,6 +686,21 @@ CASES = [
         "tool": "PowerShell",
         "input": {"command": "Set-Content -Path \"{DUAL}/WORKSTREAM-LOOP-DISABLED\" -Value 'stopped'"},
         "expect": "ALLOW",
+    },
+    {
+        # The generic carve-out, kept EXPLICIT so it is visible that writing the enable
+        # receipt on its own is ordinary create-or-extend under `$D/receipts/**` -- and
+        # that a two-call sequence (this, then a delete) is therefore NOT what authorizes
+        # the delete: the second call is a bare delete, which the S99 row above refuses.
+        "name": "enable receipt written on its own with the receipt absent",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {
+            "file_path": "{RECEIPTS}/0.2-loop-enabled.json",
+            "content": ENABLE_LITERAL + "\n",
+        },
+        "expect": "ALLOW",
+        "fixture": "receipts_all_six",
     },
     # ------------------------------------------------------------ NA-2 exception (ii)
     {
@@ -996,6 +1170,12 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self.assertEqual(counts.get("round2"), 12, "12 round-2 falsifiers")
         self.assertEqual(counts.get("failclosed"), 4, "4 fail-closed inputs")
         self.assertEqual(counts.get("benign"), 6, "6 benign ALLOW controls")
+        # PINNED DELIBERATELY, 0.05 third review delta: the 0.2 enable became ONE dedicated
+        # act, so the group grew 6 -> 15.  Six rows vary the canonical act's PRECONDITIONS,
+        # six vary its SHAPE (all DENY), two are exception (iii) creates and one is the
+        # bare receipt write.  The count is here so a row cannot be dropped silently; the
+        # round-1 (16) and round-2 (12) falsifier counts above are historical and unchanged.
+        self.assertEqual(counts.get("killswitch"), 15, "15 kill-switch / 0.2-enable rows")
 
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""

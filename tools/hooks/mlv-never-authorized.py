@@ -9,7 +9,7 @@ exit 2 : DENY, with exactly ONE line on stderr, ``NA-<n>: <reason>``.
 exit 2 : fail-CLOSED, with ``hook-error: <detail>`` on stderr, for ANY exception,
          malformed or empty stdin, a non-object payload, or a missing ``tool_name``.
 
-This is the PROJECT hook described by ``never-authorized.json`` (schema v15) and by
+This is the PROJECT hook described by ``never-authorized.json`` (schema v16) and by
 ``prompts/v2/card-TOOL-HOOK-ENFORCE-1.md``.  It is NOT the global machine hook
 ``~/.claude/hooks/check-continuity-boundaries.py``, which is shared by every project on
 this machine and fails OPEN.  This one fails CLOSED and is tracked on the same ref as the
@@ -66,6 +66,7 @@ NA2_PROTECTED_TAILS = (
 )
 NA2_PROTECTED_FILE_TAIL = ".claude/analysis_log.md"
 KILL_SWITCH_LEAF = "workstream-loop-disabled"
+KILL_SWITCH_MARKER_NAME = "WORKSTREAM-LOOP-DISABLED"
 
 CANONICAL_04B_CONTEXTS = frozenset(
     (
@@ -90,6 +91,18 @@ KILL_SWITCH_RECEIPTS = (
 KILL_SWITCH_ENABLE_RECEIPT = "0.2-loop-enabled.json"
 PROVENANCE_KEYS = ("roadmapParityReceiptSha256", "queueSha256", "productLiveCount")
 PROVENANCE_PRODUCT_LIVE_COUNT = 15
+
+# S99/O118: the 0.2 enable is ONE DEDICATED ACT, not a verb plus a path.  The register's
+# canonical compound and the keys its JSON literal must carry.
+ENABLE_LITERAL_VARIABLE = "r"
+ENABLE_LITERAL_STATE = "enabling"
+ENABLE_LITERAL_KEYS = (
+    "state",
+    "enabledUtc",
+    "executionControlReceipt",
+    "executionControlSha256",
+    "recordedUtc",
+)
 
 
 class Deny(Exception):
@@ -432,7 +445,11 @@ def _is_na2_protected(path_norm):
 
 
 def _kill_switch_receipts_ok(ctx):
-    """Exception (i): every named 0.2 receipt exists and validates, AND the enable is unspent.
+    """The RECEIPT half of exception (i): every named 0.2 receipt validates, enable unspent.
+
+    Reached ONLY from the canonical dedicated act below (S99/O118).  It is no longer a
+    standing key that any input naming the marker under a delete verb can turn: a delete
+    outside the canonical compound is refused before this is ever consulted.
 
     The execution-control arm selects the NEWEST ``execution-control-*.json`` by its
     ``recordedUtc``.  A receipt LACKING ``recordedUtc`` is INVALID (O105) and its mere
@@ -487,6 +504,142 @@ def _kill_switch_receipts_ok(ctx):
     if document.get("productLiveCount") != PROVENANCE_PRODUCT_LIVE_COUNT:
         return False, "newest execution-control receipt carries the wrong productLiveCount"
     return True, ""
+
+
+# ------------------------------------------- NA-2 exception (i): ONE DEDICATED ACT
+#
+# S99/O118.  Generic NA-2 attribution applies a command's ACT SET to EVERY path in its
+# text, so the register's own canonical enable -- which creates the receipt AND deletes
+# the marker in one input -- reads as a DELETE of a receipt and is refused (the
+# Claude-family ratifier measured 8/8 formulations denied).  The resolution is not to
+# loosen the attribution, which would also admit `Remove-Item <receipt>` on its own: the
+# hook recognises the canonical compound as ONE dedicated act, BEFORE attribution runs,
+# and the delete of the marker is authorized ONLY inside that act.  Everything else that
+# deletes the marker -- a bare delete, a re-ordered compound, a different write cmdlet --
+# is DENIED, receipts or no receipts.
+#
+# FAIL-CLOSED READINGS OF THE CANONICAL SHAPE (recorded, 0.05 third review delta).  The
+# register pins the form character-for-character except whitespace, so every degree of
+# freedom it does not name is refused rather than guessed:
+#   * PowerShell tool ONLY -- the register writes "the canonical compound form" in
+#     PowerShell; the same text arriving as a Bash input is not it.
+#   * The variable is `$r` (case-insensitively, as PowerShell resolves it) in BOTH the
+#     assignment and `-Value`, and nothing else.
+#   * `Set-Content -LiteralPath <receipt> -Value $r` exactly: not `-Path`, not a reordered
+#     or extra parameter, not `Out-File`, not a redirect.
+#   * Single-quoted literals containing no quote of their own; a PowerShell-escaped `''`
+#     inside one fails the shape and is refused.
+#   * `;` between the three statements, and NOTHING before, between or after them.
+# The cost of each reading is a visible DENY on a near-miss, one line to fix.  The cost of
+# the other reading is a silent ALLOW of a marker delete, which is the act itself.
+_ENABLE_COMPOUND_RX = re.compile(
+    r"\A\s*"
+    r"\$(?P<var>[A-Za-z_]\w*)\s*=\s*'(?P<literal>[^']*)'\s*;\s*"
+    r"Set-Content\s+-LiteralPath\s+'(?P<receipt>[^']*)'\s+-Value\s+\$(?P<value>[A-Za-z_]\w*)"
+    r"\s*;\s*"
+    r"Remove-Item\s+-LiteralPath\s+'(?P<marker>[^']*)'"
+    r"\s*\Z",
+    re.I,
+)
+
+
+def _marker_path_norm(ctx):
+    return norm(os.path.join(ctx.dual_dir_raw, KILL_SWITCH_MARKER_NAME))
+
+
+def _enable_receipt_path_norm(ctx):
+    return norm(ctx.receipt(KILL_SWITCH_ENABLE_RECEIPT))
+
+
+def _canonical_enable_literal(ctx):
+    """The JSON literal of the canonical enable compound, or None for any other shape."""
+    if ctx.tool != "PowerShell":
+        return None
+    match = _ENABLE_COMPOUND_RX.match(ctx.command or "")
+    if not match:
+        return None
+    variable = match.group("var").lower()
+    if variable != ENABLE_LITERAL_VARIABLE or match.group("value").lower() != variable:
+        return None
+    if norm(match.group("receipt")) != _enable_receipt_path_norm(ctx):
+        return None
+    if norm(match.group("marker")) != _marker_path_norm(ctx):
+        return None
+    return match.group("literal")
+
+
+def _enable_literal_ok(literal):
+    """The literal must parse as an object carrying five non-empty strings, state=enabling."""
+    try:
+        document = json.loads(literal)
+    except Exception:
+        return False, "the enable literal is not parseable JSON"
+    if not isinstance(document, dict):
+        return False, "the enable literal is not a JSON object"
+    for key in ENABLE_LITERAL_KEYS:
+        value = document.get(key)
+        if not isinstance(value, str) or not value:
+            return False, "the enable literal lacks a non-empty string %s" % key
+    if document["state"] != ENABLE_LITERAL_STATE:
+        return (
+            False,
+            'the enable literal\'s state is not "%s"' % ENABLE_LITERAL_STATE,
+        )
+    return True, ""
+
+
+def _enable_act_allowed(ctx):
+    """-> True when this input IS the canonical enable and every condition holds.
+
+    False means "some other shape, judge it generically".  Raises Deny when it IS the
+    canonical act and a condition failed -- S98 (the receipt is already present) fires
+    first, because a spent authorization settles the input before anything else is read.
+    """
+    literal = _canonical_enable_literal(ctx)
+    if literal is None:
+        return False
+    ok, why = _kill_switch_receipts_ok(ctx)
+    if not ok:
+        raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)
+    ok, why = _enable_literal_ok(literal)
+    if not ok:
+        raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)
+    return True
+
+
+def _refuse_marker_delete_outside_the_act(ctx, acts):
+    """S99/O118: deleting or moving the marker in ANY non-canonical input is refused.
+
+    Runs BEFORE the generic per-path attribution so the refusal never depends on WHICH
+    protected token the scan happens to reach first -- a delete-first compound and a
+    receipt-first compound must give the same answer, and generic attribution must never
+    be what admits or refuses the enable (O118).
+    """
+    if "delete" not in acts and "move" not in acts:
+        return
+    marker = _marker_path_norm(ctx)
+    names_marker = False
+    for token in tokens(ctx.command):
+        path_norm = norm(token)
+        if path_norm == marker or _carve_tag(ctx, path_norm) == "killswitch":
+            names_marker = True
+            break
+    if not names_marker:
+        return
+    verb = "deleting" if "delete" in acts else "moving"
+    receipt = _enable_receipt_path_norm(ctx)
+    if any(norm(token) == receipt for token in tokens(ctx.command)):
+        raise Deny(
+            "NA-2",
+            "%s %s outside the canonical enable is never authorized; naming receipts/%s "
+            "in a non-canonical shape does not make this the dedicated act (S99/O118)"
+            % (verb, KILL_SWITCH_MARKER_NAME, KILL_SWITCH_ENABLE_RECEIPT),
+        )
+    raise Deny(
+        "NA-2",
+        "%s %s outside the canonical enable is never authorized (S99)"
+        % (verb, KILL_SWITCH_MARKER_NAME),
+    )
 
 
 def _archive_release_ok(ctx, path_norm, new_text):
@@ -547,12 +700,13 @@ def _na2_decide(ctx, path_norm, acts, source):
 
     if tag == "killswitch":
         if "delete" in acts or "move" in acts:
-            ok, why = _kill_switch_receipts_ok(ctx)
-            if ok:
-                return
+            # Unreachable for shell inputs -- ``_refuse_marker_delete_outside_the_act``
+            # already settled them, and the canonical act returned before attribution.
+            # Kept as the fail-closed floor: no path reaches this arm and is allowed.
             raise Deny(
                 "NA-2",
-                "deleting WORKSTREAM-LOOP-DISABLED is refused: %s" % why,
+                "%s %s outside the canonical enable is never authorized (S99)"
+                % ("deleting" if "delete" in acts else "moving", KILL_SWITCH_MARKER_NAME),
             )
         # Exception (iii): CREATING the kill switch is ALWAYS allowed, any tool, any verb.
         return
@@ -591,9 +745,13 @@ def _na2_decide(ctx, path_norm, acts, source):
 
 def rule_na2(ctx):
     if ctx.tool in SHELL_TOOLS:
+        # The dedicated act is decided BEFORE anything is attributed (S99/O118).
+        if _enable_act_allowed(ctx):
+            return
         acts = shell_acts(ctx.command)
         if not acts:
             return
+        _refuse_marker_delete_outside_the_act(ctx, acts)
         for token in tokens(ctx.command):
             path_norm = norm(token)
             if _is_na2_protected(path_norm):
@@ -639,7 +797,7 @@ _NA3_RULES = (
 
 # ---- the `claude auth ...` arm, bounded by the REGISTER and not by the card's phrase ----
 #
-# ``never-authorized.json`` (schema v15) row NA-3 reads, VERBATIM:
+# ``never-authorized.json`` (schema v16) row NA-3 reads, VERBATIM:
 #
 #     claude auth login|logout, codex login, or assignment (X=, export, $env:, set, setx)
 #     of any variable starting ANTHROPIC_, OPENAI_, CLAUDE_CODE_
