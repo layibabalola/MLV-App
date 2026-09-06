@@ -724,7 +724,15 @@ def under(path_norm, root_norm):
 
 
 def is_absolute(path_norm):
-    return bool(re.match(r"^(?:[a-z]:/|//)", path_norm))
+    # A Windows drive-letter path (c:/...) or a UNC/POSIX path rooted at / (// is UNC,
+    # a single / is a POSIX absolute path -- both start with /, so one alternative
+    # covers both). The prior form matched ONLY c:/ or // and silently treated a real
+    # POSIX absolute path (e.g. /tmp/x) as "not absolute", which made
+    # _na7_check_path's early return ("a relative destination resolves inside the
+    # worktree by construction") fire on genuinely absolute paths outside the
+    # worktree/board roots -- NA-7 never denied them. Found by hosted CI on
+    # ubuntu-latest (r1/r2 falsifiers), invisible on the Windows-only local suite.
+    return bool(re.match(r"^(?:[a-z]:/|/)", path_norm))
 
 
 # ------------------------------------------------------------------------- tokens

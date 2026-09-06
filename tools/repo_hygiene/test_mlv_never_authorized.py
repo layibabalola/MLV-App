@@ -5636,6 +5636,29 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         hook_module = _load_hook_module()
         self.assertEqual(hook_module._fixed_set_digest(hashes), pinned_command_digest)
 
+    def test_is_absolute_recognises_posix_and_windows_paths_alike(self):
+        """NA-7: the absolute-path test must not be Windows-only.
+
+        Found by hosted CI on ubuntu-latest, invisible on this suite's own local (Windows)
+        runs: `is_absolute` matched only a drive-letter path (`c:/...`) or a UNC path
+        (`//...`), so a genuine POSIX absolute path (`/tmp/x`) read as "not absolute" and
+        `_na7_check_path`'s early return ("a relative destination resolves inside the
+        worktree by construction") fired on it -- NA-7 never denied a write to a real
+        absolute path outside the worktree/board roots on a non-Windows host. The `r1 write
+        into another project tree` / `r2 shell write outside the repo` rows exercise this
+        end-to-end via an OS-native tempdir path and so only ever stressed ONE path style
+        per host; this test checks both styles directly, on every host, regardless of which
+        style the local OS would have produced.
+        """
+        hook_module = _load_hook_module()
+        norm = hook_module.norm
+        is_absolute = hook_module.is_absolute
+        self.assertTrue(is_absolute(norm("/tmp/outside/stray.txt")), "POSIX absolute path")
+        self.assertTrue(is_absolute(norm("c:/users/x/outside/stray.txt")), "drive-letter path")
+        self.assertTrue(is_absolute(norm("//server/share/outside/stray.txt")), "UNC path")
+        self.assertFalse(is_absolute(norm("outside/stray.txt")), "relative path")
+        self.assertFalse(is_absolute(norm("../outside/stray.txt")), "relative parent path")
+
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""
         blob = json.dumps(CASES)
