@@ -708,6 +708,29 @@ def file_lock(
             if not _is_windows() and parent_fd is None:
                 os.chmod(lock_path, PRIVATE_DIRECTORY_MODE)
             break
+        except PermissionError:
+            # WINDOWS DELETE-PENDING RACE. This lock is a DIRECTORY, taken with mkdir and
+            # released with rmdir. When one process releases the lock at the same moment
+            # another tries to take it, Windows can leave the directory in a delete-pending
+            # state: the name still resolves, but every open of it fails with
+            # ERROR_ACCESS_DENIED -> PermissionError (WinError 5), NOT FileExistsError.
+            #
+            # The retry loop below only ever caught FileExistsError, so that window escaped
+            # as an unhandled exception and killed the caller. Observed in CI as
+            #   PermissionError: [WinError 5] Access is denied: '...\concurrent-inbox.jsonl.lock'
+            # failing test_core_storage_process_writers_preserve_jsonl_rows intermittently,
+            # which is exactly the shape: 4 concurrent writers, 40 appends each.
+            #
+            # Retrying is correct and is NOT a way of ignoring a real permission problem:
+            # a delete-pending directory disappears within milliseconds, while a genuinely
+            # inaccessible path keeps failing until the timeout below turns it into a
+            # bounded TimeoutError naming the lock -- a diagnosable failure instead of a
+            # crash mid-write.
+            if not _is_windows():
+                raise
+            if time.time() - start > timeout_seconds:
+                raise TimeoutError("timed out waiting for storage lock %s" % lock_path)
+            time.sleep(0.05)
         except FileExistsError:
             storage.reject_link_components(lock_path)
             try:
