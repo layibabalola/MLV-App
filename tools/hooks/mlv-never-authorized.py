@@ -13,7 +13,7 @@ exit 2 : fail-CLOSED, with ``hook-error: <detail>`` on stderr, for ANY exception
          accepted, because an argument this hook does not understand may be the venue
          under a name it no longer reads).
 
-This is the PROJECT hook described by ``never-authorized.json`` (schema v21) and by
+This is the PROJECT hook described by ``never-authorized.json`` (schema v22) and by
 ``prompts/v2/card-TOOL-HOOK-ENFORCE-1.md``.  It is NOT the global machine hook
 ``~/.claude/hooks/check-continuity-boundaries.py``, which is shared by every project on
 this machine and fails OPEN.  This one fails CLOSED and is tracked on the same ref as the
@@ -137,12 +137,18 @@ non-negative integer and a ``bool`` is NOT one; ``list`` = a JSON array.  Per re
   * ``0.5-factory-frozen.json``   queueSha256, dryRunDiffSha256 (sha256); frozenCount (int);
     scopelessIds (list).
   * ``execution-control-<step>.json`` for <step> in {0.1, 0.35, 0.4c-i, 0.4b-i, 0.6, 0.7} --
-    THE SIX CHAIN NAMES AND NO OTHER: ``hashes``, a non-empty object whose values are all
-    sha256, and from 0.35 on ``roadmapParityReceiptSha256`` EQUAL to the sha256 of
-    ``0.18-roadmap-parity.json``'s bytes on disk, ``queueSha256`` (shape only, carried
-    forward) and ``productLiveCount`` exactly 15.  Any OTHER ``execution-control-*.json``
-    present is INVALID and fails the exception closed by name -- the candidate set is an
-    ENUMERATION, not the glob the forged receipt walked in through.
+    THE SIX CHAIN NAMES AND NO OTHER: ``reviewedHeadSha`` (sha); ``solVerdictPath`` (path)
+    whose TERMINAL JSON block carries ``verdict`` APPROVE and ``subject_sha`` equal to that
+    ``reviewedHeadSha`` (S120); ``hashes``, an object whose KEY SET is EXACTLY the step's
+    fixed set in ``EXECUTION_CONTROL_HASH_TABLE`` and whose values are all sha256 (S120 --
+    a missing or an extra key is INVALID); 0.1 additionally ``composerStatus`` ==
+    ``not-yet-created`` plus ``composedPromptPath``, ``prChecksPath`` and ``prReviewPath``
+    (paths); 0.35 additionally those three paths; and from 0.35 on
+    ``roadmapParityReceiptSha256`` EQUAL to the sha256 of ``0.18-roadmap-parity.json``'s
+    bytes on disk, ``queueSha256`` (shape only, carried forward) and ``productLiveCount``
+    exactly 15.  Any OTHER ``execution-control-*.json`` present is INVALID and fails the
+    exception closed by name -- the candidate set is an ENUMERATION, not the glob the
+    forged receipt walked in through.
 
 The SELECTED control receipt is ``execution-control-0.7.json`` when a valid one exists, else
 ``execution-control-0.6.json``, and the parsed-newest valid chain receipt must BE the
@@ -160,6 +166,46 @@ one-shot enable would fire against a superseded receipt.  Recovery from an undec
 offending receipt carrying a conforming stamp and every required key, which the receipts
 carve-out allows; never a delete.  This whole arm is a PURE DECISION: it opens files for
 reading and hashes one of them, and writes nothing anywhere.
+
+THE SECOND KEY'S APPROVAL, THE FIXED HASH SET, AND THE RE-HASH (S120/O158/O159, register v22)
+------------------------------------------------------------------------------------------
+Up to the eighth commit a chain receipt validated with ANY non-empty ``hashes`` object and
+no review at all: a receipt carrying one hashed path and no reviewer's verdict was a
+complete receipt.  The gate the whole chain exists to close is "the tooling that runs the
+board is the tooling the second key approved", and that reading of ``hashes`` proved neither
+half.  Three arms close it:
+
+  * S120 -- ``reviewedHeadSha`` (40 lowercase hex, the head the second key reviewed) and
+    ``solVerdictPath``, a file that exists whose TERMINAL JSON block -- the last ```json
+    fenced block, else the last top-level JSON object in the file, which is how the
+    ``sol-review-PR-TEMPLATE`` ends -- parses to an object carrying ``verdict`` ==
+    ``APPROVE`` and ``subject_sha`` == that ``reviewedHeadSha``.  Absent, unreadable, a
+    block that does not parse, a verdict that is not APPROVE, or an approval of a DIFFERENT
+    head: INVALID, and under O152 that makes the newest undecidable.  An APPROVE of some
+    other sha is the second key's approval of something else, not of this head.
+  * S120 -- the ``hashes`` KEY SET is EXACTLY the step's required set, and the six sets
+    live in ONE table, ``EXECUTION_CONTROL_HASH_TABLE``, written the way the plan writes
+    them (BASE, then what each step adds) so the plan and the code are compared by eye in
+    one place.  A missing key is a file the step did not measure; an EXTRA key is a file no
+    step landed, which is how a receipt would come to vouch for a script nobody reviewed.
+  * O158 -- at the enable act, AFTER the selection and the venue test, the hook RE-HASHES
+    every file of the SELECTED receipt's FIXED set in the board root and compares each to
+    the receipt's value.  The fixed set, never merely the keys present: the set to walk is
+    the table's, and a file of that set ABSENT from the board root is a refusal naming the
+    path, as is a digest that differs.  This is the one arm that reads the board's TOOLING
+    rather than its receipts, and it is what makes "the receipt validated" mean "the board
+    still matches it".
+
+O159 is a hub PROCEDURE, not hook logic, and it is recorded here because the hook's strict
+rule is what makes it necessary.  When the receipt that has to be rewritten is
+``0.18-roadmap-parity.json`` -- whose sha256 every chain receipt from 0.35 on carries -- the
+same non-shrinking ``Write`` rewrite is followed, IN THE SAME HUB STEP, by a non-shrinking
+rewrite of every chain receipt from 0.35 on, re-pointing ``roadmapParityReceiptSha256`` to
+the repaired file's new digest while ``queueSha256`` and ``productLiveCount`` stay as they
+were: the ONE amendment to "carried forward unchanged".  The hook needs no new arm for it --
+it binds every chain receipt to the 0.18 bytes on disk already -- which is exactly why a
+repair that re-points all but one receipt is refused naming the one left behind, and the
+suite measures both halves.
 
 THE ENABLE LITERAL IS VALIDATED SEMANTICALLY, NOT FOR PRESENCE (S112, register v21)
 -----------------------------------------------------------------------------------
@@ -363,6 +409,80 @@ EXECUTION_CONTROL_PROVENANCE_EXEMPT = (
 CONTROL_SELECTED_PREFERRED = EXECUTION_CONTROL_PREFIX + "0.7" + EXECUTION_CONTROL_SUFFIX
 CONTROL_SELECTED_FALLBACK = EXECUTION_CONTROL_PREFIX + "0.6" + EXECUTION_CONTROL_SUFFIX
 CONTROL_HASHES_KEY = "hashes"
+
+# S120 -- EVERY CONTROL RECEIPT CARRIES THE SECOND KEY'S APPROVAL OF THIS HEAD.
+# `reviewedHeadSha` is the head sol reviewed for this step; `solVerdictPath` names that
+# review, whose TERMINAL JSON block -- the `sol-review-PR-TEMPLATE` ends with exactly one
+# -- must carry `verdict` APPROVE and `subject_sha` equal to that head.  The verdict
+# literal and the key names are the template's, compared exactly.
+CONTROL_REVIEWED_HEAD_KEY = "reviewedHeadSha"
+CONTROL_VERDICT_PATH_KEY = "solVerdictPath"
+CONTROL_VERDICT_KEY = "verdict"
+CONTROL_VERDICT_APPROVE = "APPROVE"
+CONTROL_VERDICT_SUBJECT_KEY = "subject_sha"
+# The terminal block: the LAST ```json fence when the file carries any (a fence is the
+# template's shape), else the LAST top-level JSON object -- a `{` at column 0 that decodes
+# as an object and is not inside an object already decoded (a plain `.json` verdict).
+_VERDICT_FENCE_RX = re.compile(r"```json[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
+_VERDICT_OBJECT_HEAD_RX = re.compile(r"^\{", re.M)
+
+# S120/O158 -- THE ONE TABLE OF FIXED HASH SETS (plan 1.3 step 5), written the way the plan
+# writes it so the two are compared by eye in one place: BASE, then what each step ADDS to
+# the previous step's set.  0.7 adds nothing -- it carries 0.6's set at a later head.  The
+# `hashes` KEY SET of a chain receipt is EXACTLY its step's set (a missing key is a file the
+# step did not measure, an extra key a file no step landed), and at the enable act 0.2
+# re-hashes the SELECTED receipt's FIXED set in the board root -- never merely the keys
+# present (O158).  Paths are the plan's, forward-slashed and board-relative.
+CONTROL_HASHES_BASE = (
+    "tools/hooks/mlv-never-authorized.py",
+    "tools/repo_hygiene/test_mlv_never_authorized.py",
+    "tools/hooks/test_registration_path_local.py",
+    "tools/coordination/Invoke-Lane.ps1",
+    "tools/coordination/Invoke-Workstream.ps1",
+    "tools/coordination/Invoke-WorkstreamLoop.ps1",
+)
+EXECUTION_CONTROL_HASH_TABLE = (
+    ("0.1", ()),
+    ("0.35", ("tools/coordination/Compose-LanePrompt.ps1",)),
+    ("0.4c-i", ("tools/coordination/demote-factory-bridge.ps1",)),
+    ("0.4b-i", ("tools/coordination/set-required-checks.ps1",)),
+    (
+        "0.6",
+        (
+            "tools/coordination/Test-ProductRatioGuard.ps1",
+            "tools/coordination/freeze-factory-cards.py",
+        ),
+    ),
+    ("0.7", ()),
+)
+
+
+def _required_hash_sets():
+    """-> {chain receipt basename: frozenset of board-relative paths}, from the table above."""
+    sets = {}
+    running = tuple(CONTROL_HASHES_BASE)
+    for step, added in EXECUTION_CONTROL_HASH_TABLE:
+        running = running + tuple(added)
+        sets[EXECUTION_CONTROL_PREFIX + step + EXECUTION_CONTROL_SUFFIX] = frozenset(running)
+    return sets
+
+
+EXECUTION_CONTROL_REQUIRED_HASHES = _required_hash_sets()
+
+# S120 -- THE PER-STEP KEYS.  0.1 runs before the composer exists, so it records that fact
+# (`composerStatus` == `not-yet-created`) beside the three evidence paths; 0.35 lands the
+# composer and records the three paths; the provenance keys (`PROVENANCE_KEYS`, from 0.35
+# on) are unchanged from the eighth commit.
+CONTROL_COMPOSER_STATUS_KEY = "composerStatus"
+CONTROL_COMPOSER_STATUS_VALUE = "not-yet-created"
+CONTROL_COMPOSER_PATH_KEYS = ("composedPromptPath", "prChecksPath", "prReviewPath")
+EXECUTION_CONTROL_COMPOSER_STATUS_NAMES = (
+    EXECUTION_CONTROL_PREFIX + "0.1" + EXECUTION_CONTROL_SUFFIX,
+)
+EXECUTION_CONTROL_COMPOSER_PATH_NAMES = (
+    EXECUTION_CONTROL_PREFIX + "0.1" + EXECUTION_CONTROL_SUFFIX,
+    EXECUTION_CONTROL_PREFIX + "0.35" + EXECUTION_CONTROL_SUFFIX,
+)
 # S98: the 0.2 enable is ONE-SHOT.  0.2 writes this receipt in the SAME guarded action as
 # the delete, so its PRESENCE is the proof the one authorization was already spent.
 KILL_SWITCH_ENABLE_RECEIPT = "0.2-loop-enabled.json"
@@ -858,23 +978,82 @@ def _is_contexts(value):
     return CANONICAL_04B_PROMOTED_CONTEXT in value
 
 
-def _path_value_exists(ctx, value):
-    """`path`: a file that exists, read ABSOLUTE first and then relative to the board root.
+def _resolve_path_value(ctx, value):
+    """`path`: the FILE a value names, read ABSOLUTE first and then relative to the board root.
 
-    Absolute first, so a receipt written with a full path is judged on the file it names;
-    board-relative second, because that is how the plan's steps record these fields.  The
-    fall-back is deliberately the BOARD and never the hook's cwd: a relative path resolved
-    against whatever directory the session happened to be in would make the same receipt
-    valid or invalid depending on who read it.
+    -> the path that exists, or ``None``.  Absolute first, so a receipt written with a full
+    path is judged on the file it names; board-relative second, because that is how the
+    plan's steps record these fields.  The fall-back is deliberately the BOARD and never the
+    hook's cwd: a relative path resolved against whatever directory the session happened to
+    be in would make the same receipt valid or invalid depending on who read it.  A
+    directory is not a file: `os.path.isfile` is the test.
     """
     if not isinstance(value, str) or not value:
-        return False
+        return None
     try:
         if os.path.isfile(value):
-            return True
-        return os.path.isfile(os.path.join(ctx.board_root_raw, value))
+            return value
+        joined = os.path.join(ctx.board_root_raw, value)
+        if os.path.isfile(joined):
+            return joined
     except Exception:
-        return False
+        return None
+    return None
+
+
+def _path_value_exists(ctx, value):
+    return _resolve_path_value(ctx, value) is not None
+
+
+def _text_of(path):
+    """-> the file's text (a BOM tolerated), or ``None`` when it cannot be read as UTF-8."""
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            return handle.read()
+    except Exception:
+        return None
+
+
+def _terminal_json_block(text):
+    """-> ``(document, why)``: the TERMINAL JSON block of a verdict file (S120).
+
+    The last ```json fenced block when the file carries any -- `sol-review-PR-TEMPLATE`
+    ends with exactly one, and a review that quotes an earlier block in its prose still
+    ENDS with its own -- else the last TOP-LEVEL JSON object in the file, which is what a
+    verdict saved as plain `.json` is.  Top-level means a `{` at column 0 that decodes as
+    an object and does not sit inside an object already decoded, so a pretty-printed
+    member of the root is never mistaken for the root.  ``document`` is ``None`` and
+    ``why`` says which reading failed when neither yields an object: a fence that does not
+    parse is a malformed verdict, not an invitation to fall back to the other reading.
+    """
+    fences = _VERDICT_FENCE_RX.findall(text)
+    if fences:
+        try:
+            document = json.loads(fences[-1])
+        except ValueError:
+            return None, "its last ```json block does not parse"
+        if not isinstance(document, dict):
+            return None, "its last ```json block is not a JSON object"
+        return document, ""
+    decoder = json.JSONDecoder()
+    last = None
+    consumed = 0
+    for match in _VERDICT_OBJECT_HEAD_RX.finditer(text):
+        if match.start() < consumed:
+            continue
+        try:
+            candidate, end = decoder.raw_decode(text, match.start())
+        except ValueError:
+            continue
+        consumed = end
+        if isinstance(candidate, dict):
+            last = candidate
+    if last is None:
+        return (
+            None,
+            "carries no terminal JSON block (no ```json fence and no top-level JSON object)",
+        )
+    return last, ""
 
 
 def _value_class_ok(ctx, klass, value):
@@ -976,6 +1155,182 @@ def _fixed_receipt_why(ctx, name, document, required):
     return ""
 
 
+def _control_approval_why(ctx, name, document):
+    """S120: `reviewedHeadSha` and the second key's APPROVE of exactly that head, else why.
+
+    The verdict file is read through ``_terminal_json_block``: the last ```json fence, else
+    the last top-level object.  Every arm is a refusal, never an exclusion (O152), and each
+    names the receipt, the key and -- once the file is open -- the verdict path, so a
+    near-miss is attributable to the one thing that failed: the key absent, the sha
+    malformed, the path absent, the file unreadable or without a terminal block, a verdict
+    other than APPROVE, or an APPROVE of some OTHER head, which is the second key's approval
+    of something else.
+    """
+    if CONTROL_REVIEWED_HEAD_KEY not in document:
+        return "execution-control receipt %s lacks %s (S120/O152)" % (
+            name,
+            CONTROL_REVIEWED_HEAD_KEY,
+        )
+    head = document[CONTROL_REVIEWED_HEAD_KEY]
+    if not _is_sha(head):
+        return "execution-control receipt %s carries %s %r, which is not %s (S120/O152)" % (
+            name,
+            CONTROL_REVIEWED_HEAD_KEY,
+            head,
+            _VALUE_CLASS_PROSE["sha"],
+        )
+    if CONTROL_VERDICT_PATH_KEY not in document:
+        return "execution-control receipt %s lacks %s (S120/O152)" % (
+            name,
+            CONTROL_VERDICT_PATH_KEY,
+        )
+    verdict_path = document[CONTROL_VERDICT_PATH_KEY]
+    resolved = _resolve_path_value(ctx, verdict_path)
+    if resolved is None:
+        return "execution-control receipt %s carries %s %r, which is not %s (S120/O152)" % (
+            name,
+            CONTROL_VERDICT_PATH_KEY,
+            verdict_path,
+            _VALUE_CLASS_PROSE["path"],
+        )
+    text = _text_of(resolved)
+    if text is None:
+        return (
+            "execution-control receipt %s carries %s %r, and that file could not be read "
+            "as UTF-8 text (S120/O152)" % (name, CONTROL_VERDICT_PATH_KEY, verdict_path)
+        )
+    verdict, why = _terminal_json_block(text)
+    if verdict is None:
+        return "execution-control receipt %s carries %s %r, and that file %s (S120/O152)" % (
+            name,
+            CONTROL_VERDICT_PATH_KEY,
+            verdict_path,
+            why,
+        )
+    if verdict.get(CONTROL_VERDICT_KEY) != CONTROL_VERDICT_APPROVE:
+        return (
+            "execution-control receipt %s carries %s %r, whose terminal JSON block carries "
+            "%s %r, not %r -- the second key has not approved this head (S120/O152)"
+            % (
+                name,
+                CONTROL_VERDICT_PATH_KEY,
+                verdict_path,
+                CONTROL_VERDICT_KEY,
+                verdict.get(CONTROL_VERDICT_KEY),
+                CONTROL_VERDICT_APPROVE,
+            )
+        )
+    if verdict.get(CONTROL_VERDICT_SUBJECT_KEY) != head:
+        return (
+            "execution-control receipt %s carries %s %r, whose terminal JSON block carries "
+            "%s %r, not this receipt's %s %r -- an approval of a DIFFERENT head is not the "
+            "second key's approval of this one (S120/O152)"
+            % (
+                name,
+                CONTROL_VERDICT_PATH_KEY,
+                verdict_path,
+                CONTROL_VERDICT_SUBJECT_KEY,
+                verdict.get(CONTROL_VERDICT_SUBJECT_KEY),
+                CONTROL_REVIEWED_HEAD_KEY,
+                head,
+            )
+        )
+    return ""
+
+
+def _control_hashes_why(name, document):
+    """S120: `hashes` is an object whose KEY SET is EXACTLY the step's fixed set, else why.
+
+    Missing keys are named before extra ones, and both before the value class, so a receipt
+    that is wrong in more than one way is attributed to the plan's first complaint.  The set
+    is read off ``EXECUTION_CONTROL_REQUIRED_HASHES`` by the receipt's NAME; a chain name
+    with no row there is a table this hook does not implement, and that is a refusal too.
+    """
+    if CONTROL_HASHES_KEY not in document:
+        return "execution-control receipt %s lacks %s (S118/O152)" % (
+            name,
+            CONTROL_HASHES_KEY,
+        )
+    hashes = document[CONTROL_HASHES_KEY]
+    if not isinstance(hashes, dict) or not hashes:
+        return (
+            "execution-control receipt %s carries %s %r, which is not a NON-EMPTY object "
+            "mapping each hashed path to its sha256 (S118/O152)"
+            % (name, CONTROL_HASHES_KEY, hashes)
+        )
+    required = EXECUTION_CONTROL_REQUIRED_HASHES.get(name)
+    if required is None:
+        return (
+            "execution-control receipt %s has no row in the fixed hash-set table, so its "
+            "%s cannot be judged (S120/O152)" % (name, CONTROL_HASHES_KEY)
+        )
+    missing = sorted(required - frozenset(hashes))
+    if missing:
+        return (
+            "execution-control receipt %s carries %s lacking %s -- the key set must be "
+            "EXACTLY this step's fixed set of %d paths, and a missing key is a file the "
+            "step did not measure (S120/O152)"
+            % (name, CONTROL_HASHES_KEY, ", ".join(missing), len(required))
+        )
+    extra = sorted(frozenset(hashes) - required)
+    if extra:
+        return (
+            "execution-control receipt %s carries %s with %s, which is not in this step's "
+            "fixed set -- the key set must be EXACTLY that set of %d paths, and an extra "
+            "key is a file no step landed (S120/O152)"
+            % (name, CONTROL_HASHES_KEY, ", ".join(extra), len(required))
+        )
+    for hashed_path in sorted(hashes):
+        if not _is_sha256(hashes[hashed_path]):
+            return (
+                "execution-control receipt %s maps %s entry %r to %r, which is not %s "
+                "(S118/O152)"
+                % (
+                    name,
+                    CONTROL_HASHES_KEY,
+                    hashed_path,
+                    hashes[hashed_path],
+                    _VALUE_CLASS_PROSE["sha256"],
+                )
+            )
+    return ""
+
+
+def _control_step_keys_why(ctx, name, document):
+    """S120: the keys ONE step carries beyond the common ones, else why.
+
+    0.1 carries `composerStatus` == `not-yet-created` and the three evidence paths; 0.35
+    carries the three paths.  Every other step carries neither, and a key the plan does not
+    list for a step is not judged here -- the exact-set rule is a rule about `hashes`.
+    """
+    if name in EXECUTION_CONTROL_COMPOSER_STATUS_NAMES:
+        if CONTROL_COMPOSER_STATUS_KEY not in document:
+            return "execution-control receipt %s lacks %s (S120/O152)" % (
+                name,
+                CONTROL_COMPOSER_STATUS_KEY,
+            )
+        if document[CONTROL_COMPOSER_STATUS_KEY] != CONTROL_COMPOSER_STATUS_VALUE:
+            return (
+                "execution-control receipt %s carries %s %r, not exactly %r (S120/O152)"
+                % (
+                    name,
+                    CONTROL_COMPOSER_STATUS_KEY,
+                    document[CONTROL_COMPOSER_STATUS_KEY],
+                    CONTROL_COMPOSER_STATUS_VALUE,
+                )
+            )
+    if name in EXECUTION_CONTROL_COMPOSER_PATH_NAMES:
+        for key in CONTROL_COMPOSER_PATH_KEYS:
+            if key not in document:
+                return "execution-control receipt %s lacks %s (S120/O152)" % (name, key)
+            if not _path_value_exists(ctx, document[key]):
+                return (
+                    "execution-control receipt %s carries %s %r, which is not %s (S120/O152)"
+                    % (name, key, document[key], _VALUE_CLASS_PROSE["path"])
+                )
+    return ""
+
+
 def _control_receipt_why(ctx, name, document, parity_sha):
     """-> a refusal naming the FILE and the KEY for a chain receipt, else ``""``.
 
@@ -986,8 +1341,17 @@ def _control_receipt_why(ctx, name, document, parity_sha):
     enable would fire against a superseded receipt.  Recovery is a NON-shrinking `Write`
     rewrite of the offending receipt carrying a conforming stamp and every required key,
     which the receipts carve-out allows; never a delete.
+
+    The arms run in the plan's row order -- shape, stamp, the second key's approval (S120),
+    the fixed hash set (S120), the step's own keys (S120), the provenance (S118) -- and each
+    returns the FIRST failure, so a receipt with two faults is attributed to the one the
+    plan lists first.
     """
-    why = _receipt_shape_why(name, document, (CONTROL_HASHES_KEY,))
+    why = _receipt_shape_why(
+        name,
+        document,
+        (CONTROL_REVIEWED_HEAD_KEY, CONTROL_VERDICT_PATH_KEY, CONTROL_HASHES_KEY),
+    )
     if why:
         return why
     # The stamp keeps the O141 wording and the O141 id: it is the arm that decides the
@@ -1005,31 +1369,15 @@ def _control_receipt_why(ctx, name, document, parity_sha):
             "NEWEST is UNDECIDABLE and the exception fails closed (O141)"
             % (name, RECORDED_UTC_KEY, stamp, PINNED_UTC_NOTATION)
         )
-    hashes = document.get(CONTROL_HASHES_KEY)
-    if CONTROL_HASHES_KEY not in document:
-        return "execution-control receipt %s lacks %s (S118/O152)" % (
-            name,
-            CONTROL_HASHES_KEY,
-        )
-    if not isinstance(hashes, dict) or not hashes:
-        return (
-            "execution-control receipt %s carries %s %r, which is not a NON-EMPTY object "
-            "mapping each hashed path to its sha256 (S118/O152)"
-            % (name, CONTROL_HASHES_KEY, hashes)
-        )
-    for hashed_path in sorted(hashes):
-        if not _is_sha256(hashes[hashed_path]):
-            return (
-                "execution-control receipt %s maps %s entry %r to %r, which is not %s "
-                "(S118/O152)"
-                % (
-                    name,
-                    CONTROL_HASHES_KEY,
-                    hashed_path,
-                    hashes[hashed_path],
-                    _VALUE_CLASS_PROSE["sha256"],
-                )
-            )
+    why = _control_approval_why(ctx, name, document)
+    if why:
+        return why
+    why = _control_hashes_why(name, document)
+    if why:
+        return why
+    why = _control_step_keys_why(ctx, name, document)
+    if why:
+        return why
     if name in EXECUTION_CONTROL_PROVENANCE_EXEMPT:
         return ""
     for key in PROVENANCE_KEYS:
@@ -1098,9 +1446,14 @@ def _kill_switch_receipts_ok(ctx):
 
     The execution-control arm's candidate set is the SIX CHAIN NAMES and no other; any other
     ``execution-control-*.json`` present is INVALID and fails the exception closed by name.
-    Each chain receipt carries ``hashes`` (a non-empty object of sha256 values) and, from
-    0.35 on, ``roadmapParityReceiptSha256`` EQUAL to the sha256 of ``0.18-roadmap-parity.json``
-    as it is on disk, a well-formed ``queueSha256``, and ``productLiveCount`` exactly 15.
+    Each chain receipt carries ``reviewedHeadSha`` and a ``solVerdictPath`` whose terminal
+    JSON block is the second key's APPROVE of exactly that head (S120), ``hashes`` whose KEY
+    SET is exactly its step's fixed set with sha256 values (S120), its step's own keys, and,
+    from 0.35 on, ``roadmapParityReceiptSha256`` EQUAL to the sha256 of
+    ``0.18-roadmap-parity.json`` as it is on disk, a well-formed ``queueSha256``, and
+    ``productLiveCount`` exactly 15.  The O158 re-hash of the SELECTED receipt's fixed set
+    runs in ``_enable_act_allowed``, after the venue test, because its refusal names what
+    drifted in the board root and that is the board-rooted actor's to see.
 
     O141/O152 pin the ORDER and the STRICTNESS.  A receipt LACKING ``recordedUtc`` is INVALID
     (O105) and its mere presence makes the newest undecidable, so the whole exception fails
@@ -1526,6 +1879,61 @@ def _enable_literal_ok(ctx, literal, newest_control):
     return True, ""
 
 
+def _selected_control_rehash_why(ctx, selected):
+    """O158: re-hash the SELECTED receipt's FIXED set in the board root, else why.
+
+    The set walked is the TABLE's for this step -- ``EXECUTION_CONTROL_REQUIRED_HASHES`` --
+    and never merely the keys the receipt happens to carry.  By the time this runs the two
+    are equal (S120 refused any receipt whose key set differs), and the distinction is
+    load-bearing anyway: it is the register's wording, and it keeps this arm honest if the
+    key-set arm were ever loosened.  A file of the set ABSENT from the board root is a
+    refusal naming the path; so is a digest that differs from the receipt's, naming the
+    path and both digests.  The receipt is RE-READ here rather than carried from the
+    selection: it was validated a moment ago, and a read that fails now is a refusal, never
+    a pass.  Paths are board-relative in the plan's forward-slash form and are joined to
+    the board root, never to the hook's cwd or its own worktree -- $R is the tree the loop
+    will run from, and that is the tree the receipt has to match.
+    """
+    document = read_json(ctx.receipt(selected))
+    if not isinstance(document, dict) or not isinstance(
+        document.get(CONTROL_HASHES_KEY), dict
+    ):
+        return (
+            "the SELECTED execution-control receipt %s could not be re-read to re-hash its "
+            "fixed set (O158)" % selected
+        )
+    hashes = document[CONTROL_HASHES_KEY]
+    required = EXECUTION_CONTROL_REQUIRED_HASHES.get(selected)
+    if required is None:
+        return (
+            "the SELECTED execution-control receipt %s has no row in the fixed hash-set "
+            "table (O158)" % selected
+        )
+    for relative in sorted(required):
+        path = os.path.join(ctx.board_root_raw, relative.replace("/", os.sep))
+        if not os.path.isfile(path):
+            return (
+                "the SELECTED execution-control receipt %s hashes %s, but that file is "
+                "ABSENT from the board root -- 0.2 re-hashes the step's FIXED set, never "
+                "merely the keys present (O158)" % (selected, relative)
+            )
+        digest = _sha256_of(path)
+        if digest is None:
+            return (
+                "the SELECTED execution-control receipt %s hashes %s, but that file could "
+                "not be read to re-hash it (O158)" % (selected, relative)
+            )
+        recorded = hashes.get(relative)
+        if digest != recorded:
+            return (
+                "the SELECTED execution-control receipt %s records %s at sha256 %r, but in "
+                "the board root it hashes to %r -- the board has DRIFTED from the receipt "
+                "the enable would be taken against (O158)"
+                % (selected, relative, recorded, digest)
+            )
+    return ""
+
+
 def _enable_act_allowed(ctx):
     """-> True when this input IS the canonical enable and every condition holds.
 
@@ -1542,6 +1950,13 @@ def _enable_act_allowed(ctx):
     worktree lane's hook evaluates the SAME absolute board paths and would admit the
     compound the moment the six receipts exist -- before the hub has verified $R or
     installed the task (S105).
+
+    O158 -- THE SELECTED RECEIPT'S FIXED SET IS RE-HASHED IN THE BOARD ROOT, after the venue
+    and before the literal.  After the venue, because the refusal names which board file
+    drifted and to what, which is the board-rooted actor's to see and not a lane's; before
+    the literal, because a literal naming a receipt the board no longer matches is a receipt
+    of a board that no longer exists, and the operator should be told about the drift, not
+    about the digest of a file whose own digests are stale.
 
     S112 -- THE LITERAL IS VALIDATED SEMANTICALLY, and it stays LAST for the same two
     reasons, now load-bearing in a third way: the digest arm's refusal line names the
@@ -1565,6 +1980,9 @@ def _enable_act_allowed(ctx):
             "absolute board paths (S105/O126)"
             % (ctx.project_dir or "<absent>", ctx.board_root),
         )
+    why = _selected_control_rehash_why(ctx, newest_control)
+    if why:
+        raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)
     ok, why = _enable_literal_ok(ctx, literal, newest_control)
     if not ok:
         raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)

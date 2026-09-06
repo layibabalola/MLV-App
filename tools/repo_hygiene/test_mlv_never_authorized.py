@@ -84,6 +84,23 @@ O141's hazard in a new shape.  The literal names it through ``{CONTROL_0_6}`` /
 receipt on disk, valid or not, because ``{NEWEST_CONTROL}`` cannot express "the 0.6
 specifically" when the rule under test is what "newest" means.
 
+THE SECOND KEY'S APPROVAL, THE FIXED HASH SET, AND THE RE-HASH (S120/O158/O159, register
+v22).  Every chain receipt the fixtures write now carries ``reviewedHeadSha`` (a derived
+40-hex head) and ``solVerdictPath`` naming a verdict file the fixture WROTE -- sol's
+template shape, prose ending in a ```json fence whose block is ``{"verdict": "APPROVE",
+"subject_sha": <that head>, ...}``, with an EARLIER fenced block carrying a BLOCKER so the
+ALLOW rows prove the hook reads the TERMINAL block; 0.35's is saved as plain JSON, the
+"last top-level object" reading -- and a ``hashes`` object whose KEY SET is EXACTLY the
+step's fixed set with the REAL sha256 of each file, which the fixture writes under the tmp
+board's ``tools/`` tree so the O158 re-hash has something to walk.  ``REQUIRED_HASHES``
+restates plan 1.3 step 5's table in full rather than deriving it, so the hook's cumulative
+derivation and this table are two readings the six per-step ALLOW rows force to agree.
+The O158 rows mutate the BOARD, not a receipt: one file of the selected receipt's set is
+edited after the receipt was written, one is deleted.  The O159 pair rewrites
+``0.18-roadmap-parity.json`` non-shrinking and re-points every chain receipt from 0.35 on
+(ALLOW), then leaves 0.35 behind (DENY, naming it) -- the hub procedure measured through
+the hook's strict rule.
+
 NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
 payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
 strings are data -- including the O129 rows, whose ``setx`` and ``SetEnvironmentVariable``
@@ -1659,6 +1676,329 @@ CASES = [
         "expect": "ALLOW",
         "fixture": "chain_all_six_names_at_board",
     },
+    # ------------- S120: the second key's approval of THIS head, and the EXACT fixed set
+    #
+    # Nine DENY rows, each one keyword of one chain receipt away from the ALLOW rows, at the
+    # board venue.  Up to the eighth commit a chain receipt validated with ANY non-empty
+    # `hashes` and no review at all, so a receipt hashing one file and vouched for by nobody
+    # was a complete receipt.  The verdict arm reads the TERMINAL JSON block of the file
+    # `solVerdictPath` names -- and every fixture verdict carries an EARLIER fenced block
+    # with a BLOCKER, so the ALLOW rows below prove "terminal" and not "first".
+    {
+        "name": "enable canonical compound with a chain receipt lacking reviewedHeadSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json lacks reviewedHeadSha",
+            "(S120/O152)",
+        ),
+        "fixture": "control_without_reviewed_head",
+    },
+    {
+        # The RIGHT head, uppercased.  A git object name is lowercase and the comparison is
+        # exact -- the same reading the S112 digest arm and the S118 sha class already carry.
+        "name": "enable canonical compound with an uppercase reviewedHeadSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries reviewedHeadSha",
+            "not a 40-character LOWERCASE hex sha",
+            "(S120/O152)",
+        ),
+        "fixture": "control_reviewed_head_uppercase",
+    },
+    {
+        "name": "enable canonical compound with a chain receipt lacking solVerdictPath",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json lacks solVerdictPath",
+            "(S120/O152)",
+        ),
+        "fixture": "control_without_verdict_path",
+    },
+    {
+        # A REAL verdict file, at the RIGHT head, whose terminal block is CHANGES_REQUESTED.
+        # Presence of a review is not approval; the block's `verdict` is what is read.
+        "name": "enable canonical compound whose sol verdict is changes requested",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries solVerdictPath",
+            "carries verdict 'CHANGES_REQUESTED', not 'APPROVE'",
+            "(S120/O152)",
+        ),
+        "fixture": "control_verdict_changes_requested",
+    },
+    {
+        # A REAL APPROVE -- 0.6's -- named by 0.7.  The second key approved SOMETHING; it did
+        # not approve this head, and a receipt is the approval of the head it hashes at.
+        "name": "enable canonical compound whose sol verdict approves a different head",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries solVerdictPath",
+            "carries subject_sha",
+            "not this receipt's reviewedHeadSha",
+            "(S120/O152)",
+        ),
+        "fixture": "control_verdict_of_another_head",
+    },
+    {
+        # A MISSING key, on the receipt that is NOT selected: O152's strict rule reaches every
+        # present chain receipt, so a 0.6 that measured five of six BASE files refuses the
+        # enable even though 0.7 would be the one taken.
+        "name": "enable canonical compound with a chain receipt whose hashes lack a fixed set path",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.6.json carries hashes lacking "
+            "tools/coordination/Invoke-Lane.ps1",
+            "(S120/O152)",
+        ),
+        "fixture": "control_hashes_missing_key",
+    },
+    {
+        # An EXTRA key at a well-formed digest.  A receipt vouching for a script no step
+        # landed is how an unreviewed file would come to carry a receipt's authority.
+        "name": "enable canonical compound with a chain receipt whose hashes carry an extra path",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries hashes with "
+            "tools/hooks/extra-script.py, which is not in this step's fixed set",
+            "(S120/O152)",
+        ),
+        "fixture": "control_hashes_extra_key",
+    },
+    {
+        # The per-step key.  0.1 runs before the composer exists and records that fact; a
+        # 0.1 without it is a receipt that does not say what it found.
+        "name": "enable canonical compound with execution control 0.1 lacking composerStatus",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.1.json lacks composerStatus",
+            "(S120/O152)",
+        ),
+        "fixture": "control_01_without_composer_status",
+    },
+    {
+        # The right DIGITS and the wrong TYPE.  `"15" != 15`, and the arm compares exactly --
+        # the 14 row above is the wrong value, this one is the wrong kind of value.
+        "name": "enable canonical compound with a chain receipt whose productLiveCount is the string 15",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries productLiveCount "
+            "'15', not exactly 15",
+            "(S118/O152)",
+        ),
+        "fixture": "control_product_live_string",
+    },
+    # ------------- O158: the BOARD is re-hashed against the SELECTED receipt's FIXED set
+    #
+    # Two DENY rows in which every receipt is valid and the BOARD is what changed: a file of
+    # the selected receipt's set edited after the receipt recorded it, and one deleted.  No
+    # receipt-only validation can see either; the re-hash walks the table's set and names the
+    # path.  Both run at the board venue, because the arm sits behind the venue test.
+    {
+        "name": "enable canonical compound with a fixed set file drifted in the board root",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "the SELECTED execution-control receipt execution-control-0.7.json records "
+            "tools/coordination/Invoke-Lane.ps1",
+            "DRIFTED",
+            "(O158)",
+        ),
+        "fixture": "control_rehash_drift_at_board",
+    },
+    {
+        "name": "enable canonical compound with a fixed set file absent from the board root",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "the SELECTED execution-control receipt execution-control-0.7.json hashes "
+            "tools/coordination/freeze-factory-cards.py, but that file is ABSENT",
+            "(O158)",
+        ),
+        "fixture": "control_rehash_file_missing_at_board",
+    },
+    # ------------- S120: the COMPLETE receipt of EACH of the six steps is ALLOW
+    #
+    # One ALLOW per step, each carrying that step's EXACT fixed set and its own keys.  With
+    # the missing-key and extra-key rows above, these pin the hook's six sets to the suite's
+    # `REQUIRED_HASHES` -- two independent restatements of plan 1.3 step 5 forced to agree.
+    # 0.6 and 0.7 stand alone, so each is also the SELECTED receipt whose set O158 walks.
+    {
+        "name": "enable canonical compound with a complete execution control 0.1 receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_7}",
+                    executionControlSha256="{CONTROL_0_7_SHA}",
+                )
+            )
+        },
+        "expect": "ALLOW",
+        "fixture": "chain_step_01_complete_at_board",
+    },
+    {
+        "name": "enable canonical compound with a complete execution control 0.35 receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_7}",
+                    executionControlSha256="{CONTROL_0_7_SHA}",
+                )
+            )
+        },
+        "expect": "ALLOW",
+        "fixture": "chain_step_035_complete_at_board",
+    },
+    {
+        "name": "enable canonical compound with a complete execution control 0.4c-i receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_7}",
+                    executionControlSha256="{CONTROL_0_7_SHA}",
+                )
+            )
+        },
+        "expect": "ALLOW",
+        "fixture": "chain_step_04c_i_complete_at_board",
+    },
+    {
+        "name": "enable canonical compound with a complete execution control 0.4b-i receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_7}",
+                    executionControlSha256="{CONTROL_0_7_SHA}",
+                )
+            )
+        },
+        "expect": "ALLOW",
+        "fixture": "chain_step_04b_i_complete_at_board",
+    },
+    {
+        "name": "enable canonical compound with a complete execution control 0.6 receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_6}",
+                    executionControlSha256="{CONTROL_0_6_SHA}",
+                )
+            )
+        },
+        "expect": "ALLOW",
+        "fixture": "chain_step_06_complete_at_board",
+    },
+    {
+        "name": "enable canonical compound with a complete execution control 0.7 receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_7}",
+                    executionControlSha256="{CONTROL_0_7_SHA}",
+                )
+            )
+        },
+        "expect": "ALLOW",
+        "fixture": "chain_step_07_complete_at_board",
+    },
+    # ------------- O159: the 0.18 repair, complete and partial
+    #
+    # The hub procedure measured through the hook.  `0.18-roadmap-parity.json` is rewritten
+    # NON-shrinking and every chain receipt from 0.35 on is re-pointed at its new digest with
+    # `queueSha256` and `productLiveCount` untouched: ALLOW, because the hook binds each
+    # receipt to the bytes on disk and the bytes now agree.  Leave ONE receipt pointing at the
+    # old digest and the same act is DENY naming it -- present-but-invalid, undecidable under
+    # O152's strict rule -- which is why the re-pointing is one hub step and not a follow-up.
+    {
+        "name": "enable canonical compound after the 0.18 receipt was repaired and every chain receipt re-pointed",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_7}",
+                    executionControlSha256="{CONTROL_0_7_SHA}",
+                )
+            )
+        },
+        "expect": "ALLOW",
+        "fixture": "o159_repaired_chain_at_board",
+    },
+    {
+        "name": "enable canonical compound after the 0.18 receipt was repaired with one chain receipt left behind",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_7}",
+                    executionControlSha256="{CONTROL_0_7_SHA}",
+                )
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.35.json carries "
+            "roadmapParityReceiptSha256",
+            "is not the sha256 of 0.18-roadmap-parity.json as it is on disk",
+            "(S118/O152)",
+        ),
+        "fixture": "o159_partial_repair_at_board",
+    },
     {
         # S99.  The row the old table had as an ALLOW.  Every precondition of exception (i)
         # holds -- six receipts valid, the enable unspent -- and the delete is STILL
@@ -2518,6 +2858,106 @@ CONTROL_STAMP_07 = "2026-09-06T11:00:00Z"
 PARITY_SHA_TOKEN = "{PARITY_SHA256}"
 _DROP = object()
 
+# ------------------------------------------- S120/O158: the fixed hash sets and the verdicts
+#
+# THE SUITE'S OWN RESTATEMENT OF PLAN 1.3 STEP 5's TABLE, spelled out in FULL rather than
+# derived from a base plus increments the way the hook writes it, so the two are independent
+# readings of the plan that the six per-step ALLOW rows and the missing/extra-key DENY rows
+# force to agree.  A path here is the plan's: forward-slashed, board-relative.
+REQUIRED_HASHES = {
+    "0.1": (
+        "tools/hooks/mlv-never-authorized.py",
+        "tools/repo_hygiene/test_mlv_never_authorized.py",
+        "tools/hooks/test_registration_path_local.py",
+        "tools/coordination/Invoke-Lane.ps1",
+        "tools/coordination/Invoke-Workstream.ps1",
+        "tools/coordination/Invoke-WorkstreamLoop.ps1",
+    ),
+    "0.35": (
+        "tools/hooks/mlv-never-authorized.py",
+        "tools/repo_hygiene/test_mlv_never_authorized.py",
+        "tools/hooks/test_registration_path_local.py",
+        "tools/coordination/Invoke-Lane.ps1",
+        "tools/coordination/Invoke-Workstream.ps1",
+        "tools/coordination/Invoke-WorkstreamLoop.ps1",
+        "tools/coordination/Compose-LanePrompt.ps1",
+    ),
+    "0.4c-i": (
+        "tools/hooks/mlv-never-authorized.py",
+        "tools/repo_hygiene/test_mlv_never_authorized.py",
+        "tools/hooks/test_registration_path_local.py",
+        "tools/coordination/Invoke-Lane.ps1",
+        "tools/coordination/Invoke-Workstream.ps1",
+        "tools/coordination/Invoke-WorkstreamLoop.ps1",
+        "tools/coordination/Compose-LanePrompt.ps1",
+        "tools/coordination/demote-factory-bridge.ps1",
+    ),
+    "0.4b-i": (
+        "tools/hooks/mlv-never-authorized.py",
+        "tools/repo_hygiene/test_mlv_never_authorized.py",
+        "tools/hooks/test_registration_path_local.py",
+        "tools/coordination/Invoke-Lane.ps1",
+        "tools/coordination/Invoke-Workstream.ps1",
+        "tools/coordination/Invoke-WorkstreamLoop.ps1",
+        "tools/coordination/Compose-LanePrompt.ps1",
+        "tools/coordination/demote-factory-bridge.ps1",
+        "tools/coordination/set-required-checks.ps1",
+    ),
+    "0.6": (
+        "tools/hooks/mlv-never-authorized.py",
+        "tools/repo_hygiene/test_mlv_never_authorized.py",
+        "tools/hooks/test_registration_path_local.py",
+        "tools/coordination/Invoke-Lane.ps1",
+        "tools/coordination/Invoke-Workstream.ps1",
+        "tools/coordination/Invoke-WorkstreamLoop.ps1",
+        "tools/coordination/Compose-LanePrompt.ps1",
+        "tools/coordination/demote-factory-bridge.ps1",
+        "tools/coordination/set-required-checks.ps1",
+        "tools/coordination/Test-ProductRatioGuard.ps1",
+        "tools/coordination/freeze-factory-cards.py",
+    ),
+    "0.7": (
+        "tools/hooks/mlv-never-authorized.py",
+        "tools/repo_hygiene/test_mlv_never_authorized.py",
+        "tools/hooks/test_registration_path_local.py",
+        "tools/coordination/Invoke-Lane.ps1",
+        "tools/coordination/Invoke-Workstream.ps1",
+        "tools/coordination/Invoke-WorkstreamLoop.ps1",
+        "tools/coordination/Compose-LanePrompt.ps1",
+        "tools/coordination/demote-factory-bridge.ps1",
+        "tools/coordination/set-required-checks.ps1",
+        "tools/coordination/Test-ProductRatioGuard.ps1",
+        "tools/coordination/freeze-factory-cards.py",
+    ),
+}
+# Every path any step hashes -- the files the fixture writes under the tmp board so the O158
+# re-hash has a board to walk.  A forged step (`FORGED_CONTROL_STEP`) borrows 0.7's set:
+# the forged receipt is refused for its NAME and must be plausible in every other respect.
+ALL_HASHED_PATHS = tuple(
+    sorted(set(path for paths in REQUIRED_HASHES.values() for path in paths))
+)
+# The S120 key-set near misses: a BASE path (in every step's set) dropped from 0.6, and a
+# path no step landed added to 0.7.  The O158 board mutations: a BASE file edited after the
+# receipt was written, and a 0.6/0.7-only file deleted.
+HASHES_DROPPED_PATH = "tools/coordination/Invoke-Lane.ps1"
+HASHES_EXTRA_PATH = "tools/hooks/extra-script.py"
+REHASH_DRIFTED_PATH = "tools/coordination/Invoke-Lane.ps1"
+REHASH_MISSING_PATH = "tools/coordination/freeze-factory-cards.py"
+# The per-step keys beyond the common ones (S120): 0.1 records that the composer does not
+# exist yet, beside the three evidence paths; 0.35 lands it and records the three paths.
+CHAIN_COMPOSER_STATUS_STEPS = ("0.1",)
+CHAIN_COMPOSER_PATH_STEPS = ("0.1", "0.35")
+COMPOSER_STATUS_NOT_YET_CREATED = "not-yet-created"
+COMPOSER_PATH_KEYS = ("composedPromptPath", "prChecksPath", "prReviewPath")
+# The second key's verdicts (S120).  One APPROVE per step at that step's derived head, in
+# sol's template shape -- prose ending in a ```json fence -- except 0.35's, saved as plain
+# JSON so the ALLOW rows exercise the "last top-level object" reading too; and one
+# CHANGES_REQUESTED at 0.7's head for the verdict-arm row.
+VERDICT_DIR = EVIDENCE_DIR + "/sol-verdicts"
+VERDICT_APPROVE = "APPROVE"
+VERDICT_CHANGES_REQUESTED = "CHANGES_REQUESTED"
+VERDICT_PLAIN_JSON_STEP = "0.35"
+
 
 def _derived_sha256(label):
     """A 64-char lowercase sha256 that is COMPUTED, for the fields the schema shape-checks."""
@@ -2542,6 +2982,90 @@ def _write_evidence(paths):
     """Write every file a `path` field names, so the hook's existence test has something to find."""
     for label in sorted(EVIDENCE_FILES):
         _write(_evidence_path(paths, label), "evidence fixture: %s\n" % label)
+
+
+def _hashed_file_path(paths, relative):
+    return os.path.join(paths["BOARD"], relative.replace("/", os.sep))
+
+
+def _write_hashed_files(paths):
+    """Write every file any step hashes under the tmp board, so the O158 re-hash has a board."""
+    for relative in ALL_HASHED_PATHS:
+        _write(_hashed_file_path(paths, relative), "fixed-set fixture: %s\n" % relative)
+
+
+def _board_hashes(paths, step):
+    """The step's REQUIRED set mapped to the REAL sha256 of each file on the tmp board (S120/O158)."""
+    _write_hashed_files(paths)
+    required = REQUIRED_HASHES.get(step, REQUIRED_HASHES["0.7"])
+    return dict(
+        (relative, _sha256_file(_hashed_file_path(paths, relative))) for relative in required
+    )
+
+
+def _head_sha(step):
+    """The head sol reviewed for a step -- derived, 40 lowercase hex, never written down."""
+    return _derived_sha("head:" + step)
+
+
+def _chain_stamp(step):
+    """A conforming stamp that ASCENDS with the chain, so a chain fixture is never a tie."""
+    return "2026-09-06T1%d:00:00Z" % CHAIN_STEPS.index(step)
+
+
+def _verdict_relative(step, verdict=VERDICT_APPROVE):
+    """The board-relative path of the fixture's verdict file for one step and one verdict."""
+    leaf = "sol-review-%s" % step
+    if verdict != VERDICT_APPROVE:
+        leaf += "-" + verdict.lower()
+    suffix = ".json" if step == VERDICT_PLAIN_JSON_STEP else ".md"
+    return VERDICT_DIR + "/" + leaf + suffix
+
+
+def _verdict_text(step, verdict, subject):
+    """A verdict file in sol's template shape, or as plain JSON for the plain-JSON step.
+
+    The markdown form carries an EARLIER fenced block with a BLOCKER at a digest of nothing,
+    so a hook that read the FIRST fence -- or any fence but the last -- goes red on every
+    ALLOW row rather than passing for the wrong reason.
+    """
+    block = json.dumps(
+        {
+            "verdict": verdict,
+            "subject_sha": subject,
+            "pr": 74,
+            "findings": [],
+            "self_failure": "UNMEASURED: the pilot's wall-clock number was not re-run",
+        },
+        indent=1,
+    )
+    if step == VERDICT_PLAIN_JSON_STEP:
+        return block + "\n"
+    earlier = json.dumps({"verdict": "BLOCKER", "subject_sha": "0" * 40, "pr": 74})
+    return (
+        "# sol review of PR 74 for step %s\n\n"
+        "An earlier draft of this review ended with the block below; it is quoted here so the\n"
+        "record shows what was retracted, and it is NOT the terminal block:\n\n"
+        "```json\n%s\n```\n\n"
+        "## Output\n\n"
+        "```json\n%s\n```\n" % (step, earlier, block)
+    )
+
+
+def _write_verdicts(paths):
+    """Write every verdict a fixture's `solVerdictPath` may name (S120)."""
+    for step in CHAIN_STEPS + (FORGED_CONTROL_STEP,):
+        _write(
+            os.path.join(paths["BOARD"], _verdict_relative(step).replace("/", os.sep)),
+            _verdict_text(step, VERDICT_APPROVE, _head_sha(step)),
+        )
+    _write(
+        os.path.join(
+            paths["BOARD"],
+            _verdict_relative("0.7", VERDICT_CHANGES_REQUESTED).replace("/", os.sep),
+        ),
+        _verdict_text("0.7", VERDICT_CHANGES_REQUESTED, _head_sha("0.7")),
+    )
 
 
 def _receipt_payloads(paths):
@@ -2631,6 +3155,7 @@ def _control_name(step):
 
 
 def _execution_control(
+    paths,
     step,
     stamp,
     provenance=True,
@@ -2638,22 +3163,35 @@ def _execution_control(
     parity=PARITY_SHA_TOKEN,
     queue_sha=None,
     product_live_count=15,
+    reviewed_head=None,
+    verdict_path=None,
     drop=(),
 ):
-    """One chain receipt.  Every keyword is ONE degree of freedom of the chain schema."""
+    """One chain receipt.  Every keyword is ONE degree of freedom of the chain schema.
+
+    The defaults are the CONFORMING receipt for `step`, computed from the tmp board (S120):
+    `reviewedHeadSha` is the step's derived head and `solVerdictPath` the fixture's APPROVE
+    of exactly that head; `hashes` is the step's fixed set mapped to the REAL digest of each
+    file under the tmp board (O158); 0.1 carries `composerStatus` and the three evidence
+    paths, 0.35 the three paths.  A row that wants a near miss passes ONE keyword.
+    """
+    _write_evidence(paths)
+    _write_verdicts(paths)
     document = {"step": step, "recordedUtc": stamp}
     if stamp is None:
         del document["recordedUtc"]
-    document["hashes"] = (
-        dict(hashes)
-        if hashes is not None
-        else {
-            "tools/hooks/mlv-never-authorized.py": _derived_sha256("hook:" + step),
-            "tools/repo_hygiene/test_mlv_never_authorized.py": _derived_sha256(
-                "suite:" + step
-            ),
-        }
+    document["reviewedHeadSha"] = (
+        reviewed_head if reviewed_head is not None else _head_sha(step)
     )
+    document["solVerdictPath"] = (
+        verdict_path if verdict_path is not None else _verdict_relative(step)
+    )
+    document["hashes"] = dict(hashes) if hashes is not None else _board_hashes(paths, step)
+    if step in CHAIN_COMPOSER_STATUS_STEPS:
+        document["composerStatus"] = COMPOSER_STATUS_NOT_YET_CREATED
+    if step in CHAIN_COMPOSER_PATH_STEPS:
+        for key in COMPOSER_PATH_KEYS:
+            document[key] = EVIDENCE_FILES[key]
     if provenance:
         document["roadmapParityReceiptSha256"] = parity
         document["queueSha256"] = (
@@ -2703,7 +3241,7 @@ def _kill_switch_receipts(paths, omit=(), extra=(), stamps=None):
             overrides.pop(name)
             if name in overrides
             else _execution_control(
-                step, stamp, provenance=step not in CHAIN_PROVENANCE_EXEMPT
+                paths, step, stamp, provenance=step not in CHAIN_PROVENANCE_EXEMPT
             )
         )
         _write(os.path.join(receipts, name), payload.replace(PARITY_SHA_TOKEN, parity_sha))
@@ -2992,7 +3530,7 @@ def fixture_control_forged_name(paths):
         extra=(
             (
                 _control_name(FORGED_CONTROL_STEP),
-                _execution_control(FORGED_CONTROL_STEP, CONTROL_STAMP_LATER),
+                _execution_control(paths, FORGED_CONTROL_STEP, CONTROL_STAMP_LATER),
             ),
         ),
     )
@@ -3005,7 +3543,7 @@ def fixture_control_without_hashes(paths):
         extra=(
             (
                 _control_name("0.7"),
-                _execution_control("0.7", CONTROL_STAMP_07, drop=("hashes",)),
+                _execution_control(paths, "0.7", CONTROL_STAMP_07, drop=("hashes",)),
             ),
         ),
     )
@@ -3024,7 +3562,7 @@ def fixture_control_parity_mismatch(paths):
         extra=(
             (
                 _control_name("0.35"),
-                _execution_control("0.35", RECEIPT_STAMP, parity="f" * 64),
+                _execution_control(paths, "0.35", RECEIPT_STAMP, parity="f" * 64),
             ),
         ),
     )
@@ -3037,7 +3575,7 @@ def fixture_control_product_live_14(paths):
         extra=(
             (
                 _control_name("0.7"),
-                _execution_control("0.7", CONTROL_STAMP_07, product_live_count=14),
+                _execution_control(paths, "0.7", CONTROL_STAMP_07, product_live_count=14),
             ),
         ),
     )
@@ -3063,7 +3601,7 @@ def fixture_control_07_invalid_beside_valid_06(paths):
         extra=(
             (
                 _control_name("0.7"),
-                _execution_control("0.7", CONTROL_STAMP_07, drop=("queueSha256",)),
+                _execution_control(paths, "0.7", CONTROL_STAMP_07, drop=("queueSha256",)),
             ),
         ),
     )
@@ -3088,11 +3626,191 @@ def fixture_chain_035_and_06_at_board(paths):
 
 def fixture_chain_all_six_names_at_board(paths):
     """The ALLOW with the WHOLE chain present and valid, ascending, 0.7 newest and selected."""
-    stamps = {}
-    for index, step in enumerate(CHAIN_STEPS):
-        stamps[step] = "2026-09-06T1%d:00:00Z" % index
+    _kill_switch_receipts(paths, stamps=dict((step, _chain_stamp(step)) for step in CHAIN_STEPS))
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+# ------------------------------------------- S120: the second key's approval, the fixed set
+#
+# Each S120 fixture differs from `fixture_receipts_all_six_at_board` in EXACTLY one keyword of
+# one chain receipt, at the board venue, so each DENY is attributable to the arm it names.
+
+
+def _control_at_board(paths, step, stamp, **changes):
+    """The default chain with ONE receipt replaced by a one-keyword variant, at the board venue."""
+    _kill_switch_receipts(
+        paths, extra=((_control_name(step), _execution_control(paths, step, stamp, **changes)),)
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_without_reviewed_head(paths):
+    return _control_at_board(paths, "0.7", CONTROL_STAMP_07, drop=("reviewedHeadSha",))
+
+
+def fixture_control_reviewed_head_uppercase(paths):
+    """The RIGHT head, uppercased -- a git object name is lowercase, and the comparison is exact."""
+    return _control_at_board(
+        paths, "0.7", CONTROL_STAMP_07, reviewed_head=_head_sha("0.7").upper()
+    )
+
+
+def fixture_control_without_verdict_path(paths):
+    return _control_at_board(paths, "0.7", CONTROL_STAMP_07, drop=("solVerdictPath",))
+
+
+def fixture_control_verdict_changes_requested(paths):
+    """A real verdict file at 0.7's head whose terminal block says CHANGES_REQUESTED."""
+    return _control_at_board(
+        paths,
+        "0.7",
+        CONTROL_STAMP_07,
+        verdict_path=_verdict_relative("0.7", VERDICT_CHANGES_REQUESTED),
+    )
+
+
+def fixture_control_verdict_of_another_head(paths):
+    """0.7 names 0.6's verdict: a real APPROVE, of a DIFFERENT head."""
+    return _control_at_board(
+        paths, "0.7", CONTROL_STAMP_07, verdict_path=_verdict_relative("0.6")
+    )
+
+
+def fixture_control_hashes_missing_key(paths):
+    """0.6 -- NOT the selected receipt -- with one BASE path dropped from its `hashes`."""
+    hashes = _board_hashes(paths, "0.6")
+    del hashes[HASHES_DROPPED_PATH]
+    return _control_at_board(paths, "0.6", CONTROL_STAMP_06, hashes=hashes)
+
+
+def fixture_control_hashes_extra_key(paths):
+    """0.7 with a path no step landed added to its `hashes`, at a well-formed digest."""
+    hashes = _board_hashes(paths, "0.7")
+    hashes[HASHES_EXTRA_PATH] = _derived_sha256("extra:" + HASHES_EXTRA_PATH)
+    return _control_at_board(paths, "0.7", CONTROL_STAMP_07, hashes=hashes)
+
+
+def fixture_control_01_without_composer_status(paths):
+    """A chain of {0.1, 0.7} whose 0.1 lacks `composerStatus` and is otherwise complete."""
+    _kill_switch_receipts(
+        paths,
+        stamps={"0.1": _chain_stamp("0.1"), "0.7": _chain_stamp("0.7")},
+        extra=(
+            (
+                _control_name("0.1"),
+                _execution_control(
+                    paths, "0.1", _chain_stamp("0.1"), drop=("composerStatus",)
+                ),
+            ),
+        ),
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_product_live_string(paths):
+    """The right digits and the wrong type: `"15"` is not 15."""
+    return _control_at_board(paths, "0.7", CONTROL_STAMP_07, product_live_count="15")
+
+
+# ------------------------------------------- O158: the BOARD drifts from the selected receipt
+#
+# Neither fixture touches a receipt.  Both write the default conforming set, then mutate the
+# tmp board's tooling AFTER the receipts recorded it -- which is precisely the state 0.2's
+# re-hash exists to catch, and which no receipt-only validation can see.
+
+
+def fixture_control_rehash_drift_at_board(paths):
+    _kill_switch_receipts(paths)
+    _write(
+        _hashed_file_path(paths, REHASH_DRIFTED_PATH),
+        "fixed-set fixture: %s -- edited after the receipt was written\n" % REHASH_DRIFTED_PATH,
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_rehash_file_missing_at_board(paths):
+    _kill_switch_receipts(paths)
+    os.remove(_hashed_file_path(paths, REHASH_MISSING_PATH))
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+# ------------------------------------------- S120: one COMPLETE receipt per chain step
+#
+# Six ALLOW fixtures, one per step, each carrying that step's EXACT fixed set and its own
+# keys.  The four early steps sit beside a 0.7 so a selected receipt exists; 0.6 and 0.7
+# stand alone, so each is ALSO the selected receipt whose fixed set O158 re-hashes.
+
+
+def _chain_step_complete_at_board(paths, step):
+    stamps = {step: _chain_stamp(step)}
+    if step not in ("0.6", "0.7"):
+        stamps["0.7"] = _chain_stamp("0.7")
     _kill_switch_receipts(paths, stamps=stamps)
     return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_chain_step_01_complete_at_board(paths):
+    return _chain_step_complete_at_board(paths, "0.1")
+
+
+def fixture_chain_step_035_complete_at_board(paths):
+    return _chain_step_complete_at_board(paths, "0.35")
+
+
+def fixture_chain_step_04c_i_complete_at_board(paths):
+    return _chain_step_complete_at_board(paths, "0.4c-i")
+
+
+def fixture_chain_step_04b_i_complete_at_board(paths):
+    return _chain_step_complete_at_board(paths, "0.4b-i")
+
+
+def fixture_chain_step_06_complete_at_board(paths):
+    return _chain_step_complete_at_board(paths, "0.6")
+
+
+def fixture_chain_step_07_complete_at_board(paths):
+    return _chain_step_complete_at_board(paths, "0.7")
+
+
+# ------------------------------------------- O159: the 0.18 repair and its re-pointing
+#
+# The hub procedure, modelled: the whole chain is written and valid, then
+# `0.18-roadmap-parity.json` is REWRITTEN -- non-shrinking, conforming, longer by one key --
+# and every chain receipt from 0.35 on is rewritten to carry the repaired file's digest with
+# `queueSha256` and `productLiveCount` exactly as they were.  `left_behind` names the steps
+# the partial variant does NOT re-point.
+
+
+def _o159_repaired_chain(paths, left_behind=()):
+    stamps = dict((step, _chain_stamp(step)) for step in CHAIN_STEPS)
+    _kill_switch_receipts(paths, stamps=stamps)
+    parity_path = os.path.join(paths["RECEIPTS"], ROADMAP_PARITY_RECEIPT)
+    with open(parity_path, "rb") as handle:
+        before = handle.read()
+    repaired = _receipt_payloads(paths)[ROADMAP_PARITY_RECEIPT]
+    repaired["repair"] = "O152 non-shrinking rewrite, ratification round 23"
+    text = json.dumps(repaired, indent=2)
+    if len(text.encode("utf-8")) < len(before):
+        raise AssertionError("the O159 fixture must model a NON-shrinking rewrite")
+    _write(parity_path, text)
+    repaired_sha = _sha256_file(parity_path)
+    for step in CHAIN_STEPS:
+        if step in CHAIN_PROVENANCE_EXEMPT or step in left_behind:
+            continue
+        _write(
+            os.path.join(paths["RECEIPTS"], _control_name(step)),
+            _execution_control(paths, step, stamps[step], parity=repaired_sha),
+        )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_o159_repaired_chain_at_board(paths):
+    return _o159_repaired_chain(paths)
+
+
+def fixture_o159_partial_repair_at_board(paths):
+    return _o159_repaired_chain(paths, left_behind=("0.35",))
 
 
 def fixture_receipts_04b_ready(paths):
@@ -3223,6 +3941,26 @@ FIXTURES = {
     "control_selected_absent": fixture_control_selected_absent,
     "chain_035_and_06_at_board": fixture_chain_035_and_06_at_board,
     "chain_all_six_names_at_board": fixture_chain_all_six_names_at_board,
+    # S120 / O158 / O159
+    "control_without_reviewed_head": fixture_control_without_reviewed_head,
+    "control_reviewed_head_uppercase": fixture_control_reviewed_head_uppercase,
+    "control_without_verdict_path": fixture_control_without_verdict_path,
+    "control_verdict_changes_requested": fixture_control_verdict_changes_requested,
+    "control_verdict_of_another_head": fixture_control_verdict_of_another_head,
+    "control_hashes_missing_key": fixture_control_hashes_missing_key,
+    "control_hashes_extra_key": fixture_control_hashes_extra_key,
+    "control_01_without_composer_status": fixture_control_01_without_composer_status,
+    "control_product_live_string": fixture_control_product_live_string,
+    "control_rehash_drift_at_board": fixture_control_rehash_drift_at_board,
+    "control_rehash_file_missing_at_board": fixture_control_rehash_file_missing_at_board,
+    "chain_step_01_complete_at_board": fixture_chain_step_01_complete_at_board,
+    "chain_step_035_complete_at_board": fixture_chain_step_035_complete_at_board,
+    "chain_step_04c_i_complete_at_board": fixture_chain_step_04c_i_complete_at_board,
+    "chain_step_04b_i_complete_at_board": fixture_chain_step_04b_i_complete_at_board,
+    "chain_step_06_complete_at_board": fixture_chain_step_06_complete_at_board,
+    "chain_step_07_complete_at_board": fixture_chain_step_07_complete_at_board,
+    "o159_repaired_chain_at_board": fixture_o159_repaired_chain_at_board,
+    "o159_partial_repair_at_board": fixture_o159_partial_repair_at_board,
     "receipts_04b_ready": fixture_receipts_04b_ready,
     "receipts_04b_already_done": fixture_receipts_04b_already_done,
     "checkpoint_archived": fixture_checkpoint_archived,
@@ -3541,7 +4279,33 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # now.  The historical falsifier groups -- `control` 3, `round1` 16, `round2` 12,
         # `failclosed` 4, `benign` 6 -- are untouched, as are `carveout`, `manifest`, `na3`,
         # `na3_persistent` and `na10`.
-        self.assertEqual(counts.get("killswitch"), 66, "66 kill-switch / 0.2-enable rows")
+        #
+        # PINNED DELIBERATELY, 0.05 NINTH review delta (S120/O158/O159): 66 -> 85, nineteen
+        # new rows and NO row dropped.  A chain receipt now carries the second key's approval
+        # of THIS head and an EXACT fixed hash set, and the enable act re-hashes that set in
+        # the board root.  NINE are S120 DENY, one keyword of one receipt from the ALLOW
+        # rows: `reviewedHeadSha` absent, then uppercased; `solVerdictPath` absent, then a
+        # real verdict whose terminal block is CHANGES_REQUESTED, then a real APPROVE of a
+        # DIFFERENT head; `hashes` lacking a BASE path (on the NON-selected 0.6, so O152's
+        # reach is measured), then carrying a path no step landed; 0.1 lacking
+        # `composerStatus`; and `productLiveCount` as the STRING "15" (the 14 row is the
+        # wrong value, this is the wrong kind).  TWO are O158 DENY in which every receipt is
+        # valid and the BOARD changed -- a file of the selected receipt's set edited after
+        # the receipt recorded it, and one deleted -- refused naming the path.  SIX are
+        # ALLOW, one per chain step, each carrying that step's exact set: with the
+        # missing/extra-key rows they pin the hook's six sets to this suite's
+        # `REQUIRED_HASHES`, two independent restatements of the plan's table.  TWO are
+        # O159: the 0.18 receipt rewritten non-shrinking with every chain receipt from 0.35
+        # on re-pointed (ALLOW), and the same with 0.35 left behind (DENY, naming it).
+        #
+        # NO ROW WAS RE-EXPECTED, and every existing chain fixture was REBUILT to carry the
+        # new keys: `reviewedHeadSha` and a `solVerdictPath` the fixture WROTE (sol's
+        # template shape, terminal ```json fence, an earlier BLOCKER fence above it), the
+        # step's EXACT fixed set at the REAL digest of each file the fixture writes under the
+        # tmp board's `tools/` tree, and 0.1/0.35's composer keys.  The historical falsifier
+        # groups -- `control` 3, `round1` 16, `round2` 12, `failclosed` 4, `benign` 6 -- are
+        # untouched, as are `carveout`, `manifest`, `na3`, `na3_persistent` and `na10`.
+        self.assertEqual(counts.get("killswitch"), 85, "85 kill-switch / 0.2-enable rows")
         # PINNED DELIBERATELY, 0.05 fourth review delta (O125): 3 -> 4.  The carve-out is a
         # PATH permission, not a TOOL permission, and the pair that proves it -- the `Write`
         # create ALLOW beside the shell `Set-Content` create DENY -- must not be separable.
@@ -3682,6 +4446,51 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
                 stamps[name] = json.loads(handle.read().decode("utf-8"))["recordedUtc"]
         self.assertEqual(stamps[self.paths["OLDER_CONTROL"]], CONTROL_STAMP_WHOLE)
         self.assertEqual(stamps[self.paths["NEWEST_CONTROL"]], CONTROL_STAMP_LATER)
+
+    def test_the_o159_fixture_rewrites_the_parity_receipt_without_shrinking_it(self):
+        """O159: the repair fixture models the procedure it claims to -- complete, non-shrinking.
+
+        Three claims, asserted rather than described.  (1) The rewritten
+        `0.18-roadmap-parity.json` is LONGER than the conforming original it replaced, so the
+        fixture models the register's non-shrinking rewrite and nothing a shrink guard would
+        refuse.  (2) After the complete repair every chain receipt from 0.35 on carries the
+        digest of the REWRITTEN file with `queueSha256` and `productLiveCount` as they were,
+        and 0.1 carries no provenance at all.  (3) The partial variant differs in exactly one
+        receipt -- 0.35, which still carries the ORIGINAL digest -- so its DENY row is
+        attributable to O152's strict rule and not to a second fault.
+        """
+        original = json.dumps(_receipt_payloads(self.paths)[ROADMAP_PARITY_RECEIPT], indent=2)
+        original_sha = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        parity_path = os.path.join(self.paths["RECEIPTS"], ROADMAP_PARITY_RECEIPT)
+
+        fixture_o159_repaired_chain_at_board(self.paths)
+        with open(parity_path, "rb") as handle:
+            repaired = handle.read()
+        self.assertGreater(len(repaired), len(original.encode("utf-8")))
+        repaired_sha = hashlib.sha256(repaired).hexdigest()
+        self.assertNotEqual(repaired_sha, original_sha)
+        for step in CHAIN_STEPS:
+            with open(os.path.join(self.paths["RECEIPTS"], _control_name(step)), "rb") as handle:
+                document = json.loads(handle.read().decode("utf-8"))
+            if step in CHAIN_PROVENANCE_EXEMPT:
+                self.assertNotIn("roadmapParityReceiptSha256", document)
+                continue
+            self.assertEqual(document["roadmapParityReceiptSha256"], repaired_sha, step)
+            self.assertEqual(document["queueSha256"], _derived_sha256("queue:" + step), step)
+            self.assertEqual(document["productLiveCount"], 15, step)
+
+        shutil.rmtree(self.paths["RECEIPTS"])
+        os.makedirs(self.paths["RECEIPTS"])
+        fixture_o159_partial_repair_at_board(self.paths)
+        with open(parity_path, "rb") as handle:
+            self.assertEqual(hashlib.sha256(handle.read()).hexdigest(), repaired_sha)
+        for step in CHAIN_STEPS:
+            if step in CHAIN_PROVENANCE_EXEMPT:
+                continue
+            with open(os.path.join(self.paths["RECEIPTS"], _control_name(step)), "rb") as handle:
+                document = json.loads(handle.read().decode("utf-8"))
+            expected = original_sha if step == "0.35" else repaired_sha
+            self.assertEqual(document["roadmapParityReceiptSha256"], expected, step)
 
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""
