@@ -24,6 +24,19 @@ turns into an ARGUMENT; ``_invoke`` also STRIPS ``CLAUDE_PROJECT_DIR`` from the 
 and one row deliberately puts it BACK while passing no argument, so that a hook which
 regressed to reading the environment goes red rather than looking correct.
 
+THE ENABLE LITERAL IS DERIVED FROM THE FIXTURE, NOT WRITTEN DOWN (S112, register v19).  The
+hook now validates the 0.2 enable compound's JSON literal SEMANTICALLY: ``state`` is
+``enabling``, both stamps parse as ISO-8601 UTC, ``executionControlReceipt`` is the BASENAME
+of the newest valid execution-control receipt, and ``executionControlSha256`` is that file's
+lowercase sha256.  Two of those are facts about a tmp-dir board that does not exist until
+``setUp`` runs, so the table carries them as PLACEHOLDERS (``{NEWEST_CONTROL}``,
+``{NEWEST_CONTROL_SHA}`` and the near-miss forms) which ``_bind_the_enable_literal`` resolves
+by reading the receipts the fixture just wrote and hashing their bytes.  Hard-coding either
+would leave the ALLOW row green against a hook that never opened the file -- which is exactly
+the defect S112 names.  What the table's own defaults used to be says it best: the receipt
+was ``receipts/execution-control-0.7.json``, a path, and the digest was ``"3" * 64``.  Both
+are DENY rows now.
+
 NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
 payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
 strings are data -- including the O129 rows, whose ``setx`` and ``SetEnvironmentVariable``
@@ -152,12 +165,25 @@ ENABLE_RECEIPT = "{RECEIPTS}/0.2-loop-enabled.json"
 ENABLE_MARKER = "{DUAL}/WORKSTREAM-LOOP-DISABLED"
 
 
+# S112 -- THE TWO FIELDS THAT BIND THE LITERAL TO THE BOARD ARE PLACEHOLDERS, NEVER
+# CONSTANTS.  The hook now requires `executionControlReceipt` to be the BASENAME of the
+# fixture's newest execution-control receipt and `executionControlSha256` to be that file's
+# real lowercase sha256.  Both are resolved by `_substitute` from the files the fixture
+# JUST WROTE (`_enable_literal_bindings`), because a hard-coded name or digest would keep
+# this table green against a hook that never opened the file -- which is the S112 defect
+# itself.  Note what the old default was: `receipts/execution-control-0.7.json`, a PATH, and
+# `"3" * 64`, a digest of nothing.  Both passed presence-only validation; both are now DENY
+# rows below.
+CONTROL_NAME = "{NEWEST_CONTROL}"
+CONTROL_SHA = "{NEWEST_CONTROL_SHA}"
+
+
 def _enable_literal(**overrides):
     document = {
         "state": "enabling",
         "enabledUtc": "2026-09-06T12:00:00Z",
-        "executionControlReceipt": "receipts/execution-control-0.7.json",
-        "executionControlSha256": "3" * 64,
+        "executionControlReceipt": CONTROL_NAME,
+        "executionControlSha256": CONTROL_SHA,
         "recordedUtc": "2026-09-06T12:00:00Z",
     }
     document.update(overrides)
@@ -169,6 +195,16 @@ def _enable_literal(**overrides):
 
 
 ENABLE_LITERAL = _enable_literal()
+
+# The pwsh acceptance below never reaches the hook and never opens a fixture board, so its
+# literal is CONCRETE: the placeholders exist to bind the HOOK's semantic check to a fixture,
+# and `EnableCompoundIsFailClosedTests` measures PowerShell's runtime instead.  An
+# unsubstituted `{NEWEST_CONTROL}` would still round-trip byte-for-byte and prove the same
+# thing, but it would read as a bug to the next person.
+RUNTIME_ENABLE_LITERAL = _enable_literal(
+    executionControlReceipt="execution-control-0.7.json",
+    executionControlSha256="3" * 64,
+)
 
 
 ENABLE_THROW = "enable-receipt-write-verification-failed"
@@ -697,7 +733,10 @@ CASES = [
         # `$ErrorActionPreference = 'Stop'`, then `-ErrorAction Stop` on both acts with the
         # read-back `throw` between them.  Every DENY row below it varies exactly one token
         # of this shape.  S105/O126: it also runs AT THE BOARD VENUE, and the two rows
-        # immediately below differ from it in that variable alone.
+        # immediately below differ from it in that variable alone.  S112: its JSON literal is
+        # now BOUND to the fixture -- `{NEWEST_CONTROL}` and `{NEWEST_CONTROL_SHA}` are
+        # resolved from the receipts the fixture just wrote, so this row is ALLOW only while
+        # the hook really selects the newest execution-control receipt and really hashes it.
         "name": "enable canonical fail closed compound with all six receipts",
         "group": "killswitch",
         "tool": "PowerShell",
@@ -790,6 +829,152 @@ CASES = [
         "expect": "DENY",
         "na": "NA-2",
         "reason_contains": 'state is not "enabling"',
+        "fixture": "receipts_all_six_at_board",
+    },
+    # ------------------------------------------- S112: the literal is READ, not COUNTED
+    #
+    # Eight rows, each differing from the ALLOW row in EXACTLY ONE field of the JSON literal
+    # and in nothing else -- same shape, same six receipts, same board venue.  Until this
+    # delta all eight were ALLOW: the hook checked that five keys held non-empty strings and
+    # nothing more, so the receipt that spends the one-shot authorization could name a file
+    # that does not exist and carry a digest of nothing.  The first two rows are the OLD
+    # DEFAULTS of this very table -- a receipt PATH and `"3" * 64` -- which is the sharpest
+    # statement of what presence-only validation was worth.
+    {
+        # The SELECTION arm.  `{OLDER_CONTROL}` is a real, valid, older execution-control
+        # receipt sitting beside the newest one in the same fixture: the literal must name
+        # the one the hook SELECTED, not merely one that exists.
+        "name": "enable canonical compound naming an older execution control receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(executionControlReceipt="{OLDER_CONTROL}")
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "names executionControlReceipt '{OLDER_CONTROL}'",
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # A BASENAME, not a path -- and this was the table's own default until this delta,
+        # which is why it is a row and not a footnote.  `receipts/<name>` names the right
+        # file and is still refused: the register pins the basename, and a hook that
+        # accepted both would have to decide which separator and which prefix count.
+        "name": "enable canonical compound naming the execution control receipt as a path",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="receipts/{NEWEST_CONTROL}"
+                )
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "names executionControlReceipt 'receipts/{NEWEST_CONTROL}'",
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The digest arm.  A REAL sha256 of a REAL receipt in the same directory -- just not
+        # of the file the literal names.  Nothing but hashing the named file can tell these
+        # two rows apart, which is the point.
+        "name": "enable canonical compound whose sha256 is another receipts digest",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(executionControlSha256="{OLDER_CONTROL_SHA}")
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "executionControlSha256 is '{OLDER_CONTROL_SHA}'",
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The SAME digest, uppercased.  The register says lowercase; the comparison is exact.
+        # A value that has to be case-folded before it matches was not the pinned literal,
+        # and a hook that folded it would be normalising the receipt of record.
+        "name": "enable canonical compound whose sha256 is uppercase",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(executionControlSha256="{NEWEST_CONTROL_SHA_UPPER}")
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "executionControlSha256 is '{NEWEST_CONTROL_SHA_UPPER}'",
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The correct digest, TRUNCATED to 32 characters: a prefix match would pass this and
+        # a prefix match is not equality.  The row exists because "starts with" is the
+        # cheapest way to get this arm subtly wrong.
+        "name": "enable canonical compound whose sha256 is truncated",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(executionControlSha256="{NEWEST_CONTROL_SHA_SHORT}")
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "executionControlSha256 is '{NEWEST_CONTROL_SHA_SHORT}'",
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The stamp arm, notation half: no trailing `Z`.  A bare local-looking stamp is not
+        # a UTC stamp, and the hook does not guess which zone it was written in.
+        "name": "enable canonical compound whose enabledUtc has no trailing Z",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(enabledUtc="2026-09-06T12:00:00")
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "enabledUtc is '2026-09-06T12:00:00', which is not an ISO-8601 UTC stamp",
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # `+00:00` is the same INSTANT and a different NOTATION.  Accepting it would commit
+        # the hook to accepting `-05:00` too, and then to converting it -- so the register's
+        # one notation is the one that passes (fail-closed reading, recorded).
+        "name": "enable canonical compound whose recordedUtc carries an offset",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(recordedUtc="2026-09-06T12:00:00+00:00")
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "recordedUtc is '2026-09-06T12:00:00+00:00'",
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The stamp arm, parse half: a non-empty string that is not a timestamp at all --
+        # exactly what presence-only validation accepted.
+        "name": "enable canonical compound whose recordedUtc is unparseable",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(recordedUtc="not-a-timestamp")
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "recordedUtc is 'not-a-timestamp'",
         "fixture": "receipts_all_six_at_board",
     },
     {
@@ -1332,7 +1517,7 @@ CASES = [
     },
     # -------------------------------- NA-3's `claude auth` arm, bounded by the REGISTER
     #
-    # `never-authorized.json` v17 NA-3 names `claude auth login|logout`, not `claude auth`.
+    # `never-authorized.json` v19 NA-3 names `claude auth login|logout`, not `claude auth`.
     # These four rows differ from one another in exactly ONE variable -- the auth
     # subcommand -- so they prove the arm is a GATE and not a wall.  The ALLOW row is
     # load-bearing: the board's account-rotation procedure runs `claude auth status --json`
@@ -1854,6 +2039,60 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
             return dict((k, self._substitute(v)) for k, v in value.items())
         return value
 
+    def _bind_the_enable_literal(self):
+        """S112: resolve the enable literal's placeholders from the fixture ON DISK.
+
+        The hook requires the literal to name the BASENAME of the newest valid
+        execution-control receipt and that file's real lowercase sha256.  Both are read back
+        out of the files the fixture just wrote -- never written down here -- so a hook that
+        stopped opening the file, or opened a different one, goes RED.  The selection mirrors
+        the hook's: newest by `recordedUtc`, and a receipt LACKING it is skipped for this
+        purpose only (the hook fails the whole exception closed on one, and the row that
+        carries such a receipt denies at the receipt arm before any literal is read).
+
+        `OLDER_CONTROL` is the OTHER valid receipt -- an older one that really exists and
+        really validates, which is what makes the "not the newest" row a test of the
+        SELECTION rather than of a typo.  `test_the_fixture_offers_an_older_valid_...`
+        below asserts the fixture actually offers two, so that row can never quietly become
+        a comparison of a name against itself.
+        """
+        controls = []
+        try:
+            names = sorted(os.listdir(self.paths["RECEIPTS"]))
+        except OSError:
+            names = []
+        for name in names:
+            if not (name.startswith("execution-control-") and name.endswith(".json")):
+                continue
+            with open(os.path.join(self.paths["RECEIPTS"], name), "rb") as handle:
+                payload = handle.read()
+            try:
+                stamp = json.loads(payload.decode("utf-8")).get("recordedUtc")
+            except ValueError:
+                stamp = None
+            if not isinstance(stamp, str) or not stamp:
+                continue
+            controls.append((stamp, name, hashlib.sha256(payload).hexdigest()))
+        controls.sort()
+        if controls:
+            newest = controls[-1]
+            older = controls[0] if len(controls) > 1 else controls[-1]
+        else:
+            # No fixture wrote one.  Every row that reaches the literal arm DOES write them,
+            # so these values only have to be something no receipt on disk can match.
+            newest = ("", "execution-control-none.json", "0" * 64)
+            older = newest
+        self.paths.update(
+            {
+                "NEWEST_CONTROL": newest[1],
+                "NEWEST_CONTROL_SHA": newest[2],
+                "NEWEST_CONTROL_SHA_UPPER": newest[2].upper(),
+                "NEWEST_CONTROL_SHA_SHORT": newest[2][:32],
+                "OLDER_CONTROL": older[1],
+                "OLDER_CONTROL_SHA": older[2],
+            }
+        )
+
     def _invoke(self, stdin_text, overrides):
         env = dict(os.environ)
         for key in list(env):
@@ -1888,6 +2127,8 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
 
     def _run_case(self, case):
         overrides = FIXTURES[case.get("fixture", "default")](self.paths)
+        # AFTER the fixture, because S112's placeholders are derived from what it wrote.
+        self._bind_the_enable_literal()
         if "raw" in case:
             stdin_text = case["raw"]
         else:
@@ -1914,10 +2155,13 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # A register row can fire for the WRONG arm.  Where two rows differ in exactly one
         # variable and share a rule id, the row asserts the arm by its reason text too.
         if "reason_contains" in case:
+            # Substituted like the input: an S112 row asserts the arm by quoting the very
+            # value it varied, and that value is a fixture placeholder.
+            expected = self._substitute(case["reason_contains"])
             self.assertIn(
-                case["reason_contains"],
+                expected,
                 lines[0],
-                "expected the reason to name %r%s" % (case["reason_contains"], detail),
+                "expected the reason to name %r%s" % (expected, detail),
             )
 
     # ------------------------------------------------------------- structural gates
@@ -1966,7 +2210,21 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # the ALLOW row moved to the board venue (changed, not added).  TWO are O128 -- the
         # compound now OPENS with `$ErrorActionPreference = 'Stop'`, so the rev-19 shape and
         # a `Continue` preference are DENY.  Both pairs are one token from the ALLOW row.
-        self.assertEqual(counts.get("killswitch"), 23, "23 kill-switch / 0.2-enable rows")
+        #
+        # PINNED DELIBERATELY, 0.05 SIXTH review delta (S112): 23 -> 31, eight new rows and
+        # no row dropped.  The enable LITERAL is now validated semantically instead of for
+        # presence, and each new row varies exactly ONE of its fields against the same
+        # fixture, same shape, same board venue: the execution-control receipt named is an
+        # older valid one, then the right one written as a PATH; the digest is another
+        # receipt's, then uppercase, then truncated; `enabledUtc` loses its `Z`,
+        # `recordedUtc` carries an offset, then is not a timestamp at all.  The ALLOW row and
+        # the NINETEEN other rows that already carried a literal were CHANGED, not added --
+        # 28 of the 31 rows in this group now carry a literal naming the fixture's real
+        # newest receipt and its real sha256 (computed at run time by
+        # `_bind_the_enable_literal`, never written down).  The historical falsifier
+        # groups -- `control` 3, `round1` 16, `round2` 12, `failclosed` 4, `benign` 6 -- are
+        # untouched, as are `carveout`, `manifest`, `na3`, `na3_persistent` and `na10`.
+        self.assertEqual(counts.get("killswitch"), 31, "31 kill-switch / 0.2-enable rows")
         # PINNED DELIBERATELY, 0.05 fourth review delta (O125): 3 -> 4.  The carve-out is a
         # PATH permission, not a TOOL permission, and the pair that proves it -- the `Write`
         # create ALLOW beside the shell `Set-Content` create DENY -- must not be separable.
@@ -1995,6 +2253,45 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self.assertEqual(counts.get("na3"), 5, "5 NA-3 claude-auth rows")
         self.assertEqual(counts.get("na3_persistent"), 6, "6 NA-3 O129 persistent-scope rows")
         self.assertEqual(counts.get("na10"), 6, "6 NA-10 self-edit rows")
+
+    def test_the_fixture_offers_an_older_valid_execution_control_receipt(self):
+        """S112: the "not the newest" row must compare two DIFFERENT valid receipts.
+
+        `_bind_the_enable_literal` falls back to the newest when a fixture writes only one
+        execution-control receipt, and that fallback would quietly turn the selection row
+        into a comparison of a name against itself -- ALLOW-shaped input, green row, no
+        selection tested.  So the fixture's promise is asserted directly: two valid
+        receipts, and the older one really is a file on disk that really validates.
+        """
+        fixture_receipts_all_six_at_board(self.paths)
+        self._bind_the_enable_literal()
+        newest = self.paths["NEWEST_CONTROL"]
+        older = self.paths["OLDER_CONTROL"]
+        self.assertNotEqual(newest, older, "the fixture must offer an OLDER receipt too")
+        self.assertNotEqual(
+            self.paths["NEWEST_CONTROL_SHA"], self.paths["OLDER_CONTROL_SHA"]
+        )
+        for name in (newest, older):
+            path = os.path.join(self.paths["RECEIPTS"], name)
+            self.assertTrue(os.path.isfile(path), path)
+            with open(path, "rb") as handle:
+                payload = handle.read()
+            self.assertIsInstance(
+                json.loads(payload.decode("utf-8")).get("recordedUtc"), str
+            )
+            self.assertEqual(
+                hashlib.sha256(payload).hexdigest(),
+                self.paths[
+                    "NEWEST_CONTROL_SHA" if name == newest else "OLDER_CONTROL_SHA"
+                ],
+            )
+        # The digest the hook must demand is LOWERCASE hex, and the two near-miss forms the
+        # table varies are really near misses of it -- not accidentally equal to it.
+        self.assertRegex(self.paths["NEWEST_CONTROL_SHA"], r"\A[0-9a-f]{64}\Z")
+        self.assertNotEqual(
+            self.paths["NEWEST_CONTROL_SHA"], self.paths["NEWEST_CONTROL_SHA_UPPER"]
+        )
+        self.assertEqual(len(self.paths["NEWEST_CONTROL_SHA_SHORT"]), 32)
 
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""
@@ -2129,7 +2426,7 @@ class EnableCompoundIsFailClosedTests(unittest.TestCase):
 
     def _run(self, receipt):
         compound = _canonical_enable(
-            literal=ENABLE_LITERAL, receipt=receipt, marker=self.marker
+            literal=RUNTIME_ENABLE_LITERAL, receipt=receipt, marker=self.marker
         )
         return subprocess.run(
             [PWSH, "-NoProfile", "-NonInteractive", "-Command", compound],
@@ -2206,7 +2503,7 @@ class EnableCompoundIsFailClosedTests(unittest.TestCase):
         # UTF8NoBOM, and the read-back compares with `-cne`, so any drift would have thrown.
         self.assertEqual(
             written,
-            ENABLE_LITERAL.encode("utf-8"),
+            RUNTIME_ENABLE_LITERAL.encode("utf-8"),
             "the receipt is not the literal's bytes" + detail,
         )
         self.assertFalse(

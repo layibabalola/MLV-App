@@ -13,7 +13,7 @@ exit 2 : fail-CLOSED, with ``hook-error: <detail>`` on stderr, for ANY exception
          accepted, because an argument this hook does not understand may be the venue
          under a name it no longer reads).
 
-This is the PROJECT hook described by ``never-authorized.json`` (schema v18) and by
+This is the PROJECT hook described by ``never-authorized.json`` (schema v19) and by
 ``prompts/v2/card-TOOL-HOOK-ENFORCE-1.md``.  It is NOT the global machine hook
 ``~/.claude/hooks/check-continuity-boundaries.py``, which is shared by every project on
 this machine and fails OPEN.  This one fails CLOSED and is tracked on the same ref as the
@@ -79,13 +79,48 @@ unbound WITH them, and the rev-19 shape exits 0 having deleted the marker with n
 written.  ``$ErrorActionPreference = 'Stop'`` closes that class; the rev-19 shape (no
 leading preference) is now just another non-canonical input.
 
-Stdlib only.  Deterministic: no subprocess, no clock, no network.  The worktree root is
-derived from this file's own location (``parents[2]``) rather than from ``git rev-parse``
-in the session cwd -- it needs no subprocess, it is the copy that actually governs the
-lane, and it is at least as closed as the cwd reading.
+THE ENABLE LITERAL IS VALIDATED SEMANTICALLY, NOT FOR PRESENCE (S112, register v19)
+-----------------------------------------------------------------------------------
+Up to rev 21 this hook only checked that the compound's JSON literal was an object carrying
+five NON-EMPTY STRINGS with ``state == "enabling"``.  Five strings of ``"x"`` passed.  So the
+receipt whose PRESENCE spends the one-shot authorization (S98) -- the only durable record of
+which execution-control receipt the enable was taken against -- could be written with a
+receipt name and a digest that named nothing, and the gate would still open.  A receipt that
+does not bind to the board it was taken on is a receipt of nothing.
+
+The literal is now bound to the board, in this order, so a near-miss is attributable to the
+ONE field that failed:
+
+  * the five keys are present, non-empty strings (unchanged), and ``state == "enabling"``;
+  * ``enabledUtc`` and ``recordedUtc`` PARSE as ISO-8601 UTC -- ``YYYY-MM-DDTHH:MM:SSZ``,
+    optionally with fractional seconds.  The trailing ``Z`` is REQUIRED: a bare stamp is not
+    a UTC stamp, and ``+00:00`` is an OFFSET, which is a different notation and is refused
+    rather than normalised (fail-closed: the register pins UTC, and the hook does not guess
+    what a local time meant);
+  * ``executionControlReceipt`` equals the BASENAME of the NEWEST valid execution-control
+    receipt -- selected by ``_kill_switch_receipts_ok`` above, the SAME selection that
+    decides whether the exception is open at all, never a second implementation of it.  A
+    path (``receipts/execution-control-0.7.json``) is not a basename and is refused;
+  * ``executionControlSha256`` equals the LOWERCASE hex SHA-256 of THAT FILE's bytes on
+    disk.  Uppercase, another file's digest and a truncated digest are all refused by exact
+    string comparison -- a digest that has to be normalised before it matches was not the
+    digest of that file.
+
+The literal arm runs LAST, after the receipt state, the venue and the shape, so a lane is
+never told that its literal was well-formed and only the board-rooted actor ever sees the
+expected digest in a refusal line.
+
+Stdlib only.  Deterministic: no subprocess, no clock, no network -- ``datetime`` is imported
+to PARSE a stamp out of the literal, never to read the current time, and ``hashlib`` to hash
+a file already on disk.  The worktree root is derived from this file's own location
+(``parents[2]``) rather than from ``git rev-parse`` in the session cwd -- it needs no
+subprocess, it is the copy that actually governs the lane, and it is at least as closed as
+the cwd reading.
 """
 
 import argparse
+import datetime
+import hashlib
 import json
 import os
 import re
@@ -150,6 +185,16 @@ ENABLE_LITERAL_KEYS = (
     "executionControlSha256",
     "recordedUtc",
 )
+# S112: the two stamps must PARSE as ISO-8601 UTC, in the order the literal is read, so a
+# row varying one is attributable to that one.  The regex pins the NOTATION (trailing `Z`,
+# optional fractional seconds, no offset); `strptime` then proves the CALENDAR, so
+# `2026-02-30T00:00:00Z` is refused even though its shape is right.  No current time is
+# read anywhere -- the register asks whether the stamp parses, not when it is.
+ENABLE_LITERAL_UTC_KEYS = ("enabledUtc", "recordedUtc")
+_ISO_UTC_RX = re.compile(r"\A(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z\Z")
+_ISO_UTC_FORMAT = "%Y-%m-%dT%H:%M:%S"
+ENABLE_CONTROL_NAME_KEY = "executionControlReceipt"
+ENABLE_CONTROL_SHA_KEY = "executionControlSha256"
 # S101: the canonical compound is FAIL-CLOSED.  A `Set-Content` failure is NON-terminating
 # by default, so the rev-18 shape would let `Remove-Item` disarm the kill switch with the
 # receipt absent -- the exact state the enable exists to make impossible.  The register now
@@ -573,6 +618,13 @@ def _manifest_surface(ctx, path_norm):
 def _kill_switch_receipts_ok(ctx):
     """The RECEIPT half of exception (i): every named 0.2 receipt validates, enable unspent.
 
+    -> ``(ok, why, newest_control_name)``.  The THIRD member is the BASENAME this function
+    selected, and it exists so S112's literal check can be bound to the SAME selection that
+    decided whether the exception is open at all.  A second implementation of "newest by
+    ``recordedUtc``" living next to this one is a second answer waiting to disagree with it:
+    the register names one newest receipt, so the hook computes it once.  It is ``""``
+    whenever ``ok`` is False -- there is no newest to name when the set does not validate.
+
     Reached ONLY from the canonical dedicated act below (S99/O118).  It is no longer a
     standing key that any input naming the marker under a delete verb can turn: a delete
     outside the canonical compound is refused before this is ever consulted.
@@ -598,38 +650,43 @@ def _kill_switch_receipts_ok(ctx):
             "the 0.2 enable is ONE-SHOT and receipts/%s is PRESENT, so this authorization "
             "is spent -- a re-armed marker needs a newly ratified authorization (S98)"
             % KILL_SWITCH_ENABLE_RECEIPT,
+            "",
         )
     for name in KILL_SWITCH_RECEIPTS:
         if read_json(ctx.receipt(name)) is None:
-            return False, "receipt %s is absent or does not validate" % name
+            return False, "receipt %s is absent or does not validate" % name, ""
     try:
         names = sorted(os.listdir(ctx.receipts_dir_raw))
     except Exception:
-        return False, "receipts directory is unreadable"
+        return False, "receipts directory is unreadable", ""
     controls = [
         name
         for name in names
         if name.startswith("execution-control-") and name.endswith(".json")
     ]
     if not controls:
-        return False, "no execution-control receipt is present"
+        return False, "no execution-control receipt is present", ""
     newest = None
     for name in controls:
         document = read_json(ctx.receipt(name))
         if not isinstance(document, dict):
-            return False, "execution-control receipt %s does not validate" % name
+            return False, "execution-control receipt %s does not validate" % name, ""
         stamp = document.get("recordedUtc")
         if not isinstance(stamp, str) or not stamp:
-            return False, "execution-control receipt %s lacks recordedUtc" % name
+            return False, "execution-control receipt %s lacks recordedUtc" % name, ""
         if newest is None or stamp > newest[0]:
             newest = (stamp, name, document)
     document = newest[2]
     for key in PROVENANCE_KEYS:
         if key not in document:
-            return False, "newest execution-control receipt lacks %s" % key
+            return False, "newest execution-control receipt lacks %s" % key, ""
     if document.get("productLiveCount") != PROVENANCE_PRODUCT_LIVE_COUNT:
-        return False, "newest execution-control receipt carries the wrong productLiveCount"
-    return True, ""
+        return (
+            False,
+            "newest execution-control receipt carries the wrong productLiveCount",
+            "",
+        )
+    return True, "", newest[1]
 
 
 # ------------------------------------------- NA-2 exception (i): ONE DEDICATED ACT
@@ -703,6 +760,16 @@ def _kill_switch_receipts_ok(ctx):
 #   * `;` between the five statements, and NOTHING before, between or after them.
 # The cost of each reading is a visible DENY on a near-miss, one line to fix.  The cost of
 # the other reading is a silent ALLOW of a marker delete, which is the act itself.
+#
+# S112 -- AND THE LITERAL ITSELF IS READ, NOT COUNTED (0.05 SIXTH review delta).  Every
+# reading above is about the SHAPE of the compound; until this delta the JSON it carries was
+# checked only for five non-empty strings, so `{"state":"enabling","enabledUtc":"x",
+# "executionControlReceipt":"x","executionControlSha256":"x","recordedUtc":"x"}` opened the
+# gate and wrote itself down as the receipt of record.  The literal is now BOUND TO THE
+# BOARD -- the newest execution-control receipt's basename, that file's lowercase sha256, and
+# two ISO-8601 UTC stamps -- in `_enable_literal_ok` below.  A receipt that names nothing is
+# not a lesser receipt; it is the enable act with a receipt-shaped alibi, the same failure
+# class S101 closed at the write and S98 closed on re-arm.
 _ENABLE_COMPOUND_RX = re.compile(
     r"\A\s*"
     r"\$(?P<pref>[A-Za-z_]\w*)\s*=\s*'(?P<prefvalue>[^']*)'\s*;\s*"
@@ -788,8 +855,55 @@ def _canonical_enable_literal(ctx):
     return match.group("literal")
 
 
-def _enable_literal_ok(literal):
-    """The literal must parse as an object carrying five non-empty strings, state=enabling."""
+def _iso_utc_ok(value):
+    """-> True when ``value`` is an ISO-8601 UTC stamp of the form the register pins.
+
+    ``YYYY-MM-DDTHH:MM:SSZ``, optionally with fractional seconds.  TWO fail-closed readings,
+    both recorded because neither is forced by the words "parse as ISO-8601 UTC":
+
+      * the trailing ``Z`` is REQUIRED and an OFFSET is not it.  ``+00:00`` denotes the same
+        instant, and a hook that accepted it would also have to decide what ``-05:00`` and a
+        bare ``2026-09-06T12:00:00`` meant.  Normalising is the hook guessing; refusing is
+        the hook asking for the one notation the register names.
+      * the ``Z`` is UPPERCASE, like the digest is lowercase: the register pins literals, and
+        a value that has to be case-folded before it matches is not the pinned literal.
+
+    The regex settles the NOTATION; ``strptime`` settles the CALENDAR, so
+    ``2026-02-30T00:00:00Z`` -- right shape, not a date -- is refused too.  No current time
+    is read: the question is whether the stamp parses, not when it is.
+    """
+    match = _ISO_UTC_RX.match(value)
+    if match is None:
+        return False
+    try:
+        datetime.datetime.strptime(match.group(1), _ISO_UTC_FORMAT)
+    except ValueError:
+        return False
+    return True
+
+
+def _sha256_of(path):
+    """-> the LOWERCASE hex sha256 of the file's BYTES, or None when it cannot be read."""
+    try:
+        with open(path, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+    except Exception:
+        return None
+
+
+def _enable_literal_ok(ctx, literal, newest_control):
+    """S112 -- THE LITERAL IS VALIDATED SEMANTICALLY, NOT FOR PRESENCE.
+
+    ``newest_control`` is the basename ``_kill_switch_receipts_ok`` ALREADY selected on the
+    call immediately before this one: the newest valid ``execution-control-*.json`` by
+    ``recordedUtc``.  It is passed in rather than recomputed so there is exactly ONE answer
+    to "which receipt is newest" in this hook -- the same one that decided the exception was
+    open at all.
+
+    The arms are ordered presence -> state -> stamps -> receipt name -> digest, and each
+    returns the FIRST failure, so a near-miss differing from the canonical literal in one
+    field is attributable to that field and the falsifier rows can each vary one variable.
+    """
     try:
         document = json.loads(literal)
     except Exception:
@@ -804,6 +918,41 @@ def _enable_literal_ok(literal):
         return (
             False,
             'the enable literal\'s state is not "%s"' % ENABLE_LITERAL_STATE,
+        )
+    for key in ENABLE_LITERAL_UTC_KEYS:
+        if not _iso_utc_ok(document[key]):
+            return (
+                False,
+                "the enable literal's %s is %r, which is not an ISO-8601 UTC stamp -- "
+                "YYYY-MM-DDTHH:MM:SSZ, optional fractional seconds, trailing Z required "
+                "and an offset refused (S112)" % (key, document[key]),
+            )
+    named = document[ENABLE_CONTROL_NAME_KEY]
+    if named != newest_control:
+        return (
+            False,
+            "the enable literal names %s %r, but the NEWEST valid execution-control "
+            "receipt is %r -- a path or a different basename is not it (S112)"
+            % (ENABLE_CONTROL_NAME_KEY, named, newest_control),
+        )
+    digest = _sha256_of(ctx.receipt(newest_control))
+    if digest is None:
+        return (
+            False,
+            "the newest execution-control receipt %r could not be read to hash it (S112)"
+            % newest_control,
+        )
+    if document[ENABLE_CONTROL_SHA_KEY] != digest:
+        return (
+            False,
+            "the enable literal's %s is %r, not the lowercase sha256 of %r, which is %r "
+            "(S112)"
+            % (
+                ENABLE_CONTROL_SHA_KEY,
+                document[ENABLE_CONTROL_SHA_KEY],
+                newest_control,
+                digest,
+            ),
         )
     return True, ""
 
@@ -824,11 +973,18 @@ def _enable_act_allowed(ctx):
     worktree lane's hook evaluates the SAME absolute board paths and would admit the
     compound the moment the six receipts exist -- before the hub has verified $R or
     installed the task (S105).
+
+    S112 -- THE LITERAL IS VALIDATED SEMANTICALLY, and it stays LAST for the same two
+    reasons, now load-bearing in a third way: the digest arm's refusal line names the
+    EXPECTED digest, which only the board-rooted actor may see, and only the venue test
+    ahead of it guarantees that.  ``_kill_switch_receipts_ok`` hands its own selection down
+    as ``newest_control``, so the receipt the literal must name is the receipt the receipt
+    arm just accepted.
     """
     literal = _canonical_enable_literal(ctx)
     if literal is None:
         return False
-    ok, why = _kill_switch_receipts_ok(ctx)
+    ok, why, newest_control = _kill_switch_receipts_ok(ctx)
     if not ok:
         raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)
     if not ctx.at_board_venue:
@@ -840,7 +996,7 @@ def _enable_act_allowed(ctx):
             "absolute board paths (S105/O126)"
             % (ctx.project_dir or "<absent>", ctx.board_root),
         )
-    ok, why = _enable_literal_ok(literal)
+    ok, why = _enable_literal_ok(ctx, literal, newest_control)
     if not ok:
         raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)
     return True
@@ -1147,10 +1303,13 @@ _NA3_PERSISTENT_NAME_RX = re.compile(_NA3_PERSISTENT_NAMES, re.I)
 
 # ---- the `claude auth ...` arm, bounded by the REGISTER and not by the card's phrase ----
 #
-# ``never-authorized.json`` (schema v17) row NA-3 reads, VERBATIM:
+# ``never-authorized.json`` (schema v19) row NA-3 OPENS, VERBATIM:
 #
 #     claude auth login|logout, codex login, or assignment (X=, export, $env:, set, setx)
 #     of any variable starting ANTHROPIC_, OPENAI_, CLAUDE_CODE_
+#
+# (the row has since grown a PERSISTENT-scope clause -- handled by the O129 arm above -- and
+# the explicit `status` allowance; this is its OPENING clause, quoted for the two verbs)
 #
 # so the acts the register never authorizes are `login` and `logout`.  The card's prose
 # says only "claude auth", and this hook shipped a `\bclaude\b...\bauth\b` catch-all that
