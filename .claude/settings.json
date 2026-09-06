@@ -55,7 +55,7 @@
           },
           {
             "type": "command",
-            "command": "python \"${CLAUDE_PROJECT_DIR}/tools/session-checkpoint.py\"",
+            "command": "\"C:/Users/obabalola/AppData/Local/Python/bin/python.exe\" \"${CLAUDE_PROJECT_DIR}/tools/session-checkpoint.py\"",
             "timeout": 60
           }
         ]
@@ -72,7 +72,7 @@
           },
           {
             "type": "command",
-            "command": "python \"${CLAUDE_PROJECT_DIR}/tools/session-checkpoint.py\"",
+            "command": "\"C:/Users/obabalola/AppData/Local/Python/bin/python.exe\" \"${CLAUDE_PROJECT_DIR}/tools/session-checkpoint.py\"",
             "timeout": 60
           }
         ]
