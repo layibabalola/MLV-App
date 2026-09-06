@@ -13,7 +13,7 @@ exit 2 : fail-CLOSED, with ``hook-error: <detail>`` on stderr, for ANY exception
          accepted, because an argument this hook does not understand may be the venue
          under a name it no longer reads).
 
-This is the PROJECT hook described by ``never-authorized.json`` (schema v19) and by
+This is the PROJECT hook described by ``never-authorized.json`` (schema v20) and by
 ``prompts/v2/card-TOOL-HOOK-ENFORCE-1.md``.  It is NOT the global machine hook
 ``~/.claude/hooks/check-continuity-boundaries.py``, which is shared by every project on
 this machine and fails OPEN.  This one fails CLOSED and is tracked on the same ref as the
@@ -79,7 +79,40 @@ unbound WITH them, and the rev-19 shape exits 0 having deleted the marker with n
 written.  ``$ErrorActionPreference = 'Stop'`` closes that class; the rev-19 shape (no
 leading preference) is now just another non-canonical input.
 
-THE ENABLE LITERAL IS VALIDATED SEMANTICALLY, NOT FOR PRESENCE (S112, register v19)
+ONE FIXED NOTATION FOR EVERY ``recordedUtc``, AND THE NEWEST IS THE PARSED VALUE (O141)
+---------------------------------------------------------------------------------------
+Every ``recordedUtc`` this hook READS or VALIDATES carries exactly ONE notation --
+``YYYY-MM-DDTHH:MM:SSZ``: whole seconds, uppercase ``Z``, no fractional part, no offset,
+and a real calendar date (the regex settles the notation, ``strptime`` settles the
+calendar).  That is register v20's wording, and it covers every ``execution-control-*.json``
+the enable act considers AND the enable literal's own ``enabledUtc`` and ``recordedUtc``.
+The sixth commit accepted an OPTIONAL fractional part in the literal and never checked a
+receipt's stamp at all; both are narrowed here, so a fractional literal stamp is now DENY.
+
+WHY, MEASURED RATHER THAN ASSERTED.  The sixth commit selected the newest
+execution-control receipt by comparing the raw STRINGS, and the hub reproduced the
+consequence on that very commit: with ``0.6`` stamped ``2026-09-06T16:00:00Z`` and ``0.7``
+stamped ``2026-09-06T16:00:00.500000Z``, ``'2026-09-06T16:00:00Z' >
+'2026-09-06T16:00:00.500000Z'`` is TRUE in Python -- ``Z`` is 0x5A and ``.`` is 0x2E -- so
+the STALE 0.6 was selected as newest and the one-shot enable could fire against it.  Two
+arms close that class, and they are load-bearing in different ways:
+
+  * a receipt whose ``recordedUtc`` does not conform is INVALID.  The newest is then
+    UNDECIDABLE and the whole exception fails closed, naming the offending FILE -- never
+    silently skipped, never treated as older.  A skipped receipt is one the board cannot
+    see, and the enable would then be taken against a set nobody enumerated.
+  * the newest is chosen by the PARSED value (``datetime.strptime`` of the pinned
+    notation), never by a byte comparison, and an EXACT TIE between two candidates makes
+    the newest UNDECIDABLE too -- DENY, naming BOTH files.  Note what this does and does
+    not buy: with the notation pinned to a FIXED WIDTH, lexical order and chronological
+    order coincide, so it is the VALIDATION that makes the mixed-notation case come out
+    right, not the parse.  The parse is what makes "the same instant" detectable as
+    EQUALITY rather than as a byte difference, and it is what the register pins.
+
+``_kill_switch_receipts_ok`` is the ONE selection site and hands its answer down to the
+literal check, so "which receipt is newest" has exactly one answer in this hook.
+
+THE ENABLE LITERAL IS VALIDATED SEMANTICALLY, NOT FOR PRESENCE (S112, register v20)
 -----------------------------------------------------------------------------------
 Up to rev 21 this hook only checked that the compound's JSON literal was an object carrying
 five NON-EMPTY STRINGS with ``state == "enabling"``.  Five strings of ``"x"`` passed.  So the
@@ -92,11 +125,12 @@ The literal is now bound to the board, in this order, so a near-miss is attribut
 ONE field that failed:
 
   * the five keys are present, non-empty strings (unchanged), and ``state == "enabling"``;
-  * ``enabledUtc`` and ``recordedUtc`` PARSE as ISO-8601 UTC -- ``YYYY-MM-DDTHH:MM:SSZ``,
-    optionally with fractional seconds.  The trailing ``Z`` is REQUIRED: a bare stamp is not
-    a UTC stamp, and ``+00:00`` is an OFFSET, which is a different notation and is refused
-    rather than normalised (fail-closed: the register pins UTC, and the hook does not guess
-    what a local time meant);
+  * ``enabledUtc`` and ``recordedUtc`` carry the ONE pinned notation above --
+    ``YYYY-MM-DDTHH:MM:SSZ``, whole seconds, uppercase ``Z``, no fraction, no offset (O141).
+    The trailing ``Z`` is REQUIRED: a bare stamp is not a UTC stamp, ``+00:00`` is an
+    OFFSET, which is a different notation and is refused rather than normalised, and a
+    fractional part -- which the sixth commit accepted here -- is refused too, because ONE
+    notation everywhere is what makes the literal and the receipts comparable at all;
   * ``executionControlReceipt`` equals the BASENAME of the NEWEST valid execution-control
     receipt -- selected by ``_kill_switch_receipts_ok`` above, the SAME selection that
     decides whether the exception is open at all, never a second implementation of it.  A
@@ -111,7 +145,8 @@ never told that its literal was well-formed and only the board-rooted actor ever
 expected digest in a refusal line.
 
 Stdlib only.  Deterministic: no subprocess, no clock, no network -- ``datetime`` is imported
-to PARSE a stamp out of the literal, never to read the current time, and ``hashlib`` to hash
+to PARSE the pinned stamps (the literal's two and every receipt's ``recordedUtc`` -- O141),
+never to read the current time, and ``hashlib`` to hash
 a file already on disk.  The worktree root is derived from this file's own location
 (``parents[2]``) rather than from ``git rev-parse`` in the session cwd -- it needs no
 subprocess, it is the copy that actually governs the lane, and it is at least as closed as
@@ -185,14 +220,19 @@ ENABLE_LITERAL_KEYS = (
     "executionControlSha256",
     "recordedUtc",
 )
-# S112: the two stamps must PARSE as ISO-8601 UTC, in the order the literal is read, so a
-# row varying one is attributable to that one.  The regex pins the NOTATION (trailing `Z`,
-# optional fractional seconds, no offset); `strptime` then proves the CALENDAR, so
-# `2026-02-30T00:00:00Z` is refused even though its shape is right.  No current time is
-# read anywhere -- the register asks whether the stamp parses, not when it is.
+# S112/O141: the two stamps carry the ONE pinned notation, in the order the literal is
+# read, so a row varying one is attributable to that one.  The regex pins the NOTATION --
+# whole seconds, uppercase `Z`, no fractional part, no offset, nothing before or after --
+# and `strptime` then proves the CALENDAR, so `2026-02-30T00:00:00Z` is refused even though
+# its shape is right.  THE SAME notation governs every `recordedUtc` this hook reads off a
+# receipt: the sixth commit accepted an optional fraction here and compared receipt stamps
+# as raw bytes, and the two together let a STALE receipt be selected as newest (O141).  No
+# current time is read anywhere -- the register asks whether the stamp parses, not when it
+# is.
 ENABLE_LITERAL_UTC_KEYS = ("enabledUtc", "recordedUtc")
-_ISO_UTC_RX = re.compile(r"\A(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z\Z")
-_ISO_UTC_FORMAT = "%Y-%m-%dT%H:%M:%S"
+PINNED_UTC_NOTATION = "YYYY-MM-DDTHH:MM:SSZ"
+_PINNED_UTC_RX = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+_PINNED_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 ENABLE_CONTROL_NAME_KEY = "executionControlReceipt"
 ENABLE_CONTROL_SHA_KEY = "executionControlSha256"
 # S101: the canonical compound is FAIL-CLOSED.  A `Set-Content` failure is NON-terminating
@@ -630,8 +670,13 @@ def _kill_switch_receipts_ok(ctx):
     outside the canonical compound is refused before this is ever consulted.
 
     The execution-control arm selects the NEWEST ``execution-control-*.json`` by its
-    ``recordedUtc``.  A receipt LACKING ``recordedUtc`` is INVALID (O105) and its mere
-    presence makes the newest undecidable, so the whole exception fails closed.
+    ``recordedUtc``, and O141 pins HOW.  A receipt LACKING ``recordedUtc`` is INVALID (O105)
+    and its mere presence makes the newest undecidable, so the whole exception fails closed;
+    so does a receipt whose ``recordedUtc`` is not the ONE pinned notation
+    ``YYYY-MM-DDTHH:MM:SSZ``, and that refusal NAMES the offending file -- a non-conforming
+    stamp is never silently skipped and never treated as older.  The order is the order of
+    the PARSED values, never of the raw bytes, and an EXACT TIE between two candidates is
+    undecidable too: DENY, naming BOTH files.
 
     S98 -- THE ENABLE IS ONE-SHOT, and this is the first arm because it is the decisive
     one.  Exception (i) opens only while ``receipts/0.2-loop-enabled.json`` is ABSENT.  0.2
@@ -666,7 +711,21 @@ def _kill_switch_receipts_ok(ctx):
     ]
     if not controls:
         return False, "no execution-control receipt is present", ""
+    # O141 -- ONE NOTATION, AND THE NEWEST IS THE PARSED VALUE.
+    #
+    # A non-conforming stamp is INVALID and makes the newest UNDECIDABLE, so it is refused
+    # BY NAME: never silently skipped (a skipped receipt is one the board cannot see, and
+    # the enable would then be taken against a set nobody enumerated) and never treated as
+    # older -- which is what a raw-byte comparison did.  The hub measured
+    # `'2026-09-06T16:00:00Z' > '2026-09-06T16:00:00.500000Z'` as True on the sixth commit,
+    # selecting the STALE 0.6 as newest and letting the one-shot enable fire on it.  An
+    # EXACT TIE is undecidable for the same reason, and its refusal names BOTH files.
+    #
+    # `controls` is sorted by NAME, so a comparison that quietly fell back to insertion
+    # order would look right on any fixture whose names ascend with their stamps.  The
+    # comparison is on `moment` and on nothing else.
     newest = None
+    stamped = {}
     for name in controls:
         document = read_json(ctx.receipt(name))
         if not isinstance(document, dict):
@@ -674,8 +733,27 @@ def _kill_switch_receipts_ok(ctx):
         stamp = document.get("recordedUtc")
         if not isinstance(stamp, str) or not stamp:
             return False, "execution-control receipt %s lacks recordedUtc" % name, ""
-        if newest is None or stamp > newest[0]:
-            newest = (stamp, name, document)
+        moment = _parse_pinned_utc(stamp)
+        if moment is None:
+            return (
+                False,
+                "execution-control receipt %s carries recordedUtc %r, which is not the "
+                "ONE pinned notation %s -- whole seconds, uppercase Z, no fraction, no "
+                "offset -- so the NEWEST is UNDECIDABLE and the exception fails closed "
+                "(O141)" % (name, stamp, PINNED_UTC_NOTATION),
+                "",
+            )
+        if moment in stamped:
+            return (
+                False,
+                "execution-control receipts %s and %s carry the SAME recordedUtc %r, so "
+                "the NEWEST is UNDECIDABLE and the exception fails closed (O141)"
+                % (stamped[moment], name, stamp),
+                "",
+            )
+        stamped[moment] = name
+        if newest is None or moment > newest[0]:
+            newest = (moment, name, document)
     document = newest[2]
     for key in PROVENANCE_KEYS:
         if key not in document:
@@ -767,9 +845,9 @@ def _kill_switch_receipts_ok(ctx):
 # "executionControlReceipt":"x","executionControlSha256":"x","recordedUtc":"x"}` opened the
 # gate and wrote itself down as the receipt of record.  The literal is now BOUND TO THE
 # BOARD -- the newest execution-control receipt's basename, that file's lowercase sha256, and
-# two ISO-8601 UTC stamps -- in `_enable_literal_ok` below.  A receipt that names nothing is
-# not a lesser receipt; it is the enable act with a receipt-shaped alibi, the same failure
-# class S101 closed at the write and S98 closed on re-arm.
+# two stamps in the ONE pinned notation (O141) -- in `_enable_literal_ok` below.  A receipt
+# that names nothing is not a lesser receipt; it is the enable act with a receipt-shaped
+# alibi, the same failure class S101 closed at the write and S98 closed on re-arm.
 _ENABLE_COMPOUND_RX = re.compile(
     r"\A\s*"
     r"\$(?P<pref>[A-Za-z_]\w*)\s*=\s*'(?P<prefvalue>[^']*)'\s*;\s*"
@@ -855,11 +933,14 @@ def _canonical_enable_literal(ctx):
     return match.group("literal")
 
 
-def _iso_utc_ok(value):
-    """-> True when ``value`` is an ISO-8601 UTC stamp of the form the register pins.
+def _parse_pinned_utc(value):
+    """-> the ``datetime`` a stamp in the ONE pinned notation denotes, or ``None`` (O141).
 
-    ``YYYY-MM-DDTHH:MM:SSZ``, optionally with fractional seconds.  TWO fail-closed readings,
-    both recorded because neither is forced by the words "parse as ISO-8601 UTC":
+    ``YYYY-MM-DDTHH:MM:SSZ``: whole seconds, uppercase ``Z``, no fractional part, no offset.
+    ONE notation, for the enable literal's two stamps AND for every ``recordedUtc`` this
+    hook reads off a receipt -- which is what makes them comparable at all.  THREE
+    fail-closed readings, recorded because none is forced by the words "an ISO-8601 UTC
+    stamp":
 
       * the trailing ``Z`` is REQUIRED and an OFFSET is not it.  ``+00:00`` denotes the same
         instant, and a hook that accepted it would also have to decide what ``-05:00`` and a
@@ -867,19 +948,24 @@ def _iso_utc_ok(value):
         the hook asking for the one notation the register names.
       * the ``Z`` is UPPERCASE, like the digest is lowercase: the register pins literals, and
         a value that has to be case-folded before it matches is not the pinned literal.
+      * a FRACTIONAL part is refused, which the sixth commit accepted in the literal.  A
+        fraction is exactly what made two receipt stamps order wrongly as bytes (O141), and
+        one notation is cheaper to enforce than an ordering that must be right about every
+        notation it admits.
 
     The regex settles the NOTATION; ``strptime`` settles the CALENDAR, so
     ``2026-02-30T00:00:00Z`` -- right shape, not a date -- is refused too.  No current time
-    is read: the question is whether the stamp parses, not when it is.
+    is read: the question is whether the stamp parses, not when it is.  The RETURN VALUE is
+    the parsed instant, precisely so the one site that ORDERS receipts orders by THAT.
     """
-    match = _ISO_UTC_RX.match(value)
-    if match is None:
-        return False
+    if not isinstance(value, str):
+        return None
+    if _PINNED_UTC_RX.match(value) is None:
+        return None
     try:
-        datetime.datetime.strptime(match.group(1), _ISO_UTC_FORMAT)
+        return datetime.datetime.strptime(value, _PINNED_UTC_FORMAT)
     except ValueError:
-        return False
-    return True
+        return None
 
 
 def _sha256_of(path):
@@ -895,10 +981,10 @@ def _enable_literal_ok(ctx, literal, newest_control):
     """S112 -- THE LITERAL IS VALIDATED SEMANTICALLY, NOT FOR PRESENCE.
 
     ``newest_control`` is the basename ``_kill_switch_receipts_ok`` ALREADY selected on the
-    call immediately before this one: the newest valid ``execution-control-*.json`` by
-    ``recordedUtc``.  It is passed in rather than recomputed so there is exactly ONE answer
-    to "which receipt is newest" in this hook -- the same one that decided the exception was
-    open at all.
+    call immediately before this one: the newest valid ``execution-control-*.json`` by the
+    PARSED value of its ``recordedUtc`` (O141).  It is passed in rather than recomputed so
+    there is exactly ONE answer to "which receipt is newest" in this hook -- the same one
+    that decided the exception was open at all.
 
     The arms are ordered presence -> state -> stamps -> receipt name -> digest, and each
     returns the FIRST failure, so a near-miss differing from the canonical literal in one
@@ -920,19 +1006,21 @@ def _enable_literal_ok(ctx, literal, newest_control):
             'the enable literal\'s state is not "%s"' % ENABLE_LITERAL_STATE,
         )
     for key in ENABLE_LITERAL_UTC_KEYS:
-        if not _iso_utc_ok(document[key]):
+        if _parse_pinned_utc(document[key]) is None:
             return (
                 False,
-                "the enable literal's %s is %r, which is not an ISO-8601 UTC stamp -- "
-                "YYYY-MM-DDTHH:MM:SSZ, optional fractional seconds, trailing Z required "
-                "and an offset refused (S112)" % (key, document[key]),
+                "the enable literal's %s is %r, which is not the ONE pinned notation %s -- "
+                "whole seconds, uppercase Z, no fraction, no offset, the SAME notation "
+                "every receipt's recordedUtc carries (S112/O141)"
+                % (key, document[key], PINNED_UTC_NOTATION),
             )
     named = document[ENABLE_CONTROL_NAME_KEY]
     if named != newest_control:
         return (
             False,
             "the enable literal names %s %r, but the NEWEST valid execution-control "
-            "receipt is %r -- a path or a different basename is not it (S112)"
+            "receipt -- the newest by PARSED recordedUtc -- is %r; a path or a different "
+            "basename is not it (S112/O141)"
             % (ENABLE_CONTROL_NAME_KEY, named, newest_control),
         )
     digest = _sha256_of(ctx.receipt(newest_control))
@@ -1303,7 +1391,7 @@ _NA3_PERSISTENT_NAME_RX = re.compile(_NA3_PERSISTENT_NAMES, re.I)
 
 # ---- the `claude auth ...` arm, bounded by the REGISTER and not by the card's phrase ----
 #
-# ``never-authorized.json`` (schema v19) row NA-3 OPENS, VERBATIM:
+# ``never-authorized.json`` (schema v20) row NA-3 OPENS, VERBATIM:
 #
 #     claude auth login|logout, codex login, or assignment (X=, export, $env:, set, setx)
 #     of any variable starting ANTHROPIC_, OPENAI_, CLAUDE_CODE_

@@ -24,18 +24,34 @@ turns into an ARGUMENT; ``_invoke`` also STRIPS ``CLAUDE_PROJECT_DIR`` from the 
 and one row deliberately puts it BACK while passing no argument, so that a hook which
 regressed to reading the environment goes red rather than looking correct.
 
-THE ENABLE LITERAL IS DERIVED FROM THE FIXTURE, NOT WRITTEN DOWN (S112, register v19).  The
+THE ENABLE LITERAL IS DERIVED FROM THE FIXTURE, NOT WRITTEN DOWN (S112, register v20).  The
 hook now validates the 0.2 enable compound's JSON literal SEMANTICALLY: ``state`` is
-``enabling``, both stamps parse as ISO-8601 UTC, ``executionControlReceipt`` is the BASENAME
-of the newest valid execution-control receipt, and ``executionControlSha256`` is that file's
-lowercase sha256.  Two of those are facts about a tmp-dir board that does not exist until
-``setUp`` runs, so the table carries them as PLACEHOLDERS (``{NEWEST_CONTROL}``,
-``{NEWEST_CONTROL_SHA}`` and the near-miss forms) which ``_bind_the_enable_literal`` resolves
-by reading the receipts the fixture just wrote and hashing their bytes.  Hard-coding either
+``enabling``, both stamps carry the ONE pinned notation described below,
+``executionControlReceipt`` is the BASENAME of the newest valid execution-control receipt,
+and ``executionControlSha256`` is that file's lowercase sha256.  Two of those are facts
+about a tmp-dir board that does not exist until ``setUp`` runs, so the table carries them
+as PLACEHOLDERS (``{NEWEST_CONTROL}``, ``{NEWEST_CONTROL_SHA}`` and the near-miss forms)
+which ``_bind_the_enable_literal`` resolves by reading the receipts the fixture just wrote
+and hashing their bytes.  Hard-coding either
 would leave the ALLOW row green against a hook that never opened the file -- which is exactly
 the defect S112 names.  What the table's own defaults used to be says it best: the receipt
 was ``receipts/execution-control-0.7.json``, a path, and the digest was ``"3" * 64``.  Both
 are DENY rows now.
+
+ONE FIXED NOTATION, AND THE NEWEST RECEIPT IS THE PARSED ONE (O141, register v20).
+Every ``recordedUtc`` the hook reads or validates carries exactly
+``YYYY-MM-DDTHH:MM:SSZ`` -- whole seconds, uppercase ``Z``, no fraction, no offset -- and
+the newest ``execution-control-*.json`` is chosen by the PARSED value, with a
+non-conforming stamp or an exact tie making the newest UNDECIDABLE (fail closed, naming the
+file, or both files for a tie).  The sixth commit compared the raw strings and accepted an
+optional fraction in the literal; the hub reproduced the consequence ON that commit, with
+``0.6`` at ``2026-09-06T16:00:00Z`` beside ``0.7`` at ``2026-09-06T16:00:00.500000Z``,
+where ``'...:00Z' > '...:00.500000Z'`` is True in Python and the STALE receipt was selected
+as newest.  That exact pair is a DENY row below, beside the offset, naive, lowercase-``z``
+and tied-stamp rows, the two fractional literal stamps, and an ALLOW/DENY pair on two
+whole-second stamps one second apart that pins WHICH receipt the selection returns.
+``_pinned_moment`` parses the notation with the harness's OWN implementation, so this
+table's idea of "newest" is never derived from the hook it tests.
 
 NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
 payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
@@ -49,6 +65,7 @@ drive letter that does not exist), never the board, and they SKIP rather than pr
 ``pwsh`` is absent.
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -176,6 +193,50 @@ ENABLE_MARKER = "{DUAL}/WORKSTREAM-LOOP-DISABLED"
 # rows below.
 CONTROL_NAME = "{NEWEST_CONTROL}"
 CONTROL_SHA = "{NEWEST_CONTROL_SHA}"
+
+
+# ------------------------------------------- O141: ONE notation, and the newest is PARSED
+#
+# Register v20 pins ONE notation for every `recordedUtc` the hook reads or validates:
+# `YYYY-MM-DDTHH:MM:SSZ` -- whole seconds, uppercase `Z`, no fraction, no offset.  The
+# stamps below are the hub's own round-21 reproduction pair and its near misses.  Under the
+# SIXTH commit's raw-string comparison `CONTROL_STAMP_WHOLE > CONTROL_STAMP_FRACTION` is
+# TRUE (`Z` is 0x5A, `.` is 0x2E), so the STALE 0.6 was selected as newest and the one-shot
+# enable could fire against it; `test_the_o141_stamp_constants_are_what_they_claim` asserts
+# that inversion directly, so the defect this delta closes is measured in this file and not
+# merely described.
+PINNED_UTC_RX = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+PINNED_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+CONTROL_STAMP_WHOLE = "2026-09-06T16:00:00Z"
+CONTROL_STAMP_LATER = "2026-09-06T16:00:01Z"
+CONTROL_STAMP_FRACTION = "2026-09-06T16:00:00.500000Z"
+CONTROL_STAMP_OFFSET = "2026-09-06T16:00:00+00:00"
+CONTROL_STAMP_NAIVE = "2026-09-06T16:00:00"
+CONTROL_STAMP_LOWER_Z = "2026-09-06T16:00:00z"
+# The four the register refuses, kept as ONE list so a row cannot quietly stop being a near
+# miss: every one is a NON-EMPTY STRING that presence-only validation would have accepted.
+CONTROL_STAMPS_REFUSED = (
+    CONTROL_STAMP_FRACTION,
+    CONTROL_STAMP_OFFSET,
+    CONTROL_STAMP_NAIVE,
+    CONTROL_STAMP_LOWER_Z,
+)
+
+
+def _pinned_moment(stamp):
+    """The HARNESS's own parse of the pinned notation -- deliberately a second implementation.
+
+    The table's expectation of which receipt is newest must not be derived from the hook it
+    is testing, so this does not import the hook: it re-states the notation and parses it.
+    A stamp the hook would refuse returns ``None`` here too, and the caller skips it for
+    BINDING purposes only -- the hook fails the whole exception closed on one.
+    """
+    if not isinstance(stamp, str) or PINNED_UTC_RX.match(stamp) is None:
+        return None
+    try:
+        return datetime.datetime.strptime(stamp, PINNED_UTC_FORMAT)
+    except ValueError:
+        return None
 
 
 def _enable_literal(**overrides):
@@ -941,7 +1002,11 @@ CASES = [
         },
         "expect": "DENY",
         "na": "NA-2",
-        "reason_contains": "enabledUtc is '2026-09-06T12:00:00', which is not an ISO-8601 UTC stamp",
+        "reason_contains": (
+            "enabledUtc is '2026-09-06T12:00:00'",
+            "which is not the ONE pinned notation",
+            "(S112/O141)",
+        ),
         "fixture": "receipts_all_six_at_board",
     },
     {
@@ -976,6 +1041,174 @@ CASES = [
         "na": "NA-2",
         "reason_contains": "recordedUtc is 'not-a-timestamp'",
         "fixture": "receipts_all_six_at_board",
+    },
+    # ------------------------- O141: ONE notation, and the newest is the PARSED value
+    #
+    # Nine rows.  FIVE vary a RECEIPT stamp against the same canonical compound, the same
+    # six receipts and the same board venue, so each is one variable from the ALLOW row and
+    # each denies at the RECEIPT arm -- before the literal is read at all.  TWO narrow the
+    # LITERAL to the same notation the receipts carry.  TWO are the ALLOW/DENY pair that
+    # pins WHICH receipt the selection returns when both stamps conform.
+    {
+        # THE HUB'S OWN REPRODUCTION, turned into a falsifier.  `0.6` at
+        # `2026-09-06T16:00:00Z` beside `0.7` at `2026-09-06T16:00:00.500000Z`: the sixth
+        # commit compared these as strings, `Z` sorts after `.`, and the STALE 0.6 was
+        # returned as NEWEST -- so the enable could be taken against a superseded receipt.
+        # The fractional stamp is now non-conforming, the newest is UNDECIDABLE, and the
+        # refusal NAMES the offending file rather than skipping it.
+        "name": "enable canonical compound with a fractional receipt stamp beside a whole one",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries recordedUtc "
+            "'2026-09-06T16:00:00.500000Z'",
+            "UNDECIDABLE",
+            "(O141)",
+        ),
+        "fixture": "control_stamp_fraction_at_board",
+    },
+    {
+        # `+00:00` is the same INSTANT and a different NOTATION -- refused on a RECEIPT for
+        # the same reason it is refused in the literal: accepting it commits the hook to
+        # deciding what `-05:00` meant, and then to converting it.
+        "name": "enable canonical compound with a receipt stamp carrying an offset",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries recordedUtc "
+            "'2026-09-06T16:00:00+00:00'",
+            "(O141)",
+        ),
+        "fixture": "control_stamp_offset_at_board",
+    },
+    {
+        # A NAIVE stamp: no zone at all.  It is not a UTC stamp, and the hook does not guess
+        # which zone a receipt was written in.
+        "name": "enable canonical compound with a naive receipt stamp",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries recordedUtc "
+            "'2026-09-06T16:00:00'",
+            "(O141)",
+        ),
+        "fixture": "control_stamp_naive_at_board",
+    },
+    {
+        # A LOWERCASE `z`.  The register pins literals -- the digest is lowercase, the zone
+        # designator is uppercase -- and a value that has to be case-folded before it
+        # matches is not the pinned literal.  It is also the near miss a hand-written
+        # receipt is most likely to carry.
+        "name": "enable canonical compound with a lowercase z receipt stamp",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries recordedUtc "
+            "'2026-09-06T16:00:00z'",
+            "(O141)",
+        ),
+        "fixture": "control_stamp_lowercase_z_at_board",
+    },
+    {
+        # TWO receipts, ONE instant.  Both stamps conform, so the notation arm passes and
+        # this row is attributable to the TIE arm alone: there is no newest, and the refusal
+        # names BOTH files rather than picking whichever the directory listing reached last.
+        "name": "enable canonical compound with two identically stamped receipts",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipts execution-control-0.6.json and "
+            "execution-control-0.7.json carry the SAME recordedUtc '2026-09-06T16:00:00Z'",
+            "UNDECIDABLE",
+            "(O141)",
+        ),
+        "fixture": "control_stamps_tied_at_board",
+    },
+    {
+        # The literal, narrowed.  The sixth commit accepted an optional fraction HERE while
+        # never checking a receipt's stamp at all; one notation everywhere is what makes the
+        # literal and the receipts comparable, so a fractional literal stamp is now DENY.
+        "name": "enable canonical compound whose literal enabledUtc carries fractional seconds",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(enabledUtc="2026-09-06T12:00:00.500000Z")
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "enabledUtc is '2026-09-06T12:00:00.500000Z'",
+            "(S112/O141)",
+        ),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The same narrowing on the OTHER stamp, one row each, so a hook that narrowed only
+        # the first key it read goes red here.
+        "name": "enable canonical compound whose literal recordedUtc carries fractional seconds",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(recordedUtc="2026-09-06T12:00:00.500000Z")
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "recordedUtc is '2026-09-06T12:00:00.500000Z'",
+            "(S112/O141)",
+        ),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # THE ORDERING, in the ALLOW direction.  Two CONFORMING stamps one second apart --
+        # `0.6` at `...16:00:00Z`, `0.7` at `...16:00:01Z` -- and the literal names
+        # `{NEWEST_CONTROL}`, bound at run time by `_pinned_moment`'s own parse.  ALLOW only
+        # while the hook returns `0.7`.  Its DENY partner below names `{OLDER_CONTROL}` and
+        # is the half that proves the selection has a DIRECTION: reverse the comparison and
+        # this row denies while that one allows.
+        "name": "enable canonical compound naming the newest of two whole second stamps",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "ALLOW",
+        "fixture": "control_stamps_ordered_at_board",
+    },
+    {
+        "name": "enable canonical compound naming the older of two whole second stamps",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(executionControlReceipt="{OLDER_CONTROL}")
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "names executionControlReceipt '{OLDER_CONTROL}'",
+            "the newest by PARSED recordedUtc -- is '{NEWEST_CONTROL}'",
+            "(S112/O141)",
+        ),
+        "fixture": "control_stamps_ordered_at_board",
     },
     {
         # S99.  The row the old table had as an ALLOW.  Every precondition of exception (i)
@@ -1517,7 +1750,7 @@ CASES = [
     },
     # -------------------------------- NA-3's `claude auth` arm, bounded by the REGISTER
     #
-    # `never-authorized.json` v19 NA-3 names `claude auth login|logout`, not `claude auth`.
+    # `never-authorized.json` v20 NA-3 names `claude auth login|logout`, not `claude auth`.
     # These four rows differ from one another in exactly ONE variable -- the auth
     # subcommand -- so they prove the arm is a GATE and not a wall.  The ALLOW row is
     # load-bearing: the board's account-rotation procedure runs `claude auth status --json`
@@ -1817,6 +2050,21 @@ def _kill_switch_receipts(paths, omit=(), extra=()):
         _write(os.path.join(paths["RECEIPTS"], name), payload)
 
 
+def _kill_switch_receipts_stamped(paths, stamp_06, stamp_07):
+    """The six receipts, with the two execution-control stamps set explicitly (O141).
+
+    `extra` OVERWRITES the defaults, so each O141 fixture differs from
+    `fixture_receipts_all_six_at_board` in the stamps and in nothing else.
+    """
+    _kill_switch_receipts(
+        paths,
+        extra=(
+            ("execution-control-0.6.json", _execution_control("0.6", stamp_06)),
+            ("execution-control-0.7.json", _execution_control("0.7", stamp_07)),
+        ),
+    )
+
+
 def fixture_default(paths):
     return {}
 
@@ -1885,6 +2133,42 @@ def fixture_receipts_no_recorded_utc(paths):
         extra=(("execution-control-0.5.json", _execution_control("0.5", None)),),
     )
     return {}
+
+
+def fixture_control_stamp_fraction_at_board(paths):
+    """O141: the hub's reproduction pair -- a whole second beside a FRACTIONAL stamp."""
+    _kill_switch_receipts_stamped(paths, CONTROL_STAMP_WHOLE, CONTROL_STAMP_FRACTION)
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_stamp_offset_at_board(paths):
+    """O141: an OFFSET (`+00:00`) where the register pins a trailing `Z`."""
+    _kill_switch_receipts_stamped(paths, CONTROL_STAMP_WHOLE, CONTROL_STAMP_OFFSET)
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_stamp_naive_at_board(paths):
+    """O141: a NAIVE stamp -- no zone designator at all."""
+    _kill_switch_receipts_stamped(paths, CONTROL_STAMP_WHOLE, CONTROL_STAMP_NAIVE)
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_stamp_lowercase_z_at_board(paths):
+    """O141: a LOWERCASE `z`, which is a case fold away from the pinned literal."""
+    _kill_switch_receipts_stamped(paths, CONTROL_STAMP_WHOLE, CONTROL_STAMP_LOWER_Z)
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_stamps_tied_at_board(paths):
+    """O141: two conforming stamps naming the SAME instant -- no newest exists."""
+    _kill_switch_receipts_stamped(paths, CONTROL_STAMP_WHOLE, CONTROL_STAMP_WHOLE)
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_stamps_ordered_at_board(paths):
+    """O141: two conforming stamps ONE SECOND apart -- `0.7` is the newest, and only it."""
+    _kill_switch_receipts_stamped(paths, CONTROL_STAMP_WHOLE, CONTROL_STAMP_LATER)
+    return {VENUE_KEY: paths["BOARD"]}
 
 
 def fixture_receipts_04b_ready(paths):
@@ -1982,6 +2266,12 @@ FIXTURES = {
     "receipts_all_six_plus_enable": fixture_receipts_all_six_plus_enable,
     "receipts_missing_one": fixture_receipts_missing_one,
     "receipts_no_recorded_utc": fixture_receipts_no_recorded_utc,
+    "control_stamp_fraction_at_board": fixture_control_stamp_fraction_at_board,
+    "control_stamp_offset_at_board": fixture_control_stamp_offset_at_board,
+    "control_stamp_naive_at_board": fixture_control_stamp_naive_at_board,
+    "control_stamp_lowercase_z_at_board": fixture_control_stamp_lowercase_z_at_board,
+    "control_stamps_tied_at_board": fixture_control_stamps_tied_at_board,
+    "control_stamps_ordered_at_board": fixture_control_stamps_ordered_at_board,
     "receipts_04b_ready": fixture_receipts_04b_ready,
     "receipts_04b_already_done": fixture_receipts_04b_already_done,
     "checkpoint_archived": fixture_checkpoint_archived,
@@ -2046,9 +2336,13 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         execution-control receipt and that file's real lowercase sha256.  Both are read back
         out of the files the fixture just wrote -- never written down here -- so a hook that
         stopped opening the file, or opened a different one, goes RED.  The selection mirrors
-        the hook's: newest by `recordedUtc`, and a receipt LACKING it is skipped for this
-        purpose only (the hook fails the whole exception closed on one, and the row that
-        carries such a receipt denies at the receipt arm before any literal is read).
+        the hook's, and O141 pins it: newest by the PARSED value of the ONE pinned
+        notation `YYYY-MM-DDTHH:MM:SSZ`, computed with `_pinned_moment`'s OWN parse rather
+        than the hook's, so this table's idea of "newest" is never derived from the code it
+        tests.  A receipt LACKING `recordedUtc`, or carrying a stamp in any OTHER notation,
+        is skipped for this purpose only (the hook fails the whole exception closed on one,
+        and every row that carries such a receipt denies at the receipt arm before any
+        literal is read).
 
         `OLDER_CONTROL` is the OTHER valid receipt -- an older one that really exists and
         really validates, which is what makes the "not the newest" row a test of the
@@ -2070,9 +2364,10 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
                 stamp = json.loads(payload.decode("utf-8")).get("recordedUtc")
             except ValueError:
                 stamp = None
-            if not isinstance(stamp, str) or not stamp:
+            moment = _pinned_moment(stamp)
+            if moment is None:
                 continue
-            controls.append((stamp, name, hashlib.sha256(payload).hexdigest()))
+            controls.append((moment, name, hashlib.sha256(payload).hexdigest()))
         controls.sort()
         if controls:
             newest = controls[-1]
@@ -2080,7 +2375,7 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         else:
             # No fixture wrote one.  Every row that reaches the literal arm DOES write them,
             # so these values only have to be something no receipt on disk can match.
-            newest = ("", "execution-control-none.json", "0" * 64)
+            newest = (None, "execution-control-none.json", "0" * 64)
             older = newest
         self.paths.update(
             {
@@ -2156,13 +2451,21 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # variable and share a rule id, the row asserts the arm by its reason text too.
         if "reason_contains" in case:
             # Substituted like the input: an S112 row asserts the arm by quoting the very
-            # value it varied, and that value is a fixture placeholder.
-            expected = self._substitute(case["reason_contains"])
-            self.assertIn(
-                expected,
-                lines[0],
-                "expected the reason to name %r%s" % (expected, detail),
-            )
+            # value it varied, and that value is a fixture placeholder.  A row may give a
+            # TUPLE of needles instead of one string, and the O141 rows do: the register
+            # asks that the refusal name the FINDING and the OFFENDING FILE, which is two
+            # claims about one line, and `assertIn` on a single long substring would make
+            # them one brittle claim instead of two attributable ones.
+            expected = case["reason_contains"]
+            needles = (expected,) if isinstance(expected, str) else tuple(expected)
+            self.assertTrue(needles, "reason_contains must not be empty" + detail)
+            for needle in needles:
+                needle = self._substitute(needle)
+                self.assertIn(
+                    needle,
+                    lines[0],
+                    "expected the reason to name %r%s" % (needle, detail),
+                )
 
     # ------------------------------------------------------------- structural gates
 
@@ -2224,7 +2527,25 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # `_bind_the_enable_literal`, never written down).  The historical falsifier
         # groups -- `control` 3, `round1` 16, `round2` 12, `failclosed` 4, `benign` 6 -- are
         # untouched, as are `carveout`, `manifest`, `na3`, `na3_persistent` and `na10`.
-        self.assertEqual(counts.get("killswitch"), 31, "31 kill-switch / 0.2-enable rows")
+        #
+        # PINNED DELIBERATELY, 0.05 SEVENTH review delta (O141): 31 -> 40, nine new rows and
+        # no row dropped.  ONE fixed notation now governs every `recordedUtc` the hook reads
+        # or validates, and the newest execution-control receipt is selected by the PARSED
+        # value.  FIVE rows vary a RECEIPT stamp against the same canonical compound, the
+        # same six receipts and the same board venue -- the hub's own reproduction pair (a
+        # fraction beside a whole second), an offset, a naive stamp, a lowercase `z`, and two
+        # receipts stamped identically -- and each is DENY because the newest became
+        # UNDECIDABLE, with the refusal naming the offending file, or both files for the tie.
+        # TWO narrow the LITERAL to that same notation: `enabledUtc` and `recordedUtc` with
+        # fractional seconds, which the sixth commit accepted.  TWO are the ALLOW/DENY pair
+        # that pins WHICH receipt the selection returns -- `0.6` at `...16:00:00Z` beside
+        # `0.7` at `...16:00:01Z`, the literal naming the newest (ALLOW) and naming the older
+        # (DENY).  NO EXISTING ROW WAS RE-STAMPED: every fixture stamp already carried the
+        # pinned notation, and `test_every_stamp_the_default_receipt_fixture_writes_...` now
+        # locks that rather than leaving it true by accident.  The historical falsifier
+        # groups -- `control` 3, `round1` 16, `round2` 12, `failclosed` 4, `benign` 6 -- are
+        # untouched, as are `carveout`, `manifest`, `na3`, `na3_persistent` and `na10`.
+        self.assertEqual(counts.get("killswitch"), 40, "40 kill-switch / 0.2-enable rows")
         # PINNED DELIBERATELY, 0.05 fourth review delta (O125): 3 -> 4.  The carve-out is a
         # PATH permission, not a TOOL permission, and the pair that proves it -- the `Write`
         # create ALLOW beside the shell `Set-Content` create DENY -- must not be separable.
@@ -2292,6 +2613,79 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
             self.paths["NEWEST_CONTROL_SHA"], self.paths["NEWEST_CONTROL_SHA_UPPER"]
         )
         self.assertEqual(len(self.paths["NEWEST_CONTROL_SHA_SHORT"]), 32)
+
+    def test_the_o141_stamp_constants_are_what_they_claim(self):
+        """O141: the near misses really are near misses, and the defect really inverts.
+
+        Three claims, asserted rather than described.  (1) The two conforming stamps parse
+        and order the way the ALLOW/DENY pair assumes.  (2) The four refused stamps are
+        NON-EMPTY STRINGS that fail the pinned notation -- exactly what presence-only
+        validation accepted.  (3) THE DEFECT ITSELF: comparing the hub's pair as raw strings
+        returns the STALE receipt's stamp as the greater, while parsing them returns the
+        fresher one.  Without (3) the fractional row would only prove that the hook refuses
+        a fraction, not that refusing it was necessary.
+        """
+        self.assertRegex(CONTROL_STAMP_WHOLE, PINNED_UTC_RX)
+        self.assertRegex(CONTROL_STAMP_LATER, PINNED_UTC_RX)
+        self.assertLess(
+            _pinned_moment(CONTROL_STAMP_WHOLE), _pinned_moment(CONTROL_STAMP_LATER)
+        )
+        for stamp in CONTROL_STAMPS_REFUSED:
+            self.assertIsInstance(stamp, str)
+            self.assertTrue(stamp, "a refused stamp must still be a NON-EMPTY string")
+            self.assertIsNone(PINNED_UTC_RX.match(stamp), stamp)
+            self.assertIsNone(_pinned_moment(stamp), stamp)
+        # The sixth commit's answer, and the reason this delta exists: `Z` is 0x5A and `.`
+        # is 0x2E, so the WHOLE-second stamp sorts ABOVE the later fractional one.
+        self.assertGreater(CONTROL_STAMP_WHOLE, CONTROL_STAMP_FRACTION)
+        self.assertLess(CONTROL_STAMP_WHOLE[:19], CONTROL_STAMP_FRACTION[:19] + ".")
+
+    def test_every_stamp_the_default_receipt_fixture_writes_carries_the_pinned_notation(self):
+        """O141: the table's own fixtures obey the notation they make the hook enforce.
+
+        Every `recordedUtc` written by the DEFAULT receipt fixtures -- the five kill-switch
+        receipts, both execution-control receipts and the one-shot enable receipt -- is
+        checked against the pinned notation.  A rule the fixtures themselves break is a rule
+        whose ALLOW rows are passing for the wrong reason, and the four deliberate near
+        misses live in `CONTROL_STAMPS_REFUSED` and in the O141 fixtures alone.
+        """
+        fixture_receipts_all_six_plus_enable(self.paths)
+        stamped = 0
+        for name in sorted(os.listdir(self.paths["RECEIPTS"])):
+            with open(os.path.join(self.paths["RECEIPTS"], name), "rb") as handle:
+                document = json.loads(handle.read().decode("utf-8"))
+            stamp = document.get("recordedUtc")
+            if stamp is None:
+                continue
+            stamped += 1
+            self.assertRegex(stamp, PINNED_UTC_RX, name)
+            self.assertIsNotNone(_pinned_moment(stamp), name)
+        self.assertGreaterEqual(stamped, 3, "the fixture must stamp receipts at all")
+        # And the literal the table sends by default carries it too, on both keys.
+        document = json.loads(ENABLE_LITERAL)
+        for key in ("enabledUtc", "recordedUtc"):
+            self.assertRegex(document[key], PINNED_UTC_RX)
+
+    def test_the_ordered_fixture_offers_exactly_one_newest_by_the_parsed_value(self):
+        """O141: the ALLOW/DENY ordering pair rests on a fixture that really has an order.
+
+        `_bind_the_enable_literal` falls back to the newest when only one conforming receipt
+        exists, so an ordering fixture that lost a receipt would turn the ALLOW row into a
+        comparison of a name against itself.  Both receipts are therefore asserted present,
+        both conforming, one second apart, and bound the way the two rows assume.
+        """
+        fixture_control_stamps_ordered_at_board(self.paths)
+        self._bind_the_enable_literal()
+        self.assertEqual(self.paths["NEWEST_CONTROL"], "execution-control-0.7.json")
+        self.assertEqual(self.paths["OLDER_CONTROL"], "execution-control-0.6.json")
+        stamps = {}
+        for name in (self.paths["NEWEST_CONTROL"], self.paths["OLDER_CONTROL"]):
+            path = os.path.join(self.paths["RECEIPTS"], name)
+            self.assertTrue(os.path.isfile(path), path)
+            with open(path, "rb") as handle:
+                stamps[name] = json.loads(handle.read().decode("utf-8"))["recordedUtc"]
+        self.assertEqual(stamps[self.paths["OLDER_CONTROL"]], CONTROL_STAMP_WHOLE)
+        self.assertEqual(stamps[self.paths["NEWEST_CONTROL"]], CONTROL_STAMP_LATER)
 
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""
