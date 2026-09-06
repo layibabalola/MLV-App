@@ -5636,6 +5636,58 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         hook_module = _load_hook_module()
         self.assertEqual(hook_module._fixed_set_digest(hashes), pinned_command_digest)
 
+    def test_settings_json_registers_the_hook_structurally_on_hosted_ci(self):
+        """Sol's PR #77 review BLOCKER: hosted CI never proves the hook is REGISTERED.
+
+        `tools/hooks/test_registration_path_local.py` is deliberately local-only (it pins
+        an absolute per-user interpreter path that exists on no hosted runner -- see its own
+        module docstring), and hosted CI's `unittest discover -s tools/repo_hygiene` never
+        collects it. So a PR that reverted or deleted the `.claude/settings.json` PreToolUse
+        entry entirely -- the load-bearing wiring, not the rule LOGIC this suite otherwise
+        tests -- would still show every hosted required check green. Reproduced: `git grep`
+        for `unittest discover` in `.github/workflows/tests.yml` shows `-s tools/repo_hygiene
+        -p "test_*.py"`, which does not reach `tools/hooks/`.
+
+        This test cannot prove the interpreter is correct on this host (that is exactly what
+        the local-only suite proves, and hosted runners do not carry that per-user path) --
+        but it CAN prove, portably, that the registration entry exists at all, with the exact
+        matcher and type, naming the right script and carrying the load-bearing
+        `--project-dir` venue argument (O126). That is precisely the shape a careless merge
+        or an accidental settings.json edit would break, and it is exactly what hosted CI was
+        blind to before this test existed.
+        """
+        settings_path = os.path.join(REPO_ROOT, ".claude", "settings.json")
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            settings = json.load(handle)
+        pretooluse = settings.get("hooks", {}).get("PreToolUse", [])
+        matches = [
+            hook
+            for entry in pretooluse
+            if entry.get("matcher") == "Bash|PowerShell|Write|Edit|NotebookEdit"
+            for hook in entry.get("hooks", [])
+            if hook.get("type") == "command"
+            and "tools/hooks/mlv-never-authorized.py" in hook.get("command", "")
+        ]
+        self.assertEqual(
+            len(matches),
+            1,
+            "expected exactly one command-type hook on the exact matcher naming the "
+            "never-authorized script; found %d in %s" % (len(matches), settings_path),
+        )
+        command = matches[0]["command"]
+        self.assertIn(
+            '--project-dir "${CLAUDE_PROJECT_DIR}"',
+            command,
+            "the load-bearing venue argument (O126) must be present verbatim",
+        )
+        self.assertRegex(
+            command,
+            r'^"[^"]*python[^"]*\.exe"\s+"\$\{CLAUDE_PROJECT_DIR\}/tools/hooks/mlv-never-authorized\.py"',
+            "interpreter must be a quoted absolute path ending in python.exe, and the script "
+            "path must be built from ${CLAUDE_PROJECT_DIR} (never a literal absolute path, "
+            "which would silently stop matching after a worktree move)",
+        )
+
     def test_is_absolute_recognises_posix_and_windows_paths_alike(self):
         """NA-7: the absolute-path test must not be Windows-only.
 
