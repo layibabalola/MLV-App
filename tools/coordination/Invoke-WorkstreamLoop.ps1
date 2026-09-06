@@ -230,7 +230,42 @@ if ($halted) {
                     }
                 }
                 if ($rowStamp -and $rowStamp.ToUniversalTime().ToString('yyyy-MM-dd') -eq $todayUtc) {
-                    $spentToday++
+                    # REFUND RULE. A dispatch is refunded IFF all three hold: the lane FAILED,
+                    # its cost is KNOWN, and it was ZERO. Measured 2026-09-05, two of twelve
+                    # dispatches hit HTTP 429 "You've hit your session limit" and the loop then
+                    # halted the rest of the UTC day at 12/12 having done ten units of work:
+                    #
+                    #   GATE-FAMILY-BOOKED  exit 1  USD 0.000000  -> REFUND (2.8s, bought nothing)
+                    #   CITE-TXN-1          exit 1  USD 2.244599  -> NO REFUND (the money is gone)
+                    #   CLEANUP-1           exit 0  USD 2.048145  -> counts normally
+                    #
+                    # The budget caps CONSUMPTION, not success -- that is why the test is
+                    # costUsd == 0 and not "it failed". Refunding a failed-but-expensive lane
+                    # would let the loop spend the same money twice.
+                    #
+                    # costReported must be TRUE: an unreported cost is never read as free.
+                    # Fail-closed on missing data, because here the permissive branch is the
+                    # dangerous one.
+                    #
+                    # This does NOT re-open the card. StaleHours already suppresses re-dispatch
+                    # of a card that was dispatched, refunded or not, so the recovered slot goes
+                    # to DIFFERENT work -- which is the whole intent.
+                    $exitProp = $row.PSObject.Properties['laneExitCode']
+                    $costProp = $row.PSObject.Properties['laneCostUsd']
+                    $repProp  = $row.PSObject.Properties['laneCostReported']
+                    $refunded = $false
+                    if ($exitProp -and $costProp -and $repProp) {
+                        $refunded = ([int]$exitProp.Value -ne 0) -and
+                                    ([bool]$repProp.Value) -and
+                                    ($null -ne $costProp.Value) -and
+                                    ([double]$costProp.Value -eq 0)
+                    }
+                    if ($refunded) {
+                        Write-Output ("LOOP: refunded dispatch {0} - lane failed (exit {1}) and spent USD 0" -f `
+                                      $row.cardId, $exitProp.Value)
+                    } else {
+                        $spentToday++
+                    }
                 }
             } catch { }
         }
