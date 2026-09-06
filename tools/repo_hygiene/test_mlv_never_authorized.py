@@ -116,6 +116,28 @@ as the tip and the hook, not knowing the merge method, judges SHAPE only.  The e
 the fixed set's hashes at the two shas is the HUB's assertion before the receipt is
 written, outside the hook, and no row models git.
 
+THE PRE-FLIGHT ARTIFACT, THE PROOF, AND THE CASCADE'S STAMPS (S125/O172/O171, register
+v25).  The hub measured on the tenth commit that a ``Write`` of the exact hook-stdin JSON of
+the canonical compound to ``$D/receipts/0.2-enable-preflight-input.json`` was ALLOWED by the
+receipts carve-out -- and so was the same content to ``notes.json``, under ``fleet-runs/``
+and from a worktree venue -- while the register said any other input naming both paths is
+DENIED.  S125 makes that Write the SECOND dedicated act, decided BEFORE generic content
+attribution: ALLOW only at the board venue, onto an absent target, with content that is
+exactly one JSON object whose ``tool_name`` is ``PowerShell`` and whose ``command`` the
+enable act would accept RIGHT NOW; every other file-tool payload naming both paths (or the
+marker under a delete verb) is DENY wherever it goes.  The S125 rows carry the artifact's
+content as a SPEC (``_preflight_content``) that ``_render_content`` JSON-encodes AFTER the
+placeholders are substituted, because a Windows tmp path carries backslashes and a
+backslash is not valid bare inside a JSON string -- which is also what the hub does: the
+artifact is the escaped stdin text.  O172 adds ``fixedSetEqualityProof`` to every chain
+receipt -- ``<reviewedHeadSha>=<mergeSha>:<digest>`` -- and the fixtures DERIVE it from the
+receipt's own shas and its own ``hashes`` (``_equality_proof`` over ``_fixed_set_digest``,
+the suite's own restatement of the canonicalisation: the ``<sha256>  <path>`` lines, sorted,
+LF-joined, no trailing newline); five DENY rows vary it one part at a time.  O171 pins that
+the O159 cascade preserves each rewritten receipt's ORIGINAL ``recordedUtc``: the ninth
+commit's cascade fixture already did, now asserted structurally, and ONE new row restamps
+0.6 and 0.7 at the rewrite's instant -- a tie, undecidable.
+
 NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
 payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
 strings are data -- including the O129 rows, whose ``setx`` and ``SetEnvironmentVariable``
@@ -390,6 +412,35 @@ def _rev19_enable():
     which is why the leading statement -- and not the parameter -- is what closes that class.
     """
     return _canonical_enable(preference=None)
+
+
+# ------------------------------------------- S125: the PRE-FLIGHT ARTIFACT, the second act
+#
+# Before typing the enable the hub writes the EXACT hook-stdin JSON of the compound to this
+# receipt path with the `Write` tool and runs the live hook on it under MLV_HOOK_DRYRUN=1.
+# That Write is the SECOND dedicated act; every other file-tool payload carrying the same
+# content is refused wherever it goes.
+PREFLIGHT_ARTIFACT = "{RECEIPTS}/0.2-enable-preflight-input.json"
+PREFLIGHT_CONTENT = "__preflight_content__"
+
+
+def _preflight_content(command=None, tool_name="PowerShell", shape="one"):
+    """The hook-stdin JSON the hub writes before typing the enable, as a SPEC rendered at run time.
+
+    The content embeds the compound, whose paths are tmp-board placeholders that
+    `_substitute` resolves -- and a Windows tmp path carries backslashes, which are not
+    valid bare inside a JSON string.  So the row carries the compound UNRENDERED and
+    `_render_content` JSON-encodes it AFTER substitution, which is also what the hub does:
+    the artifact is the exact stdin text, escapes included.  `shape` renders the near
+    misses: `two` concatenates the object with itself, `not-json` drops the closing brace.
+    """
+    return {
+        PREFLIGHT_CONTENT: {
+            "command": _canonical_enable() if command is None else command,
+            "tool_name": tool_name,
+            "shape": shape,
+        }
+    }
 
 
 # ------------------------------------------- the four ratified manifest surfaces (O124)
@@ -2014,6 +2065,34 @@ CASES = [
         ),
         "fixture": "o159_partial_repair_at_board",
     },
+    {
+        # O171.  The SAME complete cascade, but the rewrite RESTAMPED 0.6 and 0.7 at its own
+        # instant -- what a hub that stamped "at the moment it writes" would do, and the
+        # register's ONE exception to that rule is exactly this cascade.  Two receipts, one
+        # stamp: the newest is undecidable and the refusal names both.  Its ALLOW partner is
+        # the complete-repair row above, whose fixture preserves every ORIGINAL stamp --
+        # asserted by `test_the_o159_cascade_fixture_preserves_every_original_stamp_...`.
+        "name": "enable canonical compound after the 0.18 repair restamped two chain receipts to one instant",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_7}",
+                    executionControlSha256="{CONTROL_0_7_SHA}",
+                )
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipts execution-control-0.6.json and "
+            "execution-control-0.7.json carry the SAME recordedUtc '2026-09-06T17:00:00Z'",
+            "UNDECIDABLE",
+            "(O141)",
+        ),
+        "fixture": "o159_cascade_restamped_to_a_tie_at_board",
+    },
     # ------------- S123: the TWO shas -- the reviewed PR head and the merge commit
     #
     # `reviewedHeadSha` is the PR HEAD sol reviewed BEFORE the merge and `mergeSha` the
@@ -2102,6 +2181,308 @@ CASES = [
         "input": {"command": _canonical_enable()},
         "expect": "ALLOW",
         "fixture": "control_merge_sha_equals_reviewed_head",
+    },
+    # ------------- O172: the fixed-set equality proof, bound to both shas and to the hashes
+    #
+    # Five DENY rows, one PART of 0.7's `fixedSetEqualityProof` from the ALLOW rows, at the
+    # board venue.  The hub's git assertion that the step's fixed set hashed equal at both
+    # shas was, up to the tenth commit, recorded nowhere the hook could see; the proof is the
+    # record, and the hook binds it to the receipt beside it -- its two shas and its `hashes`
+    # -- by pure recomputation.  Every ALLOW row's proof is DERIVED by the fixture from the
+    # receipt's own hashes, so a hook that stopped recomputing goes red on the pasted row.
+    {
+        "name": "enable canonical compound with a chain receipt lacking fixedSetEqualityProof",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json lacks fixedSetEqualityProof",
+            "(O172/O152)",
+        ),
+        "fixture": "control_without_equality_proof",
+    },
+    {
+        # The RIGHT proof with its digest UPPERCASED -- `Get-FileHash`'s case (O145), the
+        # near miss a hand-assembled proof carries.  Shape first: refused before any part is
+        # compared.
+        "name": "enable canonical compound with a malformed fixedSetEqualityProof",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries fixedSetEqualityProof",
+            "not the literal <reviewedHeadSha>=<mergeSha>:<digest>",
+            "(O172/O152)",
+        ),
+        "fixture": "control_equality_proof_malformed",
+    },
+    {
+        # A well-formed proof whose FIRST sha is 0.6's reviewed head: the record of some
+        # other review, beside this receipt's own.
+        "name": "enable canonical compound whose proof first sha is not its reviewedHeadSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries "
+            "fixedSetEqualityProof whose FIRST sha",
+            "is not this receipt's reviewedHeadSha",
+            "(O172/O152)",
+        ),
+        "fixture": "control_equality_proof_first_sha_mismatch",
+    },
+    {
+        "name": "enable canonical compound whose proof second sha is not its mergeSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries "
+            "fixedSetEqualityProof whose SECOND sha",
+            "is not this receipt's mergeSha",
+            "(O172/O152)",
+        ),
+        "fixture": "control_equality_proof_second_sha_mismatch",
+    },
+    {
+        # 0.7's own two shas with the digest of 0.35's fixed set: a proof PASTED from another
+        # receipt -- well-formed, correctly bound to the shas, and the digest of a set this
+        # receipt does not carry.  Nothing but recomputing from THIS receipt's `hashes` can
+        # tell it from the ALLOW rows, which is the point.
+        "name": "enable canonical compound whose proof digest is another receipts fixed set digest",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries "
+            "fixedSetEqualityProof whose digest",
+            "is not the sha256 of the sorted '<sha256>  <path>' lines of its OWN hashes",
+            "(O172/O152)",
+        ),
+        "fixture": "control_equality_proof_digest_mismatch",
+    },
+    # ------------- S125: the PRE-FLIGHT ARTIFACT act -- the SECOND dedicated act
+    #
+    # Thirteen rows.  The hub measured on the tenth commit that the FIRST of them -- the exact
+    # hook-stdin JSON of the canonical compound, written by `Write` to
+    # `$D/receipts/0.2-enable-preflight-input.json` at the board venue -- was ALLOWED by the
+    # receipts carve-out, as an ordinary create, while the register said any other input
+    # naming both paths is DENIED; and that the same content to `notes.json`, under
+    # `fleet-runs/` and from a worktree venue was ALLOWED too (measured again on this repo
+    # before this delta: four ALLOWs).  The act is now decided BY RULE, before generic
+    # content attribution: ONE ALLOW, ten DENY each one variable from it, one DENY for the
+    # wrong TOOL on the artifact's path, and one ALLOW control that keeps the carve-out a
+    # carve-out.  The content is a SPEC rendered after substitution (`_preflight_content`).
+    {
+        "name": "preflight artifact Write with the valid stdin json at the board venue onto an absent target",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {"file_path": PREFLIGHT_ARTIFACT, "content": _preflight_content()},
+        "expect": "ALLOW",
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The same content, another path: content attribution, which the tenth commit did
+        # not have for file tools at all.  `notes.json` is on no carve-out and under no
+        # protected tail -- the plain "any other input naming both paths".
+        "name": "preflight artifact content written to notes json at the board root",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {"file_path": "{BOARD}/notes.json", "content": _preflight_content()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "names BOTH the enable receipt receipts/0.2-loop-enabled.json and the marker "
+            "WORKSTREAM-LOOP-DISABLED",
+            "(S125/S99/O118)",
+        ),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The same content under `fleet-runs/`, a CARVE-OUT path where a create is otherwise
+        # allowed: the rule is about content, and it runs before the carve-outs are consulted.
+        "name": "preflight artifact content written under fleet-runs",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {
+            "file_path": "{BOARD}/.claude-state/fleet-runs/x.json",
+            "content": _preflight_content(),
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "names BOTH the enable receipt receipts/0.2-loop-enabled.json and the marker "
+            "WORKSTREAM-LOOP-DISABLED",
+            "(S125/S99/O118)",
+        ),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # ONE variable from the ALLOW row: the venue is a lane's worktree.
+        "name": "preflight artifact Write from a worktree venue",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {"file_path": PREFLIGHT_ARTIFACT, "content": _preflight_content()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "PRE-FLIGHT ARTIFACT act",
+            "--project-dir is",
+            "(S105/O126)",
+            "(S125)",
+        ),
+        "fixture": "receipts_all_six_at_worktree",
+    },
+    {
+        # ONE variable from the ALLOW row: the artifact is already on disk.  The act CREATES
+        # it; the content is never read, and the refusal names the target.
+        "name": "preflight artifact Write onto an existing target",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {"file_path": PREFLIGHT_ARTIFACT, "content": _preflight_content()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": ("PRE-FLIGHT ARTIFACT act", "already EXISTS", "(S125)"),
+        "fixture": "preflight_artifact_present_at_board",
+    },
+    {
+        "name": "preflight artifact Write whose content is not json",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {
+            "file_path": PREFLIGHT_ARTIFACT,
+            "content": _preflight_content(shape="not-json"),
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": ("does not parse as exactly ONE JSON object", "(S125)"),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # Two objects, the second a byte-identical copy of the first: "exactly one" is the
+        # register's word, and a parser that stopped at the first closing brace would take
+        # this.
+        "name": "preflight artifact Write whose content is two json objects",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {"file_path": PREFLIGHT_ARTIFACT, "content": _preflight_content(shape="two")},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "does not parse as exactly ONE JSON object",
+            "Extra data",
+            "(S125)",
+        ),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The compound as a Bash input is a different act (the S99/O118 row above), so a
+        # pre-flight recording it as one is the pre-flight of a different act.
+        "name": "preflight artifact Write whose inner tool name is Bash",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {
+            "file_path": PREFLIGHT_ARTIFACT,
+            "content": _preflight_content(tool_name="Bash"),
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": ("tool_name is 'Bash', not 'PowerShell'", "(S125)"),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The rev-19 shape inside the artifact: the SHAPE arm, quoting the O128 gap so the
+        # operator is told which token closed.
+        "name": "preflight artifact Write whose command lacks the leading preference",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {
+            "file_path": PREFLIGHT_ARTIFACT,
+            "content": _preflight_content(command=_rev19_enable()),
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "is not the canonical enable compound",
+            "does not OPEN with $ErrorActionPreference = 'Stop' (O128)",
+            "(S125)",
+        ),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # A compound that writes and reads back a DIFFERENT receipt file name: not the shape,
+        # whatever else it gets right.
+        "name": "preflight artifact Write whose command names a different receipt file",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {
+            "file_path": PREFLIGHT_ARTIFACT,
+            "content": _preflight_content(
+                command=_canonical_enable(receipt="{RECEIPTS}/0.2-loop-enabled-copy.json")
+            ),
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": ("is not the canonical enable compound", "(S125)"),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The SEMANTIC arm: the canonical shape whose literal names an OLDER valid receipt.
+        # The artifact must record the compound the enable act would accept RIGHT NOW, and
+        # this is the row that proves the pre-flight runs the enable's own validation rather
+        # than a shape test of its own.
+        "name": "preflight artifact Write whose command names an older execution control receipt",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {
+            "file_path": PREFLIGHT_ARTIFACT,
+            "content": _preflight_content(
+                command=_canonical_enable(
+                    literal=_enable_literal(executionControlReceipt="{OLDER_CONTROL}")
+                )
+            ),
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "canonical shape but is not semantically valid",
+            "names executionControlReceipt '{OLDER_CONTROL}'",
+            "(S125)",
+        ),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The act is a `Write`.  An `Edit` of the artifact's path is a near-miss of the act,
+        # refused as such -- never judged as an ordinary carve-out extend.
+        "name": "preflight artifact Edit instead of Write",
+        "group": "killswitch",
+        "tool": "Edit",
+        "input": {"file_path": PREFLIGHT_ARTIFACT, "old_string": "{}", "new_string": "{}"},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": ("this input is Edit, not Write", "(S125)"),
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # THE CONTROL.  An ordinary receipt create beside the six, at the same venue: the
+        # carve-out still admits every OTHER create under `$D/receipts/**`, so the act did
+        # not become a wall.
+        "name": "ordinary receipt create beside the six receipts at the board venue",
+        "group": "killswitch",
+        "tool": "Write",
+        "input": {"file_path": "{RECEIPTS}/0.3-task-installed.json", "content": RECEIPT_LONG},
+        "expect": "ALLOW",
+        "fixture": "receipts_all_six_at_board",
     },
     {
         # S99.  The row the old table had as an ALLOW.  Every precondition of exception (i)
@@ -3123,6 +3504,24 @@ def _merge_sha(step):
     return _derived_sha("merge:" + step)
 
 
+def _fixed_set_digest(hashes):
+    """The SUITE's own canonicalisation of a `hashes` object (O172) -- deliberately a second implementation.
+
+    The `<sha256>  <path>` lines (two spaces), sorted as plain strings, LF-joined with no
+    trailing newline, UTF-8, sha256, lowercase hex.  It does not import the hook's, so the
+    ALLOW rows compare two readings of the plan's sentence rather than one reading with
+    itself -- and `test_every_chain_receipt_the_fixture_writes_carries_a_proof_...` writes
+    the canonicalisation out a THIRD time, inline, against both.
+    """
+    lines = sorted("%s  %s" % (digest, path) for path, digest in hashes.items())
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def _equality_proof(reviewed, merge, hashes):
+    """`<reviewedHeadSha>=<mergeSha>:<digest>` -- the literal the hub writes after its git assertion (O172)."""
+    return "%s=%s:%s" % (reviewed, merge, _fixed_set_digest(hashes))
+
+
 def _chain_stamp(step):
     """A conforming stamp that ASCENDS with the chain, so a chain fixture is never a tie."""
     return "2026-09-06T1%d:00:00Z" % CHAIN_STEPS.index(step)
@@ -3281,6 +3680,7 @@ def _execution_control(
     reviewed_head=None,
     merge_sha=None,
     verdict_path=None,
+    equality_proof=None,
     drop=(),
 ):
     """One chain receipt.  Every keyword is ONE degree of freedom of the chain schema.
@@ -3289,8 +3689,10 @@ def _execution_control(
     `reviewedHeadSha` is the step's derived REVIEWED head, `mergeSha` its derived -- and
     DIFFERENT -- post-merge commit (S123), and `solVerdictPath` the fixture's APPROVE of
     exactly the reviewed head; `hashes` is the step's fixed set mapped to the REAL digest of
-    each file under the tmp board (O158); 0.1 carries `composerStatus` and the three
-    evidence paths, 0.35 the three paths.  A row that wants a near miss passes ONE keyword.
+    each file under the tmp board (O158); `fixedSetEqualityProof` is DERIVED from the two
+    shas and the `hashes` the receipt carries, mutated or not (O172); 0.1 carries
+    `composerStatus` and the three evidence paths, 0.35 the three paths.  A row that wants a
+    near miss passes ONE keyword.
     """
     _write_evidence(paths)
     _write_verdicts(paths)
@@ -3305,6 +3707,16 @@ def _execution_control(
         verdict_path if verdict_path is not None else _verdict_relative(step)
     )
     document["hashes"] = dict(hashes) if hashes is not None else _board_hashes(paths, step)
+    # O172: DERIVED from this receipt's own two shas and its own `hashes` -- the ones just
+    # set, mutated or not -- so a near-miss row that drops a hashed path carries a proof of
+    # the SET IT CARRIES, and its refusal is the key-set arm's, never the proof's.
+    document["fixedSetEqualityProof"] = (
+        equality_proof
+        if equality_proof is not None
+        else _equality_proof(
+            document["reviewedHeadSha"], document["mergeSha"], document["hashes"]
+        )
+    )
     if step in CHAIN_COMPOSER_STATUS_STEPS:
         document["composerStatus"] = COMPOSER_STATUS_NOT_YET_CREATED
     if step in CHAIN_COMPOSER_PATH_STEPS:
@@ -3436,6 +3848,23 @@ def fixture_receipts_all_six_plus_enable(paths):
         json.dumps({"step": "0.2", "recordedUtc": "2026-09-06T12:00:00Z", "enabled": True}),
     )
     return {}
+
+
+def fixture_preflight_artifact_present_at_board(paths):
+    """S125: the six receipts at the board venue, and the pre-flight artifact ALREADY on disk.
+
+    The act CREATES the artifact; a stale one is the hub's to recover, never this act's to
+    overwrite -- so the same Write the ALLOW row admits is refused here, naming the target,
+    and the content it carries is never read.
+    """
+    _kill_switch_receipts(paths)
+    _write(
+        os.path.join(paths["RECEIPTS"], "0.2-enable-preflight-input.json"),
+        json.dumps(
+            {"tool_name": "PowerShell", "tool_input": {"command": "an earlier pre-flight"}}
+        ),
+    )
+    return {VENUE_KEY: paths["BOARD"]}
 
 
 def fixture_receipts_missing_one(paths):
@@ -3882,6 +4311,73 @@ def fixture_control_merge_sha_equals_reviewed_head(paths):
     return _control_at_board(paths, "0.7", CONTROL_STAMP_07, merge_sha=_head_sha("0.7"))
 
 
+# ------------------------------------------- O172: the fixed-set equality proof
+#
+# Each O172 fixture differs from `fixture_receipts_all_six_at_board` in EXACTLY the
+# `fixedSetEqualityProof` of 0.7, at the board venue; every other receipt carries the proof
+# DERIVED from its own shas and hashes.  So each DENY is attributable to the one part it
+# varies, and the ALLOW rows prove the derived proof is what the hook recomputes.
+
+
+def fixture_control_without_equality_proof(paths):
+    return _control_at_board(paths, "0.7", CONTROL_STAMP_07, drop=("fixedSetEqualityProof",))
+
+
+def fixture_control_equality_proof_malformed(paths):
+    """The RIGHT proof with its digest UPPERCASED -- `Get-FileHash`'s case (O145), on the proof."""
+    hashes = _board_hashes(paths, "0.7")
+    derived = _equality_proof(_head_sha("0.7"), _merge_sha("0.7"), hashes)
+    shas, digest = derived.rsplit(":", 1)
+    return _control_at_board(
+        paths,
+        "0.7",
+        CONTROL_STAMP_07,
+        hashes=hashes,
+        equality_proof=shas + ":" + digest.upper(),
+    )
+
+
+def fixture_control_equality_proof_first_sha_mismatch(paths):
+    """A well-formed proof whose FIRST sha is 0.6's reviewed head: the record of some other review."""
+    hashes = _board_hashes(paths, "0.7")
+    return _control_at_board(
+        paths,
+        "0.7",
+        CONTROL_STAMP_07,
+        hashes=hashes,
+        equality_proof=_equality_proof(_head_sha("0.6"), _merge_sha("0.7"), hashes),
+    )
+
+
+def fixture_control_equality_proof_second_sha_mismatch(paths):
+    """A well-formed proof whose SECOND sha is 0.6's merge commit."""
+    hashes = _board_hashes(paths, "0.7")
+    return _control_at_board(
+        paths,
+        "0.7",
+        CONTROL_STAMP_07,
+        hashes=hashes,
+        equality_proof=_equality_proof(_head_sha("0.7"), _merge_sha("0.6"), hashes),
+    )
+
+
+def fixture_control_equality_proof_digest_mismatch(paths):
+    """0.7's own two shas with the digest of 0.35's fixed set -- a proof PASTED from another receipt.
+
+    0.35's set is the one with a DIFFERENT key set: 0.6 and 0.7 share one, and every file
+    under the tmp board hashes the same on both, so 0.6's digest would be 0.7's own.  The
+    structural test asserts the two digests really differ.
+    """
+    return _control_at_board(
+        paths,
+        "0.7",
+        CONTROL_STAMP_07,
+        equality_proof=_equality_proof(
+            _head_sha("0.7"), _merge_sha("0.7"), _board_hashes(paths, "0.35")
+        ),
+    )
+
+
 # ------------------------------------------- O158: the BOARD drifts from the selected receipt
 #
 # Neither fixture touches a receipt.  Both write the default conforming set, then mutate the
@@ -3952,7 +4448,15 @@ def fixture_chain_step_07_complete_at_board(paths):
 # the partial variant does NOT re-point.
 
 
-def _o159_repaired_chain(paths, left_behind=()):
+# O171: the stamp a hub that stamped "at the moment it writes" would put on EVERY receipt the
+# cascade rewrites -- one instant, conforming, later than every original.
+O159_RESTAMP = "2026-09-06T17:00:00Z"
+
+
+def _o159_repaired_chain(paths, left_behind=(), restamped=()):
+    """The cascade.  `left_behind` names steps NOT re-pointed; `restamped` names steps whose
+    rewrite carries `O159_RESTAMP` instead of the ORIGINAL stamp (O171) -- the default,
+    ``()``, is the register's procedure: every rewritten receipt keeps its own."""
     stamps = dict((step, _chain_stamp(step)) for step in CHAIN_STEPS)
     _kill_switch_receipts(paths, stamps=stamps)
     parity_path = os.path.join(paths["RECEIPTS"], ROADMAP_PARITY_RECEIPT)
@@ -3968,9 +4472,10 @@ def _o159_repaired_chain(paths, left_behind=()):
     for step in CHAIN_STEPS:
         if step in CHAIN_PROVENANCE_EXEMPT or step in left_behind:
             continue
+        stamp = O159_RESTAMP if step in restamped else stamps[step]
         _write(
             os.path.join(paths["RECEIPTS"], _control_name(step)),
-            _execution_control(paths, step, stamps[step], parity=repaired_sha),
+            _execution_control(paths, step, stamp, parity=repaired_sha),
         )
     return {VENUE_KEY: paths["BOARD"]}
 
@@ -3981,6 +4486,17 @@ def fixture_o159_repaired_chain_at_board(paths):
 
 def fixture_o159_partial_repair_at_board(paths):
     return _o159_repaired_chain(paths, left_behind=("0.35",))
+
+
+def fixture_o159_cascade_restamped_to_a_tie_at_board(paths):
+    """O171: the complete cascade, but the rewrite RESTAMPED 0.6 and 0.7 at its own instant.
+
+    A hub that stamped each rewritten receipt "at the moment it writes" -- the rule for every
+    OTHER receipt -- lands the two it rewrites last in the same second: two chain receipts,
+    one stamp, no newest.  The register's ONE exception to that rule is exactly this
+    cascade, and this fixture is what the exception costs when it is not honoured.
+    """
+    return _o159_repaired_chain(paths, restamped=("0.6", "0.7"))
 
 
 def fixture_receipts_04b_ready(paths):
@@ -4076,6 +4592,8 @@ FIXTURES = {
     "receipts_all_six_at_board": fixture_receipts_all_six_at_board,
     "receipts_all_six_at_worktree": fixture_receipts_all_six_at_worktree,
     "receipts_all_six_plus_enable": fixture_receipts_all_six_plus_enable,
+    # S125
+    "preflight_artifact_present_at_board": fixture_preflight_artifact_present_at_board,
     "receipts_missing_one": fixture_receipts_missing_one,
     "receipts_no_recorded_utc": fixture_receipts_no_recorded_utc,
     "control_stamp_fraction_at_board": fixture_control_stamp_fraction_at_board,
@@ -4128,6 +4646,12 @@ FIXTURES = {
     "control_06_merge_sha_39_chars": fixture_control_06_merge_sha_39_chars,
     "control_merge_sha_differs_from_reviewed_head": fixture_control_merge_sha_differs_from_reviewed_head,
     "control_merge_sha_equals_reviewed_head": fixture_control_merge_sha_equals_reviewed_head,
+    # O172
+    "control_without_equality_proof": fixture_control_without_equality_proof,
+    "control_equality_proof_malformed": fixture_control_equality_proof_malformed,
+    "control_equality_proof_first_sha_mismatch": fixture_control_equality_proof_first_sha_mismatch,
+    "control_equality_proof_second_sha_mismatch": fixture_control_equality_proof_second_sha_mismatch,
+    "control_equality_proof_digest_mismatch": fixture_control_equality_proof_digest_mismatch,
     "control_rehash_drift_at_board": fixture_control_rehash_drift_at_board,
     "control_rehash_file_missing_at_board": fixture_control_rehash_file_missing_at_board,
     "chain_step_01_complete_at_board": fixture_chain_step_01_complete_at_board,
@@ -4138,6 +4662,8 @@ FIXTURES = {
     "chain_step_07_complete_at_board": fixture_chain_step_07_complete_at_board,
     "o159_repaired_chain_at_board": fixture_o159_repaired_chain_at_board,
     "o159_partial_repair_at_board": fixture_o159_partial_repair_at_board,
+    # O171
+    "o159_cascade_restamped_to_a_tie_at_board": fixture_o159_cascade_restamped_to_a_tie_at_board,
     "receipts_04b_ready": fixture_receipts_04b_ready,
     "receipts_04b_already_done": fixture_receipts_04b_already_done,
     "checkpoint_archived": fixture_checkpoint_archived,
@@ -4194,6 +4720,36 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         if isinstance(value, dict):
             return dict((k, self._substitute(v)) for k, v in value.items())
         return value
+
+    def _render_content(self, tool_input):
+        """S125: render a `_preflight_content` spec to the JSON text the hub would write.
+
+        AFTER substitution, because the compound inside carries tmp-board paths, and the
+        backslashes of a Windows path are only valid inside a JSON string once
+        `json.dumps` has escaped them -- which is the hub's artifact exactly: the stdin
+        text, escapes included.
+        """
+        spec = tool_input.get("content")
+        if not isinstance(spec, dict) or PREFLIGHT_CONTENT not in spec:
+            return tool_input
+        spec = spec[PREFLIGHT_CONTENT]
+        text = json.dumps(
+            {"tool_name": spec["tool_name"], "tool_input": {"command": spec["command"]}}
+        )
+        if spec["shape"] == "two":
+            text = text + "\n" + text
+        elif spec["shape"] == "not-json":
+            text = text[:-1]
+        elif spec["shape"] != "one":
+            raise AssertionError("unknown pre-flight content shape %r" % spec["shape"])
+        rendered = dict(tool_input)
+        rendered["content"] = text
+        return rendered
+
+    def _chain_document(self, step):
+        """The chain receipt for `step` as the fixture left it on the tmp board."""
+        with open(os.path.join(self.paths["RECEIPTS"], _control_name(step)), "rb") as handle:
+            return json.loads(handle.read().decode("utf-8"))
 
     def _bind_the_enable_literal(self):
         """S112: resolve the enable literal's placeholders from the fixture ON DISK.
@@ -4306,7 +4862,10 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
             stdin_text = case["raw"]
         else:
             stdin_text = json.dumps(
-                {"tool_name": case["tool"], "tool_input": self._substitute(case["input"])}
+                {
+                    "tool_name": case["tool"],
+                    "tool_input": self._render_content(self._substitute(case["input"])),
+                }
             )
         completed = self._invoke(stdin_text, overrides)
         detail = "\nrow: %s\nstdout: %r\nstderr: %r" % (
@@ -4497,7 +5056,33 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # chain fixture carries both keys, derived to differ.  The historical falsifier
         # groups -- `control` 3, `round1` 16, `round2` 12, `failclosed` 4, `benign` 6 -- are
         # untouched, as are `carveout`, `manifest`, `na3`, `na3_persistent` and `na10`.
-        self.assertEqual(counts.get("killswitch"), 91, "91 kill-switch / 0.2-enable rows")
+        #
+        # PINNED DELIBERATELY, 0.05 ELEVENTH review delta (S125/O172/O171): 91 -> 110,
+        # nineteen new rows and NO row dropped, no row re-expected.  THIRTEEN are S125, the
+        # PRE-FLIGHT ARTIFACT act -- a `Write` of exactly
+        # `receipts/0.2-enable-preflight-input.json`, decided BEFORE generic content
+        # attribution: ONE ALLOW (the valid stdin JSON of the canonical compound, at the
+        # board venue, onto an absent target -- the input the hub measured ALLOWED by the
+        # receipts carve-out on the tenth commit, now allowed BY RULE); TEN DENY one variable
+        # from it (the same content to `notes.json` and under `fleet-runs/` -- content
+        # attribution, which the tenth commit lacked for file tools; a worktree venue; an
+        # existing target; content that is not JSON, two objects, an inner `tool_name` of
+        # `Bash`; a command lacking the leading preference, naming a different receipt file,
+        # and naming an OLDER execution-control receipt -- the semantic arm); ONE DENY for an
+        # `Edit` of the artifact's path (the act is a `Write`); and ONE ALLOW control, an
+        # ordinary receipt create beside the six, which keeps the carve-out a carve-out.
+        # FIVE are O172, `fixedSetEqualityProof`, one part of 0.7's from the ALLOW rows:
+        # absent, its digest uppercased (malformed), the FIRST sha another head, the SECOND
+        # sha another merge, and a digest PASTED from 0.35's set.  ONE is O171: the O159
+        # cascade restamped so 0.6 and 0.7 share the rewrite's instant (undecidable); its
+        # ALLOW partner is the ninth commit's cascade row, whose fixture already preserved
+        # every ORIGINAL stamp -- now asserted by
+        # `test_the_o159_cascade_fixture_preserves_every_original_stamp_...`.  Every existing
+        # chain fixture carries a proof DERIVED from its own shas and hashes.  The historical
+        # falsifier groups -- `control` 3, `round1` 16, `round2` 12, `failclosed` 4, `benign`
+        # 6 -- are untouched, as are `carveout`, `manifest`, `na3`, `na3_persistent` and
+        # `na10`.
+        self.assertEqual(counts.get("killswitch"), 110, "110 kill-switch / 0.2-enable rows")
         # PINNED DELIBERATELY, 0.05 fourth review delta (O125): 3 -> 4.  The carve-out is a
         # PATH permission, not a TOOL permission, and the pair that proves it -- the `Write`
         # create ALLOW beside the shell `Set-Content` create DENY -- must not be separable.
@@ -4732,6 +5317,80 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
             document = json.loads(handle.read().decode("utf-8"))
         self.assertEqual(document["mergeSha"], document["reviewedHeadSha"])
         self.assertEqual(document["mergeSha"], _head_sha("0.7"))
+
+    def test_the_o159_cascade_fixture_preserves_every_original_stamp_and_the_tie_variant_restamps_two(self):
+        """O171: the ALLOW cascade keeps each rewritten receipt's ORIGINAL `recordedUtc`; the tie variant does not.
+
+        Two claims, asserted rather than described.  (1) After the complete repair EVERY chain
+        receipt -- rewritten or not -- carries the stamp the chain was first written with, so
+        the parsed order is unchanged and the ALLOW row passes for the register's reason and
+        not because the rewrite happened to land in ascending seconds.  (2) The tie variant
+        differs in exactly the two stamps it restamps: 0.6 and 0.7 carry ONE conforming stamp
+        later than either original, and every other receipt keeps its original -- so its
+        DENY row is attributable to the tie arm alone.
+        """
+        fixture_o159_repaired_chain_at_board(self.paths)
+        for step in CHAIN_STEPS:
+            self.assertEqual(self._chain_document(step)["recordedUtc"], _chain_stamp(step), step)
+
+        shutil.rmtree(self.paths["RECEIPTS"])
+        os.makedirs(self.paths["RECEIPTS"])
+        fixture_o159_cascade_restamped_to_a_tie_at_board(self.paths)
+        self.assertRegex(O159_RESTAMP, PINNED_UTC_RX)
+        for step in CHAIN_STEPS:
+            stamp = self._chain_document(step)["recordedUtc"]
+            if step in ("0.6", "0.7"):
+                self.assertEqual(stamp, O159_RESTAMP, step)
+                self.assertGreater(
+                    _pinned_moment(stamp), _pinned_moment(_chain_stamp(step)), step
+                )
+            else:
+                self.assertEqual(stamp, _chain_stamp(step), step)
+
+    def test_every_chain_receipt_the_fixture_writes_carries_a_proof_of_its_own_shas_and_hashes(self):
+        """O172: the fixtures' proofs are DERIVED, and the canonicalisation is asserted from scratch.
+
+        Three claims.  (1) Every chain receipt of the whole-chain fixture carries
+        `fixedSetEqualityProof` whose first sha is its `reviewedHeadSha`, whose second is its
+        `mergeSha`, and whose digest equals a canonicalisation written out HERE, inline,
+        rather than by the helper the fixtures use -- the `<sha256>  <path>` lines (two
+        spaces), sorted as plain strings, LF-joined with no trailing newline, UTF-8, sha256
+        -- so the hook's docstring, the fixture's helper and this line are three readings
+        the ALLOW rows force to agree.  (2) The near misses are near misses: 0.35's digest
+        really differs from 0.7's, and 0.6's two shas from 0.7's.  (3) The malformed
+        fixture's proof differs from the derived one in case alone.
+        """
+        fixture_chain_all_six_names_at_board(self.paths)
+        for step in CHAIN_STEPS:
+            document = self._chain_document(step)
+            proof = document["fixedSetEqualityProof"]
+            self.assertRegex(proof, r"\A[0-9a-f]{40}=[0-9a-f]{40}:[0-9a-f]{64}\Z", step)
+            shas, digest = proof.split(":")
+            first, second = shas.split("=")
+            self.assertEqual(first, document["reviewedHeadSha"], step)
+            self.assertEqual(second, document["mergeSha"], step)
+            lines = sorted(value + "  " + path for path, value in document["hashes"].items())
+            self.assertEqual(
+                digest, hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest(), step
+            )
+            self.assertEqual(digest, _fixed_set_digest(document["hashes"]), step)
+        self.assertNotEqual(
+            _fixed_set_digest(_board_hashes(self.paths, "0.7")),
+            _fixed_set_digest(_board_hashes(self.paths, "0.35")),
+        )
+        self.assertNotEqual(_head_sha("0.6"), _head_sha("0.7"))
+        self.assertNotEqual(_merge_sha("0.6"), _merge_sha("0.7"))
+
+        shutil.rmtree(self.paths["RECEIPTS"])
+        os.makedirs(self.paths["RECEIPTS"])
+        fixture_control_equality_proof_malformed(self.paths)
+        document = self._chain_document("0.7")
+        malformed = document["fixedSetEqualityProof"]
+        derived = _equality_proof(
+            document["reviewedHeadSha"], document["mergeSha"], document["hashes"]
+        )
+        self.assertNotEqual(malformed, derived)
+        self.assertEqual(malformed.lower(), derived)
 
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""

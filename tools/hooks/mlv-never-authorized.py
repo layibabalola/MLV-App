@@ -13,7 +13,7 @@ exit 2 : fail-CLOSED, with ``hook-error: <detail>`` on stderr, for ANY exception
          accepted, because an argument this hook does not understand may be the venue
          under a name it no longer reads).
 
-This is the PROJECT hook described by ``never-authorized.json`` (schema v23) and by
+This is the PROJECT hook described by ``never-authorized.json`` (schema v25) and by
 ``prompts/v2/card-TOOL-HOOK-ENFORCE-1.md``.  It is NOT the global machine hook
 ``~/.claude/hooks/check-continuity-boundaries.py``, which is shared by every project on
 this machine and fails OPEN.  This one fails CLOSED and is tracked on the same ref as the
@@ -41,6 +41,11 @@ worktree value, or empty -- ABSENT is never "unknown, assume the hub":
     evaluates the SAME absolute board paths, so without this test it would admit the
     canonical compound the moment the six receipts exist, before the hub has verified $R
     or installed the task.
+  * NA-2, S125 -- the PRE-FLIGHT ARTIFACT act, the SECOND dedicated act: a ``Write`` of
+    exactly ``<board>\\.claude-state\\coordination\\dual-lane\\receipts\\``
+    ``0.2-enable-preflight-input.json`` is allowed only at the board venue (and only onto
+    an absent target, with the exact stdin JSON of a currently valid canonical enable as
+    its content -- see THE PRE-FLIGHT ARTIFACT ACT below).
   * NA-10, O129 (hub extension) -- a lane editing its own gate.  Any write to
     ``.claude/settings.json``, ``.claude/settings.local.json`` or
     ``tools/hooks/mlv-never-authorized.py``, UNDER ANY ROOT, is denied away from the board
@@ -143,7 +148,10 @@ non-negative integer and a ``bool`` is NOT one; ``list`` = a JSON array.  Per re
     block carries ``verdict`` APPROVE and ``subject_sha`` equal to that ``reviewedHeadSha``
     (S120); ``hashes``, an object whose KEY SET is EXACTLY the step's
     fixed set in ``EXECUTION_CONTROL_HASH_TABLE`` and whose values are all sha256 (S120 --
-    a missing or an extra key is INVALID); 0.1 additionally ``composerStatus`` ==
+    a missing or an extra key is INVALID); ``fixedSetEqualityProof``, the literal
+    ``<reviewedHeadSha>=<mergeSha>:<digest>`` whose two shas EQUAL this receipt's own and
+    whose digest EQUALS the sha256 of the sorted ``<sha256>  <path>`` lines recomputed from
+    its own ``hashes`` (O172); 0.1 additionally ``composerStatus`` ==
     ``not-yet-created`` plus ``composedPromptPath``, ``prChecksPath`` and ``prReviewPath``
     (paths); 0.35 additionally those three paths; and from 0.35 on
     ``roadmapParityReceiptSha256`` EQUAL to the sha256 of ``0.18-roadmap-parity.json``'s
@@ -231,6 +239,57 @@ there means the merge carried something the review did not see, and no control r
 written until sol has reviewed the merge commit itself.  The hook checks shape and the
 subject binding only, never git (S123).
 
+THE FIXED-SET EQUALITY PROOF (O172, register v25)
+-------------------------------------------------
+The hub's assertion that a step's fixed set hashed EQUAL at ``reviewedHeadSha`` and at
+``mergeSha`` was, up to the tenth commit, recorded nowhere the hook could see: a receipt
+whose two shas were well-formed validated whether or not the hub had run it.  Every one of
+the six chain receipts now carries ``fixedSetEqualityProof``, the literal
+``<reviewedHeadSha>=<mergeSha>:<digest>`` -- two 40-character lowercase hex shas joined by
+``=``, then ``:`` and a 64-character lowercase hex sha256 -- which the hub writes only after
+the assertion succeeded.  The hook validates its SHAPE, that its first sha EQUALS the
+receipt's ``reviewedHeadSha`` and its second the receipt's ``mergeSha``, and that its digest
+EQUALS the sha256 of the sorted ``<sha256>  <path>`` lines RECOMPUTED from the receipt's OWN
+``hashes`` object -- ``_fixed_set_digest``, the ONE canonicalisation: one line per entry of
+``hashes``, the digest, TWO spaces, the board-relative path (the shape ``sha256sum`` prints);
+the lines sorted as plain strings (so by digest first, the order ``sort`` gives ``sha256sum``
+output); joined by a single LF with NO trailing newline; UTF-8; sha256; lowercase hex.  Pure
+recomputation -- no git, no file read -- so a proof pasted from another receipt, or written
+before the hashes were, fails by VALUE.  Absent, malformed, a sha that does not match, or a
+digest that does not match is INVALID; the refusal names the file, the key and which part
+failed; and under O152 that makes the newest undecidable.  The arm runs AFTER the ``hashes``
+arm, because the digest is recomputed from that object.  What the hook still does NOT judge
+is unchanged from S123: the equality itself is the hub's git assertion, and what is checked
+here is that the attestation is bound to THIS receipt's shas and THIS receipt's hashes.
+
+THE PRE-FLIGHT ARTIFACT ACT (S125, register v25)
+------------------------------------------------
+Before typing the enable the hub writes the EXACT hook-stdin JSON of the final board-path
+compound -- ``{"tool_name":"PowerShell","tool_input":{"command":"<the compound>"}}`` -- to
+``$D\\receipts\\0.2-enable-preflight-input.json`` with the ``Write`` tool and runs the live
+hook on that file under ``MLV_HOOK_DRYRUN=1`` (S104).  That content names BOTH enable paths,
+and the register says any other input naming both paths is DENIED; the hub measured on the
+tenth commit that the Write was ALLOWED anyway -- by the receipts carve-out, as a create
+under ``$D\\receipts\\**`` -- and that the same content written to ``notes.json``, under
+``fleet-runs/`` and from a worktree venue was allowed too.  S125 closes that text/code gap
+BY RULE, as the SECOND dedicated act, evaluated before generic content attribution and after
+the venue test: a ``Write`` (that tool name exactly) whose normalised path is exactly the
+artifact's is ALLOWED only when the venue is the board root (the enable act's own test), the
+target does not exist on disk, and the content parses as exactly ONE JSON object whose
+``tool_name`` is ``PowerShell`` and whose ``tool_input.command`` is the canonical enable
+compound the enable act would accept RIGHT NOW against the CURRENT six receipts --
+``_enable_act_why``, the SAME validation (the semantic literal, the receipt schemas, the
+chain selection, the O158 re-hash) on an inner context, performing nothing.  It writes
+evidence only and authorizes no delete.  Any other path carrying that content
+(``fleet-runs/`` included), a worktree venue, an existing target, a malformed or
+multi-object content, an inner ``tool_name`` other than ``PowerShell``, or a non-canonical
+or semantically invalid command is DENIED, the refusal naming the file and the reason.
+GENERIC CONTENT ATTRIBUTION then applies to every other ``Write``/``Edit``/``NotebookEdit``:
+content naming both enable paths, or carrying the marker under a delete verb, written to
+ANY other path is DENIED -- the rule the register already stated -- while the receipts
+carve-out keeps every OTHER create-or-extend under ``$D\\receipts\\**``.
+``MLV_HOOK_DRYRUN=1`` prints the decision for this act exactly as for the enable act.
+
 THE ENABLE LITERAL IS VALIDATED SEMANTICALLY, NOT FOR PRESENCE (S112, register v21)
 -----------------------------------------------------------------------------------
 Up to rev 21 this hook only checked that the compound's JSON literal was an object carrying
@@ -266,7 +325,8 @@ expected digest in a refusal line.
 Stdlib only.  Deterministic: no subprocess, no clock, no network -- ``datetime`` is imported
 to PARSE the pinned stamps (the literal's two and every receipt's ``recordedUtc`` -- O141),
 never to read the current time, and ``hashlib`` to hash
-a file already on disk.  The worktree root is derived from this file's own location
+a file already on disk and to recompute the O172 digest from a receipt's own ``hashes``.
+The worktree root is derived from this file's own location
 (``parents[2]``) rather than from ``git rev-parse`` in the session cwd -- it needs no
 subprocess, it is the copy that actually governs the lane, and it is at least as closed as
 the cwd reading.
@@ -449,6 +509,15 @@ CONTROL_REVIEWED_HEAD_KEY = "reviewedHeadSha"
 # equal at both shas is the HUB's assertion before the receipt is written, never a git call
 # from here: shape and the subject binding only.
 CONTROL_MERGE_SHA_KEY = "mergeSha"
+# O172 -- THE FIXED-SET EQUALITY PROOF.  The hub asserts, with git and BEFORE the receipt is
+# written, that the step's fixed set hashes equal at both shas; the receipt records that it
+# did as `<reviewedHeadSha>=<mergeSha>:<digest>`, and the hook binds the record to THIS
+# receipt: both shas equal the receipt's own, and the digest equals `_fixed_set_digest` of
+# the receipt's own `hashes` -- so a proof cannot be pasted from another receipt.
+CONTROL_EQUALITY_PROOF_KEY = "fixedSetEqualityProof"
+_EQUALITY_PROOF_RX = re.compile(
+    r"\A(?P<reviewed>[0-9a-f]{40})=(?P<merge>[0-9a-f]{40}):(?P<digest>[0-9a-f]{64})\Z"
+)
 CONTROL_VERDICT_PATH_KEY = "solVerdictPath"
 CONTROL_VERDICT_KEY = "verdict"
 CONTROL_VERDICT_APPROVE = "APPROVE"
@@ -519,6 +588,15 @@ EXECUTION_CONTROL_COMPOSER_PATH_NAMES = (
 # S98: the 0.2 enable is ONE-SHOT.  0.2 writes this receipt in the SAME guarded action as
 # the delete, so its PRESENCE is the proof the one authorization was already spent.
 KILL_SWITCH_ENABLE_RECEIPT = "0.2-loop-enabled.json"
+# S125: the PRE-FLIGHT ARTIFACT, the SECOND dedicated act.  Before typing the enable the hub
+# writes the EXACT hook-stdin JSON of the final board-path compound to this receipt path
+# with the `Write` tool and runs the live hook on it under MLV_HOOK_DRYRUN=1 (S104).  That
+# Write is judged as ONE act -- `PREFLIGHT_TOOL` exactly, its content one JSON object whose
+# `tool_name` is `PREFLIGHT_INNER_TOOL` -- before generic content attribution, and it is the
+# only file-tool input that may carry content naming both enable paths.
+KILL_SWITCH_PREFLIGHT_ARTIFACT = "0.2-enable-preflight-input.json"
+PREFLIGHT_TOOL = "Write"
+PREFLIGHT_INNER_TOOL = "PowerShell"
 PROVENANCE_KEYS = ("roadmapParityReceiptSha256", "queueSha256", "productLiveCount")
 PROVENANCE_PARITY_KEY = "roadmapParityReceiptSha256"
 PROVENANCE_QUEUE_KEY = "queueSha256"
@@ -1351,6 +1429,86 @@ def _control_hashes_why(name, document):
     return ""
 
 
+def _fixed_set_digest(hashes):
+    """O172: the digest of a ``hashes`` object in the ONE canonical form.
+
+    One line per entry: ``<sha256>  <path>`` -- the digest, TWO spaces, the board-relative
+    path, the shape ``sha256sum`` prints.  The lines are SORTED as plain strings (so by
+    digest first, the order ``sort`` gives ``sha256sum`` output), joined by a single LF with
+    NO trailing newline, encoded UTF-8 and hashed with sha256; the result is lowercase hex.
+    Nothing else is hashed -- not the receipt, not the file bytes, not git -- so the digest
+    is a function of ``hashes`` alone and any writer that follows this paragraph gets the
+    same value.
+    """
+    lines = sorted("%s  %s" % (hashes[path], path) for path in hashes)
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def _control_equality_proof_why(name, document):
+    """O172: ``fixedSetEqualityProof`` binds BOTH shas to the digest of this receipt's OWN ``hashes``, else why.
+
+    The literal is ``<reviewedHeadSha>=<mergeSha>:<digest>`` -- two 40-character lowercase
+    hex shas joined by ``=``, then ``:`` and a 64-character lowercase hex sha256.  Three
+    arms, in the order that makes a refusal attributable: the SHAPE; the two shas, which
+    must EQUAL this receipt's ``reviewedHeadSha`` and ``mergeSha`` in that order; and the
+    digest, which must equal ``_fixed_set_digest`` RECOMPUTED from this receipt's own
+    ``hashes`` -- pure recomputation, no git, no file read -- so a proof pasted from another
+    receipt, or written before the hashes were, fails by value.  What the proof ATTESTS,
+    that the step's fixed set hashed equal at both shas, is the hub's assertion made with
+    git before the receipt is written; the hook checks that the attestation is bound to
+    this receipt's shas and this receipt's hashes, and nothing about git.  Runs AFTER the
+    ``hashes`` arm, because the digest is recomputed from that object and a refusal about
+    the proof of a malformed ``hashes`` would name the wrong key.
+    """
+    if CONTROL_EQUALITY_PROOF_KEY not in document:
+        return "execution-control receipt %s lacks %s (O172/O152)" % (
+            name,
+            CONTROL_EQUALITY_PROOF_KEY,
+        )
+    proof = document[CONTROL_EQUALITY_PROOF_KEY]
+    match = _EQUALITY_PROOF_RX.match(proof) if isinstance(proof, str) else None
+    if match is None:
+        return (
+            "execution-control receipt %s carries %s %r, which is not the literal "
+            "<reviewedHeadSha>=<mergeSha>:<digest> -- two 40-character LOWERCASE hex shas "
+            "joined by '=', then ':' and a 64-character LOWERCASE hex sha256 (O172/O152)"
+            % (name, CONTROL_EQUALITY_PROOF_KEY, proof)
+        )
+    if match.group("reviewed") != document[CONTROL_REVIEWED_HEAD_KEY]:
+        return (
+            "execution-control receipt %s carries %s whose FIRST sha %r is not this "
+            "receipt's %s %r (O172/O152)"
+            % (
+                name,
+                CONTROL_EQUALITY_PROOF_KEY,
+                match.group("reviewed"),
+                CONTROL_REVIEWED_HEAD_KEY,
+                document[CONTROL_REVIEWED_HEAD_KEY],
+            )
+        )
+    if match.group("merge") != document[CONTROL_MERGE_SHA_KEY]:
+        return (
+            "execution-control receipt %s carries %s whose SECOND sha %r is not this "
+            "receipt's %s %r (O172/O152)"
+            % (
+                name,
+                CONTROL_EQUALITY_PROOF_KEY,
+                match.group("merge"),
+                CONTROL_MERGE_SHA_KEY,
+                document[CONTROL_MERGE_SHA_KEY],
+            )
+        )
+    digest = _fixed_set_digest(document[CONTROL_HASHES_KEY])
+    if match.group("digest") != digest:
+        return (
+            "execution-control receipt %s carries %s whose digest %r is not the sha256 of "
+            "the sorted '<sha256>  <path>' lines of its OWN hashes, which is %r -- a proof "
+            "is bound to the hashes beside it, never pasted from another receipt (O172/O152)"
+            % (name, CONTROL_EQUALITY_PROOF_KEY, match.group("digest"), digest)
+        )
+    return ""
+
+
 def _control_step_keys_why(ctx, name, document):
     """S120: the keys ONE step carries beyond the common ones, else why.
 
@@ -1398,9 +1556,11 @@ def _control_receipt_why(ctx, name, document, parity_sha):
     which the receipts carve-out allows; never a delete.
 
     The arms run in the plan's row order -- shape, stamp, the two shas and the second key's
-    approval of the reviewed one (S120/S123), the fixed hash set (S120), the step's own keys
-    (S120), the provenance (S118) -- and each returns the FIRST failure, so a receipt with
-    two faults is attributed to the one the plan lists first.
+    approval of the reviewed one (S120/S123), the fixed hash set (S120), the equality proof
+    bound to both shas and to that set (O172 -- after the set, because its digest is
+    recomputed from it), the step's own keys (S120), the provenance (S118) -- and each
+    returns the FIRST failure, so a receipt with two faults is attributed to the one the
+    plan lists first.
     """
     why = _receipt_shape_why(
         name,
@@ -1410,6 +1570,7 @@ def _control_receipt_why(ctx, name, document, parity_sha):
             CONTROL_MERGE_SHA_KEY,
             CONTROL_VERDICT_PATH_KEY,
             CONTROL_HASHES_KEY,
+            CONTROL_EQUALITY_PROOF_KEY,
         ),
     )
     if why:
@@ -1433,6 +1594,9 @@ def _control_receipt_why(ctx, name, document, parity_sha):
     if why:
         return why
     why = _control_hashes_why(name, document)
+    if why:
+        return why
+    why = _control_equality_proof_why(name, document)
     if why:
         return why
     why = _control_step_keys_why(ctx, name, document)
@@ -1997,12 +2161,18 @@ def _selected_control_rehash_why(ctx, selected):
     return ""
 
 
-def _enable_act_allowed(ctx):
-    """-> True when this input IS the canonical enable and every condition holds.
+def _enable_act_why(ctx):
+    """-> ``(canonical, why)``: is this shell input the canonical enable, and if so why is it refused.
 
-    False means "some other shape, judge it generically".  Raises Deny when it IS the
-    canonical act and a condition failed -- S98 (the receipt is already present) fires
-    first, because a spent authorization settles the input before anything else is read.
+    ``canonical`` False means "some other shape, judge it generically", and ``why`` is then
+    ``""``.  ``canonical`` True with ``why`` empty is the enable, allowed; a non-empty
+    ``why`` is the FIRST condition that failed, in this order -- S98 (the receipt is already
+    present) first, because a spent authorization settles the input before anything else is
+    read; then the receipt set; then the venue; then the O158 re-hash; then the literal.
+    ONE validation, TWO callers: ``_enable_act_allowed`` raises ``why`` as the enable's
+    refusal, and the S125 pre-flight artifact act quotes it, because the command the
+    artifact records must be the compound the enable act would accept RIGHT NOW against the
+    same six receipts -- a second implementation would be a second answer.
 
     S105/O126 -- THE ENABLE ACT IS VENUE-BOUND, and the venue is checked AFTER the receipt
     state and BEFORE the literal.  After, because S98's answer is a standing fact about the
@@ -2030,24 +2200,38 @@ def _enable_act_allowed(ctx):
     """
     literal = _canonical_enable_literal(ctx)
     if literal is None:
-        return False
+        return False, ""
     ok, why, newest_control = _kill_switch_receipts_ok(ctx)
     if not ok:
-        raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)
+        return True, why
     if not ctx.at_board_venue:
-        raise Deny(
-            "NA-2",
-            "the canonical 0.2 enable is refused: it is the BOARD-ROOTED actor's act and "
+        return True, (
+            "it is the BOARD-ROOTED actor's act and "
             "--project-dir is %s, not %s -- a worktree value or a missing/empty argument "
             "means exception (i) does not apply, because a lane's hook evaluates the same "
             "absolute board paths (S105/O126)"
-            % (ctx.project_dir or "<absent>", ctx.board_root),
+            % (ctx.project_dir or "<absent>", ctx.board_root)
         )
     why = _selected_control_rehash_why(ctx, newest_control)
     if why:
-        raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)
+        return True, why
     ok, why = _enable_literal_ok(ctx, literal, newest_control)
     if not ok:
+        return True, why
+    return True, ""
+
+
+def _enable_act_allowed(ctx):
+    """-> True when this input IS the canonical enable and every condition holds.
+
+    False means "some other shape, judge it generically".  Raises Deny when it IS the
+    canonical act and a condition failed -- the ``why`` of ``_enable_act_why`` above, in
+    its order, S98 first.
+    """
+    canonical, why = _enable_act_why(ctx)
+    if not canonical:
+        return False
+    if why:
         raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)
     return True
 
@@ -2247,6 +2431,226 @@ def _na2_decide(ctx, path_norm, acts, source):
     raise Deny("NA-2", "overwriting ledger/pen/receipt/evidence content at %s" % path_norm)
 
 
+# ------------------------------ NA-2, S125: the PRE-FLIGHT ARTIFACT, the SECOND dedicated act
+#
+# PRE-FLIGHT (S104): before typing the enable the hub writes the EXACT hook-stdin JSON of the
+# final board-path compound -- `{"tool_name":"PowerShell","tool_input":{"command":"<the
+# compound>"}}` -- to `$D\receipts\0.2-enable-preflight-input.json` with the `Write` tool,
+# records its sha256, and runs the LIVE board's hook on that file under MLV_HOOK_DRYRUN=1, so
+# the shape boundary the enable act draws is proven BEFORE the one-shot act rather than
+# discovered by it.  That Write carries content naming BOTH enable paths, and the register
+# says any other input naming both paths is DENIED -- so on the tenth commit the hub measured
+# a TEXT/CODE GAP: the Write was ALLOWED, but by the receipts carve-out (a create under
+# `$D\receipts\**`), not by any rule about what it carried; and the same content written to
+# `notes.json`, under `fleet-runs/`, and from a worktree venue was ALLOWED too (measured
+# again on this repo before this delta: four ALLOWs).  S125 pins the decision BY RULE, as the
+# second dedicated act:
+#
+#   * a `Write` -- that tool name exactly; an `Edit` or `NotebookEdit` of the path is refused
+#     as a near-miss of the act, never judged as a carve-out extend -- whose normalised path
+#     is EXACTLY the artifact's (derived from MLV_BOARD_ROOT like every enable path, so a
+#     scratch root can never match), is ALLOWED only when ALL hold, tested in this order:
+#     the venue is the board root (the enable act's own test, S105/O126, for the same
+#     reason -- a lane's hook evaluates the same absolute board paths); the target does NOT
+#     exist on disk (the act CREATES the artifact; a stale one is the hub's to recover); and
+#     the content parses as exactly ONE JSON object whose `tool_name` is `PowerShell` and
+#     whose `tool_input.command` is the canonical enable compound the enable act would
+#     accept RIGHT NOW -- `_enable_act_why` on an inner context, the SAME validation (the
+#     semantic literal, the receipt schemas, the chain selection, the O158 re-hash), never a
+#     second one.  It writes evidence only and authorizes no delete: nothing about the
+#     marker changes because this act was allowed.
+#   * it is evaluated BEFORE generic content attribution and after the venue test, exactly
+#     as the enable act is evaluated before generic per-path attribution, and for the same
+#     reason: attributing the content's verbs to the paths it names would deny the artifact
+#     itself.
+#   * GENERIC CONTENT ATTRIBUTION for `Write`/`Edit`/`NotebookEdit` then follows: content
+#     that names BOTH enable paths, or carries the marker under a delete verb, written to
+#     ANY other path -- `notes.json`, a fleet-run receipt, a checkpoint, a relative-path copy
+#     of the artifact -- is DENIED, naming the path, BEFORE the carve-outs are consulted.  A
+#     carve-out is a permission on a PATH; this is a rule about CONTENT, and the carve-out
+#     keeps every OTHER create-or-extend under `$D\receipts\**`.
+#   * MLV_HOOK_DRYRUN=1 prints the decision for this act exactly as for the enable act: the
+#     hook is DECISION-ONLY here as everywhere -- it reads the receipts and the board and
+#     writes nothing -- which is what makes the pre-flight probe safe against the live board.
+#
+# FAIL-CLOSED READINGS (recorded, eleventh delta):
+#   * "names a path" is a SUBSTRING test on the payload after `norm`'s reading -- backslashes
+#     to slashes, runs of slashes collapsed, case folded -- so the JSON-escaped `C:\\board`
+#     the artifact actually carries, a bare `C:/board` and a mixed form are ONE path; and
+#     when the payload carries a JSON `\u` escape and parses as JSON, its decoded strings are
+#     scanned too, so `\u005c` is not a way around a text matcher.  The EXACT board paths
+#     are matched -- the register's "both paths" are the board-absolute ones the compound
+#     carries -- and only the NEW content of a payload (`content`, `new_string`,
+#     `new_source`): an `Edit` whose `old_string` names both paths is removing them.
+#   * The limit is unchanged and restated: an interpreter one-liner, or content encoded in a
+#     form no text matcher decodes, is invisible here; the layers behind this rule are the
+#     shell arm's S99/O118 refusal of any command that deletes the marker outside the act,
+#     and sol's review of every PR diff.
+
+
+def _preflight_artifact_path_norm(ctx):
+    return norm(ctx.receipt(KILL_SWITCH_PREFLIGHT_ARTIFACT))
+
+
+def _preflight_refused(reason):
+    """The S125 refusal, naming the file and the one reason."""
+    return Deny(
+        "NA-2",
+        "the PRE-FLIGHT ARTIFACT act -- a Write of exactly receipts/%s -- is refused: %s "
+        "(S125)" % (KILL_SWITCH_PREFLIGHT_ARTIFACT, reason),
+    )
+
+
+def _preflight_artifact_act_allowed(ctx):
+    """S125: -> True when this file-tool input IS the pre-flight artifact act and every condition holds.
+
+    False means "the path is not the artifact's, judge it generically".  Raises Deny when the
+    path IS the artifact's and a condition failed, in the order the register lists them --
+    the tool, the venue, the target's absence, the content's shape, its inner tool name, and
+    its command's canonical shape and semantic validity -- each refusal naming the file and
+    the one thing that failed.  The command is validated by ``_enable_act_why`` on an inner
+    PowerShell context at the same venue: the compound the artifact records must be the
+    compound the enable act would accept against the CURRENT six receipts, and one
+    validation with two callers is what makes that so.  Nothing is performed: the inner
+    context is decided and discarded.
+    """
+    if ctx.tool not in FILE_TOOLS or not ctx.path_norm:
+        return False
+    if ctx.path_norm != _preflight_artifact_path_norm(ctx):
+        return False
+    if ctx.tool != PREFLIGHT_TOOL:
+        raise _preflight_refused("this input is %s, not %s" % (ctx.tool, PREFLIGHT_TOOL))
+    if not ctx.at_board_venue:
+        raise _preflight_refused(
+            "it is the BOARD-ROOTED actor's act and --project-dir is %s, not %s -- a "
+            "worktree value or a missing/empty argument means the act does not apply, "
+            "because a lane's hook evaluates the same absolute board paths (S105/O126)"
+            % (ctx.project_dir or "<absent>", ctx.board_root)
+        )
+    if os.path.exists(ctx.receipt(KILL_SWITCH_PREFLIGHT_ARTIFACT)):
+        raise _preflight_refused(
+            "the target already EXISTS on disk, and the act CREATES it -- a pre-flight "
+            "artifact is written once, before the enable, and this act never overwrites one"
+        )
+    if ctx.new_text is None:
+        raise _preflight_refused("it carries no content")
+    try:
+        document = json.loads(ctx.new_text)
+    except ValueError as error:
+        raise _preflight_refused(
+            "its content does not parse as exactly ONE JSON object (%s)" % error
+        )
+    if not isinstance(document, dict):
+        raise _preflight_refused("its content is not a JSON object")
+    if document.get("tool_name") != PREFLIGHT_INNER_TOOL:
+        raise _preflight_refused(
+            "its tool_name is %r, not %r" % (document.get("tool_name"), PREFLIGHT_INNER_TOOL)
+        )
+    inner_input = document.get("tool_input")
+    command = inner_input.get("command") if isinstance(inner_input, dict) else None
+    if not isinstance(command, str) or not command:
+        raise _preflight_refused("its tool_input carries no non-empty string command")
+    canonical, why = _enable_act_why(
+        Ctx(PREFLIGHT_INNER_TOOL, {"command": command}, ctx.project_dir_raw)
+    )
+    if not canonical:
+        raise _preflight_refused(
+            "its command is not the canonical enable compound%s"
+            % _enable_preference_gap(command)
+        )
+    if why:
+        raise _preflight_refused(
+            "its command is the canonical shape but is not semantically valid for the "
+            "CURRENT six receipts on disk: %s" % why
+        )
+    return True
+
+
+_JSON_UNICODE_ESCAPE = "\\u"
+
+
+def _content_scan_text(text):
+    """The NEW content of a file-tool payload, read the way ``norm`` reads a path.
+
+    Backslashes become slashes, runs of slashes collapse and the case folds, so the
+    JSON-escaped ``C:\\\\board`` the pre-flight artifact carries, a bare ``C:/board`` and a
+    mixed form all read as the ONE normalised path a rule compares against.  When the text
+    carries a JSON ``\\u`` escape and parses as JSON, its decoded strings (keys and values,
+    at any depth) are appended to the scan, so an escape is not a way around the matcher.
+    """
+    parts = [text]
+    if _JSON_UNICODE_ESCAPE in text:
+        try:
+            document = json.loads(text)
+        except ValueError:
+            document = None
+        stack = [document]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                stack.extend(item.keys())
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+    joined = "\n".join(parts).replace("\\", "/")
+    return re.sub(r"/{2,}", "/", joined).lower()
+
+
+def _content_names(scan_text, path_norm):
+    """Does the normalised payload text contain this normalised board path?"""
+    return path_norm.lstrip("/") in scan_text
+
+
+def _refuse_enable_content_outside_the_act(ctx):
+    """S125/S99/O118: the enable's content, written by a file tool to ANY other path, is refused.
+
+    Two arms, both about what the payload CARRIES and neither about where it goes: content
+    naming BOTH the enable receipt and the marker (the pre-flight artifact's content, or the
+    compound itself); and content carrying the marker under a delete or move verb (a script
+    that would disarm the kill switch, saved for later).  The pre-flight artifact act
+    returned before this runs, so the ONE file-tool input that may carry the compound has
+    already been judged; everything else that carries it is refused HERE, naming the path,
+    before the path guard and its carve-outs -- a carve-out is a permission on a PATH, and
+    the hub measured on the tenth commit that the receipts carve-out admitted exactly this
+    content on exactly this act.  Cheap on the common path: a payload that carries neither
+    the marker's leaf nor a ``\\u`` escape returns after one case fold.
+    """
+    text = ctx.new_text
+    if text is None:
+        return
+    if KILL_SWITCH_LEAF not in text.lower() and _JSON_UNICODE_ESCAPE not in text:
+        return
+    scan = _content_scan_text(text)
+    if not _content_names(scan, _marker_path_norm(ctx)):
+        return
+    target = ctx.path_norm or "<no path>"
+    if _content_names(scan, _enable_receipt_path_norm(ctx)):
+        raise Deny(
+            "NA-2",
+            "writing content that names BOTH the enable receipt receipts/%s and the marker "
+            "%s to %s is denied: only the PRE-FLIGHT ARTIFACT act -- a Write of exactly "
+            "receipts/%s at the board venue -- may carry that content, and generic "
+            "attribution never admits the enable (S125/S99/O118)"
+            % (
+                KILL_SWITCH_ENABLE_RECEIPT,
+                KILL_SWITCH_MARKER_NAME,
+                target,
+                KILL_SWITCH_PREFLIGHT_ARTIFACT,
+            ),
+        )
+    acts = shell_acts(text)
+    if "delete" in acts or "move" in acts:
+        raise Deny(
+            "NA-2",
+            "writing content that carries a %s verb beside the marker %s to %s is denied: "
+            "the delete verb naming the marker in any input other than the canonical "
+            "enable is never authorized (S125/S99)"
+            % ("delete" if "delete" in acts else "move", KILL_SWITCH_MARKER_NAME, target),
+        )
+
+
 def rule_na2(ctx):
     if ctx.tool in SHELL_TOOLS:
         # The dedicated act is decided BEFORE anything is attributed (S99/O118).
@@ -2261,6 +2665,12 @@ def rule_na2(ctx):
             if _is_na2_protected(path_norm):
                 _na2_decide(ctx, path_norm, acts, "shell")
         return
+    # S125: the SECOND dedicated act is decided BEFORE generic content attribution, and
+    # content attribution BEFORE the path guard and its carve-outs -- a carve-out is a
+    # permission on a PATH, and this is a rule about CONTENT.
+    if _preflight_artifact_act_allowed(ctx):
+        return
+    _refuse_enable_content_outside_the_act(ctx)
     if not ctx.path_norm or not _is_na2_protected(ctx.path_norm):
         return
     _na2_decide(ctx, ctx.path_norm, {"write"}, "file")
