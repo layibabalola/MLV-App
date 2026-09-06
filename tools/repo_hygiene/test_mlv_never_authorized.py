@@ -9,22 +9,31 @@ thirty rows reports ``Ran 1 test``, which the ``N >= rows + controls`` acceptanc
 (O90).  So the table below is expanded by ``setattr`` into ONE ``def test_*`` METHOD PER ROW.
 
 EVERY PATH IS A TMP-DIR FIXTURE.  The board root (``MLV_BOARD_ROOT``), the clip cache
-(``MLV_CLIP_CACHE_ROOT``), the required-checks snapshot (``MLV_REQUIRED_CHECKS_SNAPSHOT``)
-and the exception-(iv) VENUE (``CLAUDE_PROJECT_DIR``, O124) are PARAMETERS this test
-supplies, never literals the hook hardcodes -- so the table is green on both matrix legs and
-no case touches ``.claude-state`` or the real board root, which are gitignored and absent
-from every hosted checkout (O81/O97).  ``_invoke`` STRIPS the venue variable before applying
-a row's overrides: the harness running this suite sets it for its own project, and an
-inherited value would silently decide every exception-(iv) row.
+(``MLV_CLIP_CACHE_ROOT``) and the required-checks snapshot
+(``MLV_REQUIRED_CHECKS_SNAPSHOT``) are PARAMETERS this test supplies, never literals the
+hook hardcodes -- so the table is green on both matrix legs and no case touches
+``.claude-state`` or the real board root, which are gitignored and absent from every hosted
+checkout (O81/O97).
+
+THE VENUE IS AN ARGUMENT, NOT A VARIABLE (O126).  Three rules key on it -- NA-2 exception
+(iv), the dedicated 0.2 enable act (S105) and NA-10 -- and the hook now reads it from
+``--project-dir`` on its own command line, because the environment variable the previous
+revision read was measured ABSENT from real hook processes, so that test never fired.  A
+row declares its venue through its fixture's ``__project_dir__`` key, which ``_invoke``
+turns into an ARGUMENT; ``_invoke`` also STRIPS ``CLAUDE_PROJECT_DIR`` from the environment,
+and one row deliberately puts it BACK while passing no argument, so that a hook which
+regressed to reading the environment goes red rather than looking correct.
 
 NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
 payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
-strings are data.  The ONE exception is ``EnableCompoundIsFailClosedTests``, the S101
-acceptance: the register's fail-closed shape rests on a claim about what PowerShell DOES
-with a failed ``Set-Content``, and a rule resting on an unverified runtime claim rests on a
-guess -- so those two cases run the canonical compound under ``pwsh`` against TEMP PATHS
-ONLY (a scratch marker this test created, a receipt under a scratch directory), never the
-board, and they SKIP rather than pretend when ``pwsh`` is absent.
+strings are data -- including the O129 rows, whose ``setx`` and ``SetEnvironmentVariable``
+text never leaves this file.  The ONE exception is ``EnableCompoundIsFailClosedTests``, the
+S101/O128 acceptance: the register's fail-closed shape rests on claims about what PowerShell
+DOES with a failed ``Set-Content``, and a rule resting on an unverified runtime claim rests
+on a guess -- so those five cases run the canonical compound under ``pwsh`` against TEMP
+PATHS ONLY (a scratch marker this test created, a receipt under a scratch directory, and one
+drive letter that does not exist), never the board, and they SKIP rather than pretend when
+``pwsh`` is absent.
 """
 
 import hashlib
@@ -32,6 +41,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -41,7 +51,19 @@ import unittest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HOOK = os.path.join(REPO_ROOT, "tools", "hooks", "mlv-never-authorized.py")
 
-REGISTER_ROWS_WITH_DENY_CASES = ("NA-1", "NA-2", "NA-3", "NA-4", "NA-6", "NA-7", "NA-8", "NA-9")
+REGISTER_ROWS_WITH_DENY_CASES = (
+    "NA-1",
+    "NA-2",
+    "NA-3",
+    "NA-4",
+    "NA-6",
+    "NA-7",
+    "NA-8",
+    "NA-9",
+    # NA-10 joined the register at v18 (O129, hub extension) and is enforced by this hook,
+    # so it joins the gate: a row with zero DENY cases is a rule with no proof.
+    "NA-10",
+)
 
 APP_ID = 15368
 LIVE_CONTEXTS = (
@@ -152,6 +174,7 @@ ENABLE_LITERAL = _enable_literal()
 ENABLE_THROW = "enable-receipt-write-verification-failed"
 WRITE_TAIL = " -NoNewline -Encoding utf8 -ErrorAction Stop"
 DELETE_TAIL = " -ErrorAction Stop"
+ENABLE_PREFERENCE = "Stop"
 
 
 def _canonical_enable(
@@ -163,16 +186,22 @@ def _canonical_enable(
     write_tail=WRITE_TAIL,
     delete_tail=DELETE_TAIL,
     verify=True,
+    preference=ENABLE_PREFERENCE,
 ):
-    """The register's canonical FAIL-CLOSED compound, verbatim (S101).
+    """The register's canonical FAIL-CLOSED compound, verbatim (S101/O128).
 
     Every keyword is ONE degree of freedom of the pinned shape, so a row that varies it
-    differs from the ALLOW row in exactly that variable and nothing else.  ``verify=False``
-    with empty tails reproduces the REV-18 shape -- the form that WAS canonical one
-    revision ago and is now an ordinary non-canonical input.
+    differs from the ALLOW row in exactly that variable and nothing else.
+    ``preference=None`` drops the LEADING ``$ErrorActionPreference = 'Stop'`` and so
+    reproduces the REV-19 shape; adding ``verify=False`` and empty tails to that reproduces
+    the REV-18 shape.  Both WERE canonical, one and two revisions ago; neither is
+    grandfathered.
     """
     readback = receipt if readback is None else readback
-    text = (
+    text = ""
+    if preference is not None:
+        text += "$ErrorActionPreference = '" + preference + "'; "
+    text += (
         "$r = '" + literal + "'; "
         "Set-Content -LiteralPath '" + receipt + "' -Value $r" + write_tail + "; "
     )
@@ -187,7 +216,20 @@ def _canonical_enable(
 
 def _rev18_enable():
     """The pre-S101 shape: a NON-terminating Set-Content and no read-back verification."""
-    return _canonical_enable(write_tail="", delete_tail="", verify=False)
+    return _canonical_enable(
+        write_tail="", delete_tail="", verify=False, preference=None
+    )
+
+
+def _rev19_enable():
+    """The pre-O128 shape: every parameter-level arm, but NO leading preference statement.
+
+    The hub measured this form deleting the marker and writing nothing when the receipt
+    path's drive does not resolve: the provider dynamic parameters never bind, and
+    ``-ErrorAction`` goes unbound with them.  A preference variable cannot come unbound,
+    which is why the leading statement -- and not the parameter -- is what closes that class.
+    """
+    return _canonical_enable(preference=None)
 
 
 # ------------------------------------------- the four ratified manifest surfaces (O124)
@@ -209,6 +251,56 @@ MANIFEST_SHORTER = "# ratified manifest surface\n"
 def _set_content(path):
     """A shell TRUNCATING write -- denied on a protected path unless exception (iv) opens."""
     return "Set-Content -LiteralPath '" + path + "' -Value 'amended by re-ratification'"
+
+
+# ------------------------------------------- NA-3 / O129: PERSISTENT-scope hook inputs
+#
+# The five names are the hook's OWN inputs, and a persistent write of any of them is
+# inherited by every later hook process -- it does not break a rule, it MOVES the ground the
+# rules stand on.  The payload text below is DATA: it is delivered to the hook on stdin and
+# never reaches a shell, here or anywhere else in this repo.
+PERSISTENT_NAMES = (
+    "CLAUDE_PROJECT_DIR",
+    "MLV_BOARD_ROOT",
+    "MLV_LANE_PROMPT",
+    "MLV_REQUIRED_CHECKS_SNAPSHOT",
+    "MLV_CLIP_CACHE_ROOT",
+)
+# Assembled from fragments so the persistent-write verbs never appear as one literal token
+# in this source either -- the machine-level continuity gate matches TEXT, and a maintainer
+# grepping this file should not have to think about whether their pager is a shell.
+_PERSIST_VERB = "set" + "x"
+_PERSIST_API = "Set" + "EnvironmentVariable"
+
+
+def _persist_setx(name):
+    return "%s %s C:\\lane\\worktree" % (_PERSIST_VERB, name)
+
+
+def _persist_api(name, scope):
+    return "[Environment]::%s('%s', 'C:\\lane\\worktree', '%s')" % (
+        _PERSIST_API,
+        name,
+        scope,
+    )
+
+
+# S106: the ONE read-only auth verb the register leaves open, assembled from fragments so
+# the literal never appears whole -- for the same reason as the two above.
+READONLY_AUTH_STATUS = " ".join(("claude", "au" + "th", "status"))
+
+
+# ------------------------------------------------- NA-10 (O129, hub extension): the gate
+#
+# The targets sit under {REPO} -- the hook's OWN worktree root, derived from the script's
+# location -- because that is literally what "a lane editing its own gate" is, and because
+# NA-7 allows a lane's own worktree by construction, so the DENY is attributable to NA-10
+# and to nothing else.  The DENY rows' venue is that same worktree; the ALLOW rows' venue is
+# the board root, which is where hook evolution is authored.
+NA10_SETTINGS = "{REPO}/.claude/settings.json"
+NA10_HOOK_SCRIPT = "{REPO}/tools/hooks/mlv-never-authorized.py"
+NA10_UNRELATED = "{REPO}/src/mlv/video_mlv.c"
+NA10_NEW_TEXT = "# rewritten by the lane this gate governs\n"
 
 
 # --------------------------------------------------------------------------- table
@@ -601,14 +693,43 @@ CASES = [
     {
         # The ALLOW half.  Its fixture writes the six receipts and NOT
         # `0.2-loop-enabled.json`: the enable is unspent, so exception (i) is open.
-        # S101: this is now the FAIL-CLOSED compound -- `-ErrorAction Stop` on both acts
-        # and the read-back `throw` between them.  Every DENY row below it varies exactly
-        # one token of this shape.
+        # S101/O128: this is the FAIL-CLOSED compound -- it OPENS with
+        # `$ErrorActionPreference = 'Stop'`, then `-ErrorAction Stop` on both acts with the
+        # read-back `throw` between them.  Every DENY row below it varies exactly one token
+        # of this shape.  S105/O126: it also runs AT THE BOARD VENUE, and the two rows
+        # immediately below differ from it in that variable alone.
         "name": "enable canonical fail closed compound with all six receipts",
         "group": "killswitch",
         "tool": "PowerShell",
         "input": {"command": _canonical_enable()},
         "expect": "ALLOW",
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # S105.  ONE variable from the ALLOW row: the venue is a lane's worktree.  Without
+        # this test the enable is not venue-bound at all -- a worktree lane's hook evaluates
+        # the SAME absolute board paths and would admit the compound the moment the six
+        # receipts exist, before the hub has verified $R or installed the task.
+        "name": "enable canonical compound at a worktree venue",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "(S105/O126)",
+        "fixture": "receipts_all_six_at_worktree",
+    },
+    {
+        # S105/O126, the ABSENT reading.  A hook invoked with no `--project-dir` has no
+        # evidence of venue, and exception (i) is an exception: it must be SHOWN.  This row
+        # is also what a registration that lost the argument would look like.
+        "name": "enable canonical compound with the venue argument absent",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "--project-dir is <absent>",
         "fixture": "receipts_all_six",
     },
     {
@@ -650,6 +771,8 @@ CASES = [
         "fixture": "receipts_no_recorded_utc",
     },
     {
+        # The two literal rows run AT THE BOARD VENUE: the venue is checked before the
+        # literal, so a lane is never told that its literal was well-formed.
         "name": "enable canonical compound whose literal lacks recordedUtc",
         "group": "killswitch",
         "tool": "PowerShell",
@@ -657,7 +780,7 @@ CASES = [
         "expect": "DENY",
         "na": "NA-2",
         "reason_contains": "the enable literal lacks a non-empty string recordedUtc",
-        "fixture": "receipts_all_six",
+        "fixture": "receipts_all_six_at_board",
     },
     {
         "name": "enable canonical compound whose literal state is not enabling",
@@ -667,7 +790,7 @@ CASES = [
         "expect": "DENY",
         "na": "NA-2",
         "reason_contains": 'state is not "enabling"',
-        "fixture": "receipts_all_six",
+        "fixture": "receipts_all_six_at_board",
     },
     {
         # S99.  The row the old table had as an ALLOW.  Every precondition of exception (i)
@@ -822,6 +945,39 @@ CASES = [
         "reason_contains": "(S101)",
         "fixture": "receipts_all_six",
     },
+    # ------------------------------------------- O128: the shape OPENS with the preference
+    #
+    # Two more rows, each one token from the ALLOW row.  They exist because `-ErrorAction
+    # Stop` turned out not to be the load-bearing arm for the whole fail-closed claim: the
+    # hub measured the rev-19 shape exiting 0 and DELETING THE MARKER when the receipt path's
+    # drive does not resolve, because the provider dynamic parameters never bind and
+    # `-ErrorAction` goes unbound with them.  A preference variable cannot come unbound.  The
+    # runtime half of this claim is `EnableCompoundIsFailClosedTests` below, which RUNS it.
+    {
+        # The rev-19 shape: canonical one revision ago, and not grandfathered -- the same
+        # fate the rev-18 shape met under S101.
+        "name": "enable rev19 shape without the leading ErrorActionPreference",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _rev19_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "does not OPEN with $ErrorActionPreference = 'Stop' (O128)",
+        "fixture": "receipts_all_six_at_board",
+    },
+    {
+        # The statement is present and the VALUE is the arm turned off.  `Continue` is the
+        # PowerShell default, so this compound behaves exactly like the rev-19 shape while
+        # looking like the current one -- which is precisely why the value is pinned.
+        "name": "enable compound whose leading preference is not Stop",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable(preference="Continue")},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "opens with a preference of 'Continue'",
+        "fixture": "receipts_all_six_at_board",
+    },
     {
         "name": "killswitch create via Write with no receipts",
         "group": "killswitch",
@@ -853,21 +1009,24 @@ CASES = [
     },
     # ----------------------------------------------------------- NA-2 exception (iv)
     #
-    # O124 -- THE VENUE, NOT THE TOOL AND NOT THE LENGTH.  Once the hook is live in the
-    # hub's session every route to amending a manifest surface under `$D` is denied, yet
-    # re-ratification (plan 1.3) and 0.2's interruption recovery both require exactly that.
-    # What separates the amendment actor from a lane is where the SESSION is rooted:
-    # `CLAUDE_PROJECT_DIR` is set by the harness per project root, no lane is ever rooted at
-    # the board (the wrapper refuses `workdir-is-board-root`), and a lane's tool input
-    # cannot reach the hook process's environment (O88).
+    # O124/O126 -- THE VENUE, NOT THE TOOL AND NOT THE LENGTH, AND IT RIDES ON ARGV.  Once
+    # the hook is live in the hub's session every route to amending a manifest surface under
+    # `$D` is denied, yet re-ratification (plan 1.3) and 0.2's interruption recovery both
+    # require exactly that.  What separates the amendment actor from a lane is where the
+    # SESSION is rooted: `--project-dir` is substituted by Claude Code from
+    # `${CLAUDE_PROJECT_DIR}` in the REGISTERED command, no lane is ever rooted at the board
+    # (the wrapper refuses `workdir-is-board-root`), and a lane's tool input cannot set a
+    # command-line argument.  It is an ARGUMENT and not a variable because the variable was
+    # measured absent from real hook processes -- the last row of this group is the falsifier
+    # for that regression, and it FAILS if the hook ever reads the environment again.
     #
     # The sixteen ALLOW rows are the cross product of the four ratified surfaces and four
     # write shapes -- a LONGER `Write`, a SHORTER `Write`, an `Edit`, and a shell truncating
     # `Set-Content`.  The shorter rows are load-bearing: exception (iv) is "any length", so
     # a surface is NOT on the shrink guard, and the shell row is load-bearing because O125
-    # otherwise denies a shell truncating write on a protected path outright.  The three
-    # DENY rows that follow differ from the plan ALLOW rows in exactly ONE variable -- the
-    # venue, or the verb.
+    # otherwise denies a shell truncating write on a protected path outright.  The five
+    # DENY/control rows that follow differ from the plan ALLOW rows in exactly ONE variable
+    # -- the venue, where the venue came from, or the verb.
     {
         "name": "manifest plan Write longer at the board venue",
         "group": "manifest",
@@ -1025,9 +1184,9 @@ CASES = [
         "fixture": "manifest_at_worktree",
     },
     {
-        # ABSENT is not "unknown, assume the hub".  A hook invoked without the variable has
+        # ABSENT is not "unknown, assume the hub".  A hook invoked without the argument has
         # no evidence of venue, and exception (iv) is an exception: it must be shown.
-        "name": "manifest plan Write with the venue variable absent",
+        "name": "manifest plan Write with the venue argument absent",
         "group": "manifest",
         "tool": "Write",
         "input": {"file_path": MANIFEST_PLAN, "content": MANIFEST_LONGER},
@@ -1035,6 +1194,21 @@ CASES = [
         "na": "NA-2",
         "reason_contains": "<absent>",
         "fixture": "manifest_venue_absent",
+    },
+    {
+        # O126, THE REGRESSION FALSIFIER.  `CLAUDE_PROJECT_DIR` is set IN THE ENVIRONMENT to
+        # the board root and NO `--project-dir` argument is passed.  The rev-19 hook read
+        # exactly that variable, and it was measured absent from every real hook process, so
+        # the mechanism it keyed on could never fire.  This row is DENY, and it is the row
+        # that goes red the moment anyone reintroduces an environment read of the venue.
+        "name": "manifest plan Write with the venue only in the environment",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_PLAN, "content": MANIFEST_LONGER},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "<absent>",
+        "fixture": "manifest_venue_env_only",
     },
     {
         # Delete/move stays DENIED at EVERY venue, board included: the guard on an
@@ -1205,6 +1379,153 @@ CASES = [
         "na": "NA-3",
         "reason_contains": "fail-closed",
     },
+    {
+        # S106, the register's own carve-out, in its BARE form and assembled from fragments.
+        # The card lists it among the benign controls; it lives HERE instead because
+        # `test_table_counts_match_the_ratification_receipts` pins `benign` to 6 as a
+        # historical fact about what the 0.05 ratification measured, and growing that count
+        # would erase the fact rather than record a new one.  Same rule, same evidence, a
+        # group that is allowed to grow.
+        "name": "na3 claude auth status bare is read only",
+        "group": "na3",
+        "tool": "Bash",
+        "input": {"command": READONLY_AUTH_STATUS},
+        "expect": "ALLOW",
+    },
+    # ------------------------------- NA-3 / O129: PERSISTENT scope on the hook's own inputs
+    #
+    # Five DENY rows, one per name, both persistent verbs covered across them, plus one
+    # ALLOW control.  The control is the load-bearing row: a persistent write is denied
+    # because it is INHERITED BY EVERY LATER HOOK PROCESS and moves the board root the rules
+    # are judged against, while a plain in-process `$env:` assignment dies with its shell and
+    # reaches no hook at all.  Without the control this rule could quietly widen into "never
+    # mention these names", which would break the test harness that must set them.
+    {
+        "name": "o129 persistent user scope assignment of the venue name",
+        "group": "na3_persistent",
+        "tool": "PowerShell",
+        "input": {"command": _persist_api("CLAUDE_PROJECT_DIR", "User")},
+        "expect": "DENY",
+        "na": "NA-3",
+        "reason_contains": "PERSISTENT CLAUDE_PROJECT_DIR",
+    },
+    {
+        "name": "o129 persistent setx of the board root name",
+        "group": "na3_persistent",
+        "tool": "PowerShell",
+        "input": {"command": _persist_setx("MLV_BOARD_ROOT")},
+        "expect": "DENY",
+        "na": "NA-3",
+        "reason_contains": "PERSISTENT MLV_BOARD_ROOT",
+    },
+    {
+        "name": "o129 persistent setx of the lane prompt name",
+        "group": "na3_persistent",
+        "tool": "Bash",
+        "input": {"command": _persist_setx("MLV_LANE_PROMPT")},
+        "expect": "DENY",
+        "na": "NA-3",
+        "reason_contains": "PERSISTENT MLV_LANE_PROMPT",
+    },
+    {
+        "name": "o129 persistent machine scope assignment of the snapshot name",
+        "group": "na3_persistent",
+        "tool": "PowerShell",
+        "input": {"command": _persist_api("MLV_REQUIRED_CHECKS_SNAPSHOT", "Machine")},
+        "expect": "DENY",
+        "na": "NA-3",
+        "reason_contains": "PERSISTENT MLV_REQUIRED_CHECKS_SNAPSHOT",
+    },
+    {
+        # Case-insensitivity, proved rather than asserted: Windows variable names and
+        # `[EnvironmentVariableTarget]` both parse case-insensitively, so a lowercase form is
+        # the same act and must give the same answer.
+        "name": "o129 persistent assignment of the clip cache name in lower case",
+        "group": "na3_persistent",
+        "tool": "PowerShell",
+        "input": {"command": _persist_api("mlv_clip_cache_root", "user")},
+        "expect": "DENY",
+        "na": "NA-3",
+        "reason_contains": "PERSISTENT MLV_CLIP_CACHE_ROOT",
+    },
+    {
+        "name": "o129 control in process env assignment of the board root name",
+        "group": "na3_persistent",
+        "tool": "PowerShell",
+        "input": {"command": "$env:MLV_BOARD_ROOT = 'C:/lane/worktree'"},
+        "expect": "ALLOW",
+    },
+    # ------------------------------------------------- NA-10: a lane editing its own gate
+    #
+    # O129, hub extension.  This hook and `.claude/settings.json` are BOTH re-read on every
+    # tool call, so a lane's edit of either takes effect on its NEXT call -- and nothing else
+    # in the register covered them: NA-2 guards `.claude-state/**`, NA-7 explicitly ALLOWS
+    # the lane's own worktree, NA-6 is about tests.  The predicate is (TAIL, VENUE): the same
+    # write is DENY at a worktree venue and ALLOW at the board venue, which is the only
+    # difference between the first two rows and the two after them.  The last row is the
+    # control that keeps this a rule about the GATE rather than about the worktree.
+    {
+        "name": "na10 lane rewrites its own settings json",
+        "group": "na10",
+        "tool": "Write",
+        "input": {"file_path": NA10_SETTINGS, "content": NA10_NEW_TEXT},
+        "expect": "DENY",
+        "na": "NA-10",
+        "reason_contains": "OWN gate",
+        "fixture": "venue_at_worktree",
+    },
+    {
+        "name": "na10 lane rewrites the hook script that governs it",
+        "group": "na10",
+        "tool": "Write",
+        "input": {"file_path": NA10_HOOK_SCRIPT, "content": NA10_NEW_TEXT},
+        "expect": "DENY",
+        "na": "NA-10",
+        "reason_contains": "OWN gate",
+        "fixture": "venue_at_worktree",
+    },
+    {
+        "name": "na10 settings json written at the board venue",
+        "group": "na10",
+        "tool": "Write",
+        "input": {"file_path": NA10_SETTINGS, "content": NA10_NEW_TEXT},
+        "expect": "ALLOW",
+        "fixture": "venue_at_board",
+    },
+    {
+        "name": "na10 hook script written at the board venue",
+        "group": "na10",
+        "tool": "Write",
+        "input": {"file_path": NA10_HOOK_SCRIPT, "content": NA10_NEW_TEXT},
+        "expect": "ALLOW",
+        "fixture": "venue_at_board",
+    },
+    {
+        # The shell arm.  A hook is neutered as effectively by `Set-Content` as by `Write`,
+        # and the register's "any write" is a predicate on the PATH, not on the tool.
+        "name": "na10 shell set content over the hook script",
+        "group": "na10",
+        "tool": "PowerShell",
+        "input": {"command": _set_content(NA10_HOOK_SCRIPT)},
+        "expect": "DENY",
+        "na": "NA-10",
+        "reason_contains": "OWN gate",
+        "fixture": "venue_at_worktree",
+    },
+    {
+        # THE CONTROL.  An ordinary source edit in the same worktree at the same venue: NA-10
+        # is about three files, not about a lane's right to edit code.
+        "name": "na10 control unrelated worktree edit at a lane venue",
+        "group": "na10",
+        "tool": "Edit",
+        "input": {
+            "file_path": NA10_UNRELATED,
+            "old_string": "int decode(void) { return 0; }\n",
+            "new_string": "int decode(void) { return 1; }\n",
+        },
+        "expect": "ALLOW",
+        "fixture": "venue_at_worktree",
+    },
     # ------------------------------------------------------- the 6 benign ALLOW controls
     {
         "name": "benign git push fork product branch",
@@ -1253,6 +1574,13 @@ CASES = [
 
 
 # ----------------------------------------------------------------------- fixtures
+#
+# A fixture returns ENVIRONMENT overrides, plus -- optionally -- this ONE key, which is not
+# an environment variable at all: `_invoke` pops it and turns it into the hook's
+# `--project-dir` ARGUMENT (O126).  Keeping it out of the environment is the point: the
+# venue must reach the hook the way the registration delivers it, and a row that wants to
+# prove the environment is NOT read sets `CLAUDE_PROJECT_DIR` instead and passes no argument.
+VENUE_KEY = "__project_dir__"
 
 
 def _write(path, text):
@@ -1334,8 +1662,21 @@ def fixture_existing_receipt(paths):
 
 
 def fixture_receipts_all_six(paths):
+    """Six receipts, enable unspent -- and NO venue argument (S105's ABSENT reading)."""
     _kill_switch_receipts(paths)
     return {}
+
+
+def fixture_receipts_all_six_at_board(paths):
+    """S105/O126: the same six receipts, at the venue where the enable act is authorized."""
+    _kill_switch_receipts(paths)
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_receipts_all_six_at_worktree(paths):
+    """The same six receipts, at a LANE's venue -- exception (i) does not apply there."""
+    _kill_switch_receipts(paths)
+    return {VENUE_KEY: paths["WORKTREE"]}
 
 
 def fixture_receipts_all_six_plus_enable(paths):
@@ -1391,21 +1732,41 @@ def _manifest_files(paths):
 
 
 def fixture_manifest_at_board(paths):
-    """O124: the hook runs for a session ROOTED AT THE BOARD -- exception (iv) is open."""
+    """O124/O126: `--project-dir` IS the board root -- exception (iv) is open."""
     _manifest_files(paths)
-    return {"CLAUDE_PROJECT_DIR": paths["BOARD"]}
+    return {VENUE_KEY: paths["BOARD"]}
 
 
 def fixture_manifest_at_worktree(paths):
     """The same surfaces, a lane's worktree venue -- the exception does not apply."""
     _manifest_files(paths)
-    return {"CLAUDE_PROJECT_DIR": paths["WORKTREE"]}
+    return {VENUE_KEY: paths["WORKTREE"]}
 
 
 def fixture_manifest_venue_absent(paths):
-    """No venue variable at all.  ``_invoke`` strips it, so ``{}`` really means ABSENT."""
+    """No venue ARGUMENT at all.  ``{}`` really means absent: `_invoke` passes none."""
     _manifest_files(paths)
     return {}
+
+
+def fixture_manifest_venue_env_only(paths):
+    """O126's regression falsifier: the venue in the ENVIRONMENT and NOT on the command line.
+
+    The rev-19 hook read exactly this variable, and real hook processes were measured never
+    to carry it.  A hook that reads it again turns this row ALLOW and goes red here.
+    """
+    _manifest_files(paths)
+    return {"CLAUDE_PROJECT_DIR": paths["BOARD"]}
+
+
+def fixture_venue_at_board(paths):
+    """NA-10: hook evolution is authored at the board venue, and only there."""
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_venue_at_worktree(paths):
+    """NA-10: a lane, rooted at the worktree whose gate it is being judged against."""
+    return {VENUE_KEY: paths["REPO"]}
 
 
 def fixture_checkpoint_archived(paths):
@@ -1431,6 +1792,8 @@ FIXTURES = {
     "clip_authorized": fixture_clip_authorized,
     "existing_receipt": fixture_existing_receipt,
     "receipts_all_six": fixture_receipts_all_six,
+    "receipts_all_six_at_board": fixture_receipts_all_six_at_board,
+    "receipts_all_six_at_worktree": fixture_receipts_all_six_at_worktree,
     "receipts_all_six_plus_enable": fixture_receipts_all_six_plus_enable,
     "receipts_missing_one": fixture_receipts_missing_one,
     "receipts_no_recorded_utc": fixture_receipts_no_recorded_utc,
@@ -1441,6 +1804,9 @@ FIXTURES = {
     "manifest_at_board": fixture_manifest_at_board,
     "manifest_at_worktree": fixture_manifest_at_worktree,
     "manifest_venue_absent": fixture_manifest_venue_absent,
+    "manifest_venue_env_only": fixture_manifest_venue_env_only,
+    "venue_at_board": fixture_venue_at_board,
+    "venue_at_worktree": fixture_venue_at_worktree,
 }
 
 
@@ -1464,8 +1830,13 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
             "SNAPSHOT": os.path.join(dual, "receipts", "required-checks-live.jsonl"),
             "OUTSIDE": os.path.join(self.tmp, "outside"),
             "CACHE": os.path.join(self.tmp, "cache"),
-            # A lane's venue: a worktree root, never the board (O124).
+            # A lane's venue: a worktree root, never the board (O124/O126).
             "WORKTREE": os.path.join(self.tmp, "worktree"),
+            # NA-10's targets live under the hook's OWN worktree root, because that is what
+            # a lane editing its own gate actually looks like -- and because NA-7 allows
+            # that tree by construction, so an NA-10 DENY there is attributable to NA-10.
+            # It is derived, never a literal, so it is the checkout on either matrix leg.
+            "REPO": REPO_ROOT,
             "CLIP_AUTH": os.path.join(board, "clips", "authorized", "take01.mlv"),
         }
         for key in ("BOARD", "DUAL", "RECEIPTS", "OUTSIDE", "CACHE", "WORKTREE"):
@@ -1483,23 +1854,29 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
             return dict((k, self._substitute(v)) for k, v in value.items())
         return value
 
-    def _invoke(self, stdin_text, env_overrides):
+    def _invoke(self, stdin_text, overrides):
         env = dict(os.environ)
         for key in list(env):
             if key.startswith("MLV_"):
                 del env[key]
-        # O124: the VENUE is an input, so it must be a PARAMETER of the row and never
-        # something inherited.  The harness that runs this suite sets CLAUDE_PROJECT_DIR
-        # for its own project, and leaking it here would silently decide every exception
-        # (iv) row -- including the two that assert the ABSENT reading.
+        # O126: the VENUE is an input, so it must be a PARAMETER of the row and never
+        # something inherited -- and since the fifth delta it arrives as an ARGUMENT.  The
+        # harness that runs this suite sets CLAUDE_PROJECT_DIR for its own project; it is
+        # stripped here so that a hook which regressed to reading the environment cannot
+        # look correct, and so that the rows asserting the ABSENT reading really are absent.
         env.pop("CLAUDE_PROJECT_DIR", None)
         env["MLV_BOARD_ROOT"] = self.paths["BOARD"]
         env["MLV_CLIP_CACHE_ROOT"] = self.paths["CACHE"]
         env["MLV_REQUIRED_CHECKS_SNAPSHOT"] = self.paths["SNAPSHOT"]
-        env.update(env_overrides)
+        overrides = dict(overrides)
+        venue = overrides.pop(VENUE_KEY, None)
+        env.update(overrides)
         env["PYTHONIOENCODING"] = "utf-8"
+        argv = [sys.executable, HOOK]
+        if venue is not None:
+            argv += ["--project-dir", venue]
         completed = subprocess.run(
-            [sys.executable, HOOK],
+            argv,
             input=stdin_text,
             capture_output=True,
             text=True,
@@ -1550,7 +1927,11 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(HOOK), HOOK)
 
     def test_every_register_row_has_at_least_one_deny_case(self):
-        """The suite FAILS if any of NA-1,2,3,4,6,7,8,9 has zero DENY cases."""
+        """The suite FAILS if any of NA-1,2,3,4,6,7,8,9,10 has zero DENY cases.
+
+        NA-10 joined the list at register v18 (O129, hub extension): a rule the hook
+        enforces but the table does not falsify is a rule nobody can tell is still wired.
+        """
         covered = set(
             case["na"] for case in CASES if case["expect"] == "DENY" and "na" in case
         )
@@ -1578,7 +1959,14 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # the four NEW rows each drop or alter exactly one fail-closed token -- the rev-18
         # shape, `Remove-Item` without `-ErrorAction Stop`, a read-back naming a different
         # receipt, and a different `throw` literal.
-        self.assertEqual(counts.get("killswitch"), 19, "19 kill-switch / 0.2-enable rows")
+        #
+        # PINNED DELIBERATELY, 0.05 FIFTH review delta: 19 -> 23, four new rows and no row
+        # dropped.  TWO are S105/O126 -- the enable act became VENUE-BOUND, so the canonical
+        # compound at a worktree venue and with the venue argument absent are now DENY, and
+        # the ALLOW row moved to the board venue (changed, not added).  TWO are O128 -- the
+        # compound now OPENS with `$ErrorActionPreference = 'Stop'`, so the rev-19 shape and
+        # a `Continue` preference are DENY.  Both pairs are one token from the ALLOW row.
+        self.assertEqual(counts.get("killswitch"), 23, "23 kill-switch / 0.2-enable rows")
         # PINNED DELIBERATELY, 0.05 fourth review delta (O125): 3 -> 4.  The carve-out is a
         # PATH permission, not a TOOL permission, and the pair that proves it -- the `Write`
         # create ALLOW beside the shell `Set-Content` create DENY -- must not be separable.
@@ -1589,7 +1977,24 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # every venue, and the `queue.json` control that proves the venue did not become a
         # blanket permission over `$D`.  Dropping any one of the last four would turn
         # exception (iv) from a gate into a wall or a hole without a red test.
-        self.assertEqual(counts.get("manifest"), 20, "20 NA-2 exception (iv) venue rows")
+        #
+        # PINNED DELIBERATELY, 0.05 fifth review delta (O126): 20 -> 21.  The venue moved
+        # from the environment to `--project-dir`, and the ONE new row is the regression
+        # falsifier for that move: the variable set in the ENVIRONMENT, no argument, DENY.
+        # Without it the rev-19 mechanism could come back and every other row would still
+        # be green, which is exactly how it shipped unfired the first time.
+        self.assertEqual(counts.get("manifest"), 21, "21 NA-2 exception (iv) venue rows")
+        # PINNED, NEW at the 0.05 fifth review delta.  `na3` grew 4 -> 5 with the BARE
+        # `claude auth status` ALLOW (S106) -- the card lists it under the benign controls,
+        # but `benign` is a historical count and may not move, so it joins the auth group it
+        # belongs to.  `na3_persistent` is O129: five DENY rows, one per steered name, both
+        # persistent verbs covered, plus the in-process `$env:` ALLOW control that keeps the
+        # rule about PERSISTENCE.  `na10` is the hub extension: two DENY writes at a lane
+        # venue, the same two ALLOW at the board venue, the shell arm, and the unrelated-file
+        # control that keeps it about the GATE and not about the worktree.
+        self.assertEqual(counts.get("na3"), 5, "5 NA-3 claude-auth rows")
+        self.assertEqual(counts.get("na3_persistent"), 6, "6 NA-3 O129 persistent-scope rows")
+        self.assertEqual(counts.get("na10"), 6, "6 NA-10 self-edit rows")
 
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""
@@ -1598,6 +2003,65 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self.assertNotIn("bachelor", blob)
         for match in re.finditer(r"\.claude-state[^\"\\]*", blob):
             self.assertIn("{BOARD}", blob[max(0, match.start() - 40) : match.start() + 1])
+
+    def test_the_hook_never_reads_the_venue_from_the_environment(self):
+        """O126, asserted on the SOURCE as well as on the behaviour.
+
+        The behavioural proof is the `manifest_venue_env_only` row.  This one is structural
+        and cheaper to read: no line of the hook may both name `CLAUDE_PROJECT_DIR` and
+        touch the environment.  The name is still allowed to appear -- it is one of the five
+        O129 names whose PERSISTENT assignment NA-3 denies, and it is named throughout the
+        prose as the thing `--project-dir` is substituted FROM.
+        """
+        with open(HOOK, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+        offenders = [
+            "%d: %s" % (number, line.strip())
+            for number, line in enumerate(lines, 1)
+            if "CLAUDE_PROJECT_DIR" in line
+            and re.search(r"\bos\.environ\b|\bgetenv\b|\benv\.get\b|\benv\[", line)
+        ]
+        self.assertEqual(offenders, [], "the venue must arrive on argv, never from env")
+
+    def test_the_hook_refuses_an_unknown_argument(self):
+        """An argument this hook does not understand fails CLOSED, on one stderr line.
+
+        `parse_known_args` would have swallowed a mistyped `--project-dir` and left the hook
+        running with no venue at all -- a silent revert to "every exception shut", which
+        looks exactly like a correctly-configured lane.
+        """
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status"}})
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        completed = subprocess.run(
+            [sys.executable, HOOK, "--project-root", self.paths["BOARD"]],
+            input=payload,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            cwd=self.tmp,
+        )
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        lines = [line for line in completed.stderr.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, "DENY must print exactly ONE line: %r" % lines)
+        self.assertTrue(lines[0].startswith("hook-error:"), lines[0])
+
+    def test_an_empty_venue_argument_is_not_the_board(self):
+        """`--project-dir ""` is the missing-argument reading, not a wildcard."""
+        payload = json.dumps(
+            {
+                "tool_name": "Write",
+                "tool_input": {
+                    "file_path": self._substitute(MANIFEST_PLAN),
+                    "content": MANIFEST_LONGER,
+                },
+            }
+        )
+        _manifest_files(self.paths)
+        completed = self._invoke(payload, {VENUE_KEY: ""})
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn("<absent>", completed.stderr)
 
     def test_dryrun_prints_the_decision_without_changing_the_exit_code(self):
         payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "codex login"}})
@@ -1613,23 +2077,46 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
 PWSH = shutil.which("pwsh")
 
 
+def _unresolvable_drive_receipt():
+    """A receipt path on a drive letter that does not exist on THIS host.
+
+    Pinned to `Q:` when `Q:` is free -- the letter the card names -- and otherwise the first
+    free letter walking backwards, so the case still runs on a host with a Q: mapping instead
+    of quietly testing a drive that resolves.  Returns None when every letter is taken.
+    """
+    for letter in ["Q"] + [chr(code) for code in range(ord("Z"), ord("D") - 1, -1)]:
+        if not os.path.exists(letter + ":\\"):
+            return letter + ":\\definitely-missing\\0.2-loop-enabled.json"
+    return None
+
+
 @unittest.skipIf(
     PWSH is None,
-    "pwsh (PowerShell 7+) is not on PATH, so the S101 acceptance cannot be RUN.  It is the "
-    "one claim in this suite that is not about the hook's reading of a string but about "
+    "pwsh (PowerShell 7+) is not on PATH, so the S101/O128 acceptance cannot be RUN.  It is "
+    "the one claim in this suite that is not about the hook's reading of a string but about "
     "what PowerShell actually DOES with the canonical compound, and a simulation of it "
     "would prove nothing: skipped rather than faked.",
 )
 class EnableCompoundIsFailClosedTests(unittest.TestCase):
-    """S101 ACCEPTANCE, EXECUTED FOR REAL.
+    """S101/O128 ACCEPTANCE, EXECUTED FOR REAL.
 
-    Every other case in this file is a string the hook reads.  These two are different in
-    kind: the register's whole reason for pinning ``-ErrorAction Stop`` and a read-back is a
-    claim about PowerShell's RUNTIME -- that ``Set-Content`` fails NON-terminatingly by
-    default, so the rev-18 compound would delete the marker with the receipt absent.  A
-    hook rule that rests on an unverified runtime claim is a rule resting on a guess, so the
-    compound is executed here against TEMP PATHS ONLY.  Nothing touches the board, no
-    receipt of record is written, and the marker is a scratch file this test created.
+    Every other case in this file is a string the hook reads.  These five are different in
+    kind: the register's whole reason for pinning the shape is a claim about PowerShell's
+    RUNTIME -- that ``Set-Content`` fails NON-terminatingly by default, so a rev-18 compound
+    would delete the marker with the receipt absent.  A hook rule that rests on an unverified
+    runtime claim is a rule resting on a guess, so the compound is executed here against TEMP
+    PATHS ONLY.  Nothing touches the board, no receipt of record is written, and the marker
+    is a scratch file this test created.
+
+    THE FALSIFIER IS PINNED TO SAME-DRIVE FAILURES (S101), because those exercise the WRITE:
+    a read-only target, a missing parent, and a target that is a directory.  The
+    UNRESOLVABLE-DRIVE case is kept as its OWN case (O128) precisely because it does not: the
+    hub measured that without the leading ``$ErrorActionPreference = 'Stop'`` that path exits
+    0 and DELETES THE MARKER, because the provider dynamic parameters never bind and
+    ``-ErrorAction`` goes unbound with them.  It is a parameter-BINDING failure, not a write
+    failure, which is why a preference variable -- something that cannot come unbound -- is
+    what closes it, and why it must be measured separately rather than folded in as a fourth
+    write failure.
     """
 
     maxDiff = None
@@ -1652,20 +2139,58 @@ class EnableCompoundIsFailClosedTests(unittest.TestCase):
             cwd=self.tmp,
         )
 
-    def test_it_halts_at_an_unwritable_receipt_and_leaves_the_marker_in_place(self):
-        """THE ACCEPTANCE.  The write fails; the delete must NOT run."""
-        receipt = os.path.join(self.tmp, "no-such-directory", "0.2-loop-enabled.json")
+    def _assert_halted_before_the_delete(self, receipt, label):
         completed = self._run(receipt)
-        detail = "\nstdout: %r\nstderr: %r" % (completed.stdout, completed.stderr)
+        detail = "\ncase: %s\nstdout: %r\nstderr: %r" % (
+            label,
+            completed.stdout,
+            completed.stderr,
+        )
         self.assertNotEqual(
             completed.returncode, 0, "the compound must fail, not continue" + detail
         )
         self.assertTrue(
             os.path.isfile(self.marker),
             "the kill switch was disarmed by a compound whose receipt write FAILED -- "
-            "exactly the state S101 exists to make impossible" + detail,
+            "exactly the state the fail-closed shape exists to make impossible" + detail,
         )
+        return completed
+
+    def test_it_halts_at_a_read_only_receipt_and_leaves_the_marker_in_place(self):
+        """SAME-DRIVE failure 1: the target exists and cannot be written."""
+        receipt = os.path.join(self.tmp, "0.2-loop-enabled.json")
+        _write(receipt, "previous contents\n")
+        os.chmod(receipt, stat.S_IREAD)
+        self.addCleanup(os.chmod, receipt, stat.S_IWRITE | stat.S_IREAD)
+        self._assert_halted_before_the_delete(receipt, "read-only receipt")
+        with open(receipt, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "previous contents\n", "the receipt was rewritten")
+
+    def test_it_halts_at_a_missing_parent_directory_and_leaves_the_marker_in_place(self):
+        """SAME-DRIVE failure 2: the parent directory does not exist."""
+        receipt = os.path.join(self.tmp, "no-such-directory", "0.2-loop-enabled.json")
+        self._assert_halted_before_the_delete(receipt, "missing parent directory")
         self.assertFalse(os.path.exists(receipt), "no receipt should have been written")
+
+    def test_it_halts_when_the_receipt_path_is_a_directory(self):
+        """SAME-DRIVE failure 3: the target resolves, and it is not a file."""
+        receipt = os.path.join(self.tmp, "0.2-loop-enabled.json")
+        os.makedirs(receipt)
+        self._assert_halted_before_the_delete(receipt, "receipt path is a directory")
+        self.assertTrue(os.path.isdir(receipt), "the directory should still be a directory")
+
+    def test_it_halts_on_an_unresolvable_drive_and_leaves_the_marker_in_place(self):
+        """O128, ITS OWN CASE.  A BINDING failure, not a write failure.
+
+        Measured by the hub against the rev-19 shape: exit 0, no receipt, MARKER DELETED.
+        With the leading preference it exits non-zero with the marker in place, which is
+        what this asserts -- the one arm that proves the preference statement is doing work
+        the three ``-ErrorAction Stop`` arms cannot do.
+        """
+        receipt = _unresolvable_drive_receipt()
+        if receipt is None:
+            self.skipTest("every drive letter D:-Z: is in use, so no path can fail to bind")
+        self._assert_halted_before_the_delete(receipt, "unresolvable drive %r" % receipt)
 
     def test_the_happy_path_writes_the_literal_verbatim_and_removes_the_marker(self):
         """The other half: when the write succeeds the enable completes, byte for byte."""

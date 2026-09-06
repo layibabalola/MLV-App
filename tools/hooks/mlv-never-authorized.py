@@ -1,20 +1,51 @@
 #!/usr/bin/env python3
-"""MLV-App PROJECT PreToolUse gate for the never-authorized register (NA-1..NA-9).
+"""MLV-App PROJECT PreToolUse gate for the never-authorized register (NA-1..NA-10).
 
 Contract
 --------
+argv   : ``--project-dir <path>`` -- THE VENUE, and nothing else is accepted.
 stdin  : exactly ONE JSON object, ``{"tool_name": ..., "tool_input": {...}}``.
 exit 0 : ALLOW (nothing on stderr).
 exit 2 : DENY, with exactly ONE line on stderr, ``NA-<n>: <reason>``.
 exit 2 : fail-CLOSED, with ``hook-error: <detail>`` on stderr, for ANY exception,
-         malformed or empty stdin, a non-object payload, or a missing ``tool_name``.
+         malformed or empty stdin, a non-object payload, a missing ``tool_name``, or an
+         UNKNOWN command-line argument (argparse rejects extras; they are never silently
+         accepted, because an argument this hook does not understand may be the venue
+         under a name it no longer reads).
 
-This is the PROJECT hook described by ``never-authorized.json`` (schema v17) and by
+This is the PROJECT hook described by ``never-authorized.json`` (schema v18) and by
 ``prompts/v2/card-TOOL-HOOK-ENFORCE-1.md``.  It is NOT the global machine hook
 ``~/.claude/hooks/check-continuity-boundaries.py``, which is shared by every project on
 this machine and fails OPEN.  This one fails CLOSED and is tracked on the same ref as the
 tree it guards -- a hook is (interpreter x script x REGISTRATION), and only a tracked
 script can travel with the worktree it governs.
+
+THE VENUE RIDES ON ARGV, NOT ON THE ENVIRONMENT (O126)
+------------------------------------------------------
+``--project-dir`` is substituted by Claude Code from ``${CLAUDE_PROJECT_DIR}`` in the
+REGISTERED command string, so its value is fixed by ``.claude/settings.json`` and no tool
+call can set it.  The environment variable of that name was MEASURED ABSENT from real hook
+processes on this machine (``.hook-invocations.log``: null in 17/17), which is why the
+previous revision's venue test -- which read it from ``os.environ`` -- silently never
+fired.  This hook therefore NEVER reads ``CLAUDE_PROJECT_DIR`` from its environment; the
+name appears below only as one of the five NA-3 O129 names whose PERSISTENT assignment is
+denied.  Three rules key on the venue, and all three fail closed when it is missing, a
+worktree value, or empty -- ABSENT is never "unknown, assume the hub":
+
+  * NA-2 exception (iv), O124 -- writes (create, extend or amend, ANY length, by
+    ``Write``/``Edit``/``NotebookEdit`` or by a shell truncating write) to the four
+    ratified manifest surfaces ``<board>/.claude-state/coordination/dual-lane/``
+    ``{DEFINITIVE-FIX-PLAN-*.md, never-authorized.json, Start-EditingLane.ps1,
+    prompts/v2/**}``.  Delete/move of a surface stays DENIED at every venue.
+  * NA-2 exception (i), S105 -- the dedicated 0.2 enable act.  A worktree lane's hook
+    evaluates the SAME absolute board paths, so without this test it would admit the
+    canonical compound the moment the six receipts exist, before the hub has verified $R
+    or installed the task.
+  * NA-10, O129 (hub extension) -- a lane editing its own gate.  Any write to
+    ``.claude/settings.json``, ``.claude/settings.local.json`` or
+    ``tools/hooks/mlv-never-authorized.py``, UNDER ANY ROOT, is denied away from the board
+    venue: this hook is re-read on every tool call, so a lane's edit of its registration or
+    of this script would take effect on its next call.  Hook evolution stays hub-authored.
 
 Environment inputs (all optional; every default keeps the rule fail-closed on the real
 machine, and only the test supplies overrides, so the falsifier table is host-independent)
@@ -24,7 +55,8 @@ MLV_LANE_PROMPT             path to the lane's prompt file; NA-4 reads its
                             (full cards carry the label as a bullet, fields files at
                             column 0).  Unset => any ``*.mlv`` outside the tracked
                             fixtures is DENIED.
-MLV_BOARD_ROOT              default ``C:\\!Layi Wkspc\\MLV-App``.
+MLV_BOARD_ROOT              default ``C:\\!Layi Wkspc\\MLV-App``.  The venue is compared
+                            against THIS.
 MLV_CLIP_CACHE_ROOT         default ``\\\\bachelor\\mlv-agent\\cache``.
 MLV_REQUIRED_CHECKS_SNAPSHOT
                             default ``<board>\\.claude-state\\coordination\\dual-lane\\
@@ -32,23 +64,20 @@ MLV_REQUIRED_CHECKS_SNAPSHOT
                             non-empty row.  Absent, unparseable, or a malformed row
                             anywhere => every protection mutation is DENIED.
 MLV_HOOK_DRYRUN=1           print the decision on stdout; the exit code is unchanged.
-CLAUDE_PROJECT_DIR          THE VENUE TEST of NA-2 exception (iv) (O124).  Set by the
-                            harness, per project root, and read here from this hook
-                            process's own environment.  Writes -- create, extend or amend,
-                            ANY length, by ``Write``/``Edit``/``NotebookEdit`` or by a
-                            shell truncating write -- to the four ratified manifest
-                            surfaces ``<board>/.claude-state/coordination/dual-lane/``
-                            ``{DEFINITIVE-FIX-PLAN-*.md, never-authorized.json,
-                            Start-EditingLane.ps1, prompts/v2/**}`` are ALLOWED only while
-                            this variable, NORMALISED, equals the board root: the hub after
-                            0.1 is rooted there and no lane ever is (the wrapper refuses
-                            ``workdir-is-board-root``), so the venue is what separates the
-                            re-ratification actor from a lane.  A worktree value, or an
-                            ABSENT variable, means the exception does not apply and the
-                            ordinary NA-2 DENY stands.  Delete/move of a manifest surface
-                            stays DENIED even at the board venue.  A lane's tool input
-                            cannot reach this hook process's environment (O88), so the
-                            venue is not something a lane can assert about itself.
+
+THE CANONICAL 0.2 ENABLE COMPOUND (O128) -- the ONE shell write the receipt paths admit::
+
+    $ErrorActionPreference = 'Stop'; $r = '<json>'; Set-Content -LiteralPath '<receipt>'
+    -Value $r -NoNewline -Encoding utf8 -ErrorAction Stop; if ((Get-Content -LiteralPath
+    '<receipt>' -Raw -ErrorAction Stop) -cne $r) { throw
+    'enable-receipt-write-verification-failed' }; Remove-Item -LiteralPath '<marker>'
+    -ErrorAction Stop
+
+The LEADING preference statement is load-bearing and was measured so: with a receipt path
+on an unresolvable drive the provider dynamic parameters go unbound, ``-ErrorAction`` goes
+unbound WITH them, and the rev-19 shape exits 0 having deleted the marker with no receipt
+written.  ``$ErrorActionPreference = 'Stop'`` closes that class; the rev-19 shape (no
+leading preference) is now just another non-canonical input.
 
 Stdlib only.  Deterministic: no subprocess, no clock, no network.  The worktree root is
 derived from this file's own location (``parents[2]``) rather than from ``git rev-parse``
@@ -56,6 +85,7 @@ in the session cwd -- it needs no subprocess, it is the copy that actually gover
 lane, and it is at least as closed as the cwd reading.
 """
 
+import argparse
 import json
 import os
 import re
@@ -127,11 +157,29 @@ ENABLE_LITERAL_KEYS = (
 # matches ONLY that shape; the rev-18 shape is just another non-canonical input.
 ENABLE_THROW_MESSAGE = "enable-receipt-write-verification-failed"
 
+# O128: the canonical compound OPENS with the preference statement.  The value is the
+# PowerShell ``ActionPreference`` enum member, which PowerShell resolves case-insensitively,
+# so it is compared that way -- exactly like the two ``-ErrorAction Stop`` arms in the same
+# compound.  (The ``throw`` literal above stays CASE-SENSITIVE: it is not an enum, it is the
+# string a later reader greps for when asked whether an enable halted at the write.)
+ENABLE_PREFERENCE_VARIABLE = "erroractionpreference"
+ENABLE_PREFERENCE_VALUE = "stop"
+
 # O124: NA-2 exception (iv) -- the four ratified manifest surfaces, relative to $D.
 MANIFEST_PLAN_GLOB_PREFIX = "definitive-fix-plan-"
 MANIFEST_PLAN_GLOB_SUFFIX = ".md"
 MANIFEST_EXACT_LEAVES = ("never-authorized.json", "start-editinglane.ps1")
 MANIFEST_PROMPTS_PREFIX = "prompts/v2/"
+
+# NA-10 (O129, hub extension): a lane editing its OWN gate.  Path TAILS, matched
+# segment-wise against the END of the path, UNDER ANY ROOT -- the rule is about which file
+# is being written, not about which tree it sits in, because every lane worktree carries its
+# own copy of all three and each one governs that lane's next tool call.
+NA10_GUARDED_TAILS = (
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    "tools/hooks/mlv-never-authorized.py",
+)
 
 
 class Deny(Exception):
@@ -255,7 +303,7 @@ def json_blobs(text):
 class Ctx(object):
     """Everything a rule needs, resolved once."""
 
-    def __init__(self, tool, tool_input):
+    def __init__(self, tool, tool_input, project_dir):
         self.tool = tool
         self.tool_input = tool_input
         env = os.environ
@@ -278,17 +326,21 @@ class Ctx(object):
             self.receipts_dir_raw, "required-checks-live.jsonl"
         )
         self.lane_prompt = env.get("MLV_LANE_PROMPT") or ""
-        # O124, the venue test of NA-2 exception (iv).  Read from THIS PROCESS's
-        # environment, never from the tool input: a lane cannot assert its own venue.
-        # `norm()` is the hook's one path comparison -- the same function that decides
-        # every other containment here -- so `C:\!Layi Wkspc\MLV-App`,
-        # `C:/!Layi Wkspc/MLV-App` and a trailing-slash form are one venue, and
-        # `C:\mlvtmp\plan-definitive-fix-v7` is not.  ABSENT is not "unknown, assume the
-        # hub": absent means the exception does not apply.
-        self.project_dir = norm(env.get("CLAUDE_PROJECT_DIR") or "")
-        self.at_board_venue = bool(
-            env.get("CLAUDE_PROJECT_DIR")
-        ) and self.project_dir == self.board_root
+        # O126, THE VENUE, and it rides on ARGV.  `--project-dir` is substituted by Claude
+        # Code from `${CLAUDE_PROJECT_DIR}` in the REGISTERED command, so its value is
+        # fixed by `.claude/settings.json`: a tool call cannot set an argument, and NA-10
+        # denies a lane editing the registration that carries it.  The ENVIRONMENT variable
+        # of that name is NOT consulted here and must not be -- it was measured absent from
+        # real hook processes (null in 17/17), so the rev-19 venue test never fired at all.
+        #
+        # `norm()` is the hook's one path comparison -- the same function that decides every
+        # other containment here -- so `C:\!Layi Wkspc\MLV-App`, `C:/!Layi Wkspc/MLV-App`
+        # and a trailing-slash form are ONE venue, and `C:\mlvtmp\plan-definitive-fix-v7` is
+        # not.  MISSING or EMPTY is not "unknown, assume the hub": it means every
+        # venue-keyed exception is closed (O124 exception (iv), S105's enable act, NA-10).
+        self.project_dir_raw = project_dir or ""
+        self.project_dir = norm(self.project_dir_raw)
+        self.at_board_venue = bool(self.project_dir) and self.project_dir == self.board_root
 
         self.command = ""
         self.path = ""
@@ -607,11 +659,31 @@ def _kill_switch_receipts_ok(ctx):
 # LEAVES THE MARKER IN PLACE (the S101 acceptance, run for real against pwsh in
 # `EnableCompoundIsFailClosedTests`).
 #
-# FAIL-CLOSED READINGS OF THE CANONICAL SHAPE (recorded, 0.05 third and fourth review
+# O128 -- THE COMPOUND NOW OPENS WITH `$ErrorActionPreference = 'Stop'` (0.05 FIFTH review
+# delta), because `-ErrorAction Stop` turned out NOT to be the load-bearing arm for one
+# whole failure class.  The hub measured the rev-19 shape in pwsh 7.6.5: a missing parent
+# directory, a read-only target and a directory target each exit 1 with the marker PRESENT
+# -- but a receipt path on an UNRESOLVABLE DRIVE exits 0, writes nothing, and DELETES THE
+# MARKER.  The reason is binding, not writing: when the provider cannot resolve the drive
+# the cmdlet's provider dynamic parameters never bind, `-ErrorAction` goes unbound with
+# them, and the statement's failure is not governed by the parameter that was supposed to
+# govern it.  A preference variable is not a parameter and cannot come unbound, so the
+# leading statement closes the class the three parameter-level arms cannot reach.  With it,
+# all four measured failures exit non-zero with the marker in place.  The rev-19 shape (no
+# leading preference) is now what the rev-18 shape became under S101: an ordinary
+# non-canonical input naming both paths, refused with O128 named in the line.
+#
+# FAIL-CLOSED READINGS OF THE CANONICAL SHAPE (recorded, 0.05 third, fourth and fifth review
 # deltas).  The register pins the form character-for-character except whitespace, so every
 # degree of freedom it does not name is refused rather than guessed:
 #   * PowerShell tool ONLY -- the register writes "the canonical compound form" in
 #     PowerShell; the same text arriving as a Bash input is not it.
+#   * `$ErrorActionPreference = 'Stop'` FIRST, before anything else in the input.  The
+#     preference NAME and VALUE are compared case-insensitively, because PowerShell resolves
+#     a variable name and an `ActionPreference` enum member that way and a case difference
+#     therefore changes no behaviour -- the same reading already applied to the two
+#     `-ErrorAction Stop` arms.  Any OTHER value (`Continue`, `SilentlyContinue`) is refused:
+#     it is the value that closes the drive class, not the statement.
 #   * The variable is `$r` (case-insensitively, as PowerShell resolves it) in ALL THREE
 #     places -- the assignment, `-Value`, and the read-back's `-cne` operand -- and nothing
 #     else.  A verification that compares a DIFFERENT variable verifies nothing.
@@ -628,11 +700,12 @@ def _kill_switch_receipts_ok(ctx):
 #     is swallowed and the enable reports success it did not have.
 #   * Single-quoted literals containing no quote of their own; a PowerShell-escaped `''`
 #     inside one fails the shape and is refused.
-#   * `;` between the four statements, and NOTHING before, between or after them.
+#   * `;` between the five statements, and NOTHING before, between or after them.
 # The cost of each reading is a visible DENY on a near-miss, one line to fix.  The cost of
 # the other reading is a silent ALLOW of a marker delete, which is the act itself.
 _ENABLE_COMPOUND_RX = re.compile(
     r"\A\s*"
+    r"\$(?P<pref>[A-Za-z_]\w*)\s*=\s*'(?P<prefvalue>[^']*)'\s*;\s*"
     r"\$(?P<var>[A-Za-z_]\w*)\s*=\s*'(?P<literal>[^']*)'\s*;\s*"
     r"Set-Content\s+-LiteralPath\s+'(?P<receipt>[^']*)'\s+-Value\s+\$(?P<value>[A-Za-z_]\w*)"
     r"\s+-NoNewline\s+-Encoding\s+utf8\s+-ErrorAction\s+Stop\s*;\s*"
@@ -643,6 +716,31 @@ _ENABLE_COMPOUND_RX = re.compile(
     r"\s*\Z",
     re.I,
 )
+
+
+_ENABLE_PREFERENCE_HEAD_RX = re.compile(
+    r"\A\s*\$" + ENABLE_PREFERENCE_VARIABLE + r"\s*=\s*'(?P<value>[^']*)'\s*;", re.I
+)
+
+
+def _enable_preference_gap(command):
+    """O128: does this near-miss differ from the canonical shape in the LEADING preference?
+
+    Returns a one-clause diagnosis, or ``""`` when the input DOES open with
+    ``$ErrorActionPreference = 'Stop'`` and the near-miss is somewhere else.  Worth the few
+    lines: the preference arm is the newest one, so a compound written against the rev-19
+    register is the near-miss most likely to arrive in the field, and it also keeps ``O128``
+    OUT of the refusal line for the inputs that already carry the preference -- so the S101
+    rows and the O128 rows are separately attributable instead of sharing one catch-all.
+    """
+    head = _ENABLE_PREFERENCE_HEAD_RX.match(command or "")
+    if head is None:
+        return "; this input does not OPEN with $ErrorActionPreference = 'Stop' (O128)"
+    if head.group("value").strip().lower() != ENABLE_PREFERENCE_VALUE:
+        return "; this input opens with a preference of '%s', not 'Stop' (O128)" % (
+            head.group("value"),
+        )
+    return ""
 
 
 def _marker_path_norm(ctx):
@@ -659,6 +757,14 @@ def _canonical_enable_literal(ctx):
         return None
     match = _ENABLE_COMPOUND_RX.match(ctx.command or "")
     if not match:
+        return None
+    # O128: the LEADING preference statement, and it must be the preference variable set to
+    # `Stop`.  `$anythingElse = 'Stop'` opening the compound is not the arm that closes the
+    # unbound-parameter class, and `$ErrorActionPreference = 'Continue'` is that arm turned
+    # off.  Both are refused.
+    if match.group("pref").lower() != ENABLE_PREFERENCE_VARIABLE:
+        return None
+    if match.group("prefvalue").strip().lower() != ENABLE_PREFERENCE_VALUE:
         return None
     variable = match.group("var").lower()
     if variable != ENABLE_LITERAL_VARIABLE or match.group("value").lower() != variable:
@@ -708,6 +814,16 @@ def _enable_act_allowed(ctx):
     False means "some other shape, judge it generically".  Raises Deny when it IS the
     canonical act and a condition failed -- S98 (the receipt is already present) fires
     first, because a spent authorization settles the input before anything else is read.
+
+    S105/O126 -- THE ENABLE ACT IS VENUE-BOUND, and the venue is checked AFTER the receipt
+    state and BEFORE the literal.  After, because S98's answer is a standing fact about the
+    board that is true at every venue and must be reported as such: an operator holding a
+    spent authorization needs to be told the authorization is spent, not that they are in
+    the wrong directory.  Before the literal, because a lane may not be told that its
+    literal was well-formed.  Without this test the exception is not venue-bound at all: a
+    worktree lane's hook evaluates the SAME absolute board paths and would admit the
+    compound the moment the six receipts exist -- before the hub has verified $R or
+    installed the task (S105).
     """
     literal = _canonical_enable_literal(ctx)
     if literal is None:
@@ -715,6 +831,15 @@ def _enable_act_allowed(ctx):
     ok, why = _kill_switch_receipts_ok(ctx)
     if not ok:
         raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)
+    if not ctx.at_board_venue:
+        raise Deny(
+            "NA-2",
+            "the canonical 0.2 enable is refused: it is the BOARD-ROOTED actor's act and "
+            "--project-dir is %s, not %s -- a worktree value or a missing/empty argument "
+            "means exception (i) does not apply, because a lane's hook evaluates the same "
+            "absolute board paths (S105/O126)"
+            % (ctx.project_dir or "<absent>", ctx.board_root),
+        )
     ok, why = _enable_literal_ok(literal)
     if not ok:
         raise Deny("NA-2", "the canonical 0.2 enable is refused: %s" % why)
@@ -743,17 +868,25 @@ def _refuse_marker_delete_outside_the_act(ctx, acts):
     verb = "deleting" if "delete" in acts else "moving"
     receipt = _enable_receipt_path_norm(ctx)
     if any(norm(token) == receipt for token in tokens(ctx.command)):
-        # S101 is named here as well as S99/O118 because the rev-18 shape -- which WAS the
-        # canonical form one revision ago -- now lands on exactly this line, and an
-        # operator holding a rev-18 compound needs to be told which degree of freedom
-        # closed rather than being left to re-derive it.
+        # S101 and O128 are named here as well as S99/O118 because BOTH superseded shapes
+        # -- the rev-18 compound and the rev-19 compound, each of which WAS the canonical
+        # form one revision ago -- land on exactly this line, and an operator holding one of
+        # them needs to be told which degree of freedom closed rather than being left to
+        # re-derive it.  The line names every arm of the current shape; which one a given
+        # near-miss dropped is one diff away, and a near-miss is one line to fix.
         raise Deny(
             "NA-2",
             "%s %s outside the canonical enable is never authorized; naming receipts/%s "
             "in a non-canonical shape does not make this the dedicated act (S99/O118), and "
-            "the canonical shape is the FAIL-CLOSED one: -ErrorAction Stop on both acts "
-            "with the read-back throw between them (S101)"
-            % (verb, KILL_SWITCH_MARKER_NAME, KILL_SWITCH_ENABLE_RECEIPT),
+            "the canonical shape is the FAIL-CLOSED one: it OPENS with "
+            "$ErrorActionPreference = 'Stop', then -ErrorAction Stop on both acts with the "
+            "read-back throw between them (S101)%s"
+            % (
+                verb,
+                KILL_SWITCH_MARKER_NAME,
+                KILL_SWITCH_ENABLE_RECEIPT,
+                _enable_preference_gap(ctx.command),
+            ),
         )
     raise Deny(
         "NA-2",
@@ -869,12 +1002,14 @@ def _na2_decide(ctx, path_norm, acts, source):
     # `Write`, `Edit` and shell `Set-Content` of the plan all exit 2), yet re-ratification
     # (plan 1.3) and 0.2's interruption recovery both require exactly that.  What separates
     # the amendment actor from a lane is not the TOOL and not the LENGTH -- both were tried
-    # and both are forgeable by a lane -- it is the VENUE: `CLAUDE_PROJECT_DIR` is set by
-    # the harness per project root, no lane is ever rooted at the board (the wrapper refuses
-    # `workdir-is-board-root`), and a lane's tool input cannot reach this hook process's
-    # environment (O88).  Delete/move stays DENIED at every venue: the guard on an amendment
-    # is that plan 1.3 re-hashes and re-ratifies it, and there is nothing to re-hash after a
-    # delete.
+    # and both are forgeable by a lane -- it is the VENUE, and since O126 the venue rides on
+    # ARGV: `--project-dir` is substituted by Claude Code from `${CLAUDE_PROJECT_DIR}` in
+    # the registered command, no lane is ever rooted at the board (the wrapper refuses
+    # `workdir-is-board-root`), and a lane's tool input cannot set a command-line argument.
+    # The environment variable this argument is substituted FROM is not read here: it was
+    # measured ABSENT from real hook processes, which is why the rev-19 mechanism never
+    # fired.  Delete/move stays DENIED at every venue: the guard on an amendment is that
+    # plan 1.3 re-hashes and re-ratifies it, and there is nothing to re-hash after a delete.
     surface = _manifest_surface(ctx, path_norm)
     if surface is not None:
         if "delete" in acts or "move" in acts:
@@ -890,8 +1025,8 @@ def _na2_decide(ctx, path_norm, acts, source):
         raise Deny(
             "NA-2",
             "writing the ratified manifest surface %s needs NA-2 exception (iv), and this "
-            "session is not the board-rooted actor: CLAUDE_PROJECT_DIR is %s, not %s "
-            "(absent or a worktree value means the exception does not apply -- O124)"
+            "session is not the board-rooted actor: --project-dir is %s, not %s (absent, "
+            "empty or a worktree value means the exception does not apply -- O124/O126)"
             % (path_norm, ctx.project_dir or "<absent>", ctx.board_root),
         )
 
@@ -958,6 +1093,58 @@ _NA3_RULES = (
     (re.compile(r"\bcodex\b[^\n;|&]*\blogin\b", re.I), "`codex login` is the owner's own keystrokes"),
 )
 
+# ---- O129: PERSISTENT-scope assignment of the five names the hook itself is steered by ----
+#
+# The prefix rule above is about CREDENTIALS.  This one is about the hook's own inputs, and
+# the act it denies is narrower and sharper: a PERSISTENT write (`setx`, or
+# `[Environment]::SetEnvironmentVariable(..., 'User'|'Machine')`) of `CLAUDE_PROJECT_DIR`,
+# `MLV_BOARD_ROOT`, `MLV_LANE_PROMPT`, `MLV_REQUIRED_CHECKS_SNAPSHOT` or
+# `MLV_CLIP_CACHE_ROOT`.  Those five decide, respectively, the registered venue argument's
+# source, the board root every path in NA-2/NA-7/NA-10 is judged against, the clip
+# authorization NA-4 reads, the required-checks snapshot NA-9 fails closed without, and the
+# cache prefix NA-4 guards.  A persistent write is INHERITED BY EVERY LATER HOOK PROCESS on
+# this machine: it does not break a rule, it MOVES the ground the rules stand on, and it
+# survives the session that made it.  A plain in-process `$env:MLV_BOARD_ROOT = ...` is NOT
+# this act -- it dies with its shell, reaches no hook process, and the test carries an
+# explicit ALLOW control for it so the distinction cannot quietly widen into a ban on
+# reading or setting these names at all.
+#
+# FAIL-CLOSED READINGS (recorded, 0.05 fifth review delta):
+#   * NAME and SCOPE are matched case-insensitively.  Windows environment variable names are
+#     case-insensitive and `[EnvironmentVariableTarget]` parses case-insensitively, so
+#     `setx mlv_board_root` is the same act as `setx MLV_BOARD_ROOT`.
+#   * The scope is looked for ANYWHERE in the statement after the name, as a quoted literal
+#     OR as `[EnvironmentVariableTarget]::User|Machine`, rather than as the strict third
+#     positional argument.  Parsing PowerShell argument positions from text is exactly the
+#     kind of near-parse that fails open on a line-continuation or a splatted value.
+#   * `setx` has NO process-scope form at all -- every `setx` is persistent -- so the name
+#     alone is enough there.
+_NA3_PERSISTENT_NAMES = (
+    r"(?:CLAUDE_PROJECT_DIR|MLV_BOARD_ROOT|MLV_LANE_PROMPT|MLV_REQUIRED_CHECKS_SNAPSHOT"
+    r"|MLV_CLIP_CACHE_ROOT)"
+)
+_NA3_PERSISTENT_SCOPE = (
+    r"(?:['\"](?:User|Machine)['\"]|\[EnvironmentVariableTarget\]\s*::\s*(?:User|Machine))"
+)
+_NA3_PERSISTENT_RULES = (
+    (
+        re.compile(r"\bsetx\s+['\"]?" + _NA3_PERSISTENT_NAMES + r"\b", re.I),
+        "`setx` writes a PERSISTENT %s, inherited by every later hook process (O129)",
+    ),
+    (
+        re.compile(
+            r"setenvironmentvariable\s*\(\s*['\"]"
+            + _NA3_PERSISTENT_NAMES
+            + r"['\"][^\n;|&]*"
+            + _NA3_PERSISTENT_SCOPE,
+            re.I,
+        ),
+        "a User/Machine-scope SetEnvironmentVariable writes a PERSISTENT %s, inherited by "
+        "every later hook process (O129)",
+    ),
+)
+_NA3_PERSISTENT_NAME_RX = re.compile(_NA3_PERSISTENT_NAMES, re.I)
+
 # ---- the `claude auth ...` arm, bounded by the REGISTER and not by the card's phrase ----
 #
 # ``never-authorized.json`` (schema v17) row NA-3 reads, VERBATIM:
@@ -1014,6 +1201,11 @@ def rule_na3(ctx):
     for pattern, why in _NA3_RULES:
         if pattern.search(text):
             raise Deny("NA-3", why)
+    for pattern, why in _NA3_PERSISTENT_RULES:
+        match = pattern.search(text)
+        if match:
+            named = _NA3_PERSISTENT_NAME_RX.search(match.group(0))
+            raise Deny("NA-3", why % (named.group(0).upper() if named else "hook input"))
     why = _na3_claude_auth(text)
     if why:
         raise Deny("NA-3", why)
@@ -1387,13 +1579,119 @@ def rule_na9(ctx):
     raise Deny("NA-9", "weakens the required-check binding (strict or app_id)")
 
 
-RULES = (rule_na1, rule_na2, rule_na3, rule_na4, rule_na6, rule_na7, rule_na8, rule_na9)
+# ------------------------------------------------------------------------ NA-10
+#
+# O129 (hub extension) -- A LANE EDITING ITS OWN GATE.  This hook is re-read from disk on
+# every tool call, and so is `.claude/settings.json`: an editing lane that rewrites either
+# one is not making a change that takes effect at some later merge, it is making a change
+# that takes effect on ITS NEXT TOOL CALL.  Nothing else in the register covered it -- NA-2
+# guards `.claude-state/**` and `.claude/ANALYSIS_LOG.md`, NA-7 explicitly ALLOWS the lane's
+# own worktree, and NA-6 is about tests -- so the three files that constitute the gate were
+# the one part of the tree the gate did not defend.
+#
+# The predicate is (TAIL, VENUE) and nothing else.  UNDER ANY ROOT, because every lane
+# worktree carries its own copy and it is that copy which governs that lane; and denied
+# unless `--project-dir` equals the board root, because hook evolution stays hub-authored at
+# the board venue, where the hub's own subagents run.  The board-venue ALLOW is not a
+# loophole a lane can reach: the wrapper refuses `workdir-is-board-root`, so no lane is ever
+# started there, and the argument is fixed by the registration a lane may no longer edit.
+#
+# FAIL-CLOSED READINGS (recorded, 0.05 fifth review delta):
+#   * The shell arm scans BOTH the parsed write destinations AND -- whenever the command
+#     exhibits any destructive act at all -- every token of the command.  A delete or a move
+#     of the gate is as much "a lane editing its own gate" as a write is, and the register's
+#     word is "any write" only because deleting your own hook is the same act with fewer
+#     steps.  Over-scanning costs a visible DENY; under-scanning costs the gate.
+#   * The LIMIT is unchanged and restated: an interpreter one-liner is invisible to a
+#     text-matching hook.  The layers behind this rule are the wrapper's `hook-drifted` and
+#     `hook-unregistered` refusals at dispatch and the sol review of every PR diff.
+#
+# NA-10 runs LAST, in register order.  Every specified row is attributable there: NA-7
+# allows a lane's own worktree by construction, and none of the three tails is an NA-2
+# protected path, so nothing else fires first and steals the reason line.
+
+
+def _na10_guarded(path_norm):
+    """Does this path END with one of the three gate tails, under any root?"""
+    if not path_norm:
+        return False
+    return any(
+        path_norm == tail or path_norm.endswith("/" + tail) for tail in NA10_GUARDED_TAILS
+    )
+
+
+def _na10_deny(ctx, path_norm, how):
+    raise Deny(
+        "NA-10",
+        "%s %s edits this lane's OWN gate, which is re-read on every tool call; it is "
+        "allowed only for the board-rooted actor and --project-dir is %s, not %s (O129)"
+        % (how, path_norm, ctx.project_dir or "<absent>", ctx.board_root),
+    )
+
+
+def rule_na10(ctx):
+    if ctx.at_board_venue:
+        return  # hook evolution is hub-authored, at the board venue
+    if ctx.tool in FILE_TOOLS:
+        if _na10_guarded(ctx.path_norm):
+            _na10_deny(ctx, ctx.path_norm, ctx.tool)
+        return
+    candidates = [norm(dest) for dest in _write_destinations(ctx.command)]
+    if shell_acts(ctx.command):
+        candidates.extend(norm(token) for token in tokens(ctx.command))
+    for path_norm in candidates:
+        if _na10_guarded(path_norm):
+            _na10_deny(ctx, path_norm, "a shell write")
+
+
+RULES = (
+    rule_na1,
+    rule_na2,
+    rule_na3,
+    rule_na4,
+    rule_na6,
+    rule_na7,
+    rule_na8,
+    rule_na9,
+    rule_na10,
+)
 
 
 # -------------------------------------------------------------------------- main
 
 
-def decide(payload):
+class _ArgvError(Exception):
+    """argparse wanted to exit; this hook owns its exit codes and its one stderr line."""
+
+
+class _HookArgumentParser(argparse.ArgumentParser):
+    """argparse that RAISES instead of exiting.
+
+    Two reasons, both contractual.  (1) The contract is exit 2 with exactly ONE line on
+    stderr; argparse's own failure path exits 2 with a usage block of several lines, which a
+    reader would have to parse to tell a rejected argument from a fired rule.  (2) An
+    UNKNOWN argument must be a hook-error, never a silent acceptance: ``parse_known_args``
+    would swallow a mistyped ``--project-dir`` and leave the hook running with no venue,
+    which is the fail-open shape O126 exists to close.
+    """
+
+    def error(self, message):
+        raise _ArgvError(message)
+
+    def exit(self, status=0, message=None):
+        raise _ArgvError(message or "argument parsing stopped")
+
+
+def parse_argv(argv):
+    """-> the ``--project-dir`` value (possibly None).  Raises ``_ArgvError`` on anything else."""
+    parser = _HookArgumentParser(
+        prog="mlv-never-authorized.py", add_help=False, allow_abbrev=False
+    )
+    parser.add_argument("--project-dir", dest="project_dir", default=None)
+    return parser.parse_args(argv).project_dir
+
+
+def decide(payload, project_dir):
     """-> (exit_code, stderr_line).  Never raises for a rule; raises only on a bug."""
     if not isinstance(payload, dict):
         return EXIT_DENY, "hook-error: payload was not a JSON object"
@@ -1408,7 +1706,7 @@ def decide(payload):
     if tool not in MATCHED_TOOLS:
         return EXIT_ALLOW, ""
     try:
-        ctx = Ctx(tool, tool_input)
+        ctx = Ctx(tool, tool_input, project_dir)
         for rule in RULES:
             rule(ctx)
     except Deny as deny:
@@ -1419,6 +1717,15 @@ def decide(payload):
 
 
 def main():
+    try:
+        project_dir = parse_argv(sys.argv[1:])
+    except _ArgvError as error:
+        sys.stderr.write(
+            "hook-error: unusable command line (%s); the registered command is "
+            "`<python> mlv-never-authorized.py --project-dir <path>`\n"
+            % str(error).replace("\n", " ")
+        )
+        return EXIT_DENY
     try:
         raw = sys.stdin.read()
     except Exception as error:
@@ -1433,7 +1740,7 @@ def main():
         sys.stderr.write("hook-error: stdin was not one JSON object (%s)\n" % type(error).__name__)
         return EXIT_DENY
     try:
-        code, line = decide(payload)
+        code, line = decide(payload, project_dir)
     except Exception as error:  # any bug in a rule denies; this hook never fails open
         sys.stderr.write("hook-error: %s: %s\n" % (type(error).__name__, error))
         return EXIT_DENY
