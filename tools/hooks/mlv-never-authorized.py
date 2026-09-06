@@ -9,7 +9,7 @@ exit 2 : DENY, with exactly ONE line on stderr, ``NA-<n>: <reason>``.
 exit 2 : fail-CLOSED, with ``hook-error: <detail>`` on stderr, for ANY exception,
          malformed or empty stdin, a non-object payload, or a missing ``tool_name``.
 
-This is the PROJECT hook described by ``never-authorized.json`` (schema v14) and by
+This is the PROJECT hook described by ``never-authorized.json`` (schema v15) and by
 ``prompts/v2/card-TOOL-HOOK-ENFORCE-1.md``.  It is NOT the global machine hook
 ``~/.claude/hooks/check-continuity-boundaries.py``, which is shared by every project on
 this machine and fails OPEN.  This one fails CLOSED and is tracked on the same ref as the
@@ -85,6 +85,9 @@ KILL_SWITCH_RECEIPTS = (
     "0.6-ratio-guard.json",
     "0.5-factory-frozen.json",
 )
+# S98: the 0.2 enable is ONE-SHOT.  0.2 writes this receipt in the SAME guarded action as
+# the delete, so its PRESENCE is the proof the one authorization was already spent.
+KILL_SWITCH_ENABLE_RECEIPT = "0.2-loop-enabled.json"
 PROVENANCE_KEYS = ("roadmapParityReceiptSha256", "queueSha256", "productLiveCount")
 PROVENANCE_PRODUCT_LIVE_COUNT = 15
 
@@ -429,12 +432,30 @@ def _is_na2_protected(path_norm):
 
 
 def _kill_switch_receipts_ok(ctx):
-    """Exception (i): every named 0.2 receipt exists and validates.
+    """Exception (i): every named 0.2 receipt exists and validates, AND the enable is unspent.
 
     The execution-control arm selects the NEWEST ``execution-control-*.json`` by its
     ``recordedUtc``.  A receipt LACKING ``recordedUtc`` is INVALID (O105) and its mere
     presence makes the newest undecidable, so the whole exception fails closed.
+
+    S98 -- THE ENABLE IS ONE-SHOT, and this is the first arm because it is the decisive
+    one.  Exception (i) opens only while ``receipts/0.2-loop-enabled.json`` is ABSENT.  0.2
+    creates that receipt in the same guarded action as the delete, so once it exists the
+    single ratified authorization has been spent: a RE-ARMED marker (creating the kill
+    switch is always allowed, exception (iii)) cannot then be deleted again without a NEWLY
+    ratified authorization.  Without this arm the six receipts would be a standing key --
+    valid forever, re-usable on every re-arm -- which is a gate that opens once and never
+    closes.  Fail-closed: PRESENCE of the path is enough; it is not parsed, so an
+    unreadable or truncated enable receipt still refuses.
     """
+    enable_receipt = ctx.receipt(KILL_SWITCH_ENABLE_RECEIPT)
+    if os.path.exists(enable_receipt):
+        return (
+            False,
+            "the 0.2 enable is ONE-SHOT and receipts/%s is PRESENT, so this authorization "
+            "is spent -- a re-armed marker needs a newly ratified authorization (S98)"
+            % KILL_SWITCH_ENABLE_RECEIPT,
+        )
     for name in KILL_SWITCH_RECEIPTS:
         if read_json(ctx.receipt(name)) is None:
             return False, "receipt %s is absent or does not validate" % name
@@ -531,7 +552,7 @@ def _na2_decide(ctx, path_norm, acts, source):
                 return
             raise Deny(
                 "NA-2",
-                "deleting WORKSTREAM-LOOP-DISABLED needs the 0.2 receipts: %s" % why,
+                "deleting WORKSTREAM-LOOP-DISABLED is refused: %s" % why,
             )
         # Exception (iii): CREATING the kill switch is ALWAYS allowed, any tool, any verb.
         return
@@ -614,8 +635,55 @@ _NA3_RULES = (
         "SetEnvironmentVariable of a name starting ANTHROPIC_/OPENAI_/CLAUDE_CODE_",
     ),
     (re.compile(r"\bcodex\b[^\n;|&]*\blogin\b", re.I), "`codex login` is the owner's own keystrokes"),
-    (re.compile(r"\bclaude\b[^\n;|&]*\bauth\b", re.I), "`claude auth` is the owner's own keystrokes"),
 )
+
+# ---- the `claude auth ...` arm, bounded by the REGISTER and not by the card's phrase ----
+#
+# ``never-authorized.json`` (schema v15) row NA-3 reads, VERBATIM:
+#
+#     claude auth login|logout, codex login, or assignment (X=, export, $env:, set, setx)
+#     of any variable starting ANTHROPIC_, OPENAI_, CLAUDE_CODE_
+#
+# so the acts the register never authorizes are `login` and `logout`.  The card's prose
+# says only "claude auth", and this hook shipped a `\bclaude\b...\bauth\b` catch-all that
+# also denied `claude auth status` -- a READ-ONLY identity check that MUST keep running.
+# The board's account-rotation procedure settles CLI-versus-desktop identity with exactly
+# `claude auth status --json`, and from plan step 0.1 onward the hub session that runs it
+# is itself under this hook; denying it would break the one procedure that detects an
+# account drift, while stopping no never-authorized act.
+#
+# FAIL-CLOSED READING OF THE GAP (recorded, 0.05 review).  The register names two verbs;
+# this arm admits exactly ONE -- `status`, alone or with any flags.  EVERY other
+# `claude ... auth ...` form is DENIED: `auth` with no subcommand, and any verb this hook
+# does not recognise.  The alternative -- a bare `login|logout` denylist that matches the
+# register literally -- fails OPEN on the next auth verb the CLI grows, and NA-3 is a
+# fail-closed rule.  The cost of this reading is a false DENY on a future read-only verb,
+# which is visible and one line to fix; the cost of the other is a silent ALLOW.
+_NA3_CLAUDE_AUTH_RX = re.compile(r"\bclaude\b(?P<rest>[^\n;|&<>]*\bauth\b[^\n;|&<>]*)", re.I)
+_NA3_AUTH_SPLIT_RX = re.compile(r"\bauth\b", re.I)
+_NA3_LOGIN_RX = re.compile(r"\b(?:login|logout)\b", re.I)
+NA3_CLAUDE_AUTH_READONLY_VERB = "status"
+
+
+def _na3_claude_auth(text):
+    """The `claude auth ...` arm.  Returns a one-line DENY reason, or None to ALLOW."""
+    for match in _NA3_CLAUDE_AUTH_RX.finditer(text):
+        segment = match.group("rest")
+        if _NA3_LOGIN_RX.search(segment):
+            return "`claude auth login|logout` is the owner's own keystrokes (register NA-3)"
+        verbs = []
+        for word in _NA3_AUTH_SPLIT_RX.split(segment, 1)[-1].split():
+            word = word.strip("\"'")
+            if not word or word.startswith("-"):
+                continue  # a flag, in any order
+            verbs.append(word.lower())
+        if verbs == [NA3_CLAUDE_AUTH_READONLY_VERB]:
+            continue  # read-only `claude auth status [--json]`: the rotation check
+        return (
+            "`claude auth` without the one read-only subcommand `status` cannot be proven "
+            "read-only (register NA-3 names login|logout; fail-closed on any other verb)"
+        )
+    return None
 
 
 def rule_na3(ctx):
@@ -625,6 +693,9 @@ def rule_na3(ctx):
     for pattern, why in _NA3_RULES:
         if pattern.search(text):
             raise Deny("NA-3", why)
+    why = _na3_claude_auth(text)
+    if why:
+        raise Deny("NA-3", why)
 
 
 # ------------------------------------------------------------------------- NA-4

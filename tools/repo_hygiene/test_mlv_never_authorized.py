@@ -127,6 +127,9 @@ CASES = [
         "input": {"command": "claude auth logout"},
         "expect": "DENY",
         "na": "NA-3",
+        # Attributable to the register's login|logout arm, not to the fail-closed arm that
+        # catches an unrecognised auth verb -- see the `na3` group below.
+        "reason_contains": "login|logout",
     },
     {
         "name": "control anthropic api key assignment",
@@ -468,12 +471,30 @@ CASES = [
     },
     # ------------------------------------------------- NA-2 exception (i) and (iii)
     {
+        # The ALLOW half of the S98 pair.  Its fixture writes the six receipts and NOT
+        # `0.2-loop-enabled.json`: the enable is unspent, so exception (i) is open.
         "name": "killswitch delete with all six receipts",
         "group": "killswitch",
         "tool": "Bash",
         "input": {"command": 'rm -f "{DUAL}/WORKSTREAM-LOOP-DISABLED"'},
         "expect": "ALLOW",
         "fixture": "receipts_all_six",
+    },
+    {
+        # S98, the DENY half: the SAME six receipts, all valid, differing from the row
+        # above in exactly ONE variable -- `0.2-loop-enabled.json` is now PRESENT, so the
+        # single ratified authorization is spent and a RE-ARMED marker cannot be deleted
+        # again.  `reason_contains` is what makes this row attributable: without it the row
+        # would also pass if the receipt set arm fired, which is what the row above proves
+        # does NOT fire under this fixture.
+        "name": "killswitch delete with all six receipts but the enable receipt present",
+        "group": "killswitch",
+        "tool": "Bash",
+        "input": {"command": 'rm -f "{DUAL}/WORKSTREAM-LOOP-DISABLED"'},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "ONE-SHOT",
+        "fixture": "receipts_all_six_plus_enable",
     },
     {
         "name": "killswitch delete with one receipt absent",
@@ -599,6 +620,55 @@ CASES = [
         },
         "expect": "DENY",
         "na": "NA-6",
+    },
+    # -------------------------------- NA-3's `claude auth` arm, bounded by the REGISTER
+    #
+    # `never-authorized.json` v15 NA-3 names `claude auth login|logout`, not `claude auth`.
+    # These four rows differ from one another in exactly ONE variable -- the auth
+    # subcommand -- so they prove the arm is a GATE and not a wall.  The ALLOW row is
+    # load-bearing: the board's account-rotation procedure runs `claude auth status --json`
+    # from the hub session, which is under this hook from 0.1 onward, and the shipped
+    # catch-all denied it.  The last row records the fail-CLOSED reading of the gap the
+    # register leaves: an auth invocation with no recognised read-only verb still DENIES.
+    #
+    # They are a group of their own rather than additions to `benign`/`control`, because
+    # `test_table_counts_match_the_ratification_receipts` pins those counts to the 0.05
+    # ratification receipts.  Those counts are a historical fact about what was ratified;
+    # growing them would erase it.  (The `claude auth logout` DENY control already covers
+    # the logout verb and stays exactly where it is, at the top of the table.)
+    {
+        "name": "na3 claude auth login",
+        "group": "na3",
+        "tool": "Bash",
+        "input": {"command": "claude auth login"},
+        "expect": "DENY",
+        "na": "NA-3",
+        "reason_contains": "login|logout",
+    },
+    {
+        "name": "na3 claude auth login with flags",
+        "group": "na3",
+        "tool": "PowerShell",
+        "input": {"command": "claude auth login --email someone@example.invalid"},
+        "expect": "DENY",
+        "na": "NA-3",
+        "reason_contains": "login|logout",
+    },
+    {
+        "name": "na3 claude auth status json is read only",
+        "group": "na3",
+        "tool": "Bash",
+        "input": {"command": "claude auth status --json"},
+        "expect": "ALLOW",
+    },
+    {
+        "name": "na3 claude auth with no subcommand fails closed",
+        "group": "na3",
+        "tool": "Bash",
+        "input": {"command": "claude auth"},
+        "expect": "DENY",
+        "na": "NA-3",
+        "reason_contains": "fail-closed",
     },
     # ------------------------------------------------------- the 6 benign ALLOW controls
     {
@@ -733,6 +803,16 @@ def fixture_receipts_all_six(paths):
     return {}
 
 
+def fixture_receipts_all_six_plus_enable(paths):
+    """S98: the six receipts valid AND the ONE-SHOT enable receipt already written."""
+    _kill_switch_receipts(paths)
+    _write(
+        os.path.join(paths["RECEIPTS"], "0.2-loop-enabled.json"),
+        json.dumps({"step": "0.2", "recordedUtc": "2026-09-06T12:00:00Z", "enabled": True}),
+    )
+    return {}
+
+
 def fixture_receipts_missing_one(paths):
     _kill_switch_receipts(paths, omit=("0.6-ratio-guard.json",))
     return {}
@@ -791,6 +871,7 @@ FIXTURES = {
     "clip_authorized": fixture_clip_authorized,
     "existing_receipt": fixture_existing_receipt,
     "receipts_all_six": fixture_receipts_all_six,
+    "receipts_all_six_plus_enable": fixture_receipts_all_six_plus_enable,
     "receipts_missing_one": fixture_receipts_missing_one,
     "receipts_no_recorded_utc": fixture_receipts_no_recorded_utc,
     "receipts_04b_ready": fixture_receipts_04b_ready,
@@ -883,6 +964,14 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
             lines[0].startswith(case["na"] + ":"),
             "expected the %s row to fire, got %r%s" % (case["na"], lines[0], detail),
         )
+        # A register row can fire for the WRONG arm.  Where two rows differ in exactly one
+        # variable and share a rule id, the row asserts the arm by its reason text too.
+        if "reason_contains" in case:
+            self.assertIn(
+                case["reason_contains"],
+                lines[0],
+                "expected the reason to name %r%s" % (case["reason_contains"], detail),
+            )
 
     # ------------------------------------------------------------- structural gates
 
