@@ -152,6 +152,7 @@ drive letter that does not exist), never the board, and they SKIP rather than pr
 
 import datetime
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -165,6 +166,26 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HOOK = os.path.join(REPO_ROOT, "tools", "hooks", "mlv-never-authorized.py")
+
+
+def _load_hook_module():
+    """O175: the hook's OWN module object, loaded directly -- not the suite's independent
+    restatement (``_fixed_set_digest`` below, a SECOND implementation deliberately kept out
+    of sync with the hook's import graph) and not a subprocess.
+
+    Safe to import: ``main()`` below reads stdin only under ``if __name__ == "__main__"``
+    (see the bottom of the hook file), so loading the module by path runs every module-level
+    ``def``/``class``/constant and nothing else -- no I/O, no stdin read.  This is what lets
+    an O175 test assert that the hook's canonicalisation FUNCTION, not a copy of its prose,
+    returns the pinned worked digest.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_mlv_never_authorized_hook_under_test", HOOK
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 REGISTER_ROWS_WITH_DENY_CASES = (
     "NA-1",
@@ -1663,6 +1684,48 @@ CASES = [
             "(S118)",
         ),
         "fixture": "control_06_newer_than_07",
+    },
+    {
+        # O177: an O152 REPAIR of 0.6, ORDER-PRESERVING.  0.4b-i, 0.6 and 0.7 are all
+        # present and valid; the repair's stamp sits STRICTLY BETWEEN 0.4b-i's parsed stamp
+        # and a valid 0.7's, which is the shape O152's non-shrinking rewrite must take
+        # (hub-measured on the tenth commit: an order-preserving repair stamp ALLOWS -- never
+        # the moment of the write, which would re-create the undecidable state the repair
+        # exists to clear).  0.7 is still both the parsed-newest and the SELECTED receipt.
+        "name": "enable canonical compound with an O152 repair of 0.6 stamped between 0.4b-i and a valid 0.7",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_7}",
+                    executionControlSha256="{CONTROL_0_7_SHA}",
+                )
+            )
+        },
+        "expect": "ALLOW",
+        "fixture": "control_o152_repair_06_between_04bi_and_07",
+    },
+    {
+        # O177's DENY partner: the SAME repair, stamped at the MOMENT OF THE WRITE instead
+        # -- later than 0.7's parsed stamp, which re-creates the undecidable state O152's
+        # non-shrinking rewrite exists to clear (hub-measured on the tenth commit: a
+        # write-time repair stamp DENIES).  The parsed-newest valid receipt is then 0.6, a
+        # CHAIN VIOLATION against the SELECTED 0.7 -- the same rule the row above proves,
+        # measured on the repair path rather than on an ordinary restamp.
+        "name": "enable canonical compound with the same O152 repair of 0.6 stamped at the moment of the write",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "the parsed-newest valid execution-control receipt is execution-control-0.6.json, "
+            "but the SELECTED one is execution-control-0.7.json",
+            "CHAIN VIOLATION",
+            "(S118)",
+        ),
+        "fixture": "control_o152_repair_06_at_write_time",
     },
     {
         # O152, AND THE ROW THE "EXCLUDE" READING FAILS.  0.7 is PRESENT and invalid (no
@@ -3336,6 +3399,14 @@ FORGED_CONTROL_STEP = "forged"
 # The default two-receipt chain, and the stamps the pre-S118 fixture already used.
 CONTROL_STAMP_06 = "2026-09-06T09:00:00Z"
 CONTROL_STAMP_07 = "2026-09-06T11:00:00Z"
+# O177: a THREE-receipt chain {0.4b-i, 0.6, 0.7} so an O152 repair of 0.6 has a stamp either
+# side of it to sit between -- 0.4b-i's parsed stamp below it, a valid 0.7's above it.  The
+# ALLOW pair is order-preserving (0.4b-i < 0.6-repaired < 0.7); the DENY pair restamps the
+# SAME repair at the moment of the write, i.e. later than 0.7's, and nothing else changes.
+CONTROL_STAMP_O177_04B_I = "2026-09-06T08:00:00Z"
+CONTROL_STAMP_O177_06_REPAIRED_BETWEEN = "2026-09-06T10:00:00Z"
+CONTROL_STAMP_O177_07 = "2026-09-06T12:00:00Z"
+CONTROL_STAMP_O177_06_REPAIRED_AT_WRITE = "2026-09-06T13:00:00Z"
 # `roadmapParityReceiptSha256` is bound to bytes that do not exist until the fixture writes
 # them, so the payload carries a TOKEN and `_kill_switch_receipts` substitutes the real
 # digest at write time.  A row that wants a WRONG digest passes an explicit value instead,
@@ -4135,6 +4206,42 @@ def fixture_control_06_newer_than_07(paths):
     return {VENUE_KEY: paths["BOARD"]}
 
 
+def fixture_control_o152_repair_06_between_04bi_and_07(paths):
+    """O177: an O152 repair of 0.6, order-preserving.
+
+    Three valid chain receipts -- 0.4b-i, 0.6 and 0.7 -- with 0.6's stamp sitting strictly
+    between 0.4b-i's parsed stamp and a valid 0.7's.  0.7 remains both the parsed-newest and
+    the SELECTED receipt, so this is the ALLOW half of O177's pair.
+    """
+    _kill_switch_receipts(
+        paths,
+        stamps={
+            "0.4b-i": CONTROL_STAMP_O177_04B_I,
+            "0.6": CONTROL_STAMP_O177_06_REPAIRED_BETWEEN,
+            "0.7": CONTROL_STAMP_O177_07,
+        },
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_o152_repair_06_at_write_time(paths):
+    """O177's DENY partner: the SAME repair, stamped at the MOMENT OF THE WRITE.
+
+    Identical to `fixture_control_o152_repair_06_between_04bi_and_07` except 0.6's stamp,
+    which now sorts LATER than 0.7's -- exactly the undecidable state an O152 repair must
+    never carry, and the moment-of-write stamp O177 forbids.
+    """
+    _kill_switch_receipts(
+        paths,
+        stamps={
+            "0.4b-i": CONTROL_STAMP_O177_04B_I,
+            "0.6": CONTROL_STAMP_O177_06_REPAIRED_AT_WRITE,
+            "0.7": CONTROL_STAMP_O177_07,
+        },
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
 def fixture_control_07_invalid_beside_valid_06(paths):
     """O152, STRICT.  0.7 is PRESENT and invalid (no `queueSha256`); 0.6 is valid.
 
@@ -4625,6 +4732,9 @@ FIXTURES = {
     "control_parity_mismatch": fixture_control_parity_mismatch,
     "control_product_live_14": fixture_control_product_live_14,
     "control_06_newer_than_07": fixture_control_06_newer_than_07,
+    # O177
+    "control_o152_repair_06_between_04bi_and_07": fixture_control_o152_repair_06_between_04bi_and_07,
+    "control_o152_repair_06_at_write_time": fixture_control_o152_repair_06_at_write_time,
     "control_07_invalid_beside_valid_06": fixture_control_07_invalid_beside_valid_06,
     "control_selected_absent": fixture_control_selected_absent,
     "chain_035_and_06_at_board": fixture_chain_035_and_06_at_board,
@@ -5082,7 +5192,20 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # falsifier groups -- `control` 3, `round1` 16, `round2` 12, `failclosed` 4, `benign`
         # 6 -- are untouched, as are `carveout`, `manifest`, `na3`, `na3_persistent` and
         # `na10`.
-        self.assertEqual(counts.get("killswitch"), 110, "110 kill-switch / 0.2-enable rows")
+        #
+        # PINNED DELIBERATELY, 0.05 TWELFTH review delta (O177): 110 -> 112, two new rows and
+        # NO row dropped, no row re-expected.  Both are an O152 repair of `0.6` on a THREE-
+        # receipt chain {0.4b-i, 0.6, 0.7}: one ALLOW with the repair's stamp strictly
+        # BETWEEN 0.4b-i's parsed stamp and a valid 0.7's (order-preserving, the shape a
+        # repair must take), and one DENY with the SAME repair stamped at the moment of the
+        # write instead -- later than 0.7's, which makes the parsed-newest valid receipt 0.6
+        # again, a CHAIN VIOLATION against the SELECTED 0.7.  O175's worked-digest and
+        # pinned-command tests add no CASES row: they assert the hook's own canonicalisation
+        # function directly, imported by `_load_hook_module`, and belong to no `group`. The
+        # historical falsifier groups -- `control` 3, `round1` 16, `round2` 12, `failclosed`
+        # 4, `benign` 6 -- are untouched, as are `carveout`, `manifest`, `na3`,
+        # `na3_persistent` and `na10`.
+        self.assertEqual(counts.get("killswitch"), 112, "112 kill-switch / 0.2-enable rows")
         # PINNED DELIBERATELY, 0.05 fourth review delta (O125): 3 -> 4.  The carve-out is a
         # PATH permission, not a TOOL permission, and the pair that proves it -- the `Write`
         # create ALLOW beside the shell `Set-Content` create DENY -- must not be separable.
@@ -5391,6 +5514,84 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         )
         self.assertNotEqual(malformed, derived)
         self.assertEqual(malformed.lower(), derived)
+
+    def test_o175_worked_digest_over_a_fixed_three_path_hashes_object(self):
+        """O175: a WORKED EXAMPLE, literal end to end.
+
+        The `hashes` object, its canonical `<sha256>  <path>` lines and the expected digest
+        are all written out here rather than derived -- the digest was computed ONCE by the
+        pinned command,
+        `python -c "import hashlib,sys,json;h=json.load(open(sys.argv[1]))['hashes'];
+        print(hashlib.sha256('\\n'.join(sorted(h[k]+'  '+k for k in h)).encode()).hexdigest())"
+        <receipt>`, against a receipt carrying exactly this `hashes` object, and pasted below
+        as a literal.  The assertion is against the HOOK's own canonicalisation function,
+        loaded by `_load_hook_module` -- not the suite's independent restatement
+        (`_fixed_set_digest` above) that every other test in this file uses -- because the
+        whole point of O175 is that the register's sentence and the hook's code must agree,
+        and a comparison against the suite's own second implementation would prove nothing
+        about the hook at all.
+        """
+        hashes = {
+            "tools/hooks/mlv-never-authorized.py": (
+                "9e04fdac339ac81a80705d7b544ed99ff7fdef88216e0f76ac3567a408aada17"
+            ),
+            "tools/repo_hygiene/test_mlv_never_authorized.py": (
+                "62ae321defcdf5f970a29c92c47cbdff27a0bb435a875196247d3c11dc61fef3"
+            ),
+            "tools/hooks/test_registration_path_local.py": (
+                "8f6e02b42a2e89d22a13c80e71d596f7315851d133f7c9ff66243b5cada04142"
+            ),
+        }
+        # The three `<sha256>  <path>` lines (two spaces), sorted as plain strings -- written
+        # out so the ordering itself is a literal, not merely the digest at the end of it.
+        expected_lines = [
+            "62ae321defcdf5f970a29c92c47cbdff27a0bb435a875196247d3c11dc61fef3  "
+            "tools/repo_hygiene/test_mlv_never_authorized.py",
+            "8f6e02b42a2e89d22a13c80e71d596f7315851d133f7c9ff66243b5cada04142  "
+            "tools/hooks/test_registration_path_local.py",
+            "9e04fdac339ac81a80705d7b544ed99ff7fdef88216e0f76ac3567a408aada17  "
+            "tools/hooks/mlv-never-authorized.py",
+        ]
+        self.assertEqual(sorted(value + "  " + path for path, value in hashes.items()), expected_lines)
+        # Computed ONCE, by hand, with the pinned command against a receipt carrying exactly
+        # this `hashes` object -- pasted here as a literal, never re-derived by this test.
+        expected_digest = "bac6f11665439b302c323725ac968299cd919ecac6e45c5c3b9d46d82d6e2327"
+        self.assertEqual(
+            hashlib.sha256("\n".join(expected_lines).encode("utf-8")).hexdigest(),
+            expected_digest,
+        )
+        hook_module = _load_hook_module()
+        self.assertEqual(hook_module._fixed_set_digest(hashes), expected_digest)
+
+    def test_o175_the_pinned_command_and_the_hook_agree_on_a_fixture_receipt(self):
+        """O175: the plan's CANONICAL COMMAND, run as a real subprocess, against the hook's own function.
+
+        A structural cross-check beside the worked example above: the register's
+        `fixedSetEqualityProof` sentence names an exact command line, and this test runs
+        THAT TEXT -- unmodified, as a subprocess against a receipt written to disk -- and
+        asserts its stdout equals what the hook's own `_fixed_set_digest` computes for the
+        same `hashes`.  The command and the code are two independent readings of the same
+        paragraph; a hub that skipped running the assertion, or a hook that silently drifted
+        from the paragraph, would separate them, and this is what would catch it.
+        """
+        hashes = _board_hashes(self.paths, "0.7")
+        receipt_path = os.path.join(self.paths["BOARD"], "o175-worked-digest-receipt.json")
+        _write(receipt_path, json.dumps({"hashes": hashes}))
+        pinned_command = (
+            "import hashlib,sys,json;h=json.load(open(sys.argv[1]))['hashes'];"
+            "print(hashlib.sha256('\\n'.join(sorted(h[k]+'  '+k for k in h))"
+            ".encode()).hexdigest())"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", pinned_command, receipt_path],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        pinned_command_digest = completed.stdout.strip()
+        self.assertRegex(pinned_command_digest, r"\A[0-9a-f]{64}\Z")
+        hook_module = _load_hook_module()
+        self.assertEqual(hook_module._fixed_set_digest(hashes), pinned_command_digest)
 
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""
