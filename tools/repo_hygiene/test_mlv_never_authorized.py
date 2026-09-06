@@ -9,13 +9,22 @@ thirty rows reports ``Ran 1 test``, which the ``N >= rows + controls`` acceptanc
 (O90).  So the table below is expanded by ``setattr`` into ONE ``def test_*`` METHOD PER ROW.
 
 EVERY PATH IS A TMP-DIR FIXTURE.  The board root (``MLV_BOARD_ROOT``), the clip cache
-(``MLV_CLIP_CACHE_ROOT``) and the required-checks snapshot (``MLV_REQUIRED_CHECKS_SNAPSHOT``)
-are PARAMETERS this test supplies, never literals the hook hardcodes -- so the table is green
-on both matrix legs and no case touches ``.claude-state`` or the real board root, which are
-gitignored and absent from every hosted checkout (O81/O97).
+(``MLV_CLIP_CACHE_ROOT``), the required-checks snapshot (``MLV_REQUIRED_CHECKS_SNAPSHOT``)
+and the exception-(iv) VENUE (``CLAUDE_PROJECT_DIR``, O124) are PARAMETERS this test
+supplies, never literals the hook hardcodes -- so the table is green on both matrix legs and
+no case touches ``.claude-state`` or the real board root, which are gitignored and absent
+from every hosted checkout (O81/O97).  ``_invoke`` STRIPS the venue variable before applying
+a row's overrides: the harness running this suite sets it for its own project, and an
+inherited value would silently decide every exception-(iv) row.
 
-NOTHING IS EXECUTED.  Every falsifier reaches the hook as a JSON payload on stdin, delivered
-to a subprocess started with ``sys.executable``.  The command strings are data.
+NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
+payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
+strings are data.  The ONE exception is ``EnableCompoundIsFailClosedTests``, the S101
+acceptance: the register's fail-closed shape rests on a claim about what PowerShell DOES
+with a failed ``Set-Content``, and a rule resting on an unverified runtime claim rests on a
+guess -- so those two cases run the canonical compound under ``pwsh`` against TEMP PATHS
+ONLY (a scratch marker this test created, a receipt under a scratch directory), never the
+board, and they SKIP rather than pretend when ``pwsh`` is absent.
 """
 
 import hashlib
@@ -140,13 +149,66 @@ def _enable_literal(**overrides):
 ENABLE_LITERAL = _enable_literal()
 
 
-def _canonical_enable(literal=ENABLE_LITERAL, receipt=ENABLE_RECEIPT, marker=ENABLE_MARKER):
-    """The register's canonical compound, verbatim."""
-    return (
+ENABLE_THROW = "enable-receipt-write-verification-failed"
+WRITE_TAIL = " -NoNewline -Encoding utf8 -ErrorAction Stop"
+DELETE_TAIL = " -ErrorAction Stop"
+
+
+def _canonical_enable(
+    literal=ENABLE_LITERAL,
+    receipt=ENABLE_RECEIPT,
+    marker=ENABLE_MARKER,
+    readback=None,
+    throw=ENABLE_THROW,
+    write_tail=WRITE_TAIL,
+    delete_tail=DELETE_TAIL,
+    verify=True,
+):
+    """The register's canonical FAIL-CLOSED compound, verbatim (S101).
+
+    Every keyword is ONE degree of freedom of the pinned shape, so a row that varies it
+    differs from the ALLOW row in exactly that variable and nothing else.  ``verify=False``
+    with empty tails reproduces the REV-18 shape -- the form that WAS canonical one
+    revision ago and is now an ordinary non-canonical input.
+    """
+    readback = receipt if readback is None else readback
+    text = (
         "$r = '" + literal + "'; "
-        "Set-Content -LiteralPath '" + receipt + "' -Value $r; "
-        "Remove-Item -LiteralPath '" + marker + "'"
+        "Set-Content -LiteralPath '" + receipt + "' -Value $r" + write_tail + "; "
     )
+    if verify:
+        text += (
+            "if ((Get-Content -LiteralPath '" + readback + "' -Raw -ErrorAction Stop) "
+            "-cne $r) { throw '" + throw + "' }; "
+        )
+    text += "Remove-Item -LiteralPath '" + marker + "'" + delete_tail
+    return text
+
+
+def _rev18_enable():
+    """The pre-S101 shape: a NON-terminating Set-Content and no read-back verification."""
+    return _canonical_enable(write_tail="", delete_tail="", verify=False)
+
+
+# ------------------------------------------- the four ratified manifest surfaces (O124)
+#
+# `$D/DEFINITIVE-FIX-PLAN-*.md` is a basename glob on a DIRECT CHILD of `$D`;
+# `prompts/v2/**` is a prefix.  The fixture writes each surface with MANIFEST_EXISTING, so
+# a LONGER and a SHORTER write are both meaningful against a target that exists.
+MANIFEST_PLAN = "{DUAL}/DEFINITIVE-FIX-PLAN-20260906.md"
+MANIFEST_REGISTER = "{DUAL}/never-authorized.json"
+MANIFEST_WRAPPER = "{DUAL}/Start-EditingLane.ps1"
+MANIFEST_PROMPT = "{DUAL}/prompts/v2/card-TOOL-HOOK-ENFORCE-1.md"
+MANIFEST_SURFACES = (MANIFEST_PLAN, MANIFEST_REGISTER, MANIFEST_WRAPPER, MANIFEST_PROMPT)
+
+MANIFEST_EXISTING = "# ratified manifest surface\n" + ("pinned line\n" * 30)
+MANIFEST_LONGER = MANIFEST_EXISTING + ("amended line\n" * 10)
+MANIFEST_SHORTER = "# ratified manifest surface\n"
+
+
+def _set_content(path):
+    """A shell TRUNCATING write -- denied on a protected path unless exception (iv) opens."""
+    return "Set-Content -LiteralPath '" + path + "' -Value 'amended by re-ratification'"
 
 
 # --------------------------------------------------------------------------- table
@@ -474,6 +536,15 @@ CASES = [
         "fixture": "clip_authorized",
     },
     # ------------------------------------------- NA-2 carve-out: create vs shrink
+    #
+    # O125 -- THE CARVE-OUT IS A PATH PERMISSION, NOT A TOOL PERMISSION.  The first two
+    # rows are the pair that proves it: the same CREATE, on a path under `$D/receipts/**`
+    # that nothing exists at, differing in exactly ONE variable -- the tool.  The hook sees
+    # a shell command's TEXT and never its outcome, so a truncating `Set-Content` cannot be
+    # proven non-shrinking even for a create; a `Write` carries its new content in the
+    # payload and can be.  This is why every Phase-0 receipt write after 0.1 uses the file
+    # tools or an append, and why 0.2's canonical compound is the ONE shell write these
+    # paths admit -- and only because the dedicated act is evaluated first.
     {
         "name": "carveout receipt create",
         "group": "carveout",
@@ -483,6 +554,19 @@ CASES = [
             "content": RECEIPT_LONG,
         },
         "expect": "ALLOW",
+    },
+    {
+        "name": "carveout receipt create via a shell Set-Content",
+        "group": "carveout",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Set-Content -LiteralPath '{RECEIPTS}/x.json' -Value '"
+            + RECEIPT_SHORT
+            + "'"
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "cannot be proven non-shrinking",
     },
     {
         "name": "carveout receipt shrink as a Write",
@@ -517,7 +601,10 @@ CASES = [
     {
         # The ALLOW half.  Its fixture writes the six receipts and NOT
         # `0.2-loop-enabled.json`: the enable is unspent, so exception (i) is open.
-        "name": "enable canonical compound with all six receipts",
+        # S101: this is now the FAIL-CLOSED compound -- `-ErrorAction Stop` on both acts
+        # and the read-back `throw` between them.  Every DENY row below it varies exactly
+        # one token of this shape.
+        "name": "enable canonical fail closed compound with all six receipts",
         "group": "killswitch",
         "tool": "PowerShell",
         "input": {"command": _canonical_enable()},
@@ -673,6 +760,68 @@ CASES = [
         "reason_contains": "(S99/O118)",
         "fixture": "receipts_all_six",
     },
+    # ------------------------------------------- S101: the shape is FAIL-CLOSED, and only
+    #
+    # Four rows, each differing from the ALLOW row above in EXACTLY ONE token of the pinned
+    # compound.  All four are refused on the same line, which names S101 -- the point is
+    # that a near-miss of the fail-closed shape is not a degraded enable, it is an ordinary
+    # non-canonical input naming both paths, and the operator is told which token closed.
+    {
+        # The rev-18 shape: `Set-Content` without `-ErrorAction Stop` is NON-terminating,
+        # so on a failed write the pipeline continues and `Remove-Item` disarms the kill
+        # switch with the receipt ABSENT -- the never-authorized act with a receipt-shaped
+        # alibi, and the S98 one-shot never closes because nothing was written.  It was
+        # canonical one revision ago; it is not grandfathered.
+        "name": "enable rev18 shape without ErrorAction Stop or a read back",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _rev18_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "(S101)",
+        "fixture": "receipts_all_six",
+    },
+    {
+        # Without `-ErrorAction Stop` on the DELETE half a failed `Remove-Item` is
+        # swallowed: the compound reports a success it did not have, and the receipt now
+        # says the loop is enabled while the marker still stops it.
+        "name": "enable compound whose Remove-Item lacks ErrorAction Stop",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable(delete_tail="")},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "(S101)",
+        "fixture": "receipts_all_six",
+    },
+    {
+        # The read-back must read back THE FILE THIS COMPOUND JUST WROTE.  Verifying some
+        # other receipt proves that other file's contents and lets the delete run anyway --
+        # precisely the failure the verification exists to catch.
+        "name": "enable compound whose read back names a different receipt path",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(readback="{RECEIPTS}/0.2-loop-enabled-copy.json")
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "(S101)",
+        "fixture": "receipts_all_six",
+    },
+    {
+        # The register pins the halt message as a literal.  It is what a later reader greps
+        # for when asked whether an enable halted at the write, so a different string is a
+        # different act -- compared case-sensitively, fail-closed.
+        "name": "enable compound whose throw string differs",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable(throw="write-failed")},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "(S101)",
+        "fixture": "receipts_all_six",
+    },
     {
         "name": "killswitch create via Write with no receipts",
         "group": "killswitch",
@@ -701,6 +850,218 @@ CASES = [
         },
         "expect": "ALLOW",
         "fixture": "receipts_all_six",
+    },
+    # ----------------------------------------------------------- NA-2 exception (iv)
+    #
+    # O124 -- THE VENUE, NOT THE TOOL AND NOT THE LENGTH.  Once the hook is live in the
+    # hub's session every route to amending a manifest surface under `$D` is denied, yet
+    # re-ratification (plan 1.3) and 0.2's interruption recovery both require exactly that.
+    # What separates the amendment actor from a lane is where the SESSION is rooted:
+    # `CLAUDE_PROJECT_DIR` is set by the harness per project root, no lane is ever rooted at
+    # the board (the wrapper refuses `workdir-is-board-root`), and a lane's tool input
+    # cannot reach the hook process's environment (O88).
+    #
+    # The sixteen ALLOW rows are the cross product of the four ratified surfaces and four
+    # write shapes -- a LONGER `Write`, a SHORTER `Write`, an `Edit`, and a shell truncating
+    # `Set-Content`.  The shorter rows are load-bearing: exception (iv) is "any length", so
+    # a surface is NOT on the shrink guard, and the shell row is load-bearing because O125
+    # otherwise denies a shell truncating write on a protected path outright.  The three
+    # DENY rows that follow differ from the plan ALLOW rows in exactly ONE variable -- the
+    # venue, or the verb.
+    {
+        "name": "manifest plan Write longer at the board venue",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_PLAN, "content": MANIFEST_LONGER},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest plan Write shorter at the board venue",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_PLAN, "content": MANIFEST_SHORTER},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest plan Edit at the board venue",
+        "group": "manifest",
+        "tool": "Edit",
+        "input": {
+            "file_path": MANIFEST_PLAN,
+            "old_string": MANIFEST_EXISTING,
+            "new_string": MANIFEST_SHORTER,
+        },
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest plan shell Set-Content at the board venue",
+        "group": "manifest",
+        "tool": "PowerShell",
+        "input": {"command": _set_content(MANIFEST_PLAN)},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest register Write longer at the board venue",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_REGISTER, "content": MANIFEST_LONGER},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest register Write shorter at the board venue",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_REGISTER, "content": MANIFEST_SHORTER},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest register Edit at the board venue",
+        "group": "manifest",
+        "tool": "Edit",
+        "input": {
+            "file_path": MANIFEST_REGISTER,
+            "old_string": MANIFEST_EXISTING,
+            "new_string": MANIFEST_SHORTER,
+        },
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest register shell Set-Content at the board venue",
+        "group": "manifest",
+        "tool": "PowerShell",
+        "input": {"command": _set_content(MANIFEST_REGISTER)},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest wrapper Write longer at the board venue",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_WRAPPER, "content": MANIFEST_LONGER},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest wrapper Write shorter at the board venue",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_WRAPPER, "content": MANIFEST_SHORTER},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest wrapper Edit at the board venue",
+        "group": "manifest",
+        "tool": "Edit",
+        "input": {
+            "file_path": MANIFEST_WRAPPER,
+            "old_string": MANIFEST_EXISTING,
+            "new_string": MANIFEST_SHORTER,
+        },
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest wrapper shell Set-Content at the board venue",
+        "group": "manifest",
+        "tool": "PowerShell",
+        "input": {"command": _set_content(MANIFEST_WRAPPER)},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest prompt card Write longer at the board venue",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_PROMPT, "content": MANIFEST_LONGER},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest prompt card Write shorter at the board venue",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_PROMPT, "content": MANIFEST_SHORTER},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest prompt card Edit at the board venue",
+        "group": "manifest",
+        "tool": "Edit",
+        "input": {
+            "file_path": MANIFEST_PROMPT,
+            "old_string": MANIFEST_EXISTING,
+            "new_string": MANIFEST_SHORTER,
+        },
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        "name": "manifest prompt card shell Set-Content at the board venue",
+        "group": "manifest",
+        "tool": "PowerShell",
+        "input": {"command": _set_content(MANIFEST_PROMPT)},
+        "expect": "ALLOW",
+        "fixture": "manifest_at_board",
+    },
+    {
+        # ONE variable away from the first ALLOW row: the venue is a lane's `C:\mlvtmp\`
+        # worktree, which a lane's hook receives and cannot change.
+        "name": "manifest plan Write at a worktree venue",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_PLAN, "content": MANIFEST_LONGER},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "exception (iv)",
+        "fixture": "manifest_at_worktree",
+    },
+    {
+        # ABSENT is not "unknown, assume the hub".  A hook invoked without the variable has
+        # no evidence of venue, and exception (iv) is an exception: it must be shown.
+        "name": "manifest plan Write with the venue variable absent",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": MANIFEST_PLAN, "content": MANIFEST_LONGER},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "<absent>",
+        "fixture": "manifest_venue_absent",
+    },
+    {
+        # Delete/move stays DENIED at EVERY venue, board included: the guard on an
+        # amendment is that plan 1.3 re-hashes and re-ratifies it, and a deletion leaves
+        # nothing to re-hash.
+        "name": "manifest register delete from the board venue",
+        "group": "manifest",
+        "tool": "PowerShell",
+        "input": {"command": "Remove-Item -LiteralPath '" + MANIFEST_REGISTER + "'"},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "denied at EVERY venue",
+        "fixture": "manifest_at_board",
+    },
+    {
+        # THE CONTROL.  A non-surface path under the SAME `$D`, at the SAME board venue:
+        # `queue.json` is on the O47 carve-out, so it keeps its shrink guard and the venue
+        # changes nothing.  Without this row, exception (iv) could quietly have become
+        # "the board root may do anything under $D".
+        "name": "manifest control queue json shrink is unchanged by the board venue",
+        "group": "manifest",
+        "tool": "Write",
+        "input": {"file_path": "{DUAL}/queue.json", "content": MANIFEST_SHORTER},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "shrinking overwrite",
+        "fixture": "manifest_at_board",
     },
     # ------------------------------------------------------------ NA-2 exception (ii)
     {
@@ -797,7 +1158,7 @@ CASES = [
     },
     # -------------------------------- NA-3's `claude auth` arm, bounded by the REGISTER
     #
-    # `never-authorized.json` v15 NA-3 names `claude auth login|logout`, not `claude auth`.
+    # `never-authorized.json` v17 NA-3 names `claude auth login|logout`, not `claude auth`.
     # These four rows differ from one another in exactly ONE variable -- the auth
     # subcommand -- so they prove the arm is a GATE and not a wall.  The ALLOW row is
     # load-bearing: the board's account-rotation procedure runs `claude auth status --json`
@@ -1022,6 +1383,31 @@ def fixture_receipts_04b_already_done(paths):
     return {}
 
 
+def _manifest_files(paths):
+    """Write the four ratified surfaces, plus the `queue.json` the venue control needs."""
+    for template in MANIFEST_SURFACES:
+        _write(template.replace("{DUAL}", paths["DUAL"]), MANIFEST_EXISTING)
+    _write(os.path.join(paths["DUAL"], "queue.json"), MANIFEST_EXISTING)
+
+
+def fixture_manifest_at_board(paths):
+    """O124: the hook runs for a session ROOTED AT THE BOARD -- exception (iv) is open."""
+    _manifest_files(paths)
+    return {"CLAUDE_PROJECT_DIR": paths["BOARD"]}
+
+
+def fixture_manifest_at_worktree(paths):
+    """The same surfaces, a lane's worktree venue -- the exception does not apply."""
+    _manifest_files(paths)
+    return {"CLAUDE_PROJECT_DIR": paths["WORKTREE"]}
+
+
+def fixture_manifest_venue_absent(paths):
+    """No venue variable at all.  ``_invoke`` strips it, so ``{}`` really means ABSENT."""
+    _manifest_files(paths)
+    return {}
+
+
 def fixture_checkpoint_archived(paths):
     target = os.path.join(paths["DUAL"], "orchestrator-resume-CURRENT.md")
     _write(target, CHECKPOINT_LONG)
@@ -1052,6 +1438,9 @@ FIXTURES = {
     "receipts_04b_already_done": fixture_receipts_04b_already_done,
     "checkpoint_archived": fixture_checkpoint_archived,
     "checkpoint_unarchived": fixture_checkpoint_unarchived,
+    "manifest_at_board": fixture_manifest_at_board,
+    "manifest_at_worktree": fixture_manifest_at_worktree,
+    "manifest_venue_absent": fixture_manifest_venue_absent,
 }
 
 
@@ -1075,9 +1464,11 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
             "SNAPSHOT": os.path.join(dual, "receipts", "required-checks-live.jsonl"),
             "OUTSIDE": os.path.join(self.tmp, "outside"),
             "CACHE": os.path.join(self.tmp, "cache"),
+            # A lane's venue: a worktree root, never the board (O124).
+            "WORKTREE": os.path.join(self.tmp, "worktree"),
             "CLIP_AUTH": os.path.join(board, "clips", "authorized", "take01.mlv"),
         }
-        for key in ("BOARD", "DUAL", "RECEIPTS", "OUTSIDE", "CACHE"):
+        for key in ("BOARD", "DUAL", "RECEIPTS", "OUTSIDE", "CACHE", "WORKTREE"):
             os.makedirs(self.paths[key])
         self.paths["CHECKPOINT_SHA"] = hashlib.sha256(
             CHECKPOINT_LONG.encode("utf-8")
@@ -1097,6 +1488,11 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         for key in list(env):
             if key.startswith("MLV_"):
                 del env[key]
+        # O124: the VENUE is an input, so it must be a PARAMETER of the row and never
+        # something inherited.  The harness that runs this suite sets CLAUDE_PROJECT_DIR
+        # for its own project, and leaking it here would silently decide every exception
+        # (iv) row -- including the two that assert the ABSENT reading.
+        env.pop("CLAUDE_PROJECT_DIR", None)
         env["MLV_BOARD_ROOT"] = self.paths["BOARD"]
         env["MLV_CLIP_CACHE_ROOT"] = self.paths["CACHE"]
         env["MLV_REQUIRED_CHECKS_SNAPSHOT"] = self.paths["SNAPSHOT"]
@@ -1175,7 +1571,25 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # six vary its SHAPE (all DENY), two are exception (iii) creates and one is the
         # bare receipt write.  The count is here so a row cannot be dropped silently; the
         # round-1 (16) and round-2 (12) falsifier counts above are historical and unchanged.
-        self.assertEqual(counts.get("killswitch"), 15, "15 kill-switch / 0.2-enable rows")
+        #
+        # PINNED DELIBERATELY, 0.05 FOURTH review delta (S101): the canonical compound
+        # became FAIL-CLOSED, so the group grew 15 -> 19.  The ALLOW row and the five rows
+        # that vary its preconditions now carry the fail-closed shape (changed, not added);
+        # the four NEW rows each drop or alter exactly one fail-closed token -- the rev-18
+        # shape, `Remove-Item` without `-ErrorAction Stop`, a read-back naming a different
+        # receipt, and a different `throw` literal.
+        self.assertEqual(counts.get("killswitch"), 19, "19 kill-switch / 0.2-enable rows")
+        # PINNED DELIBERATELY, 0.05 fourth review delta (O125): 3 -> 4.  The carve-out is a
+        # PATH permission, not a TOOL permission, and the pair that proves it -- the `Write`
+        # create ALLOW beside the shell `Set-Content` create DENY -- must not be separable.
+        self.assertEqual(counts.get("carveout"), 4, "4 NA-2 carve-out rows")
+        # PINNED DELIBERATELY, 0.05 fourth review delta (O124): a NEW group, 20 rows.  The
+        # cross product of 4 ratified surfaces x 4 write shapes at the board venue (16
+        # ALLOW), plus the worktree venue, the absent venue, the delete that stays denied at
+        # every venue, and the `queue.json` control that proves the venue did not become a
+        # blanket permission over `$D`.  Dropping any one of the last four would turn
+        # exception (iv) from a gate into a wall or a hole without a red test.
+        self.assertEqual(counts.get("manifest"), 20, "20 NA-2 exception (iv) venue rows")
 
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""
@@ -1194,6 +1608,85 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         completed = self._invoke(allowed, {"MLV_HOOK_DRYRUN": "1"})
         self.assertEqual(completed.returncode, 0)
         self.assertIn("DRYRUN ALLOW", completed.stdout)
+
+
+PWSH = shutil.which("pwsh")
+
+
+@unittest.skipIf(
+    PWSH is None,
+    "pwsh (PowerShell 7+) is not on PATH, so the S101 acceptance cannot be RUN.  It is the "
+    "one claim in this suite that is not about the hook's reading of a string but about "
+    "what PowerShell actually DOES with the canonical compound, and a simulation of it "
+    "would prove nothing: skipped rather than faked.",
+)
+class EnableCompoundIsFailClosedTests(unittest.TestCase):
+    """S101 ACCEPTANCE, EXECUTED FOR REAL.
+
+    Every other case in this file is a string the hook reads.  These two are different in
+    kind: the register's whole reason for pinning ``-ErrorAction Stop`` and a read-back is a
+    claim about PowerShell's RUNTIME -- that ``Set-Content`` fails NON-terminatingly by
+    default, so the rev-18 compound would delete the marker with the receipt absent.  A
+    hook rule that rests on an unverified runtime claim is a rule resting on a guess, so the
+    compound is executed here against TEMP PATHS ONLY.  Nothing touches the board, no
+    receipt of record is written, and the marker is a scratch file this test created.
+    """
+
+    maxDiff = None
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mlv-s101-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.marker = os.path.join(self.tmp, "WORKSTREAM-LOOP-DISABLED")
+        _write(self.marker, "stopped\n")
+
+    def _run(self, receipt):
+        compound = _canonical_enable(
+            literal=ENABLE_LITERAL, receipt=receipt, marker=self.marker
+        )
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-Command", compound],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=self.tmp,
+        )
+
+    def test_it_halts_at_an_unwritable_receipt_and_leaves_the_marker_in_place(self):
+        """THE ACCEPTANCE.  The write fails; the delete must NOT run."""
+        receipt = os.path.join(self.tmp, "no-such-directory", "0.2-loop-enabled.json")
+        completed = self._run(receipt)
+        detail = "\nstdout: %r\nstderr: %r" % (completed.stdout, completed.stderr)
+        self.assertNotEqual(
+            completed.returncode, 0, "the compound must fail, not continue" + detail
+        )
+        self.assertTrue(
+            os.path.isfile(self.marker),
+            "the kill switch was disarmed by a compound whose receipt write FAILED -- "
+            "exactly the state S101 exists to make impossible" + detail,
+        )
+        self.assertFalse(os.path.exists(receipt), "no receipt should have been written")
+
+    def test_the_happy_path_writes_the_literal_verbatim_and_removes_the_marker(self):
+        """The other half: when the write succeeds the enable completes, byte for byte."""
+        receipt = os.path.join(self.tmp, "receipts", "0.2-loop-enabled.json")
+        os.makedirs(os.path.dirname(receipt))
+        completed = self._run(receipt)
+        detail = "\nstdout: %r\nstderr: %r" % (completed.stdout, completed.stderr)
+        self.assertEqual(completed.returncode, 0, "expected the enable to complete" + detail)
+        self.assertTrue(os.path.isfile(receipt), "the receipt was not written" + detail)
+        with open(receipt, "rb") as handle:
+            written = handle.read()
+        # `-NoNewline -Encoding utf8` is why this is byte-exact: PowerShell 7's `utf8` is
+        # UTF8NoBOM, and the read-back compares with `-cne`, so any drift would have thrown.
+        self.assertEqual(
+            written,
+            ENABLE_LITERAL.encode("utf-8"),
+            "the receipt is not the literal's bytes" + detail,
+        )
+        self.assertFalse(
+            os.path.exists(self.marker), "the marker should be gone" + detail
+        )
 
 
 def _slug(name):

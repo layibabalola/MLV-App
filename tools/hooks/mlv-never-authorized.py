@@ -9,7 +9,7 @@ exit 2 : DENY, with exactly ONE line on stderr, ``NA-<n>: <reason>``.
 exit 2 : fail-CLOSED, with ``hook-error: <detail>`` on stderr, for ANY exception,
          malformed or empty stdin, a non-object payload, or a missing ``tool_name``.
 
-This is the PROJECT hook described by ``never-authorized.json`` (schema v16) and by
+This is the PROJECT hook described by ``never-authorized.json`` (schema v17) and by
 ``prompts/v2/card-TOOL-HOOK-ENFORCE-1.md``.  It is NOT the global machine hook
 ``~/.claude/hooks/check-continuity-boundaries.py``, which is shared by every project on
 this machine and fails OPEN.  This one fails CLOSED and is tracked on the same ref as the
@@ -32,6 +32,23 @@ MLV_REQUIRED_CHECKS_SNAPSHOT
                             non-empty row.  Absent, unparseable, or a malformed row
                             anywhere => every protection mutation is DENIED.
 MLV_HOOK_DRYRUN=1           print the decision on stdout; the exit code is unchanged.
+CLAUDE_PROJECT_DIR          THE VENUE TEST of NA-2 exception (iv) (O124).  Set by the
+                            harness, per project root, and read here from this hook
+                            process's own environment.  Writes -- create, extend or amend,
+                            ANY length, by ``Write``/``Edit``/``NotebookEdit`` or by a
+                            shell truncating write -- to the four ratified manifest
+                            surfaces ``<board>/.claude-state/coordination/dual-lane/``
+                            ``{DEFINITIVE-FIX-PLAN-*.md, never-authorized.json,
+                            Start-EditingLane.ps1, prompts/v2/**}`` are ALLOWED only while
+                            this variable, NORMALISED, equals the board root: the hub after
+                            0.1 is rooted there and no lane ever is (the wrapper refuses
+                            ``workdir-is-board-root``), so the venue is what separates the
+                            re-ratification actor from a lane.  A worktree value, or an
+                            ABSENT variable, means the exception does not apply and the
+                            ordinary NA-2 DENY stands.  Delete/move of a manifest surface
+                            stays DENIED even at the board venue.  A lane's tool input
+                            cannot reach this hook process's environment (O88), so the
+                            venue is not something a lane can assert about itself.
 
 Stdlib only.  Deterministic: no subprocess, no clock, no network.  The worktree root is
 derived from this file's own location (``parents[2]``) rather than from ``git rev-parse``
@@ -103,6 +120,18 @@ ENABLE_LITERAL_KEYS = (
     "executionControlSha256",
     "recordedUtc",
 )
+# S101: the canonical compound is FAIL-CLOSED.  A `Set-Content` failure is NON-terminating
+# by default, so the rev-18 shape would let `Remove-Item` disarm the kill switch with the
+# receipt absent -- the exact state the enable exists to make impossible.  The register now
+# pins `-ErrorAction Stop` on BOTH acts and a read-back `throw` between them, and the hook
+# matches ONLY that shape; the rev-18 shape is just another non-canonical input.
+ENABLE_THROW_MESSAGE = "enable-receipt-write-verification-failed"
+
+# O124: NA-2 exception (iv) -- the four ratified manifest surfaces, relative to $D.
+MANIFEST_PLAN_GLOB_PREFIX = "definitive-fix-plan-"
+MANIFEST_PLAN_GLOB_SUFFIX = ".md"
+MANIFEST_EXACT_LEAVES = ("never-authorized.json", "start-editinglane.ps1")
+MANIFEST_PROMPTS_PREFIX = "prompts/v2/"
 
 
 class Deny(Exception):
@@ -249,6 +278,17 @@ class Ctx(object):
             self.receipts_dir_raw, "required-checks-live.jsonl"
         )
         self.lane_prompt = env.get("MLV_LANE_PROMPT") or ""
+        # O124, the venue test of NA-2 exception (iv).  Read from THIS PROCESS's
+        # environment, never from the tool input: a lane cannot assert its own venue.
+        # `norm()` is the hook's one path comparison -- the same function that decides
+        # every other containment here -- so `C:\!Layi Wkspc\MLV-App`,
+        # `C:/!Layi Wkspc/MLV-App` and a trailing-slash form are one venue, and
+        # `C:\mlvtmp\plan-definitive-fix-v7` is not.  ABSENT is not "unknown, assume the
+        # hub": absent means the exception does not apply.
+        self.project_dir = norm(env.get("CLAUDE_PROJECT_DIR") or "")
+        self.at_board_venue = bool(
+            env.get("CLAUDE_PROJECT_DIR")
+        ) and self.project_dir == self.board_root
 
         self.command = ""
         self.path = ""
@@ -444,6 +484,40 @@ def _is_na2_protected(path_norm):
     return has_seg(path_norm, NA2_PROTECTED_FILE_TAIL)
 
 
+def _manifest_surface(ctx, path_norm):
+    """O124: is this one of the four RATIFIED manifest surfaces of exception (iv)?
+
+    FAIL-CLOSED READINGS (recorded, 0.05 fourth review delta):
+      * The surfaces are pinned to THE BOARD's own ``$D`` -- ``ctx.dual_dir_raw`` -- not to
+        any directory that merely ends ``.claude-state/coordination/dual-lane``.  A lane
+        worktree cannot carry a copy of the tree and thereby earn the exception, and the
+        exception's whole justification is that the amendment happens at the board.
+      * ``$D/DEFINITIVE-FIX-PLAN-*.md`` is a BASENAME glob on a DIRECT CHILD of ``$D``: a
+        matching name nested deeper is a different file and gets no exception.
+      * ``prompts/v2/**`` is a prefix, so the cards below it are covered; ``prompts/`` and
+        ``prompts/v1/`` are not.
+    Returns the surface kind, or None.
+    """
+    rest = after_seg(path_norm, DUAL_TAIL)
+    if rest is None or not rest:
+        return None
+    if not under(path_norm, norm(ctx.dual_dir_raw)):
+        return None
+    if "/" not in rest:
+        if rest.startswith(MANIFEST_PLAN_GLOB_PREFIX) and rest.endswith(
+            MANIFEST_PLAN_GLOB_SUFFIX
+        ):
+            return "plan"
+        if rest in MANIFEST_EXACT_LEAVES:
+            return "register" if rest.endswith(".json") else "wrapper"
+        return None
+    if rest.startswith(MANIFEST_PROMPTS_PREFIX) and len(rest) > len(
+        MANIFEST_PROMPTS_PREFIX
+    ):
+        return "prompt"
+    return None
+
+
 def _kill_switch_receipts_ok(ctx):
     """The RECEIPT half of exception (i): every named 0.2 receipt validates, enable unspent.
 
@@ -518,26 +592,54 @@ def _kill_switch_receipts_ok(ctx):
 # deletes the marker -- a bare delete, a re-ordered compound, a different write cmdlet --
 # is DENIED, receipts or no receipts.
 #
-# FAIL-CLOSED READINGS OF THE CANONICAL SHAPE (recorded, 0.05 third review delta).  The
-# register pins the form character-for-character except whitespace, so every degree of
-# freedom it does not name is refused rather than guessed:
+# S101 -- THE CANONICAL SHAPE IS THE FAIL-CLOSED ONE, AND ONLY IT (0.05 fourth review
+# delta).  `Set-Content` raises a NON-terminating error by default: on a full disk, a
+# denied ACL or a missing parent the write fails, the pipeline continues, and the rev-18
+# shape's `Remove-Item` then disarms the kill switch with `0.2-loop-enabled.json` ABSENT.
+# That is not a degraded enable, it is the never-authorized act with a receipt-shaped alibi
+# -- and worse, the S98 one-shot never closes, because the receipt whose presence spends
+# the authorization was never written.  So the register now pins `-ErrorAction Stop` on
+# BOTH acts and a read-back `throw` between them, and this hook matches ONLY that form.
+# The rev-18 shape (no `-ErrorAction Stop`, no read-back) is NOT a grandfathered enable: it
+# is an ordinary non-canonical input naming both paths, refused below with S101 named in
+# the line so the operator is told WHICH degree of freedom closed.  Measured: the compound
+# against a receipt path under a nonexistent directory exits non-zero at the write and
+# LEAVES THE MARKER IN PLACE (the S101 acceptance, run for real against pwsh in
+# `EnableCompoundIsFailClosedTests`).
+#
+# FAIL-CLOSED READINGS OF THE CANONICAL SHAPE (recorded, 0.05 third and fourth review
+# deltas).  The register pins the form character-for-character except whitespace, so every
+# degree of freedom it does not name is refused rather than guessed:
 #   * PowerShell tool ONLY -- the register writes "the canonical compound form" in
 #     PowerShell; the same text arriving as a Bash input is not it.
-#   * The variable is `$r` (case-insensitively, as PowerShell resolves it) in BOTH the
-#     assignment and `-Value`, and nothing else.
-#   * `Set-Content -LiteralPath <receipt> -Value $r` exactly: not `-Path`, not a reordered
-#     or extra parameter, not `Out-File`, not a redirect.
+#   * The variable is `$r` (case-insensitively, as PowerShell resolves it) in ALL THREE
+#     places -- the assignment, `-Value`, and the read-back's `-cne` operand -- and nothing
+#     else.  A verification that compares a DIFFERENT variable verifies nothing.
+#   * `Set-Content -LiteralPath <receipt> -Value $r -NoNewline -Encoding utf8
+#     -ErrorAction Stop` exactly: not `-Path`, not a reordered, dropped or extra parameter,
+#     not `Out-File`, not a redirect.
+#   * The read-back names THE SAME receipt path as the write, everywhere the path appears.
+#     Reading a different file back proves the write succeeded somewhere else, which is
+#     precisely the failure S101 exists to catch.
+#   * The `throw` string is `enable-receipt-write-verification-failed`, compared
+#     CASE-SENSITIVELY: the register pins a literal, and a literal that differs is a
+#     different act -- the receipt of a halt is what a later reader greps for.
+#   * `Remove-Item -LiteralPath <marker> -ErrorAction Stop` -- without it a delete failure
+#     is swallowed and the enable reports success it did not have.
 #   * Single-quoted literals containing no quote of their own; a PowerShell-escaped `''`
 #     inside one fails the shape and is refused.
-#   * `;` between the three statements, and NOTHING before, between or after them.
+#   * `;` between the four statements, and NOTHING before, between or after them.
 # The cost of each reading is a visible DENY on a near-miss, one line to fix.  The cost of
 # the other reading is a silent ALLOW of a marker delete, which is the act itself.
 _ENABLE_COMPOUND_RX = re.compile(
     r"\A\s*"
     r"\$(?P<var>[A-Za-z_]\w*)\s*=\s*'(?P<literal>[^']*)'\s*;\s*"
     r"Set-Content\s+-LiteralPath\s+'(?P<receipt>[^']*)'\s+-Value\s+\$(?P<value>[A-Za-z_]\w*)"
-    r"\s*;\s*"
-    r"Remove-Item\s+-LiteralPath\s+'(?P<marker>[^']*)'"
+    r"\s+-NoNewline\s+-Encoding\s+utf8\s+-ErrorAction\s+Stop\s*;\s*"
+    r"if\s*\(\s*\(\s*Get-Content\s+-LiteralPath\s+'(?P<readback>[^']*)'\s+-Raw"
+    r"\s+-ErrorAction\s+Stop\s*\)\s*-cne\s+\$(?P<verify>[A-Za-z_]\w*)\s*\)\s*"
+    r"\{\s*throw\s+'(?P<throw>[^']*)'\s*\}\s*;\s*"
+    r"Remove-Item\s+-LiteralPath\s+'(?P<marker>[^']*)'\s+-ErrorAction\s+Stop"
     r"\s*\Z",
     re.I,
 )
@@ -561,7 +663,19 @@ def _canonical_enable_literal(ctx):
     variable = match.group("var").lower()
     if variable != ENABLE_LITERAL_VARIABLE or match.group("value").lower() != variable:
         return None
-    if norm(match.group("receipt")) != _enable_receipt_path_norm(ctx):
+    # S101: `$r` in ALL THREE places.  A read-back that compares some other variable is a
+    # verification of nothing, and it would pass every time.
+    if match.group("verify").lower() != variable:
+        return None
+    receipt_norm = _enable_receipt_path_norm(ctx)
+    if norm(match.group("receipt")) != receipt_norm:
+        return None
+    # S101: the read-back reads back THE RECEIPT THIS COMPOUND JUST WROTE.  A different
+    # path would prove some other file's contents and let the delete run regardless.
+    if norm(match.group("readback")) != receipt_norm:
+        return None
+    # S101: the pinned halt message, compared case-sensitively -- see the shape notes.
+    if match.group("throw") != ENABLE_THROW_MESSAGE:
         return None
     if norm(match.group("marker")) != _marker_path_norm(ctx):
         return None
@@ -629,10 +743,16 @@ def _refuse_marker_delete_outside_the_act(ctx, acts):
     verb = "deleting" if "delete" in acts else "moving"
     receipt = _enable_receipt_path_norm(ctx)
     if any(norm(token) == receipt for token in tokens(ctx.command)):
+        # S101 is named here as well as S99/O118 because the rev-18 shape -- which WAS the
+        # canonical form one revision ago -- now lands on exactly this line, and an
+        # operator holding a rev-18 compound needs to be told which degree of freedom
+        # closed rather than being left to re-derive it.
         raise Deny(
             "NA-2",
             "%s %s outside the canonical enable is never authorized; naming receipts/%s "
-            "in a non-canonical shape does not make this the dedicated act (S99/O118)"
+            "in a non-canonical shape does not make this the dedicated act (S99/O118), and "
+            "the canonical shape is the FAIL-CLOSED one: -ErrorAction Stop on both acts "
+            "with the read-back throw between them (S101)"
             % (verb, KILL_SWITCH_MARKER_NAME, KILL_SWITCH_ENABLE_RECEIPT),
         )
     raise Deny(
@@ -717,6 +837,15 @@ def _na2_decide(ctx, path_norm, acts, source):
         if "move" in acts:
             raise Deny("NA-2", "moving %s is denied on the carve-out paths" % path_norm)
         if source == "shell":
+            # O125: THE CARVE-OUT IS A PATH PERMISSION, NOT A TOOL PERMISSION.  The hook
+            # sees a command's TEXT, never its outcome, so a shell truncating write cannot
+            # be proven non-shrinking even when it is a create -- the same path reached by
+            # `Write`/`Edit` carries its new content in the payload and CAN be.  So a shell
+            # `Set-Content` create of `receipts/x.json` is DENY while the `Write` create of
+            # that path is ALLOW; receipt writes after 0.1 use the file tools or an append
+            # (`Add-Content`, `>>`).  0.2's canonical compound is the one shell write these
+            # paths admit, and only because the dedicated act is evaluated BEFORE this rule
+            # -- its `Set-Content` half is denied here too, not merely its `Remove-Item`.
             if "truncate" in acts:
                 raise Deny(
                     "NA-2",
@@ -731,6 +860,40 @@ def _na2_decide(ctx, path_norm, acts, source):
                 "shrinking overwrite of %s (archive with a stub instead)" % path_norm,
             )
         return
+
+    # ---------------------------------------------- NA-2 exception (iv): the VENUE (O124)
+    #
+    # Reached only for a path that is NOT on a carve-out, so the venue can never loosen the
+    # shrink guard or the kill switch: those returned above.  Once the hook is live in the
+    # hub's session every route to amending a manifest surface is denied (hub-measured:
+    # `Write`, `Edit` and shell `Set-Content` of the plan all exit 2), yet re-ratification
+    # (plan 1.3) and 0.2's interruption recovery both require exactly that.  What separates
+    # the amendment actor from a lane is not the TOOL and not the LENGTH -- both were tried
+    # and both are forgeable by a lane -- it is the VENUE: `CLAUDE_PROJECT_DIR` is set by
+    # the harness per project root, no lane is ever rooted at the board (the wrapper refuses
+    # `workdir-is-board-root`), and a lane's tool input cannot reach this hook process's
+    # environment (O88).  Delete/move stays DENIED at every venue: the guard on an amendment
+    # is that plan 1.3 re-hashes and re-ratifies it, and there is nothing to re-hash after a
+    # delete.
+    surface = _manifest_surface(ctx, path_norm)
+    if surface is not None:
+        if "delete" in acts or "move" in acts:
+            raise Deny(
+                "NA-2",
+                "%s the ratified manifest surface %s is denied at EVERY venue; exception "
+                "(iv) admits writes only, because an amendment is re-hashed and "
+                "re-ratified and a deletion cannot be (O124)"
+                % ("deleting" if "delete" in acts else "moving", path_norm),
+            )
+        if ctx.at_board_venue:
+            return  # exception (iv): the board-rooted amendment actor, any tool, any length
+        raise Deny(
+            "NA-2",
+            "writing the ratified manifest surface %s needs NA-2 exception (iv), and this "
+            "session is not the board-rooted actor: CLAUDE_PROJECT_DIR is %s, not %s "
+            "(absent or a worktree value means the exception does not apply -- O124)"
+            % (path_norm, ctx.project_dir or "<absent>", ctx.board_root),
+        )
 
     if source == "shell":
         if acts:
@@ -797,7 +960,7 @@ _NA3_RULES = (
 
 # ---- the `claude auth ...` arm, bounded by the REGISTER and not by the card's phrase ----
 #
-# ``never-authorized.json`` (schema v16) row NA-3 reads, VERBATIM:
+# ``never-authorized.json`` (schema v17) row NA-3 reads, VERBATIM:
 #
 #     claude auth login|logout, codex login, or assignment (X=, export, $env:, set, setx)
 #     of any variable starting ANTHROPIC_, OPENAI_, CLAUDE_CODE_
