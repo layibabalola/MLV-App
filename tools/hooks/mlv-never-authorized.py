@@ -13,7 +13,7 @@ exit 2 : fail-CLOSED, with ``hook-error: <detail>`` on stderr, for ANY exception
          accepted, because an argument this hook does not understand may be the venue
          under a name it no longer reads).
 
-This is the PROJECT hook described by ``never-authorized.json`` (schema v20) and by
+This is the PROJECT hook described by ``never-authorized.json`` (schema v21) and by
 ``prompts/v2/card-TOOL-HOOK-ENFORCE-1.md``.  It is NOT the global machine hook
 ``~/.claude/hooks/check-continuity-boundaries.py``, which is shared by every project on
 this machine and fails OPEN.  This one fails CLOSED and is tracked on the same ref as the
@@ -84,7 +84,7 @@ ONE FIXED NOTATION FOR EVERY ``recordedUtc``, AND THE NEWEST IS THE PARSED VALUE
 Every ``recordedUtc`` this hook READS or VALIDATES carries exactly ONE notation --
 ``YYYY-MM-DDTHH:MM:SSZ``: whole seconds, uppercase ``Z``, no fractional part, no offset,
 and a real calendar date (the regex settles the notation, ``strptime`` settles the
-calendar).  That is register v20's wording, and it covers every ``execution-control-*.json``
+calendar).  That is register v21's wording, and it covers every ``execution-control-*.json``
 the enable act considers AND the enable literal's own ``enabledUtc`` and ``recordedUtc``.
 The sixth commit accepted an OPTIONAL fractional part in the literal and never checked a
 receipt's stamp at all; both are narrowed here, so a fractional literal stamp is now DENY.
@@ -112,7 +112,56 @@ arms close that class, and they are load-bearing in different ways:
 ``_kill_switch_receipts_ok`` is the ONE selection site and hands its answer down to the
 literal check, so "which receipt is newest" has exactly one answer in this hook.
 
-THE ENABLE LITERAL IS VALIDATED SEMANTICALLY, NOT FOR PRESENCE (S112, register v20)
+THE SIX GATE RECEIPTS VALIDATE AGAINST A SCHEMA TABLE (S118, register v21)
+--------------------------------------------------------------------------
+Up to the seventh commit, "validate" meant ``json.load`` returned something that was not
+``None``.  ``{}`` is not ``None``, and the hub reproduced the consequence on the sixth
+commit: FIVE EMPTY OBJECTS beside an ``execution-control-forged.json`` carrying only the
+three provenance keys ALLOWED the canonical enable, exit 0.  The gate that spends the one
+ratified authorization was a file-existence test wearing a schema's name.
+
+The ONE table is plan 1.3 step 5, implemented here as ``KILL_SWITCH_RECEIPT_SCHEMAS`` plus
+the chain rules.  Every gate receipt parses as JSON, is a NON-EMPTY object, and carries
+``recordedUtc`` in the pinned notation above.  Value classes: ``sha256`` = 64 lowercase hex;
+``sha`` = 40 lowercase hex; ``path`` = a file that EXISTS (absolute, else relative to the
+board root); ``url`` = begins ``https://github.com/layibabalola/MLV-App/``; ``int`` = a
+non-negative integer and a ``bool`` is NOT one; ``list`` = a JSON array.  Per receipt:
+
+  * ``0.18-roadmap-parity.json``  queueArmResultSha256 (sha256); composedPromptPath,
+    prChecksPath, prReviewPath, solVerdictPath (paths).
+  * ``0.4b-required-checks.json`` headSha (sha); preContexts (list); postContexts (exactly
+    the canonical five strings, containing ``Batch Compile``); snapshotRowSha256 (sha256).
+  * ``0.4c-demoted.json``         headSha, mergeSha (shas); runUrl (url); solVerdictPath (path).
+  * ``0.6-ratio-guard.json``      mergeSha (sha); firstReading (present and non-empty);
+    solVerdictPath (path).
+  * ``0.5-factory-frozen.json``   queueSha256, dryRunDiffSha256 (sha256); frozenCount (int);
+    scopelessIds (list).
+  * ``execution-control-<step>.json`` for <step> in {0.1, 0.35, 0.4c-i, 0.4b-i, 0.6, 0.7} --
+    THE SIX CHAIN NAMES AND NO OTHER: ``hashes``, a non-empty object whose values are all
+    sha256, and from 0.35 on ``roadmapParityReceiptSha256`` EQUAL to the sha256 of
+    ``0.18-roadmap-parity.json``'s bytes on disk, ``queueSha256`` (shape only, carried
+    forward) and ``productLiveCount`` exactly 15.  Any OTHER ``execution-control-*.json``
+    present is INVALID and fails the exception closed by name -- the candidate set is an
+    ENUMERATION, not the glob the forged receipt walked in through.
+
+The SELECTED control receipt is ``execution-control-0.7.json`` when a valid one exists, else
+``execution-control-0.6.json``, and the parsed-newest valid chain receipt must BE the
+selected one: a valid 0.6 stamped later than a valid 0.7 is a CHAIN VIOLATION (undecidable),
+and the selected receipt absent is DENY.  Every refusal names the FILE and the KEY -- or the
+value class -- that failed.
+
+STRICT UNDECIDABILITY (O152).  A chain receipt that is PRESENT but invalid -- a missing or
+non-conforming stamp, a missing provenance key, a malformed value -- is NEVER silently
+excluded.  It makes the newest UNDECIDABLE and the act fails closed naming it.  Exclusion
+was the amendment's proposal and is rejected here, because it re-opens O141's hazard in a
+new shape: an invalid 0.7 beside a valid 0.6 would silently select the STALE 0.6, and the
+one-shot enable would fire against a superseded receipt.  Recovery from an undecidable set
+-- a malformed receipt or an exact tie -- is a NON-shrinking ``Write``-tool rewrite of the
+offending receipt carrying a conforming stamp and every required key, which the receipts
+carve-out allows; never a delete.  This whole arm is a PURE DECISION: it opens files for
+reading and hashes one of them, and writes nothing anywhere.
+
+THE ENABLE LITERAL IS VALIDATED SEMANTICALLY, NOT FOR PRESENCE (S112, register v21)
 -----------------------------------------------------------------------------------
 Up to rev 21 this hook only checked that the compound's JSON literal was an object carrying
 five NON-EMPTY STRINGS with ``state == "enabling"``.  Five strings of ``"x"`` passed.  So the
@@ -196,17 +245,131 @@ CANONICAL_04B_CONTEXTS = frozenset(
 )
 CANONICAL_04B_APP_ID = 15368
 
-KILL_SWITCH_RECEIPTS = (
-    "0.18-roadmap-parity.json",
-    "0.4b-required-checks.json",
-    "0.4c-demoted.json",
-    "0.6-ratio-guard.json",
-    "0.5-factory-frozen.json",
+# S118 -- THE RECEIPT SCHEMA TABLE, and it is the ONE table (plan 1.3 step 5).
+#
+# Up to the seventh commit "validate" meant `json.load` returned something that was not
+# `None`.  `{}` is not `None`, so FIVE EMPTY OBJECTS validated -- and the hub reproduced
+# exactly that on the sixth commit: five `{}` receipts beside an `execution-control-
+# forged.json` carrying only the three provenance keys ALLOWED the one-shot enable.  The
+# gate that spends the single ratified authorization was, in effect, a file-existence test.
+#
+# The VALUE CLASSES the plan names.  Each is a predicate over a JSON value, and each refusal
+# below names the FILE and the KEY (or the class) that failed, so a near-miss receipt is
+# attributable to one field:
+#
+#   sha256    exactly 64 LOWERCASE hex.  Uppercase is refused rather than folded, and 63
+#             characters is refused rather than prefix-matched -- the same exactness the
+#             enable literal's digest already carries (S112).
+#   sha       exactly 40 LOWERCASE hex -- a git object name, not a digest.
+#   path      a file that EXISTS, read as absolute first and then relative to the board
+#             root, because the plan writes these fields relative to `$R`.  A directory is
+#             not a file: `os.path.isfile` is the test, so a receipt naming its own parent
+#             directory does not pass.
+#   url       begins `https://github.com/layibabalola/MLV-App/`.  A PREFIX, because the
+#             plan pins the repository and not the route -- and the board carries two
+#             remotes, so a run URL on the UPSTREAM host is exactly the value this refuses.
+#   int       a NON-NEGATIVE integer, and `bool` is NOT one: `True == 1` in Python, so a
+#             `frozenCount` of `true` would otherwise pass an `isinstance(v, int)` test.
+#   list      a JSON array.
+#   nonempty  present, not `None`, and -- for a string, array or object -- not empty.  A
+#             number or a boolean passes on presence; the plan asks only that
+#             `firstReading` be there and carry something.
+SHA256_HEX_RX = re.compile(r"\A[0-9a-f]{64}\Z")
+SHA_HEX_RX = re.compile(r"\A[0-9a-f]{40}\Z")
+RECEIPT_URL_PREFIX = "https://github.com/layibabalola/MLV-App/"
+ROADMAP_PARITY_RECEIPT = "0.18-roadmap-parity.json"
+# `postContexts` is the canonical five of 0.4b, and `Batch Compile` is the context the whole
+# step exists to promote -- a four-entry list is the shape a silent removal leaves behind.
+CANONICAL_04B_CONTEXT_COUNT = 5
+CANONICAL_04B_PROMOTED_CONTEXT = "Batch Compile"
+
+# The five FIXED gate receipts, each with the required keys of its producing step.  The
+# order is the register's, and it is also the order the arms fire in, so a set with two
+# faults is attributed to the first one the plan lists.  `recordedUtc` is not in any row
+# because EVERY gate receipt carries it, checked once for all six.
+KILL_SWITCH_RECEIPT_SCHEMAS = (
+    (
+        ROADMAP_PARITY_RECEIPT,
+        (
+            ("queueArmResultSha256", "sha256"),
+            ("composedPromptPath", "path"),
+            ("prChecksPath", "path"),
+            ("prReviewPath", "path"),
+            ("solVerdictPath", "path"),
+        ),
+    ),
+    (
+        "0.4b-required-checks.json",
+        (
+            ("headSha", "sha"),
+            ("preContexts", "list"),
+            ("postContexts", "contexts"),
+            ("snapshotRowSha256", "sha256"),
+        ),
+    ),
+    (
+        "0.4c-demoted.json",
+        (
+            ("headSha", "sha"),
+            ("mergeSha", "sha"),
+            ("runUrl", "url"),
+            ("solVerdictPath", "path"),
+        ),
+    ),
+    (
+        "0.6-ratio-guard.json",
+        (
+            ("mergeSha", "sha"),
+            ("firstReading", "nonempty"),
+            ("solVerdictPath", "path"),
+        ),
+    ),
+    (
+        "0.5-factory-frozen.json",
+        (
+            ("queueSha256", "sha256"),
+            ("frozenCount", "int"),
+            ("dryRunDiffSha256", "sha256"),
+            ("scopelessIds", "list"),
+        ),
+    ),
 )
+KILL_SWITCH_RECEIPTS = tuple(name for name, _ in KILL_SWITCH_RECEIPT_SCHEMAS)
+RECORDED_UTC_KEY = "recordedUtc"
+
+# THE EXECUTION-CONTROL CHAIN IS SIX NAMES AND NO OTHER (S118).  The candidate set was
+# `execution-control-*.json`, a GLOB, so any file matching it joined the selection -- and
+# the hub's reproduction used precisely that: `execution-control-forged.json`, a name no
+# plan step writes, carrying only the provenance keys.  The set is now an enumeration, and
+# a file matching the glob but not the enumeration does not merely get skipped: it FAILS
+# THE EXCEPTION CLOSED, because a receipt nobody can attribute to a step is a receipt the
+# board cannot account for.
+EXECUTION_CONTROL_PREFIX = "execution-control-"
+EXECUTION_CONTROL_SUFFIX = ".json"
+EXECUTION_CONTROL_STEPS = ("0.1", "0.35", "0.4c-i", "0.4b-i", "0.6", "0.7")
+EXECUTION_CONTROL_CHAIN = tuple(
+    EXECUTION_CONTROL_PREFIX + step + EXECUTION_CONTROL_SUFFIX
+    for step in EXECUTION_CONTROL_STEPS
+)
+# "from 0.35 on": every chain step EXCEPT 0.1, which runs before 0.18 exists and therefore
+# cannot carry a digest of it.
+EXECUTION_CONTROL_PROVENANCE_EXEMPT = (
+    EXECUTION_CONTROL_PREFIX + EXECUTION_CONTROL_STEPS[0] + EXECUTION_CONTROL_SUFFIX,
+)
+# The SELECTED receipt is a NAME, not "whichever is newest": 0.7 when a valid one exists,
+# else 0.6.  The parsed-newest valid chain receipt must BE that one -- a valid 0.6 stamped
+# later than a valid 0.7 is a chain violation, which is undecidable rather than a new
+# answer to "which is newest".
+CONTROL_SELECTED_PREFERRED = EXECUTION_CONTROL_PREFIX + "0.7" + EXECUTION_CONTROL_SUFFIX
+CONTROL_SELECTED_FALLBACK = EXECUTION_CONTROL_PREFIX + "0.6" + EXECUTION_CONTROL_SUFFIX
+CONTROL_HASHES_KEY = "hashes"
 # S98: the 0.2 enable is ONE-SHOT.  0.2 writes this receipt in the SAME guarded action as
 # the delete, so its PRESENCE is the proof the one authorization was already spent.
 KILL_SWITCH_ENABLE_RECEIPT = "0.2-loop-enabled.json"
 PROVENANCE_KEYS = ("roadmapParityReceiptSha256", "queueSha256", "productLiveCount")
+PROVENANCE_PARITY_KEY = "roadmapParityReceiptSha256"
+PROVENANCE_QUEUE_KEY = "queueSha256"
+PROVENANCE_COUNT_KEY = "productLiveCount"
 PROVENANCE_PRODUCT_LIVE_COUNT = 15
 
 # S99/O118: the 0.2 enable is ONE DEDICATED ACT, not a verb plus a path.  The register's
@@ -655,6 +818,262 @@ def _manifest_surface(ctx, path_norm):
     return None
 
 
+def _is_sha256(value):
+    return isinstance(value, str) and SHA256_HEX_RX.match(value) is not None
+
+
+def _is_sha(value):
+    return isinstance(value, str) and SHA_HEX_RX.match(value) is not None
+
+
+def _is_url(value):
+    return isinstance(value, str) and value.startswith(RECEIPT_URL_PREFIX)
+
+
+def _is_int(value):
+    # `bool` is a subclass of `int` and `True == 1`, so the bool test comes FIRST.  A
+    # `frozenCount` of `true` is not a count, and this is the one class where the naive
+    # `isinstance` reading admits a value of the wrong type outright.
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_list(value):
+    return isinstance(value, list)
+
+
+def _is_nonempty(value):
+    if value is None:
+        return False
+    if isinstance(value, (str, list, dict, tuple)) and not value:
+        return False
+    return True
+
+
+def _is_contexts(value):
+    """0.4b's `postContexts`: exactly the canonical five, and `Batch Compile` among them."""
+    if not isinstance(value, list) or len(value) != CANONICAL_04B_CONTEXT_COUNT:
+        return False
+    if not all(isinstance(item, str) and item for item in value):
+        return False
+    return CANONICAL_04B_PROMOTED_CONTEXT in value
+
+
+def _path_value_exists(ctx, value):
+    """`path`: a file that exists, read ABSOLUTE first and then relative to the board root.
+
+    Absolute first, so a receipt written with a full path is judged on the file it names;
+    board-relative second, because that is how the plan's steps record these fields.  The
+    fall-back is deliberately the BOARD and never the hook's cwd: a relative path resolved
+    against whatever directory the session happened to be in would make the same receipt
+    valid or invalid depending on who read it.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        if os.path.isfile(value):
+            return True
+        return os.path.isfile(os.path.join(ctx.board_root_raw, value))
+    except Exception:
+        return False
+
+
+def _value_class_ok(ctx, klass, value):
+    if klass == "sha256":
+        return _is_sha256(value)
+    if klass == "sha":
+        return _is_sha(value)
+    if klass == "path":
+        return _path_value_exists(ctx, value)
+    if klass == "url":
+        return _is_url(value)
+    if klass == "int":
+        return _is_int(value)
+    if klass == "list":
+        return _is_list(value)
+    if klass == "contexts":
+        return _is_contexts(value)
+    if klass == "nonempty":
+        return _is_nonempty(value)
+    # An unknown class is a schema this hook does not implement, and guessing is how the
+    # gate got soft in the first place.
+    return False
+
+
+_VALUE_CLASS_PROSE = {
+    "sha256": "a 64-character LOWERCASE hex sha256",
+    "sha": "a 40-character LOWERCASE hex sha",
+    "path": "a path to a file that EXISTS (absolute, or relative to the board root)",
+    "url": "a url beginning " + RECEIPT_URL_PREFIX,
+    "int": "a NON-NEGATIVE integer (a boolean is not one)",
+    "list": "a JSON array",
+    "contexts": (
+        "a JSON array of exactly %d non-empty strings containing %r"
+        % (CANONICAL_04B_CONTEXT_COUNT, CANONICAL_04B_PROMOTED_CONTEXT)
+    ),
+    "nonempty": "present and NON-EMPTY",
+}
+
+
+def _receipt_shape_why(name, document, required):
+    """-> a refusal naming FILE and KEY for a receipt that is not a stamped object, else ``""``.
+
+    The three faults every gate receipt shares, in the order that makes a refusal
+    attributable: parseable JSON, a NON-EMPTY object, and `recordedUtc` in the pinned
+    notation.  The EMPTY-OBJECT case gets its own line naming the keys it carries none of,
+    because `{}` is what presence-only validation accepted and the operator reading the
+    refusal should be told that, not that one arbitrary key is missing.
+    """
+    if document is None:
+        return "receipt %s is absent or is not parseable JSON (S118)" % name
+    if not isinstance(document, dict):
+        return "receipt %s is not a JSON object (S118)" % name
+    if not document:
+        return (
+            "receipt %s is an EMPTY object -- it carries none of its required keys "
+            "(%s), and an empty object is INVALID (S118)"
+            % (name, ", ".join((RECORDED_UTC_KEY,) + tuple(required)))
+        )
+    return ""
+
+
+def _recorded_utc_why(name, document, rule):
+    """-> a refusal for a missing or non-conforming ``recordedUtc``, else ``""``.
+
+    ONE stamp rule for all six gate receipts (O155 was rejected in favour of this).  The
+    ``rule`` argument only chooses which id the line cites -- O141 for the chain, whose
+    ordering the stamp decides, S118 for the five fixed receipts, whose stamp is a schema
+    key like any other.
+    """
+    stamp = document.get(RECORDED_UTC_KEY)
+    if not isinstance(stamp, str) or not stamp:
+        return "receipt %s lacks %s (%s)" % (name, RECORDED_UTC_KEY, rule)
+    if _parse_pinned_utc(stamp) is None:
+        return (
+            "receipt %s carries %s %r, which is not the ONE pinned notation %s -- whole "
+            "seconds, uppercase Z, no fraction, no offset (%s)"
+            % (name, RECORDED_UTC_KEY, stamp, PINNED_UTC_NOTATION, rule)
+        )
+    return ""
+
+
+def _fixed_receipt_why(ctx, name, document, required):
+    """-> a refusal naming the FILE and the KEY that failed this receipt's row, else ``""``."""
+    why = _receipt_shape_why(name, document, [key for key, _ in required])
+    if why:
+        return why
+    why = _recorded_utc_why(name, document, "S118")
+    if why:
+        return why
+    for key, klass in required:
+        if key not in document:
+            return "receipt %s lacks the required key %s (S118)" % (name, key)
+        value = document[key]
+        if not _value_class_ok(ctx, klass, value):
+            return (
+                "receipt %s carries %s %r, which is not %s (S118)"
+                % (name, key, value, _VALUE_CLASS_PROSE[klass])
+            )
+    return ""
+
+
+def _control_receipt_why(ctx, name, document, parity_sha):
+    """-> a refusal naming the FILE and the KEY for a chain receipt, else ``""``.
+
+    O152, THE STRICT RULE.  Every arm here returns a refusal rather than an exclusion: a
+    chain receipt that is PRESENT but invalid makes the newest UNDECIDABLE and fails the
+    exception closed.  Excluding it instead would re-open O141's hazard in a new shape --
+    an invalid 0.7 beside a valid 0.6 would silently select the STALE 0.6 and the one-shot
+    enable would fire against a superseded receipt.  Recovery is a NON-shrinking `Write`
+    rewrite of the offending receipt carrying a conforming stamp and every required key,
+    which the receipts carve-out allows; never a delete.
+    """
+    why = _receipt_shape_why(name, document, (CONTROL_HASHES_KEY,))
+    if why:
+        return why
+    # The stamp keeps the O141 wording and the O141 id: it is the arm that decides the
+    # ORDER, and the falsifiers that measured it name that id.
+    stamp = document.get(RECORDED_UTC_KEY)
+    if not isinstance(stamp, str) or not stamp:
+        return "execution-control receipt %s lacks %s (O105/O152)" % (
+            name,
+            RECORDED_UTC_KEY,
+        )
+    if _parse_pinned_utc(stamp) is None:
+        return (
+            "execution-control receipt %s carries %s %r, which is not the ONE pinned "
+            "notation %s -- whole seconds, uppercase Z, no fraction, no offset -- so the "
+            "NEWEST is UNDECIDABLE and the exception fails closed (O141)"
+            % (name, RECORDED_UTC_KEY, stamp, PINNED_UTC_NOTATION)
+        )
+    hashes = document.get(CONTROL_HASHES_KEY)
+    if CONTROL_HASHES_KEY not in document:
+        return "execution-control receipt %s lacks %s (S118/O152)" % (
+            name,
+            CONTROL_HASHES_KEY,
+        )
+    if not isinstance(hashes, dict) or not hashes:
+        return (
+            "execution-control receipt %s carries %s %r, which is not a NON-EMPTY object "
+            "mapping each hashed path to its sha256 (S118/O152)"
+            % (name, CONTROL_HASHES_KEY, hashes)
+        )
+    for hashed_path in sorted(hashes):
+        if not _is_sha256(hashes[hashed_path]):
+            return (
+                "execution-control receipt %s maps %s entry %r to %r, which is not %s "
+                "(S118/O152)"
+                % (
+                    name,
+                    CONTROL_HASHES_KEY,
+                    hashed_path,
+                    hashes[hashed_path],
+                    _VALUE_CLASS_PROSE["sha256"],
+                )
+            )
+    if name in EXECUTION_CONTROL_PROVENANCE_EXEMPT:
+        return ""
+    for key in PROVENANCE_KEYS:
+        if key not in document:
+            return "execution-control receipt %s lacks %s (S118/O152)" % (name, key)
+    parity = document[PROVENANCE_PARITY_KEY]
+    if not _is_sha256(parity):
+        return (
+            "execution-control receipt %s carries %s %r, which is not %s (S118/O152)"
+            % (name, PROVENANCE_PARITY_KEY, parity, _VALUE_CLASS_PROSE["sha256"])
+        )
+    if parity != parity_sha:
+        # BOUND, not merely well-formed.  A digest of the right SHAPE that is a digest of
+        # nothing is exactly what the forged set carried.
+        return (
+            "execution-control receipt %s carries %s %r, which is not the sha256 of %s as "
+            "it is on disk (%r) (S118/O152)"
+            % (name, PROVENANCE_PARITY_KEY, parity, ROADMAP_PARITY_RECEIPT, parity_sha)
+        )
+    if not _is_sha256(document[PROVENANCE_QUEUE_KEY]):
+        return (
+            "execution-control receipt %s carries %s %r, which is not %s (S118/O152)"
+            % (
+                name,
+                PROVENANCE_QUEUE_KEY,
+                document[PROVENANCE_QUEUE_KEY],
+                _VALUE_CLASS_PROSE["sha256"],
+            )
+        )
+    if document[PROVENANCE_COUNT_KEY] != PROVENANCE_PRODUCT_LIVE_COUNT or isinstance(
+        document[PROVENANCE_COUNT_KEY], bool
+    ):
+        return (
+            "execution-control receipt %s carries %s %r, not exactly %d (S118/O152)"
+            % (
+                name,
+                PROVENANCE_COUNT_KEY,
+                document[PROVENANCE_COUNT_KEY],
+                PROVENANCE_PRODUCT_LIVE_COUNT,
+            )
+        )
+    return ""
+
+
 def _kill_switch_receipts_ok(ctx):
     """The RECEIPT half of exception (i): every named 0.2 receipt validates, enable unspent.
 
@@ -669,14 +1088,36 @@ def _kill_switch_receipts_ok(ctx):
     standing key that any input naming the marker under a delete verb can turn: a delete
     outside the canonical compound is refused before this is ever consulted.
 
-    The execution-control arm selects the NEWEST ``execution-control-*.json`` by its
-    ``recordedUtc``, and O141 pins HOW.  A receipt LACKING ``recordedUtc`` is INVALID (O105)
-    and its mere presence makes the newest undecidable, so the whole exception fails closed;
-    so does a receipt whose ``recordedUtc`` is not the ONE pinned notation
+    S118 -- "VALIDATE" IS THE SCHEMA TABLE, NOT ``json.load(...) is not None``.  Each of the
+    five fixed receipts is judged against its row of ``KILL_SWITCH_RECEIPT_SCHEMAS``:
+    required keys, value classes, and ``recordedUtc`` in the pinned notation.  An EMPTY
+    OBJECT is INVALID -- which is the whole point, because the hub's reproduction on the
+    sixth commit was five ``{}`` receipts beside ``execution-control-forged.json`` carrying
+    only the provenance keys, and that set ALLOWED the one-shot enable.  Every refusal names
+    the FILE and the KEY (or the value class) that failed.
+
+    The execution-control arm's candidate set is the SIX CHAIN NAMES and no other; any other
+    ``execution-control-*.json`` present is INVALID and fails the exception closed by name.
+    Each chain receipt carries ``hashes`` (a non-empty object of sha256 values) and, from
+    0.35 on, ``roadmapParityReceiptSha256`` EQUAL to the sha256 of ``0.18-roadmap-parity.json``
+    as it is on disk, a well-formed ``queueSha256``, and ``productLiveCount`` exactly 15.
+
+    O141/O152 pin the ORDER and the STRICTNESS.  A receipt LACKING ``recordedUtc`` is INVALID
+    (O105) and its mere presence makes the newest undecidable, so the whole exception fails
+    closed; so does a receipt whose ``recordedUtc`` is not the ONE pinned notation
     ``YYYY-MM-DDTHH:MM:SSZ``, and that refusal NAMES the offending file -- a non-conforming
-    stamp is never silently skipped and never treated as older.  The order is the order of
-    the PARSED values, never of the raw bytes, and an EXACT TIE between two candidates is
-    undecidable too: DENY, naming BOTH files.
+    stamp is never silently skipped and never treated as older.  O152 generalises that to
+    EVERY schema fault: a chain receipt that is PRESENT but invalid is never excluded, it
+    makes the newest UNDECIDABLE, because excluding it would let an invalid 0.7 beside a
+    valid 0.6 select the STALE 0.6.  Recovery is a NON-shrinking ``Write`` rewrite of the
+    offending receipt, never a delete.  The order is the order of the PARSED values, never
+    of the raw bytes, and an EXACT TIE between two candidates is undecidable too: DENY,
+    naming BOTH files.
+
+    The SELECTED receipt is a NAME -- ``execution-control-0.7.json`` when a valid one exists,
+    else ``execution-control-0.6.json`` -- and the parsed-newest valid chain receipt must BE
+    that one.  A valid 0.6 stamped later than a valid 0.7 is a CHAIN VIOLATION, undecidable
+    rather than a new answer; the selected receipt absent is DENY.
 
     S98 -- THE ENABLE IS ONE-SHOT, and this is the first arm because it is the decisive
     one.  Exception (i) opens only while ``receipts/0.2-loop-enabled.json`` is ABSENT.  0.2
@@ -697,9 +1138,28 @@ def _kill_switch_receipts_ok(ctx):
             % KILL_SWITCH_ENABLE_RECEIPT,
             "",
         )
-    for name in KILL_SWITCH_RECEIPTS:
-        if read_json(ctx.receipt(name)) is None:
-            return False, "receipt %s is absent or does not validate" % name, ""
+    # S118 -- THE FIVE FIXED RECEIPTS VALIDATE AGAINST THE SCHEMA TABLE, one row each.
+    # `0.18-roadmap-parity.json` is hashed as soon as it validates, because every chain
+    # receipt from 0.35 on must carry THAT digest: the binding is to the bytes on disk, so
+    # it is computed from the file and never trusted from a receipt.
+    parity_sha = None
+    for name, required in KILL_SWITCH_RECEIPT_SCHEMAS:
+        path = ctx.receipt(name)
+        if not os.path.exists(path):
+            return False, "receipt %s is absent (S118)" % name, ""
+        why = _fixed_receipt_why(ctx, name, read_json(path), required)
+        if why:
+            return False, why, ""
+        if name == ROADMAP_PARITY_RECEIPT:
+            parity_sha = _sha256_of(path)
+            if parity_sha is None:
+                return (
+                    False,
+                    "receipt %s could not be read to hash it, so no chain receipt's %s "
+                    "can be bound to it (S118)"
+                    % (name, PROVENANCE_PARITY_KEY),
+                    "",
+                )
     try:
         names = sorted(os.listdir(ctx.receipts_dir_raw))
     except Exception:
@@ -707,10 +1167,24 @@ def _kill_switch_receipts_ok(ctx):
     controls = [
         name
         for name in names
-        if name.startswith("execution-control-") and name.endswith(".json")
+        if name.startswith(EXECUTION_CONTROL_PREFIX)
+        and name.endswith(EXECUTION_CONTROL_SUFFIX)
     ]
     if not controls:
         return False, "no execution-control receipt is present", ""
+    # S118 -- THE CANDIDATE SET IS AN ENUMERATION, NOT A GLOB, and a name outside it fails
+    # the exception CLOSED rather than being skipped.  The hub's reproduction turned on
+    # exactly this: `execution-control-forged.json`, a name no plan step writes, joined the
+    # selection because the filter was `execution-control-*.json`.
+    for name in controls:
+        if name not in EXECUTION_CONTROL_CHAIN:
+            return (
+                False,
+                "execution-control receipt %s is not one of the SIX chain names (%s), so "
+                "the candidate set is not the chain and the exception fails closed (S118)"
+                % (name, ", ".join(EXECUTION_CONTROL_CHAIN)),
+                "",
+            )
     # O141 -- ONE NOTATION, AND THE NEWEST IS THE PARSED VALUE.
     #
     # A non-conforming stamp is INVALID and makes the newest UNDECIDABLE, so it is refused
@@ -727,41 +1201,48 @@ def _kill_switch_receipts_ok(ctx):
     newest = None
     stamped = {}
     for name in controls:
+        # O152, STRICT.  EVERY present chain receipt is validated in FULL -- shape, stamp,
+        # `hashes`, and from 0.35 on the provenance bound to the on-disk 0.18 digest -- and
+        # any failure refuses HERE, naming the file and the key.  This is what "never
+        # silently excluded" means operationally: the loop has no `continue`.
         document = read_json(ctx.receipt(name))
-        if not isinstance(document, dict):
-            return False, "execution-control receipt %s does not validate" % name, ""
-        stamp = document.get("recordedUtc")
-        if not isinstance(stamp, str) or not stamp:
-            return False, "execution-control receipt %s lacks recordedUtc" % name, ""
-        moment = _parse_pinned_utc(stamp)
-        if moment is None:
-            return (
-                False,
-                "execution-control receipt %s carries recordedUtc %r, which is not the "
-                "ONE pinned notation %s -- whole seconds, uppercase Z, no fraction, no "
-                "offset -- so the NEWEST is UNDECIDABLE and the exception fails closed "
-                "(O141)" % (name, stamp, PINNED_UTC_NOTATION),
-                "",
-            )
+        why = _control_receipt_why(ctx, name, document, parity_sha)
+        if why:
+            return False, why, ""
+        moment = _parse_pinned_utc(document.get(RECORDED_UTC_KEY))
         if moment in stamped:
             return (
                 False,
                 "execution-control receipts %s and %s carry the SAME recordedUtc %r, so "
                 "the NEWEST is UNDECIDABLE and the exception fails closed (O141)"
-                % (stamped[moment], name, stamp),
+                % (stamped[moment], name, document[RECORDED_UTC_KEY]),
                 "",
             )
         stamped[moment] = name
         if newest is None or moment > newest[0]:
             newest = (moment, name, document)
-    document = newest[2]
-    for key in PROVENANCE_KEYS:
-        if key not in document:
-            return False, "newest execution-control receipt lacks %s" % key, ""
-    if document.get("productLiveCount") != PROVENANCE_PRODUCT_LIVE_COUNT:
+    # S118 -- THE SELECTED RECEIPT IS A NAME.  Every present chain receipt validated above,
+    # so "a valid 0.7 exists" is "0.7 is present" here and nowhere else: under O152's strict
+    # rule an invalid 0.7 already refused, rather than demoting the selection to 0.6.
+    selected = (
+        CONTROL_SELECTED_PREFERRED
+        if CONTROL_SELECTED_PREFERRED in controls
+        else CONTROL_SELECTED_FALLBACK
+    )
+    if selected not in controls:
         return (
             False,
-            "newest execution-control receipt carries the wrong productLiveCount",
+            "the SELECTED execution-control receipt %s is ABSENT (the selection is %s when "
+            "a valid one exists, else %s), so the exception fails closed (S118)"
+            % (selected, CONTROL_SELECTED_PREFERRED, CONTROL_SELECTED_FALLBACK),
+            "",
+        )
+    if newest[1] != selected:
+        return (
+            False,
+            "the parsed-newest valid execution-control receipt is %s, but the SELECTED one "
+            "is %s -- a CHAIN VIOLATION, so the newest is UNDECIDABLE and the exception "
+            "fails closed (S118)" % (newest[1], selected),
             "",
         )
     return True, "", newest[1]
@@ -1391,7 +1872,7 @@ _NA3_PERSISTENT_NAME_RX = re.compile(_NA3_PERSISTENT_NAMES, re.I)
 
 # ---- the `claude auth ...` arm, bounded by the REGISTER and not by the card's phrase ----
 #
-# ``never-authorized.json`` (schema v20) row NA-3 OPENS, VERBATIM:
+# ``never-authorized.json`` (schema v21) row NA-3 OPENS, VERBATIM:
 #
 #     claude auth login|logout, codex login, or assignment (X=, export, $env:, set, setx)
 #     of any variable starting ANTHROPIC_, OPENAI_, CLAUDE_CODE_

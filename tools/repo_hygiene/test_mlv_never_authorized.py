@@ -24,7 +24,7 @@ turns into an ARGUMENT; ``_invoke`` also STRIPS ``CLAUDE_PROJECT_DIR`` from the 
 and one row deliberately puts it BACK while passing no argument, so that a hook which
 regressed to reading the environment goes red rather than looking correct.
 
-THE ENABLE LITERAL IS DERIVED FROM THE FIXTURE, NOT WRITTEN DOWN (S112, register v20).  The
+THE ENABLE LITERAL IS DERIVED FROM THE FIXTURE, NOT WRITTEN DOWN (S112, register v21).  The
 hook now validates the 0.2 enable compound's JSON literal SEMANTICALLY: ``state`` is
 ``enabling``, both stamps carry the ONE pinned notation described below,
 ``executionControlReceipt`` is the BASENAME of the newest valid execution-control receipt,
@@ -38,7 +38,7 @@ the defect S112 names.  What the table's own defaults used to be says it best: t
 was ``receipts/execution-control-0.7.json``, a path, and the digest was ``"3" * 64``.  Both
 are DENY rows now.
 
-ONE FIXED NOTATION, AND THE NEWEST RECEIPT IS THE PARSED ONE (O141, register v20).
+ONE FIXED NOTATION, AND THE NEWEST RECEIPT IS THE PARSED ONE (O141, register v21).
 Every ``recordedUtc`` the hook reads or validates carries exactly
 ``YYYY-MM-DDTHH:MM:SSZ`` -- whole seconds, uppercase ``Z``, no fraction, no offset -- and
 the newest ``execution-control-*.json`` is chosen by the PARSED value, with a
@@ -52,6 +52,37 @@ and tied-stamp rows, the two fractional literal stamps, and an ALLOW/DENY pair o
 whole-second stamps one second apart that pins WHICH receipt the selection returns.
 ``_pinned_moment`` parses the notation with the harness's OWN implementation, so this
 table's idea of "newest" is never derived from the hook it tests.
+
+THE SIX GATE RECEIPTS VALIDATE AGAINST A SCHEMA TABLE (S118, register v21).  Until this
+delta "validate" meant ``json.load`` returned something other than ``None``, so ``{}``
+passed -- and the hub reproduced the consequence ON the sixth commit: five ``{}`` receipts
+beside ``execution-control-forged.json`` carrying only the three provenance keys ALLOWED the
+canonical enable, exit 0.  The hook now implements the ONE table of plan 1.3 step 5, and so
+does this suite's fixture: every gate receipt is a non-empty object carrying ``recordedUtc``
+in the pinned notation, with ``sha256`` = 64 lowercase hex, ``sha`` = 40 lowercase hex,
+``path`` = a file that EXISTS (absolute, else relative to the board root), ``url`` = begins
+``https://github.com/layibabalola/MLV-App/``, ``int`` = a non-negative integer where a
+BOOLEAN is not one, and ``list`` = a JSON array.  The execution-control candidate set is the
+SIX chain names ``execution-control-{0.1,0.35,0.4c-i,0.4b-i,0.6,0.7}.json`` and no other; the
+SELECTED receipt is ``0.7`` when a valid one exists else ``0.6``, and the parsed-newest valid
+chain receipt must BE that one.
+
+EVERY BOUND VALUE IN EVERY FIXTURE IS COMPUTED, NEVER WRITTEN DOWN.  The `path` fields name
+files this fixture just wrote under the tmp board; the digests are real digests; and
+``roadmapParityReceiptSha256`` is the sha256 of ``0.18-roadmap-parity.json`` READ BACK OFF
+DISK after the write, substituted into each chain receipt at write time.  A table carrying a
+hard-coded digest would stay green against a hook that had stopped opening the file, which
+is the S112/S118 defect itself.
+
+O152, THE STRICT RULE, AND THE ROW THAT MEASURES IT.  A chain receipt that is PRESENT but
+invalid is never silently excluded: it makes the newest UNDECIDABLE and the act fails closed
+naming it.  The falsifier is a present-but-invalid ``0.7`` (no ``queueSha256``) beside a
+VALID ``0.6``, with the enable literal naming ``0.6`` and carrying ``0.6``'s real digest --
+so the rejected "exclude" reading would ALLOW that row, selecting a STALE receipt, which is
+O141's hazard in a new shape.  The literal names it through ``{CONTROL_0_6}`` /
+``{CONTROL_0_6_SHA}``, placeholders ``_bind_the_enable_literal`` publishes for EVERY chain
+receipt on disk, valid or not, because ``{NEWEST_CONTROL}`` cannot express "the 0.6
+specifically" when the rule under test is what "newest" means.
 
 NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
 payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
@@ -197,7 +228,7 @@ CONTROL_SHA = "{NEWEST_CONTROL_SHA}"
 
 # ------------------------------------------- O141: ONE notation, and the newest is PARSED
 #
-# Register v20 pins ONE notation for every `recordedUtc` the hook reads or validates:
+# Register v21 pins ONE notation for every `recordedUtc` the hook reads or validates:
 # `YYYY-MM-DDTHH:MM:SSZ` -- whole seconds, uppercase `Z`, no fraction, no offset.  The
 # stamps below are the hub's own round-21 reproduction pair and its near misses.  Under the
 # SIXTH commit's raw-string comparison `CONTROL_STAMP_WHOLE > CONTROL_STAMP_FRACTION` is
@@ -1210,6 +1241,424 @@ CASES = [
         ),
         "fixture": "control_stamps_ordered_at_board",
     },
+    # ------------------- S118: the six receipts VALIDATE against the schema table
+    #
+    # Twenty-four DENY rows and two ALLOW rows.  Until this delta "validate" meant `json.load`
+    # returned something other than `None`, and the hub reproduced what that was worth ON the
+    # sixth commit: five `{}` receipts beside `execution-control-forged.json` carrying only
+    # the three provenance keys ALLOWED the canonical enable, exit 0.  Every row below is one
+    # key of one receipt away from the ALLOW rows, at the same board venue, with the same
+    # compound and the same literal -- so each DENY is attributable to the schema arm it names.
+    #
+    # THE FIVE FIXED RECEIPTS, EMPTY.  One row each, because "an empty object is INVALID" has
+    # to be true of every receipt and not just of whichever one the hook happens to read first.
+    {
+        "name": "enable canonical compound with an empty 0.18 roadmap parity receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.18-roadmap-parity.json is an EMPTY object",
+            "(S118)",
+        ),
+        "fixture": "receipt_018_empty",
+    },
+    {
+        "name": "enable canonical compound with an empty 0.4b required checks receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.4b-required-checks.json is an EMPTY object",
+            "(S118)",
+        ),
+        "fixture": "receipt_04b_empty",
+    },
+    {
+        "name": "enable canonical compound with an empty 0.4c demoted receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": ("receipt 0.4c-demoted.json is an EMPTY object", "(S118)"),
+        "fixture": "receipt_04c_empty",
+    },
+    {
+        "name": "enable canonical compound with an empty 0.6 ratio guard receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": ("receipt 0.6-ratio-guard.json is an EMPTY object", "(S118)"),
+        "fixture": "receipt_06_empty",
+    },
+    {
+        "name": "enable canonical compound with an empty 0.5 factory frozen receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.5-factory-frozen.json is an EMPTY object",
+            "(S118)",
+        ),
+        "fixture": "receipt_05_empty",
+    },
+    # A REQUIRED KEY MISSING, one row per receipt, each naming the key it dropped.  A
+    # non-empty object with four of five keys is what a half-written receipt looks like, and
+    # it is the shape an empty-object test alone would not catch.
+    {
+        "name": "enable canonical compound with 0.18 lacking queueArmResultSha256",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.18-roadmap-parity.json lacks the required key queueArmResultSha256",
+            "(S118)",
+        ),
+        "fixture": "receipt_018_missing_key",
+    },
+    {
+        "name": "enable canonical compound with 0.4b lacking headSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.4b-required-checks.json lacks the required key headSha",
+            "(S118)",
+        ),
+        "fixture": "receipt_04b_missing_key",
+    },
+    {
+        "name": "enable canonical compound with 0.4c lacking mergeSha",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.4c-demoted.json lacks the required key mergeSha",
+            "(S118)",
+        ),
+        "fixture": "receipt_04c_missing_key",
+    },
+    {
+        "name": "enable canonical compound with 0.6 lacking firstReading",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.6-ratio-guard.json lacks the required key firstReading",
+            "(S118)",
+        ),
+        "fixture": "receipt_06_missing_key",
+    },
+    {
+        "name": "enable canonical compound with 0.5 lacking frozenCount",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.5-factory-frozen.json lacks the required key frozenCount",
+            "(S118)",
+        ),
+        "fixture": "receipt_05_missing_key",
+    },
+    # THE VALUE CLASSES.  Each row carries a value of the right SORT and the wrong CLASS --
+    # the near misses a hand-written receipt actually carries.
+    {
+        # The right digest of the right file, uppercased.  `Get-FileHash` returns uppercase
+        # (O145), so this is the value a receipt written without `.ToLowerInvariant()` holds.
+        "name": "enable canonical compound with an uppercase sha256 in a receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.18-roadmap-parity.json carries queueArmResultSha256",
+            "not a 64-character LOWERCASE hex sha256",
+            "(S118)",
+        ),
+        "fixture": "receipt_sha256_uppercase",
+    },
+    {
+        # 63 of the right 64 characters: a `startswith` test takes it, and a prefix is not
+        # equality -- the same trap the S112 truncated-digest row closes on the literal.
+        "name": "enable canonical compound with a 63 character sha256 in a receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.5-factory-frozen.json carries dryRunDiffSha256",
+            "not a 64-character LOWERCASE hex sha256",
+            "(S118)",
+        ),
+        "fixture": "receipt_sha256_63_chars",
+    },
+    {
+        # `path` is an EXISTENCE test, not a shape test.  A receipt naming evidence that was
+        # never written is a receipt of nothing -- and it is what an interrupted step leaves.
+        "name": "enable canonical compound with a receipt path that does not exist",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.18-roadmap-parity.json carries composedPromptPath",
+            "a path to a file that EXISTS",
+            "(S118)",
+        ),
+        "fixture": "receipt_path_missing",
+    },
+    {
+        # The UPSTREAM host.  The board carries two remotes and no default repo, so an
+        # unpinned `gh` resolves to `ilia3101/MLV-App` (O135): a run URL on that host is
+        # what a receipt written by an unpinned command actually contains.
+        "name": "enable canonical compound with a receipt url on the wrong host",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.4c-demoted.json carries runUrl",
+            "a url beginning https://github.com/layibabalola/MLV-App/",
+            "(S118)",
+        ),
+        "fixture": "receipt_url_wrong_host",
+    },
+    {
+        "name": "enable canonical compound with frozenCount as a string",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.5-factory-frozen.json carries frozenCount '12'",
+            "a NON-NEGATIVE integer",
+            "(S118)",
+        ),
+        "fixture": "receipt_frozen_count_string",
+    },
+    {
+        # `True == 1` in Python, so `isinstance(value, int)` accepts a boolean -- the one
+        # value class where the obvious implementation admits the wrong type outright.
+        "name": "enable canonical compound with frozenCount as a boolean",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.5-factory-frozen.json carries frozenCount True",
+            "a boolean is not one",
+            "(S118)",
+        ),
+        "fixture": "receipt_frozen_count_bool",
+    },
+    {
+        # FOUR contexts where the plan pins five, `Batch Compile` KEPT -- so the row is
+        # attributable to the COUNT and not to the promoted context going missing.  Four is
+        # exactly what a silent removal against the live snapshot leaves behind (NA-9/O92).
+        "name": "enable canonical compound with four postContexts in the 0.4b receipt",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "receipt 0.4b-required-checks.json carries postContexts",
+            "exactly 5 non-empty strings containing 'Batch Compile'",
+            "(S118)",
+        ),
+        "fixture": "receipt_post_contexts_four",
+    },
+    # THE CHAIN: SIX NAMES, AND A PRESENT-BUT-INVALID RECEIPT IS UNDECIDABLE (S118/O152).
+    {
+        # THE HUB'S REPRODUCTION, turned into a falsifier.  `execution-control-forged.json`
+        # is a name no plan step writes, and it carries a conforming stamp LATER than 0.7,
+        # a well-formed `hashes` and the real provenance -- so under the old
+        # `execution-control-*.json` GLOB it would have been SELECTED as the newest and the
+        # one-shot enable taken against it.  The only thing wrong with it is its NAME, which
+        # is why the candidate set had to become an enumeration rather than a filter.
+        "name": "enable canonical compound with a forged execution control receipt name",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-forged.json is not one of the SIX "
+            "chain names",
+            "(S118)",
+        ),
+        "fixture": "control_forged_name",
+    },
+    {
+        # `hashes` is the chain receipt's whole point: it is what the step actually
+        # measured.  A receipt carrying provenance and no hashes records that a step ran and
+        # not what it saw.
+        "name": "enable canonical compound with a chain receipt lacking hashes",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json lacks hashes",
+            "(S118/O152)",
+        ),
+        "fixture": "control_without_hashes",
+    },
+    {
+        # The provenance is BOUND, not merely well-formed.  `"f" * 64` is a perfectly shaped
+        # sha256 that is the digest of nothing on this board -- which is exactly what the
+        # forged set carried, and exactly what a shape-only check accepts.
+        "name": "enable canonical compound with a chain receipt whose parity sha256 is unbound",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.35.json carries "
+            "roadmapParityReceiptSha256",
+            "is not the sha256 of 0.18-roadmap-parity.json as it is on disk",
+            "(S118/O152)",
+        ),
+        "fixture": "control_parity_mismatch",
+    },
+    {
+        "name": "enable canonical compound with a chain receipt whose productLiveCount is 14",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json carries productLiveCount "
+            "14, not exactly 15",
+            "(S118/O152)",
+        ),
+        "fixture": "control_product_live_14",
+    },
+    {
+        # A CHAIN VIOLATION, and the row that shows the selection is a NAME and not "whichever
+        # is newest".  Both receipts are valid and both stamps conform, but 0.6 is stamped
+        # LATER than a valid 0.7 -- an order the chain cannot produce.  The hook does not
+        # resolve it by preferring one; it declares the newest undecidable.
+        "name": "enable canonical compound with a valid 0.6 stamped later than a valid 0.7",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "the parsed-newest valid execution-control receipt is execution-control-0.6.json, "
+            "but the SELECTED one is execution-control-0.7.json",
+            "CHAIN VIOLATION",
+            "(S118)",
+        ),
+        "fixture": "control_06_newer_than_07",
+    },
+    {
+        # O152, AND THE ROW THE "EXCLUDE" READING FAILS.  0.7 is PRESENT and invalid (no
+        # `queueSha256`); 0.6 is valid; the literal names 0.6 by name and carries 0.6's real
+        # digest.  Exclude the invalid 0.7 -- the amendment's proposal -- and the selection
+        # falls back to a valid 0.6, the literal matches, and the ONE-SHOT enable fires
+        # against a STALE receipt: O141's hazard in a new shape.  The strict rule refuses
+        # instead, naming the offending file, and recovery is a non-shrinking rewrite of it.
+        "name": "enable canonical compound with a present but invalid 0.7 beside a valid 0.6",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_6}",
+                    executionControlSha256="{CONTROL_0_6_SHA}",
+                )
+            )
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "execution-control receipt execution-control-0.7.json lacks queueSha256",
+            "(S118/O152)",
+        ),
+        "fixture": "control_07_invalid_beside_valid_06",
+    },
+    {
+        # The SELECTED receipt is absent: a valid chain that stops at 0.35, so neither 0.7
+        # nor 0.6 exists.  Without this arm "the newest valid chain receipt" would quietly
+        # become 0.35 and the enable would be taken three steps early.
+        "name": "enable canonical compound with the selected control receipt absent",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {"command": _canonical_enable()},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "the SELECTED execution-control receipt execution-control-0.6.json is ABSENT",
+            "(S118)",
+        ),
+        "fixture": "control_selected_absent",
+    },
+    {
+        # ALLOW, 0.7 ABSENT.  A fully conforming set whose chain is `{0.35, 0.6}`: the
+        # selection falls back to 0.6, which is also the parsed-newest, and the literal names
+        # it by name.  Every value in every receipt is computed from the fixture at run time.
+        "name": "enable canonical compound with a conforming chain of 0.35 and 0.6",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_6}",
+                    executionControlSha256="{CONTROL_0_6_SHA}",
+                )
+            )
+        },
+        "expect": "ALLOW",
+        "fixture": "chain_035_and_06_at_board",
+    },
+    {
+        # ALLOW, THE WHOLE CHAIN.  All six names present, valid and ascending, so 0.7 is both
+        # the parsed-newest and the SELECTED one, and the literal names it.  This is the row
+        # that proves the enumeration is a set of SIX and not a set of two.
+        "name": "enable canonical compound with all six conforming chain receipts",
+        "group": "killswitch",
+        "tool": "PowerShell",
+        "input": {
+            "command": _canonical_enable(
+                literal=_enable_literal(
+                    executionControlReceipt="{CONTROL_0_7}",
+                    executionControlSha256="{CONTROL_0_7_SHA}",
+                )
+            )
+        },
+        "expect": "ALLOW",
+        "fixture": "chain_all_six_names_at_board",
+    },
     {
         # S99.  The row the old table had as an ALLOW.  Every precondition of exception (i)
         # holds -- six receipts valid, the enable unspent -- and the delete is STILL
@@ -1750,7 +2199,7 @@ CASES = [
     },
     # -------------------------------- NA-3's `claude auth` arm, bounded by the REGISTER
     #
-    # `never-authorized.json` v20 NA-3 names `claude auth login|logout`, not `claude auth`.
+    # `never-authorized.json` v21 NA-3 names `claude auth login|logout`, not `claude auth`.
     # These four rows differ from one another in exactly ONE variable -- the auth
     # subcommand -- so they prove the arm is a GATE and not a wall.  The ALLOW row is
     # load-bearing: the board's account-rotation procedure runs `claude auth status --json`
@@ -2016,53 +2465,264 @@ def _snapshot_rows(paths, tail_is_malformed=False):
     return "\n".join(rows) + "\n"
 
 
-def _execution_control(step, stamp, provenance=True):
-    document = {
-        "step": step,
-        "recordedUtc": stamp,
-        "hookSha256": "0" * 64,
-        "solVerdictPath": "receipts/sol.md",
+# ------------------------------------------- S118: the receipts CONFORM to the schema table
+#
+# Until this delta the receipt fixtures were placeholders -- `{"step": "0.18", "parity":
+# true}` and friends -- because "validate" meant `json.load` did not return `None`.  The hub
+# reproduced what that was worth on the sixth commit: five `{}` receipts beside an
+# `execution-control-forged.json` carrying only the provenance keys ALLOWED the one-shot
+# enable.  So every ALLOW row's receipt set is now FULLY CONFORMING, and -- this is the part
+# that matters -- every bound value is COMPUTED AT TEST TIME from the fixture itself:
+#
+#   * every `path` field names a file this fixture WROTE, so the hook's existence test is
+#     answered by the tmp board and never by the host;
+#   * every `sha256` is a real digest -- of a file on disk where the schema binds one, and
+#     of a derived label where the schema asks only for the shape;
+#   * `roadmapParityReceiptSha256` is the sha256 of `0.18-roadmap-parity.json` AS WRITTEN,
+#     read back from disk after the write, so a newline translation or an indent change
+#     cannot make the ALLOW rows pass against a hook that stopped hashing the file.
+#
+# Nothing here is a hard-coded digest.  A table that wrote one down would go green against a
+# hook that had stopped opening the file -- which is the S112/S118 defect in its purest form.
+RECEIPT_STAMP = "2026-09-06T08:00:00Z"
+RECEIPT_RUN_URL = "https://github.com/layibabalola/MLV-App/actions/runs/17512345678"
+# The UPSTREAM remote, and the reason `url` is a prefix test rather than a "looks like a
+# GitHub URL" test: the board carries two remotes and an unpinned `gh` resolves to this one
+# (O135), so a run URL on this host is the value the class exists to refuse.
+RECEIPT_RUN_URL_WRONG_HOST = "https://github.com/ilia3101/MLV-App/actions/runs/17512345678"
+# `path` fields resolve ABSOLUTE first, then relative to the BOARD root, so the fixture
+# writes these under the tmp board and stores the RELATIVE form -- the same shape the plan's
+# steps record, and identical on both matrix legs.
+EVIDENCE_DIR = ".claude-state/coordination/dual-lane/evidence"
+EVIDENCE_FILES = {
+    "composedPromptPath": EVIDENCE_DIR + "/sol-review-PR-74.md",
+    "prChecksPath": EVIDENCE_DIR + "/pr-74-checks.json",
+    "prReviewPath": EVIDENCE_DIR + "/pr-74-review.json",
+    "solVerdictPath": EVIDENCE_DIR + "/sol-verdict.md",
+    "dryRunDiff": EVIDENCE_DIR + "/factory-freeze-dry-run.diff",
+    "queue": ".claude-state/coordination/dual-lane/queue.json",
+}
+MISSING_EVIDENCE_PATH = EVIDENCE_DIR + "/no-such-composed-prompt.md"
+
+# The six chain names, as STEPS -- the enumeration the hook restricts the candidate set to.
+CHAIN_STEPS = ("0.1", "0.35", "0.4c-i", "0.4b-i", "0.6", "0.7")
+CHAIN_PROVENANCE_EXEMPT = ("0.1",)
+FORGED_CONTROL_STEP = "forged"
+# The default two-receipt chain, and the stamps the pre-S118 fixture already used.
+CONTROL_STAMP_06 = "2026-09-06T09:00:00Z"
+CONTROL_STAMP_07 = "2026-09-06T11:00:00Z"
+# `roadmapParityReceiptSha256` is bound to bytes that do not exist until the fixture writes
+# them, so the payload carries a TOKEN and `_kill_switch_receipts` substitutes the real
+# digest at write time.  A row that wants a WRONG digest passes an explicit value instead,
+# which the substitution then leaves alone.
+PARITY_SHA_TOKEN = "{PARITY_SHA256}"
+_DROP = object()
+
+
+def _derived_sha256(label):
+    """A 64-char lowercase sha256 that is COMPUTED, for the fields the schema shape-checks."""
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def _derived_sha(label):
+    """A 40-char lowercase hex sha -- a git object name's shape, computed, never written down."""
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()[:40]
+
+
+def _sha256_file(path):
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+
+
+def _evidence_path(paths, label):
+    return os.path.join(paths["BOARD"], EVIDENCE_FILES[label].replace("/", os.sep))
+
+
+def _write_evidence(paths):
+    """Write every file a `path` field names, so the hook's existence test has something to find."""
+    for label in sorted(EVIDENCE_FILES):
+        _write(_evidence_path(paths, label), "evidence fixture: %s\n" % label)
+
+
+def _receipt_payloads(paths):
+    """The five FIXED gate receipts as documents, fully conforming to the schema table."""
+    _write_evidence(paths)
+    snapshot_row = json.dumps(
+        {
+            "recordedUtc": RECEIPT_STAMP,
+            "required_status_checks": _body(CANONICAL_04B_CONTEXTS),
+        }
+    )
+    queue_sha = _sha256_file(_evidence_path(paths, "queue"))
+    return {
+        "0.18-roadmap-parity.json": {
+            "step": "0.18",
+            "recordedUtc": RECEIPT_STAMP,
+            "queueArmResultSha256": queue_sha,
+            "composedPromptPath": EVIDENCE_FILES["composedPromptPath"],
+            "prChecksPath": EVIDENCE_FILES["prChecksPath"],
+            "prReviewPath": EVIDENCE_FILES["prReviewPath"],
+            "solVerdictPath": EVIDENCE_FILES["solVerdictPath"],
+        },
+        "0.4b-required-checks.json": {
+            "step": "0.4b",
+            "recordedUtc": RECEIPT_STAMP,
+            "headSha": _derived_sha("0.4b-head"),
+            "preContexts": list(LIVE_CONTEXTS),
+            "postContexts": list(CANONICAL_04B_CONTEXTS),
+            "snapshotRowSha256": hashlib.sha256(
+                snapshot_row.encode("utf-8")
+            ).hexdigest(),
+        },
+        "0.4c-demoted.json": {
+            "step": "0.4c",
+            "recordedUtc": RECEIPT_STAMP,
+            "headSha": _derived_sha("0.4c-head"),
+            "mergeSha": _derived_sha("0.4c-merge"),
+            "runUrl": RECEIPT_RUN_URL,
+            "solVerdictPath": EVIDENCE_FILES["solVerdictPath"],
+        },
+        "0.6-ratio-guard.json": {
+            "step": "0.6",
+            "recordedUtc": RECEIPT_STAMP,
+            "mergeSha": _derived_sha("0.6-merge"),
+            "firstReading": {"dispatched": 0, "charged": 0, "window": "24h"},
+            "solVerdictPath": EVIDENCE_FILES["solVerdictPath"],
+        },
+        "0.5-factory-frozen.json": {
+            "step": "0.5",
+            "recordedUtc": RECEIPT_STAMP,
+            "queueSha256": queue_sha,
+            "frozenCount": 12,
+            "dryRunDiffSha256": _sha256_file(_evidence_path(paths, "dryRunDiff")),
+            "scopelessIds": ["FACT-11", "FACT-12"],
+        },
     }
-    if stamp is None:
-        del document["recordedUtc"]
-    if provenance:
-        document["roadmapParityReceiptSha256"] = "1" * 64
-        document["queueSha256"] = "2" * 64
-        document["productLiveCount"] = 15
+
+
+FIXED_RECEIPT_ORDER = (
+    "0.18-roadmap-parity.json",
+    "0.4b-required-checks.json",
+    "0.4c-demoted.json",
+    "0.6-ratio-guard.json",
+    "0.5-factory-frozen.json",
+)
+ROADMAP_PARITY_RECEIPT = FIXED_RECEIPT_ORDER[0]
+
+
+def _mutated(paths, name, **changes):
+    """The CONFORMING payload for one fixed receipt, with named keys set or dropped.
+
+    Every S118 fixed-receipt falsifier is built this way, so it differs from the ALLOW row's
+    receipt in EXACTLY the key it names and in nothing else -- the same discipline the S101
+    and S112 rows already use on the compound and on the literal.
+    """
+    document = _receipt_payloads(paths)[name]
+    for key, value in changes.items():
+        if value is _DROP:
+            document.pop(key, None)
+        else:
+            document[key] = value
     return json.dumps(document, indent=2)
 
 
-def _kill_switch_receipts(paths, omit=(), extra=()):
-    named = {
-        "0.18-roadmap-parity.json": json.dumps({"step": "0.18", "parity": True}),
-        "0.4b-required-checks.json": json.dumps({"step": "0.4b", "contexts": list(CANONICAL_04B_CONTEXTS)}),
-        "0.4c-demoted.json": json.dumps({"step": "0.4c", "demoted": "Factory Bridge Regressions"}),
-        "0.6-ratio-guard.json": json.dumps({"step": "0.6", "guard": "green"}),
-        "0.5-factory-frozen.json": json.dumps({"step": "0.5", "frozen": 12}),
-        "execution-control-0.6.json": _execution_control("0.6", "2026-09-06T09:00:00Z"),
-        "execution-control-0.7.json": _execution_control("0.7", "2026-09-06T11:00:00Z"),
-    }
-    for name in omit:
-        named.pop(name, None)
-    for name, payload in extra:
-        named[name] = payload
-    for name, payload in named.items():
-        _write(os.path.join(paths["RECEIPTS"], name), payload)
+def _control_name(step):
+    return "execution-control-%s.json" % step
+
+
+def _execution_control(
+    step,
+    stamp,
+    provenance=True,
+    hashes=None,
+    parity=PARITY_SHA_TOKEN,
+    queue_sha=None,
+    product_live_count=15,
+    drop=(),
+):
+    """One chain receipt.  Every keyword is ONE degree of freedom of the chain schema."""
+    document = {"step": step, "recordedUtc": stamp}
+    if stamp is None:
+        del document["recordedUtc"]
+    document["hashes"] = (
+        dict(hashes)
+        if hashes is not None
+        else {
+            "tools/hooks/mlv-never-authorized.py": _derived_sha256("hook:" + step),
+            "tools/repo_hygiene/test_mlv_never_authorized.py": _derived_sha256(
+                "suite:" + step
+            ),
+        }
+    )
+    if provenance:
+        document["roadmapParityReceiptSha256"] = parity
+        document["queueSha256"] = (
+            queue_sha if queue_sha is not None else _derived_sha256("queue:" + step)
+        )
+        document["productLiveCount"] = product_live_count
+    for key in drop:
+        document.pop(key, None)
+    return json.dumps(document, indent=2)
+
+
+def _kill_switch_receipts(paths, omit=(), extra=(), stamps=None):
+    """The gate receipts, fully conforming unless a row deliberately breaks one (S118).
+
+    `stamps` is an ORDERED mapping of chain STEP -> `recordedUtc`, and its keys ARE the chain
+    this fixture writes: the default is the `{0.6, 0.7}` pair the pre-S118 fixture used, an
+    O141 row passes two stamps, and an S118 row passes a longer or shorter chain to exercise
+    the selection and the "selected receipt absent" arm.
+
+    `extra` still OVERWRITES by basename -- a chain name replaces that receipt in place, any
+    other name is written beside the chain (which is how the forged-name row is built).  The
+    five fixed receipts are written FIRST and `0.18-roadmap-parity.json` is then hashed OFF
+    DISK, so every chain receipt's `roadmapParityReceiptSha256` token resolves to the digest
+    of the bytes the hook will read.
+    """
+    receipts = paths["RECEIPTS"]
+    overrides = dict(extra)
+    conforming = _receipt_payloads(paths)
+    for name in FIXED_RECEIPT_ORDER:
+        if name in omit:
+            continue
+        payload = (
+            overrides.pop(name)
+            if name in overrides
+            else json.dumps(conforming[name], indent=2)
+        )
+        _write(os.path.join(receipts, name), payload)
+    parity_path = os.path.join(receipts, ROADMAP_PARITY_RECEIPT)
+    parity_sha = _sha256_file(parity_path) if os.path.isfile(parity_path) else "0" * 64
+    if stamps is None:
+        stamps = {"0.6": CONTROL_STAMP_06, "0.7": CONTROL_STAMP_07}
+    for step, stamp in stamps.items():
+        name = _control_name(step)
+        if name in omit:
+            continue
+        payload = (
+            overrides.pop(name)
+            if name in overrides
+            else _execution_control(
+                step, stamp, provenance=step not in CHAIN_PROVENANCE_EXEMPT
+            )
+        )
+        _write(os.path.join(receipts, name), payload.replace(PARITY_SHA_TOKEN, parity_sha))
+    for name in sorted(overrides):
+        if name in omit:
+            continue
+        _write(
+            os.path.join(receipts, name),
+            overrides[name].replace(PARITY_SHA_TOKEN, parity_sha),
+        )
 
 
 def _kill_switch_receipts_stamped(paths, stamp_06, stamp_07):
     """The six receipts, with the two execution-control stamps set explicitly (O141).
 
-    `extra` OVERWRITES the defaults, so each O141 fixture differs from
-    `fixture_receipts_all_six_at_board` in the stamps and in nothing else.
+    Each O141 fixture differs from `fixture_receipts_all_six_at_board` in the stamps and in
+    nothing else.
     """
-    _kill_switch_receipts(
-        paths,
-        extra=(
-            ("execution-control-0.6.json", _execution_control("0.6", stamp_06)),
-            ("execution-control-0.7.json", _execution_control("0.7", stamp_07)),
-        ),
-    )
+    _kill_switch_receipts(paths, stamps={"0.6": stamp_06, "0.7": stamp_07})
 
 
 def fixture_default(paths):
@@ -2128,9 +2788,16 @@ def fixture_receipts_missing_one(paths):
 
 
 def fixture_receipts_no_recorded_utc(paths):
+    """O105: a chain receipt with NO `recordedUtc` at all, beside two that carry one.
+
+    S118 moved the receipt this row uses.  It used to be `execution-control-0.5.json`, a
+    name outside the chain -- which the candidate-set restriction now refuses BY NAME, so
+    the row would have stopped testing O105 and started testing S118's enumeration.  It is
+    `0.35` now: a real chain step, refused for the missing stamp and for nothing else.
+    """
     _kill_switch_receipts(
         paths,
-        extra=(("execution-control-0.5.json", _execution_control("0.5", None)),),
+        stamps={"0.35": None, "0.6": CONTROL_STAMP_06, "0.7": CONTROL_STAMP_07},
     )
     return {}
 
@@ -2168,6 +2835,263 @@ def fixture_control_stamps_tied_at_board(paths):
 def fixture_control_stamps_ordered_at_board(paths):
     """O141: two conforming stamps ONE SECOND apart -- `0.7` is the newest, and only it."""
     _kill_switch_receipts_stamped(paths, CONTROL_STAMP_WHOLE, CONTROL_STAMP_LATER)
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+# ------------------------------------------- S118: the receipt SCHEMA fixtures
+#
+# Every one of these differs from `fixture_receipts_all_six_at_board` in EXACTLY one key of
+# one receipt, and all of them run at the BOARD venue, so each row's DENY is attributable to
+# the schema arm it names and not to the venue, the shape or the literal.
+
+
+def _fault_at_board(paths, name, payload):
+    """One fixed receipt replaced by a deliberately invalid payload; everything else conforms."""
+    _kill_switch_receipts(paths, extra=((name, payload),))
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_receipt_018_empty(paths):
+    return _fault_at_board(paths, "0.18-roadmap-parity.json", "{}")
+
+
+def fixture_receipt_04b_empty(paths):
+    return _fault_at_board(paths, "0.4b-required-checks.json", "{}")
+
+
+def fixture_receipt_04c_empty(paths):
+    return _fault_at_board(paths, "0.4c-demoted.json", "{}")
+
+
+def fixture_receipt_06_empty(paths):
+    return _fault_at_board(paths, "0.6-ratio-guard.json", "{}")
+
+
+def fixture_receipt_05_empty(paths):
+    return _fault_at_board(paths, "0.5-factory-frozen.json", "{}")
+
+
+def fixture_receipt_018_missing_key(paths):
+    return _fault_at_board(
+        paths,
+        "0.18-roadmap-parity.json",
+        _mutated(paths, "0.18-roadmap-parity.json", queueArmResultSha256=_DROP),
+    )
+
+
+def fixture_receipt_04b_missing_key(paths):
+    return _fault_at_board(
+        paths,
+        "0.4b-required-checks.json",
+        _mutated(paths, "0.4b-required-checks.json", headSha=_DROP),
+    )
+
+
+def fixture_receipt_04c_missing_key(paths):
+    return _fault_at_board(
+        paths, "0.4c-demoted.json", _mutated(paths, "0.4c-demoted.json", mergeSha=_DROP)
+    )
+
+
+def fixture_receipt_06_missing_key(paths):
+    return _fault_at_board(
+        paths,
+        "0.6-ratio-guard.json",
+        _mutated(paths, "0.6-ratio-guard.json", firstReading=_DROP),
+    )
+
+
+def fixture_receipt_05_missing_key(paths):
+    return _fault_at_board(
+        paths,
+        "0.5-factory-frozen.json",
+        _mutated(paths, "0.5-factory-frozen.json", frozenCount=_DROP),
+    )
+
+
+def fixture_receipt_sha256_uppercase(paths):
+    """The RIGHT digest of the RIGHT file, uppercased -- the S112 near miss, on a receipt."""
+    conforming = _receipt_payloads(paths)["0.18-roadmap-parity.json"]
+    return _fault_at_board(
+        paths,
+        "0.18-roadmap-parity.json",
+        _mutated(
+            paths,
+            "0.18-roadmap-parity.json",
+            queueArmResultSha256=conforming["queueArmResultSha256"].upper(),
+        ),
+    )
+
+
+def fixture_receipt_sha256_63_chars(paths):
+    """63 of the right 64 characters: a prefix match would take it, and a prefix is not equality."""
+    conforming = _receipt_payloads(paths)["0.5-factory-frozen.json"]
+    return _fault_at_board(
+        paths,
+        "0.5-factory-frozen.json",
+        _mutated(
+            paths,
+            "0.5-factory-frozen.json",
+            dryRunDiffSha256=conforming["dryRunDiffSha256"][:63],
+        ),
+    )
+
+
+def fixture_receipt_path_missing(paths):
+    """A `path` field of the right SHAPE naming a file that is not there."""
+    return _fault_at_board(
+        paths,
+        "0.18-roadmap-parity.json",
+        _mutated(
+            paths, "0.18-roadmap-parity.json", composedPromptPath=MISSING_EVIDENCE_PATH
+        ),
+    )
+
+
+def fixture_receipt_url_wrong_host(paths):
+    return _fault_at_board(
+        paths, "0.4c-demoted.json", _mutated(paths, "0.4c-demoted.json", runUrl=RECEIPT_RUN_URL_WRONG_HOST)
+    )
+
+
+def fixture_receipt_frozen_count_string(paths):
+    return _fault_at_board(
+        paths, "0.5-factory-frozen.json", _mutated(paths, "0.5-factory-frozen.json", frozenCount="12")
+    )
+
+
+def fixture_receipt_frozen_count_bool(paths):
+    """`True == 1` in Python, so a naive `isinstance(v, int)` takes this one."""
+    return _fault_at_board(
+        paths, "0.5-factory-frozen.json", _mutated(paths, "0.5-factory-frozen.json", frozenCount=True)
+    )
+
+
+def fixture_receipt_post_contexts_four(paths):
+    """Four of the canonical five, `Batch Compile` KEPT -- so the row tests the COUNT alone."""
+    return _fault_at_board(
+        paths,
+        "0.4b-required-checks.json",
+        _mutated(
+            paths,
+            "0.4b-required-checks.json",
+            postContexts=list(CANONICAL_04B_CONTEXTS)[1:],
+        ),
+    )
+
+
+def fixture_control_forged_name(paths):
+    """The hub's reproduction: a receipt outside the chain, otherwise entirely plausible.
+
+    It carries a conforming stamp LATER than `0.7`, a well-formed `hashes` and the real
+    provenance, so under the old `execution-control-*.json` GLOB it would have been SELECTED
+    as the newest.  The only thing wrong with it is its NAME.
+    """
+    _kill_switch_receipts(
+        paths,
+        extra=(
+            (
+                _control_name(FORGED_CONTROL_STEP),
+                _execution_control(FORGED_CONTROL_STEP, CONTROL_STAMP_LATER),
+            ),
+        ),
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_without_hashes(paths):
+    _kill_switch_receipts(
+        paths,
+        extra=(
+            (
+                _control_name("0.7"),
+                _execution_control("0.7", CONTROL_STAMP_07, drop=("hashes",)),
+            ),
+        ),
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_parity_mismatch(paths):
+    """A 0.35 whose `roadmapParityReceiptSha256` is a well-formed digest OF NOTHING.
+
+    Exactly the forged set's provenance: right shape, bound to no file on this board.  0.35
+    sorts first among the three chain names, so the refusal names it.
+    """
+    _kill_switch_receipts(
+        paths,
+        stamps={"0.35": RECEIPT_STAMP, "0.6": CONTROL_STAMP_06, "0.7": CONTROL_STAMP_07},
+        extra=(
+            (
+                _control_name("0.35"),
+                _execution_control("0.35", RECEIPT_STAMP, parity="f" * 64),
+            ),
+        ),
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_product_live_14(paths):
+    _kill_switch_receipts(
+        paths,
+        extra=(
+            (
+                _control_name("0.7"),
+                _execution_control("0.7", CONTROL_STAMP_07, product_live_count=14),
+            ),
+        ),
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_06_newer_than_07(paths):
+    """A CHAIN VIOLATION: both valid, but the parsed-newest is 0.6 and the SELECTED one is 0.7."""
+    _kill_switch_receipts_stamped(paths, CONTROL_STAMP_LATER, CONTROL_STAMP_WHOLE)
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_07_invalid_beside_valid_06(paths):
+    """O152, STRICT.  0.7 is PRESENT and invalid (no `queueSha256`); 0.6 is valid.
+
+    This is the fixture the "exclude" reading fails on.  Exclude the invalid 0.7 and the
+    selection falls back to a valid 0.6, the literal below names 0.6 with 0.6's real digest,
+    and the enable is ALLOWED against a STALE receipt -- O141's hazard in a new shape.  The
+    strict rule refuses instead, naming 0.7.
+    """
+    _kill_switch_receipts(
+        paths,
+        extra=(
+            (
+                _control_name("0.7"),
+                _execution_control("0.7", CONTROL_STAMP_07, drop=("queueSha256",)),
+            ),
+        ),
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_control_selected_absent(paths):
+    """A valid chain that stops at 0.35: neither 0.7 nor 0.6 exists, so the SELECTED one is absent."""
+    _kill_switch_receipts(
+        paths, stamps={"0.1": CONTROL_STAMP_WHOLE, "0.35": CONTROL_STAMP_LATER}
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_chain_035_and_06_at_board(paths):
+    """The ALLOW with 0.7 ABSENT: the selection falls back to 0.6, which is also the newest."""
+    _kill_switch_receipts(
+        paths, stamps={"0.35": CONTROL_STAMP_WHOLE, "0.6": CONTROL_STAMP_LATER}
+    )
+    return {VENUE_KEY: paths["BOARD"]}
+
+
+def fixture_chain_all_six_names_at_board(paths):
+    """The ALLOW with the WHOLE chain present and valid, ascending, 0.7 newest and selected."""
+    stamps = {}
+    for index, step in enumerate(CHAIN_STEPS):
+        stamps[step] = "2026-09-06T1%d:00:00Z" % index
+    _kill_switch_receipts(paths, stamps=stamps)
     return {VENUE_KEY: paths["BOARD"]}
 
 
@@ -2272,6 +3196,33 @@ FIXTURES = {
     "control_stamp_lowercase_z_at_board": fixture_control_stamp_lowercase_z_at_board,
     "control_stamps_tied_at_board": fixture_control_stamps_tied_at_board,
     "control_stamps_ordered_at_board": fixture_control_stamps_ordered_at_board,
+    # S118 / O152
+    "receipt_018_empty": fixture_receipt_018_empty,
+    "receipt_04b_empty": fixture_receipt_04b_empty,
+    "receipt_04c_empty": fixture_receipt_04c_empty,
+    "receipt_06_empty": fixture_receipt_06_empty,
+    "receipt_05_empty": fixture_receipt_05_empty,
+    "receipt_018_missing_key": fixture_receipt_018_missing_key,
+    "receipt_04b_missing_key": fixture_receipt_04b_missing_key,
+    "receipt_04c_missing_key": fixture_receipt_04c_missing_key,
+    "receipt_06_missing_key": fixture_receipt_06_missing_key,
+    "receipt_05_missing_key": fixture_receipt_05_missing_key,
+    "receipt_sha256_uppercase": fixture_receipt_sha256_uppercase,
+    "receipt_sha256_63_chars": fixture_receipt_sha256_63_chars,
+    "receipt_path_missing": fixture_receipt_path_missing,
+    "receipt_url_wrong_host": fixture_receipt_url_wrong_host,
+    "receipt_frozen_count_string": fixture_receipt_frozen_count_string,
+    "receipt_frozen_count_bool": fixture_receipt_frozen_count_bool,
+    "receipt_post_contexts_four": fixture_receipt_post_contexts_four,
+    "control_forged_name": fixture_control_forged_name,
+    "control_without_hashes": fixture_control_without_hashes,
+    "control_parity_mismatch": fixture_control_parity_mismatch,
+    "control_product_live_14": fixture_control_product_live_14,
+    "control_06_newer_than_07": fixture_control_06_newer_than_07,
+    "control_07_invalid_beside_valid_06": fixture_control_07_invalid_beside_valid_06,
+    "control_selected_absent": fixture_control_selected_absent,
+    "chain_035_and_06_at_board": fixture_chain_035_and_06_at_board,
+    "chain_all_six_names_at_board": fixture_chain_all_six_names_at_board,
     "receipts_04b_ready": fixture_receipts_04b_ready,
     "receipts_04b_already_done": fixture_receipts_04b_already_done,
     "checkpoint_archived": fixture_checkpoint_archived,
@@ -2360,6 +3311,18 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
                 continue
             with open(os.path.join(self.paths["RECEIPTS"], name), "rb") as handle:
                 payload = handle.read()
+            # S118/O152: EVERY chain receipt on disk also gets its own placeholder pair,
+            # valid or not -- `{CONTROL_0_6}` and `{CONTROL_0_6_SHA}` for
+            # `execution-control-0.6.json`, and so on.  The O152 row needs to name a
+            # SPECIFIC receipt (the valid 0.6 beside a present-but-invalid 0.7), which
+            # `{NEWEST_CONTROL}` cannot express: under the STRICT rule there is no newest at
+            # all, and under the rejected "exclude" reading the newest would be the 0.6 --
+            # so the row would silently change meaning with the rule it is testing.
+            slug = re.sub(
+                r"[^0-9A-Za-z]+", "_", name[len("execution-control-") : -len(".json")]
+            ).upper()
+            self.paths["CONTROL_" + slug] = name
+            self.paths["CONTROL_" + slug + "_SHA"] = hashlib.sha256(payload).hexdigest()
             try:
                 stamp = json.loads(payload.decode("utf-8")).get("recordedUtc")
             except ValueError:
@@ -2545,7 +3508,40 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # locks that rather than leaving it true by accident.  The historical falsifier
         # groups -- `control` 3, `round1` 16, `round2` 12, `failclosed` 4, `benign` 6 -- are
         # untouched, as are `carveout`, `manifest`, `na3`, `na3_persistent` and `na10`.
-        self.assertEqual(counts.get("killswitch"), 40, "40 kill-switch / 0.2-enable rows")
+        #
+        # PINNED DELIBERATELY, 0.05 EIGHTH review delta (S118/O152): 40 -> 66, twenty-six
+        # new rows and NO row dropped.  The six gate receipts now VALIDATE against the schema
+        # table of plan 1.3 step 5 instead of merely parsing, which is the defect the hub
+        # reproduced on the sixth commit -- five `{}` receipts beside
+        # `execution-control-forged.json` carrying only the provenance keys ALLOWED the
+        # enable.  TWENTY-FOUR are DENY: an EMPTY OBJECT in each of the five fixed receipts
+        # (five rows, one per receipt, because "an empty object is INVALID" must be true of
+        # every receipt and not of whichever is read first); a MISSING REQUIRED KEY in each
+        # of the five, naming the key (five rows); the value classes, one row each -- an
+        # uppercase sha256, a 63-character sha256, a `path` naming a file that does not
+        # exist, a `url` on the UPSTREAM host, `frozenCount` as a string, `frozenCount` as a
+        # BOOLEAN (`True == 1`, so the obvious `isinstance` takes it) and `postContexts` with
+        # four entries; and the chain, one row each -- `execution-control-forged.json` beside
+        # a valid chain (the candidate set is an ENUMERATION, not the glob it walked in
+        # through), a chain receipt lacking `hashes`, a 0.35 whose
+        # `roadmapParityReceiptSha256` is a well-formed digest of nothing, a
+        # `productLiveCount` of 14, a valid 0.6 stamped LATER than a valid 0.7 (a chain
+        # violation, undecidable), a PRESENT-but-invalid 0.7 beside a valid 0.6 with the
+        # literal naming 0.6 (O152's strict rule -- the "exclude" reading ALLOWS this one),
+        # and the SELECTED receipt absent.  TWO are ALLOW: a conforming chain of `{0.35,
+        # 0.6}` with 0.7 absent, and all six chain names present, valid and ascending.
+        #
+        # NO ROW WAS RE-EXPECTED, but EVERY existing row's receipt fixture was REBUILT: the
+        # placeholder payloads (`{"step": "0.18", "parity": true}`) are now fully conforming
+        # documents whose every bound value -- the paths, the digests and the on-disk sha256
+        # of `0.18-roadmap-parity.json` -- is COMPUTED at run time from the fixture, never
+        # written down.  One fixture MOVED: `receipts_no_recorded_utc` used
+        # `execution-control-0.5.json`, a name outside the chain, which the enumeration now
+        # refuses BY NAME -- so that O105 row would have stopped testing O105.  It is `0.35`
+        # now.  The historical falsifier groups -- `control` 3, `round1` 16, `round2` 12,
+        # `failclosed` 4, `benign` 6 -- are untouched, as are `carveout`, `manifest`, `na3`,
+        # `na3_persistent` and `na10`.
+        self.assertEqual(counts.get("killswitch"), 66, "66 kill-switch / 0.2-enable rows")
         # PINNED DELIBERATELY, 0.05 fourth review delta (O125): 3 -> 4.  The carve-out is a
         # PATH permission, not a TOOL permission, and the pair that proves it -- the `Write`
         # create ALLOW beside the shell `Set-Content` create DENY -- must not be separable.
