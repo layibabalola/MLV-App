@@ -34,9 +34,17 @@ __all__ = [
     "native_probe_denied",
     "native_process_entry",
     "native_process_table",
+    "normalize_command_line",
 ]
 
 NATIVE_PROCESS_PROBE_AVAILABLE = sys.platform == "win32"
+
+# Spelled ``chr(0)`` rather than as an escape inside a literal, deliberately: a
+# real NUL byte in a source file makes that file ungreppable (this repository
+# has already had to remove one), and an escape written into a source file by a
+# tool that re-interprets escapes silently becomes the byte it was meant to
+# name.  Both failures are invisible on a diff.
+NUL = chr(0)
 
 # Win32 constants.
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -241,6 +249,34 @@ def _parent_pid(handle) -> int:
     return int(info.InheritedFromUniqueProcessId or 0)
 
 
+def normalize_command_line(raw: str) -> str:
+    r"""Cut a PEB command line at its first NUL, the way every other reader does.
+
+    ``RTL_USER_PROCESS_PARAMETERS.CommandLine`` is a ``UNICODE_STRING`` whose
+    ``Length`` can cover characters *past* the terminating NUL.  WMI provider
+    hosts are the routine case, measured on a GitHub Windows runner: the buffer
+    holds ``C:\Windows\system32\wbem\wmiprvse.exe\x00-Embedding`` (and, for a
+    second pid, ``...wmiprvse.exe\x00-secured\x00-Embedding``) while
+    ``Win32_Process.CommandLine`` -- and ``GetCommandLineW``, which hands back a
+    NUL-terminated pointer into that same buffer -- report only
+    ``C:\Windows\system32\wbem\wmiprvse.exe``.
+
+    Reading the full ``Length`` therefore produced a string no other reader on
+    the system agrees with, carrying an embedded NUL: the fingerprint
+    comparators scored it "this pid was reused", and every consumer downstream
+    inherited a value that cannot round-trip through JSON, a log line or a
+    shell.  Truncating restores parity with CIM, which is this probe's stated
+    contract.
+
+    A buffer whose *first* character is NUL yields ``""``, which the callers
+    already read as *unknown* rather than *empty* -- the safe direction.
+    """
+    if not raw:
+        return ""
+    nul = raw.find(NUL)
+    return raw if nul < 0 else raw[:nul]
+
+
 def _command_line(handle) -> str:
     """Read the target's command line via ``ProcessCommandLineInformation``.
 
@@ -268,7 +304,9 @@ def _command_line(handle) -> str:
     unicode_string = ctypes.cast(buffer, ctypes.POINTER(_UNICODE_STRING)).contents
     if not unicode_string.Buffer or not unicode_string.Length:
         return ""
-    return ctypes.wstring_at(unicode_string.Buffer, unicode_string.Length // 2)
+    return normalize_command_line(
+        ctypes.wstring_at(unicode_string.Buffer, unicode_string.Length // 2)
+    )
 
 
 def native_process_entry(pid: int) -> Optional[Dict[str, Any]]:
