@@ -3,10 +3,14 @@
 Validates every `queue.json` item whose `kind` is `product` or `playback`: it must
 carry `track == kind` (the dispatcher's `Get-Track` reads only `track`, so a card
 missing it is invisible to `-Track product`/`-Track playback` regardless of what its
-`kind` says — S82), a non-empty `scope`, and a `procedure` path that exists on disk and
-still matches the recorded `procedureSha256` (a currency check: the ratified card
-changed out from under a queue entry). Prints one line per card and a final summary to
-stdout; the hub records the stdout sha256 in `0.18-roadmap-parity.json` as
+`kind` says — S82), a non-empty `scope`, a REQUIRED (never optional) `procedureSha256`,
+and a `procedure` path that exists on disk and still matches it (a currency check: the
+ratified card changed out from under a queue entry). `--min-count` (default 1) fails the
+whole run if fewer than that many cards were found, so an empty or misfiltered queue
+cannot report a vacuous "0 checked, OK" — sol's PR #79 review caught both gaps: this
+script originally treated a missing `procedureSha256` as "nothing to check" rather than
+a failure, and had no floor on card count at all. Prints one line per card and a final
+summary to stdout; the hub records the stdout sha256 in `0.18-roadmap-parity.json` as
 `queueArmResultSha256`.
 
 LOCAL ONLY. `queue.json` lives under `.claude-state/`, which is gitignored and absent
@@ -34,7 +38,7 @@ def _sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def check_queue(queue_path: Path) -> tuple[bool, list[str]]:
+def check_queue(queue_path: Path, min_count: int = 1) -> tuple[bool, list[str]]:
     lines: list[str] = []
     ok = True
 
@@ -56,16 +60,19 @@ def check_queue(queue_path: Path) -> tuple[bool, list[str]]:
             problems.append("scope missing or empty")
 
         procedure = card.get("procedure")
+        recorded = card.get("procedureSha256")
+        if not recorded or not isinstance(recorded, str):
+            problems.append("procedureSha256 missing (required, never optional)")
+
         if not procedure:
             problems.append("procedure missing")
         else:
             proc_path = REPO_ROOT / procedure
             if not proc_path.is_file():
                 problems.append(f"procedure file does not exist: {procedure}")
-            else:
-                recorded = card.get("procedureSha256")
+            elif recorded:
                 actual = _sha256_of(proc_path)
-                if recorded and recorded != actual:
+                if recorded != actual:
                     problems.append(
                         f"procedureSha256 stale: recorded={recorded} actual={actual}"
                     )
@@ -75,6 +82,14 @@ def check_queue(queue_path: Path) -> tuple[bool, list[str]]:
             lines.append(f"FAIL {card_id}: {'; '.join(problems)}")
         else:
             lines.append(f"OK   {card_id} kind={kind} priority={card.get('priority')}")
+
+    if len(cards) < min_count:
+        ok = False
+        lines.append(
+            f"FAIL: only {len(cards)} product/playback card(s) found, "
+            f"expected at least {min_count} (--min-count) — an empty or "
+            f"misfiltered queue must never report a vacuous pass"
+        )
 
     lines.append(f"{'OK' if ok else 'FAIL'}: {len(cards)} product/playback card(s) checked")
     return ok, lines
@@ -88,9 +103,16 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_QUEUE_PATH,
         help="Path to queue.json (default: the board's own .claude-state queue)",
     )
+    parser.add_argument(
+        "--min-count",
+        type=int,
+        default=1,
+        help="Fail if fewer than this many product/playback cards are found (default 1; "
+        "pass 15 to reproduce plan step 0.18's exact seed acceptance)",
+    )
     args = parser.parse_args(argv)
 
-    ok, lines = check_queue(args.queue)
+    ok, lines = check_queue(args.queue, min_count=args.min_count)
     for line in lines:
         print(line)
     return 0 if ok else 1
