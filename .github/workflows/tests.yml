@@ -105,6 +105,9 @@ jobs:
           python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
 
+      - name: Check pinned instruction tokens
+        run: python tools/docs/check_pinned_tokens.py
+
       - name: Run coordination and self-healing guardrails
         if: runner.os == 'Windows'
         shell: pwsh

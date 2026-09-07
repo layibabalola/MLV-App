@@ -1,8 +1,8 @@
-# MLV-App Batch CLI Implementation Spec (CLAUDE.md)
+# MLV-App Working Index
 
 ## Document Map
 
-This file is an INDEX. It carries pointers and session-start procedure only; detail lives in `claude/` children. Governed by [docs/22-doc-fragmentation-policy.md](docs/22-doc-fragmentation-policy.md) (entry tier: 8 KB soft / 12 KB hard). Check with:
+Index only; details live in claude/. Policy: [fragmentation limits](docs/22-doc-fragmentation-policy.md), 8KB soft/12KB hard. Check with:
 
 ```bash
 py -3 tools/docs/check_pinned_tokens.py
@@ -69,9 +69,7 @@ already mandatory` -- detail in claude/session-closeout.md
 - `worktree-inspection.v1` -- detail in claude/session-closeout.md
 
 ## Purpose
-This file guides Claude Code through a surgical modification of MLV-App to add
-headless batch CLI mode for Cinema DNG sequence export. Place this file in the
-repository root — Claude Code reads it automatically every session.
+Batch CDNG CLI Phases 0-6 are SHIPPED (`66549181`). Evidence: `receiptOpt` in `platform/qt/main.cpp`, `skipped=` logging in `src/batch/BatchRunner.cpp`. Next product work only from [roadmap](docs/roadmap.md).
 
 ---
 
