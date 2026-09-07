@@ -1,0 +1,1092 @@
+{
+  "schema": "mlv-project-audit-execution-proposal.v1",
+  "audit_date": "2026-09-07",
+  "base_sha": "1a4f152d3536fa40b5b6018061aeeb6dd6f12d15",
+  "authority": "Advisory packets for adoption by the current hub; queue.json remains dispatch authority. No task is dispatched or activated by this file.",
+  "worker_contract": {
+    "base_binding": "Coordinator substitutes a fresh full base SHA and exact artifacts at dispatch; the audit base is evidence only.",
+    "mandatory_read": "Applicable AGENTS.md and scoped policies plus this packet and its named existing card.",
+    "max_attempts": 4,
+    "default_editor_now": "sonnet through existing wrapper",
+    "luna_now": "read-only; current adapter uses high reasoning",
+    "result_fields": [
+      "task_id",
+      "attempt_id",
+      "base_sha",
+      "head_sha",
+      "changed_paths",
+      "effective_model",
+      "effective_effort",
+      "verification_commands",
+      "exit_codes",
+      "artifact_paths_and_sha256",
+      "blocking_reason",
+      "next_action",
+      "usage_or_null"
+    ],
+    "forbidden": [
+      "fabricating reviews or success",
+      "changing golden authority",
+      "editing outside approved packet scope",
+      "altering own guard",
+      "unowned cleanup",
+      "retrying identical failed tuple without new evidence"
+    ],
+    "completion": "Owned commit + applicable independent current-head review + merge + relevant target verification. Global repository maintenance is separately reported only after a reviewed contract migration."
+  },
+  "packets": [
+    {
+      "id": "AUD-RECONCILE",
+      "wave": 0,
+      "workstream": "continuity",
+      "proposed_executor": "current hub with Luna read-only evidence",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "One current owner and an exact next step; no duplicate work.",
+      "depends_on": [],
+      "read_set": [
+        "docs/audits/execution-20260907.md",
+        "docs/definitive-fix-plan-20260906.md"
+      ],
+      "allowed_paths": [
+        ".claude-state/coordination/dual-lane/queue.json",
+        ".claude-state/coordination/dual-lane/orchestrator-resume-CURRENT.md"
+      ],
+      "steps": [
+        "Read live #80, #82, #64 and #67 and current queue; bind all evidence to full commit ids.",
+        "For #64/#67 compare merged changed files and artifacts with the card deliverable; split any residual acceptance obligation.",
+        "Record #80 terminal state and #82 current check/review state; update only reconciled rows through the existing writer."
+      ],
+      "verification": [
+        "gh pr view 82 -R layibabalola/MLV-App --json state,headRefOid,mergeCommit,statusCheckRollup",
+        "py -3 tools/coordination/check_roadmap_queue_parity.py --min-count 15",
+        "Replay the reconciliation: no additional dispatch and no completed delivery reopens."
+      ],
+      "stop_condition": "A fresh active hub already owns the transition: submit evidence for its reconciliation, do not become a second hub."
+    },
+    {
+      "id": "AUD-CI-COMPILE",
+      "wave": 0,
+      "workstream": "validation",
+      "proposed_executor": "current hub + current independent Sol review",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Finish existing PR #82, preserve its reviewed head and merged workflow receipt.",
+      "depends_on": [
+        "AUD-RECONCILE"
+      ],
+      "read_set": [
+        "docs/definitive-fix-plan-20260906.md",
+        ".github/workflows/tests.yml",
+        "tools/repo_hygiene/test_repo_hygiene.py"
+      ],
+      "allowed_paths": [
+        ".github/workflows/tests.yml",
+        "tools/repo_hygiene/test_repo_hygiene.py",
+        ".claude-state/coordination/dual-lane/receipts/0.4a-workflow-base.json"
+      ],
+      "steps": [
+        "Resume the current pushed PR head; do not recreate its implementation.",
+        "Resolve concrete remaining check/review failures, preserving the Qt multimedia dependency correction.",
+        "Only after exact-head review and required checks: merge through the existing authority and derive WORKFLOW_BASE from the merge."
+      ],
+      "verification": [
+        "gh pr view 82 -R layibabalola/MLV-App --json state,headRefOid,statusCheckRollup,mergeCommit",
+        "py -3 -m unittest tools.repo_hygiene.test_repo_hygiene -q",
+        "Batch Compile and all required checks terminal success at the accepted tuple."
+      ],
+      "stop_condition": "Any nonterminal, missing, failed, skipped or stale required check blocks merge."
+    },
+    {
+      "id": "AUD-CI-FALSIFY",
+      "wave": 0,
+      "workstream": "validation",
+      "proposed_executor": "current hub + Sol evidence verifier",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Prove a broken BatchRunner makes the new compile job fail.",
+      "depends_on": [
+        "AUD-CI-COMPILE"
+      ],
+      "read_set": [
+        "docs/definitive-fix-plan-20260906.md",
+        ".github/workflows/tests.yml"
+      ],
+      "allowed_paths": [
+        "src/batch/BatchRunner.cpp on a dedicated falsifier branch only",
+        ".claude-state/coordination/dual-lane/receipts/0.4a-batch-compile-falsifier.json"
+      ],
+      "steps": [
+        "Use plan 0.4a-ii unchanged: branch from WORKFLOW_BASE and inject one deliberate syntax error.",
+        "Trigger workflow_dispatch explicitly; a non-master branch push alone is insufficient.",
+        "Bind failure to the intended compiler diagnostic and branch; preserve receipt; never merge the falsifier."
+      ],
+      "verification": [
+        "Expected: Batch Compile conclusion=failure caused by the injected syntax error, not auth/setup failure.",
+        "Independent review of run URL, head and diagnostic."
+      ],
+      "stop_condition": "A different failing stage does not qualify as the compiler falsifier."
+    },
+    {
+      "id": "AUD-CI-GUARDRAILS",
+      "wave": 0,
+      "workstream": "validation",
+      "proposed_executor": "Sonnet",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Guardrail suite runs in required Windows repo-hygiene job with locked pytest.",
+      "depends_on": [
+        "AUD-CI-FALSIFY"
+      ],
+      "read_set": [
+        "docs/definitive-fix-plan-20260906.md",
+        ".github/workflows/tests.yml",
+        ".github/requirements/repo-hygiene.in",
+        "tools/repo_hygiene/test_repo_hygiene.py"
+      ],
+      "allowed_paths": [
+        ".github/workflows/tests.yml",
+        ".github/requirements/repo-hygiene.in",
+        ".github/requirements/repo-hygiene.txt",
+        "tools/coordination/demote-factory-bridge.ps1",
+        "tools/repo_hygiene/test_repo_hygiene.py",
+        "tests/coordination/"
+      ],
+      "steps": [
+        "Execute existing 0.4c-i; include dependency locks and workflow inventory assertions in the same PR.",
+        "Keep the step Windows-only until an actual portability change is validated.",
+        "Write the named receipts after exact-head review, CI and merge."
+      ],
+      "verification": [
+        "py -3 -m pytest tools/coordination/test_coordination_guardrails.py tests/coordination -q",
+        "py -3 -m pytest tools/coordination/test_coordination_guardrails.py tests/coordination --collect-only -q",
+        "Collected count is positive; hosted result accounts for every collected test; existing hygiene suite passes."
+      ],
+      "stop_condition": "Missing pytest, zero collection or lost tests blocks promotion."
+    },
+    {
+      "id": "AUD-CI-PROTECTION-ACTOR",
+      "wave": 0,
+      "workstream": "validation",
+      "proposed_executor": "Sonnet",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "A receipt-gated required-check transition script and deterministic negative tests.",
+      "depends_on": [
+        "AUD-CI-GUARDRAILS"
+      ],
+      "read_set": [
+        "docs/definitive-fix-plan-20260906.md",
+        "CONTRIBUTING.md",
+        "tools/repo_hygiene/test_repo_hygiene.py"
+      ],
+      "allowed_paths": [
+        "tools/coordination/set-required-checks.ps1",
+        "tests/coordination/test_required_checks_transition.py"
+      ],
+      "steps": [
+        "Implement existing 0.4b-i using an injected API transport for local tests.",
+        "Refuse missing/mismatched falsifier and guardrail receipts before any network mutation.",
+        "Review and merge the script before the separate transition act."
+      ],
+      "verification": [
+        "py -3 -m pytest tests/coordination/test_required_checks_transition.py -q",
+        "Negative fixtures: missing receipt, wrong head, unrelated failure, invalid context set; no API write in each case."
+      ],
+      "stop_condition": "Do not PATCH real protection while authoring or unit-testing the actor."
+    },
+    {
+      "id": "AUD-CI-PROTECTION",
+      "wave": 0,
+      "workstream": "validation",
+      "proposed_executor": "current hub",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Install and verify the exact already-ratified five-context transition.",
+      "depends_on": [
+        "AUD-CI-PROTECTION-ACTOR"
+      ],
+      "read_set": [
+        "docs/definitive-fix-plan-20260906.md",
+        "tools/coordination/set-required-checks.ps1"
+      ],
+      "allowed_paths": [
+        "CONTRIBUTING.md",
+        "tools/repo_hygiene/test_repo_hygiene.py",
+        ".claude-state/coordination/dual-lane/receipts/"
+      ],
+      "steps": [
+        "Follow 0.4b-ii and its NA-9 exception only.",
+        "Synchronize the tracked required-context assertions through the specified PR.",
+        "Run the validated actor, re-read GitHub protection, preserve pre/post snapshots and receipt."
+      ],
+      "verification": [
+        "gh api repos/layibabalola/MLV-App/branches/master/protection",
+        "Post-set exactly matches the ratified transition, strict remains true, contexts retain pinned app ids.",
+        "Previous snapshot row remains byte-identical and new row is appended."
+      ],
+      "stop_condition": "No valid exception receipt means no protection mutation."
+    },
+    {
+      "id": "AUD-CI-BRIDGE-SEPARATION",
+      "wave": 0,
+      "workstream": "validation",
+      "proposed_executor": "Sonnet",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Separate bridge failures without hiding them or losing required guardrail coverage.",
+      "depends_on": [
+        "AUD-CI-PROTECTION"
+      ],
+      "read_set": [
+        "docs/definitive-fix-plan-20260906.md",
+        "tools/coordination/demote-factory-bridge.ps1"
+      ],
+      "allowed_paths": [
+        ".github/workflows/tests.yml",
+        ".github/workflows/factory-bridge.yml",
+        "tools/repo_hygiene/test_repo_hygiene.py"
+      ],
+      "steps": [
+        "Use 0.4c-ii through the validated actor on a fresh branch.",
+        "Retain failing bridge/profiling results in a non-required workflow and the weekly digest.",
+        "Update action pins, inventory and all affected tests together."
+      ],
+      "verification": [
+        "py -3 -m unittest tools.repo_hygiene.test_repo_hygiene -q",
+        "A bridge-only failure is visible while independent product jobs execute; required guardrail coverage remains."
+      ],
+      "stop_condition": "No continue-on-error, silent test deletion, or removal of product gates."
+    },
+    {
+      "id": "AUD-FACTORY-FREEZE",
+      "wave": 0,
+      "workstream": "factory",
+      "proposed_executor": "Sonnet",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Existing historical factory queue cannot starve the seeded product backlog.",
+      "depends_on": [
+        "AUD-CI-BRIDGE-SEPARATION"
+      ],
+      "read_set": [
+        "docs/definitive-fix-plan-20260906.md",
+        "tools/coordination/Invoke-Workstream.ps1"
+      ],
+      "allowed_paths": [
+        "tools/coordination/freeze-factory-cards.py",
+        "tests/coordination/test_factory_freeze.py",
+        ".claude-state/coordination/dual-lane/queue.json",
+        ".claude-state/coordination/dual-lane/receipts/0.5-factory-frozen.json"
+      ],
+      "steps": [
+        "Implement existing 0.5, including its exact six keep-live cards.",
+        "Test on a copied queue before the hub applies; preserve existing terminal records and all seeded product cards.",
+        "Reapply to prove idempotence and write the named receipt."
+      ],
+      "verification": [
+        "py -3 -m pytest tests/coordination/test_factory_freeze.py -q",
+        "Zero dispatchable factory cards after the controlled freeze; all 15 seeded cards retain kind/owner/procedure."
+      ],
+      "stop_condition": "Ambiguous classification stays visible and cannot become a product card merely to satisfy a quota."
+    },
+    {
+      "id": "AUD-DELIVERY-METRIC",
+      "wave": 0,
+      "workstream": "factory",
+      "proposed_executor": "Sonnet",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "One truthful mainline metric drives dispatcher and human status.",
+      "depends_on": [
+        "AUD-FACTORY-FREEZE"
+      ],
+      "read_set": [
+        "docs/definitive-fix-plan-20260906.md",
+        "tools/coordination/Invoke-Workstream.ps1",
+        ".claude-state/heartbeat/board-heartbeat.ps1"
+      ],
+      "allowed_paths": [
+        "tools/coordination/Test-ProductRatioGuard.ps1",
+        "tools/coordination/Invoke-Workstream.ps1",
+        "tools/coordination/freeze-factory-cards.py",
+        "tools/coordination/test_coordination_guardrails.py",
+        ".claude-state/heartbeat/board-heartbeat.ps1"
+      ],
+      "steps": [
+        "Implement existing 0.6 and replace the heartbeat classifier with the same derivation.",
+        "Exclude unmerged branch commits and tools-only commits from product source share.",
+        "Keep accepted product PR count separate; include refused/review attempts and unknown cost honestly."
+      ],
+      "verification": [
+        "Synthetic history: tools-only and unmerged-source commits do not count as delivered product.",
+        "Synthetic 60 percent and 5 percent fixtures produce the plan-defined outcomes.",
+        "Dispatcher and heartbeat report identical metrics for the same window and target."
+      ],
+      "stop_condition": "Do not broaden the definition of product to make the dashboard green."
+    },
+    {
+      "id": "AUD-DEPENDENCY-PREFLIGHT",
+      "wave": 0,
+      "workstream": "factory",
+      "proposed_executor": "Sonnet",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "Missing prerequisites never spend an implementation invocation; promised artifacts have a writer.",
+      "depends_on": [
+        "AUD-RECONCILE"
+      ],
+      "read_set": [
+        "tools/coordination/Invoke-Workstream.ps1",
+        "tools/coordination/compose-lane-prompt-core.ps1",
+        "docs/lane-prompts/v2/fields-PLAY-C2-SUBMIT-2-ACCEPT.md"
+      ],
+      "allowed_paths": [
+        "tools/coordination/Invoke-Workstream.ps1",
+        "tools/coordination/Export-LaneDependencies.ps1",
+        "tools/coordination/test_coordination_guardrails.py",
+        "tests/coordination/test_lane_dependencies.py"
+      ],
+      "steps": [
+        "Parse typed dependencies before selection/reservation; validate exact terminal states and evidence identity.",
+        "Export C2 dependencies.json with pr72, C2-SUBMIT-2 and playCountersGpuReceipt; validate source/DLL/receipt identity.",
+        "Skip only the blocked leg, and choose the next unrelated ready card.",
+        "Review the bounded manifest/receipt-chain amendment before live adoption."
+      ],
+      "verification": [
+        "py -3 -m pytest tests/coordination/test_lane_dependencies.py -q",
+        "Missing/failed/wrong-head dependency: no child, reservation or editing worktree.",
+        "Ready dependency: one export with matching hashes; replay does not duplicate dispatch.",
+        "Malformed dependency and cycle fail explicitly, never as an empty healthy queue."
+      ],
+      "stop_condition": "Do not create a fake receipt or use prose as dependency approval."
+    },
+    {
+      "id": "AUD-COMPLETION-CONTRACT",
+      "wave": 0,
+      "workstream": "governance",
+      "proposed_executor": "senior bounded design review; Sonnet implementation",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "Current PR workflow and legacy closeout have explicit compatible completion semantics.",
+      "depends_on": [
+        "AUD-RECONCILE"
+      ],
+      "read_set": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "agents/brokered-auto-closeout.md",
+        "claude/session-closeout.md",
+        "closeout.config.json",
+        "docs/definitive-fix-plan-20260906.md"
+      ],
+      "allowed_paths": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "agents/brokered-auto-closeout.md",
+        "claude/session-closeout.md",
+        "closeout.config.json",
+        "tools/repo_hygiene/brokered_closeout.py",
+        "tools/repo_hygiene/test_brokered_closeout.py",
+        "docs/19-closeout-dashboard-spec.md",
+        "CLOSEOUT-CROSS-MAP-COMPARISON.md"
+      ],
+      "steps": [
+        "Ratify exact precedence and role boundaries once; do not change golden authority.",
+        "Distinguish change acceptance, owned work-block accounting and global cleanup state.",
+        "Update affected consumers and documentation together; retain a migration receipt."
+      ],
+      "verification": [
+        "Disposable unrelated dirty sibling stays byte-identical through owned closeout.",
+        "Missing review/failed product test still blocks acceptance.",
+        "Global debt remains visible; protected or unowned state is never pruned by a product closeout."
+      ],
+      "stop_condition": "Authority conflicts or missing independent policy approval block adoption, not permission to bypass a gate."
+    },
+    {
+      "id": "AUD-OLD-PRS",
+      "wave": 0,
+      "workstream": "factory",
+      "proposed_executor": "current hub + Sonnet for concrete merges",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Finish existing 0.7 and 0.9 with exact receipts and preserved work.",
+      "depends_on": [
+        "AUD-DELIVERY-METRIC"
+      ],
+      "read_set": [
+        "docs/definitive-fix-plan-20260906.md"
+      ],
+      "allowed_paths": [
+        "Exact changed files from #71, #72, #73, #8 and #5 after live re-derivation",
+        ".claude-state/coordination/dual-lane/receipts/",
+        ".claude-state/coordination/dual-lane/orchestrator-resume-CURRENT.md"
+      ],
+      "steps": [
+        "Derive current PR file lists; separate obsolete proposals from still-needed changes.",
+        "Normal merges only; preserve unique work; never blanket rebase or force-push.",
+        "Refresh execution-control receipt if hashed control files change, using the plan-prescribed chain.",
+        "Execute checkpoint retirement step 0.9 as written."
+      ],
+      "verification": [
+        "Every listed PR has a merged+verified or explicitly superseded/retained disposition with rationale.",
+        "Named receipts validate against final runtime hashes."
+      ],
+      "stop_condition": "Do not infer merge eligibility from old green checks or a matching commit subject."
+    },
+    {
+      "id": "AUD-LOOP-CANARY",
+      "wave": 1,
+      "workstream": "factory",
+      "proposed_executor": "current hub",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "One safely enabled editing product cycle reaches a verified terminal result.",
+      "depends_on": [
+        "AUD-OLD-PRS",
+        "AUD-DEPENDENCY-PREFLIGHT"
+      ],
+      "read_set": [
+        "docs/definitive-fix-plan-20260906.md",
+        "docs/lane-prompts/v2/hub-procedure.md"
+      ],
+      "allowed_paths": [
+        "Scheduled task MLV-WorkstreamLoop through existing supported installer",
+        ".claude-state/coordination/dual-lane/receipts/0.2-enable-preflight-input.json",
+        ".claude-state/coordination/dual-lane/receipts/0.2-loop-enabled.json",
+        ".claude-state/coordination/dual-lane/WORKSTREAM-LOOP-DISABLED through validated enable only"
+      ],
+      "steps": [
+        "Validate the complete existing six-receipt chain and all prior Phase 0 steps.",
+        "Verify canonical runtime hashes and persisted product,playback + Sonnet + editing arguments.",
+        "Execute existing dedicated enable act once; retain its preflight evidence.",
+        "Verify first cycle selection, dependency gate, reservation, worker, review and terminal result; rearm marker on failure."
+      ],
+      "verification": [
+        "Scheduled action matches verified runtime and arguments.",
+        "One product task has one reservation and final receipt; no old factory dispatch.",
+        "A repeated completion event neither relaunches nor double-charges."
+      ],
+      "stop_condition": "Any stale/missing control receipt or unsafe ownership means marker remains armed."
+    },
+    {
+      "id": "PROD-TLS-VERIFY-1",
+      "wave": 1,
+      "workstream": "product",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "AUD-CI-COMPILE"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/card-PROD-TLS-VERIFY-1.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "platform/qt/DownloadManager.cpp, platform/qt/DownloadManager.h, platform/qt/FpmNameValidator.h, platform/qt/AtomicFileReplace.h, tests/console/test_fpm_name_validator.cpp, tests/console/test_atomic_file_replace.cpp, tests/console/console_tests.pro, tools/repo_hygiene/test_no_tls_verify_none.py"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request."
+    },
+    {
+      "id": "PROD-TLS-VERIFY-1b",
+      "wave": 2,
+      "workstream": "product",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "PROD-TLS-VERIFY-1"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PROD-TLS-VERIFY-1b.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "platform/qt/SyncDownloadWaiter.h, platform/qt/FocusPixelMapManager.cpp, tests/console/test_sync_download_waiter.cpp, tests/console/console_tests.pro, tools/repo_hygiene/test_fpm_no_process_events.py"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request."
+    },
+    {
+      "id": "PROD-CLAUDEMD-TRUTH",
+      "wave": 1,
+      "workstream": "continuity",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "AUD-RECONCILE"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/card-PROD-CLAUDEMD-TRUTH.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "CLAUDE.md, claude/batch-cli-spec.md, .github/workflows/tests.yml"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request.",
+      "required_amendment": "Repair the missing docs/22-doc-fragmentation-policy.md reference through a separately scoped doc change; the existing three-file card does not authorize creating it."
+    },
+    {
+      "id": "HYG-PROFILING-MEDIA-1",
+      "wave": 2,
+      "workstream": "hygiene",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "AUD-RECONCILE"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/card-HYG-PROFILING-DNGS-1.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        ".gitignore, .claude/profiling/**/*.dng (index removal only; working files stay), tools/repo_hygiene/test_no_tracked_scratch_media.py"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request."
+    },
+    {
+      "id": "PROD-ENVFLAG-1",
+      "wave": 2,
+      "workstream": "product",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "PROD-TLS-VERIFY-1"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PROD-ENVFLAG-1.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "src/batch/EnvFlags.h, src/batch/WorkerThreadCount.h, platform/qt/main.cpp, tests/console/test_env_flags.cpp, tests/console/console_tests.pro, tools/repo_hygiene/test_env_flag_single_definition.py"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request."
+    },
+    {
+      "id": "PROD-DUALISO-GUARD-TEST",
+      "wave": 2,
+      "workstream": "product",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "AUD-CI-COMPILE"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PROD-DUALISO-GUARD-TEST.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "platform/qt/DualIsoLevelSyncPolicy.h, platform/qt/MainWindow.cpp, tests/console/test_dual_iso_level_sync_policy.cpp, tests/console/console_tests.pro, tools/repo_hygiene/test_dual_iso_policy_wiring.py"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request."
+    },
+    {
+      "id": "PROD-TOOLCHAIN-1",
+      "wave": 2,
+      "workstream": "release",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "AUD-CI-COMPILE"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PROD-TOOLCHAIN-1.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        ".github/workflows/Windows.yml, .github/workflows/Linux.yml, docs/10-build-windows.md, docs/11-build-macos-linux.md, tools/repo_hygiene/test_repo_hygiene.py"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request."
+    },
+    {
+      "id": "PLAY-COUNTERS-CPU",
+      "wave": 2,
+      "workstream": "playback",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "AUD-CI-COMPILE"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PLAY-COUNTERS-CPU.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "platform/qt/PlaybackGatePolicy.h, platform/qt/MainWindow.cpp, tests/console/test_playback_gate_policy.cpp, tests/console/console_tests.pro, tools/repo_hygiene/test_playback_gate_wiring.py, docs/playback-improvement-plan-round2.md"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request.",
+      "required_amendment": "Define expected frames by operating mode before coding: full-frame export and intentional realtime drop-frame preview have different invariants. Keep existing advancing-frame and skipped-ratio rules."
+    },
+    {
+      "id": "PLAY-COUNTERS-GPU",
+      "wave": 2,
+      "workstream": "playback",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "AUD-CI-COMPILE"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PLAY-COUNTERS-GPU.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "platform/qt/AsyncH2dCounterContract.h, tests/console/test_async_h2d_counter_contract.cpp, tests/console/console_tests.pro, tools/profiling/bachelor/async-h2d-counter-job.ps1"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request.",
+      "required_amendment": "Split hosted contract and real CUDA leg into separate dispatchable acceptance units. Fake records prove logic only; the GPU leg requires the named host, verified artifacts and an authorized clip."
+    },
+    {
+      "id": "PLAY-C2-SUBMIT-2-ACCEPT",
+      "wave": 3,
+      "workstream": "playback",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "PLAY-COUNTERS-GPU",
+        "AUD-GPU-PROVENANCE",
+        "AUD-DEPENDENCY-PREFLIGHT"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PLAY-C2-SUBMIT-2-ACCEPT.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "src/processing/**, platform/qt/GpuPreviewProcessing.cpp, platform/qt/GpuDisplayViewport.cpp, tests/pipeline/**, docs/playback-improvement-results.md"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request.",
+      "required_amendment": "Include current PR #72 merged proof, actual changed-source coverage, and known-good-build output A/B. A synchronous same-code proxy is insufficient. Split ACCEPT versus REVERT scope before assigning a cheap worker."
+    },
+    {
+      "id": "PROD-UPSTREAM-SYNC-1",
+      "wave": 3,
+      "workstream": "maintainability",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "PROD-TOOLCHAIN-1",
+        "AUD-DOGFOOD"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PROD-UPSTREAM-SYNC-1.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "any tracked path touched by the merge of 877dea2cb9413bd0542abb622af517cf12db63d3 (the ratified upstream head; a moving origin/master never selects the subject) — conflicts resolved in place; no new features; no factory paths"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request.",
+      "required_amendment": "Keep the existing ratified upstream SHA; export exact changed files and group conflict analysis by subsystem. A single any-tracked-path prompt is not a cheap-model implementation unit."
+    },
+    {
+      "id": "PROD-CDNG-DECOUPLE-1",
+      "wave": 3,
+      "workstream": "export",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "AUD-CI-COMPILE",
+        "AUD-DOGFOOD"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PROD-CDNG-DECOUPLE-1.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "src/batch/CdngSequenceExport.h, src/batch/CdngSequenceExport.cpp, src/batch/BatchRunner.h, src/batch/BatchRunner.cpp, platform/qt/MainWindow.cpp, platform/qt/MainWindow.h, platform/qt/MLVApp.pro, tests/pipeline/**, tests/pipeline/pipeline_tests.pro, tools/repo_hygiene/test_batch_no_mainwindow_include.py"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request."
+    },
+    {
+      "id": "HYG-EVIDENCE-RATCHET-1",
+      "wave": 2,
+      "workstream": "hygiene",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "AUD-RECONCILE"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-HYG-EVIDENCE-RATCHET-1.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "tools/repo_hygiene/test_closeout_evidence_ratchet.py, CLOSEOUT-CAPABILITY-LEDGER.json, CLOSEOUT-CAPABILITY-LEDGER.schema.json"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request."
+    },
+    {
+      "id": "PROD-BATCHTYPES-SPLIT-1",
+      "wave": 3,
+      "workstream": "maintainability",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": false,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "PROD-CDNG-DECOUPLE-1"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PROD-BATCHTYPES-SPLIT-1.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "src/batch/BatchTypes.h, src/batch/BatchRenderedVideoPlan.h, src/batch/BatchRenderedVideoPlan.cpp, src/batch/BatchContext.h, src/batch/BatchRunner.h (it exposes the moved BatchRenderedVideo* types and includes only BatchTypes.h — S96), src/batch/BatchRunner.cpp, platform/qt/MLVApp.pro, tests/console/console_tests.pro, tests/pipeline/pipeline_tests.pro, tests/console/test_receipt_applier.cpp, tools/repo_hygiene/test_batch_header_hygiene.py, tests/console/test_rendered_video_runner.cpp"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request."
+    },
+    {
+      "id": "PROD-README-FORK-1",
+      "wave": 2,
+      "workstream": "continuity",
+      "proposed_executor": "Sonnet through existing editing wrapper",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "Complete the existing named card with its scoped acceptance; preserve its current id.",
+      "depends_on": [
+        "AUD-RECONCILE"
+      ],
+      "read_set": [
+        "docs/lane-prompts/v2/fields-PROD-README-FORK-1.md",
+        "docs/lane-prompts/v2/product-card-TEMPLATE.md"
+      ],
+      "allowed_paths": [
+        "README.md, CHANGELOG.md, tools/repo_hygiene/test_readme_fork_banner.py"
+      ],
+      "steps": [
+        "Read the existing verify-first and allowed paths; confirm the deliverable is not already shipped.",
+        "Bind current input artifacts and base SHA; follow the existing composed procedure.",
+        "Run its exact acceptance commands; preserve outputs; submit owned commit and current-head review."
+      ],
+      "verification": [
+        "The existing card ACCEPTANCE section, with all named test registrations and call-site checks.",
+        "Applicable current product CI and output/golden gates; no skipped acceptance reclassified as pass."
+      ],
+      "stop_condition": "Missing capability blocks only its dependent leg; scope expansion or failed test returns a concrete amendment request.",
+      "required_amendment": "Fork issues are disabled. Choose an existing working support channel or separately configure one; do not add a broken fork-issues URL."
+    },
+    {
+      "id": "AUD-GPU-PROVENANCE",
+      "wave": 2,
+      "workstream": "playback",
+      "proposed_executor": "Sonnet evidence tooling; senior interpretation only if needed",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "A real GPU run measures current source and DLL, not a stale bundle.",
+      "depends_on": [
+        "PLAY-COUNTERS-GPU",
+        "AUD-OLD-PRS"
+      ],
+      "read_set": [
+        ".claude-state/coordination/dual-lane/c2-submit-2-acceptance-precondition-20260905.md",
+        "tools/profiling/check-ultra-magnus-toolchain.ps1",
+        "tools/profiling/ultra-magnus-agent.ps1"
+      ],
+      "allowed_paths": [
+        "tools/profiling/bachelor/async-h2d-counter-job.ps1",
+        "tests/coordination/test_gpu_counter_preflight.py",
+        "A new exact owned GPU evidence run directory"
+      ],
+      "steps": [
+        "Read-only preflight: host identity, toolchain, full source SHA, DLL hash/export table and clip authorization.",
+        "Use existing routed GPU job framework with the exact pinned build; build/deploy only under its applicable authority.",
+        "Reject absent exports before profiling; capture real fires/bytes/frame ids and mismatches."
+      ],
+      "verification": [
+        "A stale DLL fixture refuses before workload launch.",
+        "Real receipt binds EXE+DLL+source+clip+flags and reports nonzero engagement with zero mismatches.",
+        "Unknown/unreachable capability is explicit, never fake success."
+      ],
+      "stop_condition": "No current verified DLL or GPU capability: retain BLOCKED_CAPABILITY and continue hosted/independent cards."
+    },
+    {
+      "id": "AUD-DOGFOOD",
+      "wave": 2,
+      "workstream": "release",
+      "proposed_executor": "Sonnet using established wrappers",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "A named Windows package opens, plays, scrubs, exports and reopens representative footage.",
+      "depends_on": [
+        "PROD-TLS-VERIFY-1",
+        "PROD-TOOLCHAIN-1"
+      ],
+      "read_set": [
+        "agents/release-and-regression.md",
+        "tools/testing/run-windows-test.ps1",
+        "tools/profiling/run-release-gui-smoke.ps1",
+        "tools/profiling/run-release-cdng-export-profile-ab.ps1"
+      ],
+      "allowed_paths": [
+        "An exact owned build/evidence run directory",
+        "docs/playback-improvement-results.md"
+      ],
+      "steps": [
+        "Select exact candidate and known-good build; validate toolchain and 20 GiB output projection.",
+        "Build user-facing release and deploy Qt/MinGW runtime using established procedures.",
+        "Run named fixture/real-clip smoke, aspect/stretch checks and CDNG output/reopen; keep GPU-dependent legs separate."
+      ],
+      "verification": [
+        "Report EXE path/time/length/hash and runtime DLL presence.",
+        "Advancing presented frames, existing skipped-ratio bound, screenshots with stretch state, no new blocking color/exposure/golden differences.",
+        "Existing unit/pipeline checks and export output tests pass; capability absence is not pass."
+      ],
+      "stop_condition": "No valid baseline or a failed blocking output gate prevents release acceptance; no re-bless workaround."
+    },
+    {
+      "id": "AUD-COMPACT-STARTUP",
+      "wave": 2,
+      "workstream": "continuity",
+      "proposed_executor": "Sonnet; Haiku may prepare read-only inventory",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "A fresh worker gets one authoritative task packet without historical startup debt.",
+      "depends_on": [
+        "PROD-CLAUDEMD-TRUTH",
+        "AUD-COMPLETION-CONTRACT"
+      ],
+      "read_set": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/definitive-fix-plan-20260906.md",
+        "tools/docs/check_pinned_tokens.py"
+      ],
+      "allowed_paths": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/22-doc-fragmentation-policy.md",
+        ".claude-state/RESUME.md",
+        ".claude-state/SESSION-HANDOFF.md",
+        ".claude-state/project-memory/README.md",
+        ".claude-state/coordination/dual-lane/orchestrator-resume-CURRENT.md"
+      ],
+      "steps": [
+        "Use existing Phase 4 byte budgets; preserve history via existing archive procedure.",
+        "Repair document references and contract precedence; retain every mandatory policy.",
+        "Test a fresh-session packet for one selected product card without loading archival narratives."
+      ],
+      "verification": [
+        "py -3 tools/docs/check_pinned_tokens.py",
+        "Every startup link resolves; every historical archive is preserved and hash-bound.",
+        "Six-member current entry budget <=30000 bytes under the plan measurement; unrelated archives excluded."
+      ],
+      "stop_condition": "Do not delete evidence, truncate a ledger, or omit mandatory policy to meet the size budget."
+    },
+    {
+      "id": "AUD-MODEL-QUALIFY",
+      "wave": 2,
+      "workstream": "factory",
+      "proposed_executor": "current hub; selected Luna/Haiku/Sonnet pilot workers",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "Measured low-cost task classes and effective runtime identity.",
+      "depends_on": [
+        "AUD-RECONCILE"
+      ],
+      "read_set": [
+        "tools/coordination/Invoke-Lane.ps1",
+        "docs/audits/execution-20260907.md"
+      ],
+      "allowed_paths": [
+        "An exact new model-qualification evidence directory"
+      ],
+      "steps": [
+        "Choose ten fixed tasks spanning extraction, test-result classification, small patch drafting and failure repair.",
+        "Use read-only Luna under current rules; Haiku trials only through a supported authorized capability, otherwise record unavailable.",
+        "Compare correctness, escalation, total tokens, latency and repeated runs against Sonnet; record resolved model/effort."
+      ],
+      "verification": [
+        "Ten task ids, preserved inputs, expected outcomes, actual outputs and review; no missing result called pass.",
+        "Report measured tokens per accepted task including retries; missing cost remains null."
+      ],
+      "stop_condition": "Do not invoke an unsupported lane or grant editing to Luna to conduct the pilot."
+    },
+    {
+      "id": "AUD-MODEL-ADAPTER",
+      "wave": 4,
+      "workstream": "factory",
+      "proposed_executor": "Sonnet with independent policy review",
+      "status": "proposal",
+      "requires_policy_adoption": true,
+      "outcome": "Supported low-reasoning Luna/Haiku modes with unchanged containment.",
+      "depends_on": [
+        "AUD-MODEL-QUALIFY",
+        "AUD-DEPENDENCY-PREFLIGHT",
+        "AUD-COMPLETION-CONTRACT"
+      ],
+      "read_set": [
+        "tools/coordination/Invoke-Lane.ps1",
+        "tools/coordination/Invoke-Workstream.ps1",
+        "docs/Start-EditingLane.ps1",
+        "docs/never-authorized.json"
+      ],
+      "allowed_paths": [
+        "tools/coordination/Invoke-Lane.ps1",
+        "tools/coordination/Invoke-Workstream.ps1",
+        "tools/coordination/test_coordination_guardrails.py",
+        "tests/coordination/test_model_capability_matrix.py",
+        "Ratified adapter/wrapper/register mirrors through existing amendment authority"
+      ],
+      "steps": [
+        "Add an explicit capability table for model, effort, tools and permitted task class; deny unsupported combinations.",
+        "Support Haiku only for qualified classes; lower Luna reasoning for qualified read-only tasks.",
+        "Keep Luna editing refused unless a separate equivalent-containment proposal is approved and negatively tested."
+      ],
+      "verification": [
+        "Receipt shows effective model and effort, explicit allowed tools and mode.",
+        "Invalid editing/model combinations refuse before reservation/child creation.",
+        "Provider refusal and malformed output propagate as non-success through all consumers."
+      ],
+      "stop_condition": "Adapter mutation is not activation authority; old safety refusals remain until replacement controls pass."
+    }
+  ]
+}
