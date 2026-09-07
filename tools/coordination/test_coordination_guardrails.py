@@ -947,9 +947,16 @@ def test_the_refusal_suggests_the_refspec_fetch_when_the_ref_is_NOT_checked_out(
 # the PR #79 review and codex refused it in 7.7 s with "You've hit your usage limit ... try
 # again at Sep 10th". The receipt said exitCode=1, failure=null, complete=true, state=complete.
 # Nothing downstream could tell "refused before any work" from "reviewed and objected", and the
-# hub idled for an hour on what was actually an owner-side account rotation. These tests pin the
-# classifier to the REAL refusal text and to a real known-good transcript, and pin the receipt
-# plumbing structurally the way the exit-code tests above do.
+# hub idled for an hour on what was actually an owner-side account rotation.
+#
+# Round 1 BLOCKER: codex echoes the prompt into stderr, and a text scan over the WHOLE
+# transcript misclassified a review that merely quoted the incident. Round 2: BLOCKER x2 --
+# (1) a completed review that READS this repo prints "api_error_status 429" into stderr via
+# tool output and was classified refused even though it answered; (2) removing the echoed
+# prompt line-by-line hid a genuine refusal identical to an echoed line. The fix (see
+# lane-provider-refusal.ps1) is structural, never a phrase scan: codex is refused iff stdout
+# is EMPTY and, after removing the echoed prompt as ONE BLOCK, a framed `ERROR:` line remains;
+# claude is decided by its own JSON envelope fields (is_error / api_error_status), never text.
 
 REFUSAL_HELPER = ROOT / "tools" / "coordination" / "lane-provider-refusal.ps1"
 
@@ -963,7 +970,7 @@ REAL_CODEX_USAGE_LIMIT_STDERR = (
     "purchase more credits or try again at Sep 10th, 2026 8:09 PM.\n"
 )
 
-REAL_CODEX_KNOWN_GOOD_STDOUT = (
+REAL_CODEX_KNOWN_GOOD_STDERR = (
     "OpenAI Codex v0.147.0\n--------\nworkdir: C:\\!Layi Wkspc\\MLV-App\nmodel: gpt-5.6-sol\n"
     "provider: openai\napproval: never\nsandbox: read-only\nreasoning effort: high\n--------\n"
     "user\nReply with exactly: PROBE-OK\ncodex\nPROBE-OK\ntokens used\n22,014\nPROBE-OK\n"
@@ -971,22 +978,31 @@ REAL_CODEX_KNOWN_GOOD_STDOUT = (
 
 # Measured 2026-09-05 on the claude engine, two dispatches of twelve (see Invoke-Lane's exit
 # code comment): the JSON envelope carried this and exitCode 1.
-REAL_CLAUDE_429_STDOUT = (
+REAL_CLAUDE_429_ENVELOPE = (
     '{"type":"result","subtype":"error","is_error":true,"api_error_status":429,'
     '"result":"You\'ve hit your session limit. Try again in 3 hours.","num_turns":0}\n'
 )
 
+CLAUDE_SUCCESS_QUOTING_ENVELOPE = (
+    '{"type":"result","subtype":"success","is_error":false,'
+    '"result":"ERROR: You\'ve hit your usage limit and api_error_status 429 in the quoted text",'
+    '"num_turns":3}\n'
+)
 
-def _classify(tmp_path, text, engine, prompt=""):
-    src = tmp_path / "lane-output.txt"
+
+def _classify(tmp_path, text, engine, prompt="", answer=""):
+    src = tmp_path / "lane-stderr.txt"
     src.write_text(text, encoding="utf-8")
     psrc = tmp_path / "lane-prompt.txt"
     psrc.write_text(prompt, encoding="utf-8")
+    asrc = tmp_path / "lane-answer.txt"
+    asrc.write_text(answer, encoding="utf-8")
     cmd = (
         f". '{REFUSAL_HELPER}'; "
         f"$t = [IO.File]::ReadAllText('{src}'); "
         f"$p = [IO.File]::ReadAllText('{psrc}'); "
-        f"$r = Get-ProviderRefusal -Text $t -Engine '{engine}' -Prompt $p; "
+        f"$a = [IO.File]::ReadAllText('{asrc}'); "
+        f"$r = Get-ProviderRefusal -Text $t -Engine '{engine}' -Prompt $p -Answer $a; "
         "if ($null -eq $r) { 'NULL' } else { $r | ConvertTo-Json -Compress }"
     )
     out = subprocess.run(
@@ -999,7 +1015,7 @@ def _classify(tmp_path, text, engine, prompt=""):
 
 
 def test_provider_refusal_classifies_the_real_codex_usage_limit_stderr(tmp_path):
-    r = _classify(tmp_path, REAL_CODEX_USAGE_LIMIT_STDERR, "codex")
+    r = _classify(tmp_path, REAL_CODEX_USAGE_LIMIT_STDERR, "codex", answer="")
     assert r is not None, "the 2026-09-07 refusal must not read as a completed run"
     assert r["kind"] == "provider-usage-limit"
     assert r["engine"] == "codex"
@@ -1010,22 +1026,49 @@ def test_provider_refusal_classifies_the_real_codex_usage_limit_stderr(tmp_path)
 
 def test_provider_refusal_is_null_on_a_real_known_good_transcript(tmp_path):
     # The falsifier beside its subject: the probe that proved the rotated account worked.
-    assert _classify(tmp_path, REAL_CODEX_KNOWN_GOOD_STDOUT, "codex") is None
+    # It answered ("PROBE-OK" on stdout), so nothing in stderr is even inspected.
+    assert _classify(tmp_path, REAL_CODEX_KNOWN_GOOD_STDERR, "codex", answer="PROBE-OK") is None
 
 
 def test_provider_refusal_classifies_the_claude_429_session_limit(tmp_path):
-    r = _classify(tmp_path, REAL_CLAUDE_429_STDOUT, "claude")
+    r = _classify(tmp_path, "", "claude", answer=REAL_CLAUDE_429_ENVELOPE)
     assert r is not None
     assert r["kind"] == "provider-usage-limit"
     assert r["retryAfter"] == "3 hours"
 
 
+def test_provider_refusal_claude_success_envelope_quoting_the_phrase_is_null(tmp_path):
+    # sol PR #80 R2 BLOCKER (1): a completed run that merely QUOTES the vocabulary -- in its own
+    # result text, and with stderr full of the same phrase -- must not classify as refused. Only
+    # the envelope's own is_error / api_error_status fields decide for claude; text is never
+    # evidence.
+    stderr_full_of_phrase = (
+        "api_error_status 429\nYou've hit your usage limit\nERROR: You've hit your usage limit\n"
+    ) * 3
+    r = _classify(tmp_path, stderr_full_of_phrase, "claude", answer=CLAUDE_SUCCESS_QUOTING_ENVELOPE)
+    assert r is None
+
+
 # sol PR #80 round 1 BLOCKER (2026-09-07): codex echoes the prompt into stderr, and the first
 # version scanned every line, so a review whose PROMPT quoted the incident classified itself as
-# refused. The repro below is sol's own, verbatim.
+# refused. sol PR #80 round 2 BLOCKER (finding 1): a completed review that READS this repo prints
+# "api_error_status 429" into stderr via tool-output/citation lines and was classified refused
+# even though it answered. Both repros are sol's own, verbatim in shape.
 def test_provider_refusal_ignores_prose_that_merely_quotes_a_refusal(tmp_path):
-    prose = "Successful review quotes: You've hit your usage limit. Verdict APPROVE.\n"
-    assert _classify(tmp_path, prose, "codex") is None
+    prompt = (
+        "# CROSS-FAMILY REVIEW: PR #80\n"
+        "The incident: ERROR: You've hit your usage limit. Visit ... try again at Sep 10th, 2026 8:09 PM.\n"
+        "Verify it.\n"
+    )
+    answer = "Successful review quotes: You've hit your usage limit. Verdict APPROVE.\n"
+    stderr = (
+        prompt
+        + "#   CITE-TXN-1 the receipt recorded api_error_status 429 \"You've hit your session limit\"\n"
+        + "ERROR: this line is a reviewer quoting: You've hit your usage limit\n"
+    )
+    # It answered: the classifier never even reaches the text below, which is exactly why a
+    # reviewer's citations and quotations cannot self-classify as a refusal.
+    assert _classify(tmp_path, stderr, "codex", prompt=prompt, answer=answer) is None
 
 
 def test_provider_refusal_ignores_the_echoed_prompt_but_still_sees_a_real_error_line(tmp_path):
@@ -1035,29 +1078,57 @@ def test_provider_refusal_ignores_the_echoed_prompt_but_still_sees_a_real_error_
         "Verify it.\n"
     )
     # Echo only: the prompt's ERROR line appears in stderr because codex printed the prompt back.
-    echoed = "OpenAI Codex v0.147.0\n--------\nuser\n" + prompt + "codex\nVerdict: APPROVE\n"
-    assert _classify(tmp_path, echoed, "codex", prompt) is None
+    # No answer: a genuine refusal never produces stdout.
+    echoed = "OpenAI Codex v0.147.0\n--------\nuser\n" + prompt + "codex\n"
+    assert _classify(tmp_path, echoed, "codex", prompt=prompt, answer="") is None
     # Echo PLUS a genuine refusal line that is not in the prompt: still a refusal.
     refused = echoed + "ERROR: You've hit your usage limit. Visit x to purchase more credits or try again at Sep 11th, 2026 1:00 AM.\n"
-    r = _classify(tmp_path, refused, "codex", prompt)
+    r = _classify(tmp_path, refused, "codex", prompt=prompt, answer="")
     assert r is not None and r["retryAfter"] == "Sep 11th, 2026 1:00 AM"
 
 
+def test_provider_refusal_removes_the_echoed_prompt_as_one_block_not_line_by_line(tmp_path):
+    # sol PR #80 R2 BLOCKER (finding 2): a genuine refusal line IDENTICAL to an echoed prompt
+    # line must still be seen. Removing the prompt line-by-line would delete every occurrence,
+    # including the provider's own, real, second one. Removing it as one verbatim block only
+    # deletes the FIRST occurrence, leaving a later identical line intact.
+    x = "ERROR: You've hit your usage limit. Visit x or try again at Sep 10th, 2026 8:09 PM.\n"
+    prompt = x
+    stderr_with_second_error = "user\n" + x + "\ncodex\n" + x + "\n"
+    r = _classify(tmp_path, stderr_with_second_error, "codex", prompt=prompt, answer="")
+    assert r is not None
+    assert r["retryAfter"] == "Sep 10th, 2026 8:09 PM"
+    # Only the echoed occurrence, once: nothing left after the block is removed.
+    stderr_echo_only = "user\n" + x + "\n"
+    assert _classify(tmp_path, stderr_echo_only, "codex", prompt=prompt, answer="") is None
+
+
 def test_provider_refusal_requires_the_provider_frame_not_just_the_phrase(tmp_path):
-    # Same words, no ERROR:/is_error frame -> not a refusal. With the frame -> refusal.
-    assert _classify(tmp_path, "you've hit your usage limit\n", "codex") is None
-    assert _classify(tmp_path, "ERROR: you've hit your usage limit\n", "codex") is not None
+    # Same words, no ERROR: frame -> not a refusal. With the frame -> refusal. Empty answer
+    # required in both cases: a real answer means it ran.
+    assert _classify(tmp_path, "you've hit your usage limit\n", "codex", answer="") is None
+    assert _classify(tmp_path, "ERROR: you've hit your usage limit\n", "codex", answer="") is not None
+
+
+def test_provider_refusal_requires_an_empty_answer_even_with_a_framed_line(tmp_path):
+    # A non-empty answer means the lane ran and produced something: never a refusal, no matter
+    # what the (irrelevant, historical) stderr says.
+    assert _classify(tmp_path, "ERROR: you've hit your usage limit\n", "codex", answer="APPROVE") is None
 
 
 def test_provider_refusal_treats_empty_output_as_no_refusal(tmp_path):
     # Silence is not a refusal; it is the -999/incomplete path, which the receipt already names.
-    assert _classify(tmp_path, "", "codex") is None
+    assert _classify(tmp_path, "", "codex", answer="") is None
+    assert _classify(tmp_path, "", "claude", answer="") is None
 
 
 def test_invoke_lane_records_a_provider_refusal_as_refused_not_complete():
     body = LANE_RUNNER.read_text(encoding="utf-8")
     assert "lane-provider-refusal.ps1" in body, "Invoke-Lane must dot-source the one classifier"
-    assert "Get-ProviderRefusal -Text ($stderrText" in body, "classification must read the harvested stderr"
+    assert "Get-ProviderRefusal -Text $stderrText -Answer $stdout" in body, (
+        "classification must read the harvested stderr and the harvested answer separately, "
+        "never a blended blob (sol PR #80 R1+R2 BLOCKERs)"
+    )
     assert "-Prompt $Prompt" in body, "the echoed prompt must be excluded from classification (sol PR #80 R1 BLOCKER)"
     assert "providerRefusal = $providerRefusal" in body, "the receipt must carry the refusal verbatim"
     assert "elseif ($null -ne $providerRefusal) { 'refused' }" in body, "state must have a third value"
