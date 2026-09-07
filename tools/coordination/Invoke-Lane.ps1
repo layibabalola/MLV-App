@@ -402,7 +402,7 @@ Write-Utf8NoBom $outPath $stdout
 Write-Utf8NoBom $errPath $stderrText
 # Classify BEFORE parsing the answer: a refused run has no answer, and the 2026-09-07 sol
 # receipt proved that exitCode alone cannot tell "refused in 7 s" from "reviewed and objected".
-$providerRefusal = Get-ProviderRefusal -Text ($stderrText + "`n" + $stdout) -Engine $cfg.engine
+$providerRefusal = Get-ProviderRefusal -Text ($stderrText + "`n" + $stdout) -Engine $cfg.engine -Prompt $Prompt
 
 $final = ''
 if ($cfg.engine -eq 'claude') {

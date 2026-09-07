@@ -977,13 +977,16 @@ REAL_CLAUDE_429_STDOUT = (
 )
 
 
-def _classify(tmp_path, text, engine):
+def _classify(tmp_path, text, engine, prompt=""):
     src = tmp_path / "lane-output.txt"
     src.write_text(text, encoding="utf-8")
+    psrc = tmp_path / "lane-prompt.txt"
+    psrc.write_text(prompt, encoding="utf-8")
     cmd = (
         f". '{REFUSAL_HELPER}'; "
         f"$t = [IO.File]::ReadAllText('{src}'); "
-        f"$r = Get-ProviderRefusal -Text $t -Engine '{engine}'; "
+        f"$p = [IO.File]::ReadAllText('{psrc}'); "
+        f"$r = Get-ProviderRefusal -Text $t -Engine '{engine}' -Prompt $p; "
         "if ($null -eq $r) { 'NULL' } else { $r | ConvertTo-Json -Compress }"
     )
     out = subprocess.run(
@@ -1017,6 +1020,35 @@ def test_provider_refusal_classifies_the_claude_429_session_limit(tmp_path):
     assert r["retryAfter"] == "3 hours"
 
 
+# sol PR #80 round 1 BLOCKER (2026-09-07): codex echoes the prompt into stderr, and the first
+# version scanned every line, so a review whose PROMPT quoted the incident classified itself as
+# refused. The repro below is sol's own, verbatim.
+def test_provider_refusal_ignores_prose_that_merely_quotes_a_refusal(tmp_path):
+    prose = "Successful review quotes: You've hit your usage limit. Verdict APPROVE.\n"
+    assert _classify(tmp_path, prose, "codex") is None
+
+
+def test_provider_refusal_ignores_the_echoed_prompt_but_still_sees_a_real_error_line(tmp_path):
+    prompt = (
+        "# CROSS-FAMILY REVIEW: PR #80\n"
+        "The incident: ERROR: You've hit your usage limit. Visit ... try again at Sep 10th, 2026 8:09 PM.\n"
+        "Verify it.\n"
+    )
+    # Echo only: the prompt's ERROR line appears in stderr because codex printed the prompt back.
+    echoed = "OpenAI Codex v0.147.0\n--------\nuser\n" + prompt + "codex\nVerdict: APPROVE\n"
+    assert _classify(tmp_path, echoed, "codex", prompt) is None
+    # Echo PLUS a genuine refusal line that is not in the prompt: still a refusal.
+    refused = echoed + "ERROR: You've hit your usage limit. Visit x to purchase more credits or try again at Sep 11th, 2026 1:00 AM.\n"
+    r = _classify(tmp_path, refused, "codex", prompt)
+    assert r is not None and r["retryAfter"] == "Sep 11th, 2026 1:00 AM"
+
+
+def test_provider_refusal_requires_the_provider_frame_not_just_the_phrase(tmp_path):
+    # Same words, no ERROR:/is_error frame -> not a refusal. With the frame -> refusal.
+    assert _classify(tmp_path, "you've hit your usage limit\n", "codex") is None
+    assert _classify(tmp_path, "ERROR: you've hit your usage limit\n", "codex") is not None
+
+
 def test_provider_refusal_treats_empty_output_as_no_refusal(tmp_path):
     # Silence is not a refusal; it is the -999/incomplete path, which the receipt already names.
     assert _classify(tmp_path, "", "codex") is None
@@ -1026,6 +1058,7 @@ def test_invoke_lane_records_a_provider_refusal_as_refused_not_complete():
     body = LANE_RUNNER.read_text(encoding="utf-8")
     assert "lane-provider-refusal.ps1" in body, "Invoke-Lane must dot-source the one classifier"
     assert "Get-ProviderRefusal -Text ($stderrText" in body, "classification must read the harvested stderr"
+    assert "-Prompt $Prompt" in body, "the echoed prompt must be excluded from classification (sol PR #80 R1 BLOCKER)"
     assert "providerRefusal = $providerRefusal" in body, "the receipt must carry the refusal verbatim"
     assert "elseif ($null -ne $providerRefusal) { 'refused' }" in body, "state must have a third value"
     assert "$null -eq $providerRefusal -and $exitCode -ne -999" in body, "complete must be false on refusal"

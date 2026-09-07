@@ -16,16 +16,26 @@
 # has to say so in a field a machine can branch on.
 #
 # Dot-sourced by Invoke-Lane.ps1; exercised directly by test_coordination_guardrails.py
-# against the real 2026-09-07 stderr and a known-good transcript.
+# against the real 2026-09-07 stderr, a known-good transcript, and prose that only QUOTES a refusal.
 # ASCII-only by project convention.
 
 function Get-ProviderRefusal {
     [CmdletBinding()]
     param(
         [AllowEmptyString()][AllowNull()][string]$Text,
-        [string]$Engine = 'unknown'
+        [string]$Engine = 'unknown',
+        # The prompt that was sent. Codex ECHOES the prompt into stderr, so any line that
+        # also appears in the prompt is the lane's INPUT, not the provider's answer.
+        # sol PR #80 round 1 BLOCKER (2026-09-07): without this, a review that merely
+        # quoted "You've hit your usage limit" classified itself as refused.
+        [AllowEmptyString()][AllowNull()][string]$Prompt = ''
     )
     if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+
+    $promptLines = New-Object 'System.Collections.Generic.HashSet[string]'
+    if (-not [string]::IsNullOrEmpty($Prompt)) {
+        foreach ($pl in ($Prompt -split "`r?`n")) { [void]$promptLines.Add($pl.Trim()) }
+    }
 
     # One vocabulary, one emitter. Each entry: kind, regex over a single line.
     # Kinds are deliberately few; a reader branches on `kind`, and the matched line is
@@ -39,7 +49,18 @@ function Get-ProviderRefusal {
         @{ kind = 'provider-auth';        rx = 'not logged in|invalid api key|authentication failed' }
     )
 
+    # SCOPE. A refusal is something the PROVIDER SAID, and both engines say it in a
+    # recognisable frame: codex prints `ERROR: ...` lines; claude --output-format json
+    # returns an envelope with "is_error":true / api_error_status. Discussion of a refusal
+    # (a prompt, a review, a quoted incident) never carries that frame, so only framed
+    # lines are eligible for the vocabulary below. Unframed text is never a refusal.
+    $frame = '^\s*ERROR\b|"is_error"\s*:\s*true|api_error_status'
+
     foreach ($line in ($Text -split "`r?`n")) {
+        $t = $line.Trim()
+        if ($t.Length -eq 0) { continue }
+        if ($promptLines.Contains($t)) { continue }   # echoed input, not an answer
+        if ($line -inotmatch $frame) { continue }      # unframed prose is never a refusal
         foreach ($p in $patterns) {
             if ($line -imatch $p.rx) {
                 $retry = $null
