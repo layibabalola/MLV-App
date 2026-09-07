@@ -10,6 +10,7 @@
 #include "CrashForensics.h"
 #include "ExportDimensions.h"
 #include "ExportProcess.h"
+#include "DualIsoLevelSyncPolicy.h"
 #include "PlaybackFrameRange.h"
 #include "PlaybackPrepPresentationPolicy.h"
 #include "debug/StageTiming.h"
@@ -6312,8 +6313,12 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
          * restricted-range dual-ISO clip keeps its clip-open (pre-recon-scale)
          * levels and the subset renders the recon-scaled data several times
          * too bright (washed out, clipped highlights, exposed recon texture). */
-        if( m_pMlvObject && m_fileLoaded
-         && mlvProcessingDualIsoBlackWhiteLevelsOutOfSync( m_pMlvObject ) )
+        const bool dualIsoLevelSyncSourceReady = m_pMlvObject && m_fileLoaded;
+        if( dual_iso_level_sync_policy::shouldSync(
+                dualIsoLevelSyncSourceReady,
+                /* bakePending */ true,
+                dualIsoLevelSyncSourceReady
+                    && mlvProcessingDualIsoBlackWhiteLevelsOutOfSync( m_pMlvObject ) ) )
         {
             waitForRenderThreadIdleBeforeCoreMutation( "dual-iso-subset-level-sync" );
             mlvSyncProcessingDualIsoBlackWhiteLevels( m_pMlvObject );

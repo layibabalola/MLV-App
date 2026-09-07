@@ -27,6 +27,7 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_worker_thread_count.cpp \
     $$REPO_ROOT/tests/console/test_env_flags.cpp \
     $$REPO_ROOT/tests/console/test_dual_iso_playback_policy.cpp \
+    $$REPO_ROOT/tests/console/test_dual_iso_level_sync_policy.cpp \
     $$REPO_ROOT/tests/console/test_frame_compare.cpp \
     $$REPO_ROOT/tests/console/test_phase3_quality_policy.cpp \
     $$REPO_ROOT/tests/console/test_clip_lifecycle_barrier.cpp \
@@ -56,6 +57,7 @@ HEADERS += \
     $$REPO_ROOT/platform/qt/ClipLifecycleBarrier.h \
     $$REPO_ROOT/platform/qt/ExportDimensions.h \
     $$REPO_ROOT/platform/qt/ExportProcess.h \
+    $$REPO_ROOT/platform/qt/DualIsoLevelSyncPolicy.h \
     $$REPO_ROOT/platform/qt/PlaybackFrameRange.h \
     $$REPO_ROOT/platform/qt/PlaybackPrepPresentationPolicy.h
 
