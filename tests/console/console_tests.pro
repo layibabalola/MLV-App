@@ -6,6 +6,8 @@ TEMPLATE = app
 TARGET = console_tests
 
 SOURCES += \
+    $$REPO_ROOT/tests/console/test_fpm_name_validator.cpp \
+    $$REPO_ROOT/tests/console/test_atomic_file_replace.cpp \
     $$REPO_ROOT/tests/common/test_artifacts.cpp \
     $$REPO_ROOT/tests/common/frame_compare.cpp \
     $$REPO_ROOT/tests/common/hash_helpers.cpp \
@@ -38,6 +40,8 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_rendered_video_runner.cpp
 
 HEADERS += \
+    $$REPO_ROOT/platform/qt/FpmNameValidator.h \
+    $$REPO_ROOT/platform/qt/AtomicFileReplace.h \
     $$REPO_ROOT/tests/common/minitest.h \
     $$REPO_ROOT/tests/common/test_artifacts.h \
     $$REPO_ROOT/tests/common/test_runtime.h \
