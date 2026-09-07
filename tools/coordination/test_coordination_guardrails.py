@@ -940,3 +940,102 @@ def test_the_refusal_suggests_the_refspec_fetch_when_the_ref_is_NOT_checked_out(
     assert r.returncode == 14
     assert "fetch origin main:main" in r.stderr, r.stderr
     assert "is CHECKED OUT at that path" not in r.stderr, r.stderr
+
+
+# --- Invoke-Lane: a PROVIDER REFUSAL is a third outcome, never a completed run ----------
+# Incident 2026-09-07T01:28Z (fleet-runs\20260907T012821Z): sol was dispatched for round 3 of
+# the PR #79 review and codex refused it in 7.7 s with "You've hit your usage limit ... try
+# again at Sep 10th". The receipt said exitCode=1, failure=null, complete=true, state=complete.
+# Nothing downstream could tell "refused before any work" from "reviewed and objected", and the
+# hub idled for an hour on what was actually an owner-side account rotation. These tests pin the
+# classifier to the REAL refusal text and to a real known-good transcript, and pin the receipt
+# plumbing structurally the way the exit-code tests above do.
+
+REFUSAL_HELPER = ROOT / "tools" / "coordination" / "lane-provider-refusal.ps1"
+
+REAL_CODEX_USAGE_LIMIT_STDERR = (
+    "2026-09-07T01:28:22.710128Z ERROR codex_models_manager::manager: failed to load models cache\n"
+    "OpenAI Codex v0.147.0\n--------\nworkdir: C:\\!Layi Wkspc\\MLV-App\nmodel: gpt-5.6-sol\n"
+    "--------\nuser\n# CROSS-FAMILY REVIEW: PR #79 at head 22483b33\n...\n"
+    "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to "
+    "purchase more credits or try again at Sep 10th, 2026 8:09 PM.\n"
+    "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to "
+    "purchase more credits or try again at Sep 10th, 2026 8:09 PM.\n"
+)
+
+REAL_CODEX_KNOWN_GOOD_STDOUT = (
+    "OpenAI Codex v0.147.0\n--------\nworkdir: C:\\!Layi Wkspc\\MLV-App\nmodel: gpt-5.6-sol\n"
+    "provider: openai\napproval: never\nsandbox: read-only\nreasoning effort: high\n--------\n"
+    "user\nReply with exactly: PROBE-OK\ncodex\nPROBE-OK\ntokens used\n22,014\nPROBE-OK\n"
+)
+
+# Measured 2026-09-05 on the claude engine, two dispatches of twelve (see Invoke-Lane's exit
+# code comment): the JSON envelope carried this and exitCode 1.
+REAL_CLAUDE_429_STDOUT = (
+    '{"type":"result","subtype":"error","is_error":true,"api_error_status":429,'
+    '"result":"You\'ve hit your session limit. Try again in 3 hours.","num_turns":0}\n'
+)
+
+
+def _classify(tmp_path, text, engine):
+    src = tmp_path / "lane-output.txt"
+    src.write_text(text, encoding="utf-8")
+    cmd = (
+        f". '{REFUSAL_HELPER}'; "
+        f"$t = [IO.File]::ReadAllText('{src}'); "
+        f"$r = Get-ProviderRefusal -Text $t -Engine '{engine}'; "
+        "if ($null -eq $r) { 'NULL' } else { $r | ConvertTo-Json -Compress }"
+    )
+    out = subprocess.run(
+        ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmd],
+        text=True, capture_output=True,
+    )
+    assert out.returncode == 0, out.stderr
+    line = out.stdout.strip().splitlines()[-1]
+    return None if line == "NULL" else json.loads(line)
+
+
+def test_provider_refusal_classifies_the_real_codex_usage_limit_stderr(tmp_path):
+    r = _classify(tmp_path, REAL_CODEX_USAGE_LIMIT_STDERR, "codex")
+    assert r is not None, "the 2026-09-07 refusal must not read as a completed run"
+    assert r["kind"] == "provider-usage-limit"
+    assert r["engine"] == "codex"
+    assert r["retryAfter"] == "Sep 10th, 2026 8:09 PM"
+    assert "usage limit" in r["match"]
+    assert "rotates" in r["remedy"], "a usage limit is an owner-side rotation, and the receipt says so"
+
+
+def test_provider_refusal_is_null_on_a_real_known_good_transcript(tmp_path):
+    # The falsifier beside its subject: the probe that proved the rotated account worked.
+    assert _classify(tmp_path, REAL_CODEX_KNOWN_GOOD_STDOUT, "codex") is None
+
+
+def test_provider_refusal_classifies_the_claude_429_session_limit(tmp_path):
+    r = _classify(tmp_path, REAL_CLAUDE_429_STDOUT, "claude")
+    assert r is not None
+    assert r["kind"] == "provider-usage-limit"
+    assert r["retryAfter"] == "3 hours"
+
+
+def test_provider_refusal_treats_empty_output_as_no_refusal(tmp_path):
+    # Silence is not a refusal; it is the -999/incomplete path, which the receipt already names.
+    assert _classify(tmp_path, "", "codex") is None
+
+
+def test_invoke_lane_records_a_provider_refusal_as_refused_not_complete():
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "lane-provider-refusal.ps1" in body, "Invoke-Lane must dot-source the one classifier"
+    assert "Get-ProviderRefusal -Text ($stderrText" in body, "classification must read the harvested stderr"
+    assert "providerRefusal = $providerRefusal" in body, "the receipt must carry the refusal verbatim"
+    assert "elseif ($null -ne $providerRefusal) { 'refused' }" in body, "state must have a third value"
+    assert "$null -eq $providerRefusal -and $exitCode -ne -999" in body, "complete must be false on refusal"
+
+
+def test_invoke_lane_propagates_a_refusal_as_125_ahead_of_the_child_code():
+    # 124 timeout, 127 never-completed, 125 provider refused: three sentinels, three meanings.
+    # The refusal clause must come FIRST and break, because PowerShell's switch runs every
+    # matching clause and a refusal can arrive with any child exit code.
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    i_refused = body.index("{ $null -ne $providerRefusal } { 125; break }")
+    i_timeout = body.index("-1      { 124 }")
+    assert i_refused < i_timeout
