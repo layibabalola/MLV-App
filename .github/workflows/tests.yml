@@ -769,5 +769,6 @@ jobs:
           New-Item -ItemType Directory -Force platform\qt\build-ci-batch | Out-Null
           Push-Location platform\qt\build-ci-batch
           & "$env:QT_ROOT_DIR\bin\qmake.exe" "..\MLVApp.pro"
+          if ($LASTEXITCODE -ne 0) { Pop-Location; throw "qmake failed for MLVApp.pro (exit=$LASTEXITCODE)" }
           & "$env:MINGW_ROOT\bin\mingw32-make.exe" -j2
           Pop-Location
