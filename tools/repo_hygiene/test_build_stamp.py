@@ -46,9 +46,9 @@ class BuildStampTests(unittest.TestCase):
         h = self.root / "header.h"
         # Quoted tags cannot be loose refs on Windows; exercise the metadata
         # seam directly while the other cases run the actual CLI against git.
-        with patch.object(build_stamp, "git", side_effect=[self.sha, "", 'release"quote']):
+        with patch.object(build_stamp, "git", side_effect=[self.sha, "", 'release"quote\\\U0001f600']):
             build_stamp.generate(self.root, self.sha, h)
-        self.assertIn('#define MLVAPP_GIT_DESCRIBE "release\\"quote"', h.read_text())
+        self.assertIn('#define MLVAPP_GIT_DESCRIBE "release\\042quote\\134\\360\\237\\230\\200"', h.read_text())
 
     def test_dirty_generation_preserves_existing_header(self):
         h = self.root / "header.h"
@@ -56,5 +56,21 @@ class BuildStampTests(unittest.TestCase):
         result = run("generate", "--repo-root", self.root, "--expected-sha", self.sha, "--output-header", h)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(h.read_text(), "previous header")
+
+    def test_installer_working_directory_keeps_logs_out_of_source(self):
+        import yaml
+        for filename, step_name in (("Windows.yml", "Install Qt 6.10.2 + MinGW 13.1"),
+                                    ("Linux.yml", "Install Qt 6.10.2")):
+            with self.subTest(workflow=filename), tempfile.TemporaryDirectory() as runner_temp:
+                workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+                step = next(s for s in workflow["jobs"]["build"]["steps"] if s.get("name") == step_name)
+                cwd = step.get("working-directory", str(self.root)).replace("${{ runner.temp }}", runner_temp)
+                # AQT's file handler creates a relative aqtinstall.log. Exercise
+                # the workflow-selected cwd with that behavior and the real gate.
+                subprocess.run([sys.executable, "-c", "from pathlib import Path; Path('aqtinstall.log').write_text('installer log')"], cwd=cwd, check=True)
+                h = Path(runner_temp) / "header.h"
+                result = run("generate", "--repo-root", self.root, "--expected-sha", self.sha, "--output-header", h)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(h.exists())
 
 if __name__ == "__main__": unittest.main()

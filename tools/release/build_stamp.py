@@ -21,12 +21,15 @@ def generate(root: Path, expected: str, output: Path) -> None:
     if not SHA.fullmatch(expected): raise RuntimeError("expected SHA must be 40 lowercase hex characters")
     head = git(root, "rev-parse", "HEAD").strip()
     if head != expected or not SHA.fullmatch(head): raise RuntimeError("HEAD does not equal expected SHA")
-    dirty = 1 if git(root, "status", "--porcelain") else 0
-    if dirty: raise RuntimeError("working tree is dirty")
+    status = git(root, "status", "--porcelain")
+    if status: raise RuntimeError(f"working tree is dirty: {status.strip()}")
     describe = git(root, "describe", "--always", "--dirty", "--abbrev=40").strip() or head
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # JSON's ASCII string escaping is valid for this C string literal as well.
-    description_literal = json.dumps(describe, ensure_ascii=True)
+    # Fixed-width octal escapes preserve UTF-8 bytes without C universal-character
+    # restrictions or accidental consumption of following hex/octal characters.
+    description_literal = '"' + ''.join(
+        chr(b) if 32 <= b < 127 and b not in (34, 92) else f"\\{b:03o}"
+        for b in describe.encode("utf-8")) + '"'
     body = f'''/* AUTO-GENERATED; do not edit or commit. */
 #ifndef MLVAPP_BUILD_BUILDINFO_H
 #define MLVAPP_BUILD_BUILDINFO_H

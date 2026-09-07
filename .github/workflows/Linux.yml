@@ -56,6 +56,7 @@ jobs:
           sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100
 
     - name: Install Qt 6.10.2
+      working-directory: ${{ runner.temp }}
       run: |
            set -euo pipefail
            export QT_OUTPUT_DIR="${RUNNER_TEMP}/mlv-release-qt"

@@ -50,6 +50,7 @@ jobs:
            if ($LASTEXITCODE -ne 0) { throw "Chocolatey OpenSSL install failed with exit code $LASTEXITCODE" }
 
     - name: Install Qt 6.10.2 + MinGW 13.1
+      working-directory: ${{ runner.temp }}
       timeout-minutes: 20
       run: |
            $ErrorActionPreference = "Stop"
