@@ -71,7 +71,15 @@ param(
     # the landed-card guard below can only be proven by a queue in which a landed card is the
     # TOP pick, and the real queue must never be mutated to manufacture that. Never used in
     # production; the default is the canonical queue.
-    [string]$QueuePath = ''
+    [string]$QueuePath = '',
+
+    # Path to the pre-dispatch PR-review evidence exporter (deliverable 9, S126). EXISTS FOR
+    # FALSIFICATION: a test points this at a fake exporter shim so the dispatcher's OWN wiring -
+    # it calls the exporter before a review-lane starts, and refuses the dispatch when the
+    # exporter refuses - can be proven without a real PR or a network call, matching the
+    # existing fake-gh shim pattern. Never overridden in production; the default is the real
+    # exporter beside this script.
+    [string]$ExporterPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,8 +112,9 @@ $StartEditingLane  = Join-Path $DualLane 'Start-EditingLane.ps1'
 # $PSScriptRoot is the pinned sibling when driven by the loop, and the local sibling when run by
 # hand: correct in both cases, and it can never silently cross into another branch's checkout.
 $LaneRunner = Join-Path $PSScriptRoot 'Invoke-Lane.ps1'
+if (-not $ExporterPath) { $ExporterPath = Join-Path $PSScriptRoot 'Export-PrReviewEvidence.ps1' }
 
-foreach ($p in @($QueuePath, $LaneRunner)) {
+foreach ($p in @($QueuePath, $LaneRunner, $ExporterPath)) {
     if (-not (Test-Path -LiteralPath $p)) {
         Write-Output "WORKSTREAM: CANNOT-DETERMINE - missing $p"
         exit 3
@@ -409,6 +418,32 @@ $engine = if ($Lane -eq 'sol' -or $Lane -eq 'luna') { 'codex' } else { 'claude' 
 # this path, so what you inspect under -DryRun is byte-identical to what a lane would receive.
 $stamp  = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
 $runDir = Join-Path $RepoRoot ".claude-state\fleet-runs\ws-$cardId-$stamp"
+
+# ------------------------------------------------------------------ pre-dispatch PR review evidence
+# DELIVERABLE 9 (S126): before every review-lane dispatch, run the SAME exporter the hub ran by
+# hand for the three PRs that landed before this card - from this card on, the DISPATCHER is the
+# exporter. A review lane (fable, routed here by the REVIEW: scope rule; sol, the adversarial
+# verifier, when explicitly requested) reads pr-<n>-checks.json / pr-<n>-review.json instead of
+# calling `gh` itself, exactly like the generic HOSTED GITHUB EVIDENCE section below - this is the
+# NARROW, deliverable-9-specific contract sol-review-PR-TEMPLATE.md actually consumes, and unlike
+# that generic export (which fails OPEN), a review with unverified evidence is worse than no
+# review at all, so a failed export here REFUSES the dispatch rather than proceeding anyway.
+#
+# Scoped to a card that names a PR to review (`prNumber`): a review-lane card with no PR to bind
+# to has no subject for this exporter, and dispatching it without hosted evidence is already
+# covered by the generic export below.
+$isReviewLane = ($Lane -eq 'fable' -or $Lane -eq 'sol')
+$cardPrNumber = Get-Prop $card 'prNumber'
+if ($isReviewLane -and $cardPrNumber) {
+    Write-Output "WORKSTREAM: pre-dispatch review-evidence export pr=$cardPrNumber card=$cardId runDir=$runDir"
+    & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ExporterPath `
+        -PrNumber ([int]$cardPrNumber) -RunDir $runDir -RepoRoot $RepoRoot
+    $exporterExit = $LASTEXITCODE
+    if ($exporterExit -ne 0) {
+        Write-Output "WORKSTREAM: REFUSED review-evidence-export-failed card=$cardId pr=$cardPrNumber exit=$exporterExit"
+        exit 6
+    }
+}
 
 # ------------------------------------------------------------------ hosted GitHub evidence
 # WHY THIS EXISTS, AND WHY A WARNING IN THE BRIEF WAS NOT ENOUGH.

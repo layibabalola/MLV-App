@@ -36,11 +36,18 @@ param(
     [Parameter(Mandatory)][int]$PrNumber,
     [Parameter(Mandatory)][string]$RunDir,
     [string]$RepoRoot = 'C:\!Layi Wkspc\MLV-App',
-    [string]$Repo = 'layibabalola/MLV-App',
     [string]$GhExe = 'gh'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# HARDCODED, NOT A PARAMETER (sol round-1 review, MAJOR 3). A -Repo parameter is a caller-
+# overridable pin, which is no pin at all - any caller (including a future dispatcher call
+# site) could point this exporter at a different repository and every downstream "-R
+# layibabalola/MLV-App on every call" guarantee would still hold locally while being wrong
+# globally. Removing the parameter, rather than merely validating it, means there is no argv
+# path that can ever carry a different value in.
+$Repo = 'layibabalola/MLV-App'
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
@@ -63,20 +70,35 @@ function Get-RequiredContexts {
 
 if (-not (Test-Path -LiteralPath $RunDir)) { New-Item -ItemType Directory -Path $RunDir -Force | Out-Null }
 
-& git -C $RepoRoot fetch fork --quiet 2>&1 | Out-Null
+# FAIL CLOSED ON FETCH FAILURE (sol round-1 review, MAJOR 2). A nonzero exit here used to be
+# silently discarded (piped to Out-Null with no check), so a lane could be dispatched to review
+# objects this exporter never actually fetched - the head/base sha checks below would then run
+# against whatever was ALREADY local, which is exactly the stale-review risk this exporter
+# exists to close.
+$fetchOutput = & git -C $RepoRoot fetch fork --quiet 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Output "REFUSED: git-fetch-failed pr=$PrNumber exit=$LASTEXITCODE detail=$($fetchOutput -join ' ')"
+    exit 3
+}
 
 $prBefore = Get-PrView -GhExe $GhExe -Repo $Repo -PrNumber $PrNumber
 $requiredBefore = @(Get-RequiredContexts -GhExe $GhExe -Repo $Repo)
 
 $headSha = [string]$prBefore.headRefOid
 $baseSha = (& git -C $RepoRoot rev-parse fork/master 2>$null | Select-Object -First 1)
-foreach ($sha in @($headSha, $baseSha)) {
-    if ($sha) {
-        & git -C $RepoRoot cat-file -e "$sha^{commit}" 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Output "REFUSED: pr-object-missing sha=$sha pr=$PrNumber"
-            exit 3
-        }
+# EACH VALUE VALIDATED AS A FULL 40-HEX SHA BEFORE THE COMMIT-EXISTENCE CHECK (sol round-1
+# review, MAJOR 2). The previous form skipped cat-file entirely for a falsy value ("if ($sha)"),
+# so an empty or short sha silently passed with no objects ever verified - the exact case a
+# reviewer bound to "whatever headRefOid happened to be" is reviewing nothing.
+foreach ($pair in @(@{ Field = 'head'; Sha = $headSha }, @{ Field = 'base'; Sha = $baseSha })) {
+    if (-not $pair.Sha -or $pair.Sha -notmatch '^[0-9a-f]{40}$') {
+        Write-Output "REFUSED: pr-sha-invalid field=$($pair.Field) value=$($pair.Sha) pr=$PrNumber"
+        exit 3
+    }
+    & git -C $RepoRoot cat-file -e "$($pair.Sha)^{commit}" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "REFUSED: pr-object-missing sha=$($pair.Sha) pr=$PrNumber"
+        exit 3
     }
 }
 

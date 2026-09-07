@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1038,14 +1039,47 @@ def test_a_dry_run_cycle_started_from_the_persisted_arg_line_reports_the_resolve
     Resolve-Tracks function in isolation: -Tracks "product,playback" arrives at the loop as a
     single-element array and must still resolve and print as two comma-separated tracks.
     -MaxDispatchesPerCycle 0 means no dispatch is attempted regardless of the real board's queue
-    state, and the kill switch (armed or not) is checked only AFTER this line is printed."""
+    state, and the kill switch (armed or not) is checked only AFTER this line is printed.
+
+    MINOR 4 (sol round-1 review): this used to hand-reconstruct the scheduled-task argument list
+    directly as a Python literal (-Tracks "product,playback" -Lane sonnet -AllowEdits), never
+    actually calling Get-InstallArgLine -- so a regression in the arg-line BUILDER itself (a
+    dropped flag, wrong quoting, wrong flag spelling) would not show up here even though this
+    test's whole point is the exact-line install/reinstall contract. Now it calls
+    Get-InstallArgLine for real, takes its ACTUAL returned string, and parses THAT string into an
+    argv list -- exactly what a `pwsh -File` scheduled-task action does with a persisted
+    Arguments string -- before starting the -DryRun cycle from it."""
+    # -MaxDispatchesPerCycle 0 goes INTO the persisted line itself (not appended afterwards): the
+    # loop's own param binder throws "specified more than once" if the same flag appears twice in
+    # argv, and 0 makes the per-track dispatch loop break before attempting a single real
+    # dispatch against the live board, which -DryRun alone would not prevent (it would still
+    # forward -DryRun to up to MaxDispatchesPerCycle real dispatcher invocations).
+    get_line_cmd = (
+        ". '%s'; Get-InstallArgLine -ScriptPath '%s' -DailyBudget 12 -MaxDispatchesPerCycle 0 "
+        "-TimeoutSec 1500 -StaleHours 12 -Tracks @('product','playback') -Lane sonnet -AllowEdits"
+        % (LOOP_INSTALL_ARGS.as_posix(), LOOP.as_posix())
+    )
+    line_result = run_pwsh_command(get_line_cmd)
+    assert line_result.returncode == 0, line_result.stdout + line_result.stderr
+    arg_line = line_result.stdout.strip()
+    assert '-Tracks "product,playback"' in arg_line, arg_line
+    assert '-Lane sonnet' in arg_line, arg_line
+    assert '-AllowEdits' in arg_line, arg_line
+
+    # shlex with posix=False keeps Windows-style backslash paths intact (no backslash-escape
+    # processing) while still respecting quotes for word-splitting; the quote characters
+    # themselves are left attached and must be stripped before use as a real argv element,
+    # since subprocess.run's list form passes each element through literally (no shell requoting).
+    raw_tokens = shlex.split(arg_line, posix=False)
+    argv = [t[1:-1] if len(t) >= 2 and t[0] == '"' and t[-1] == '"' else t for t in raw_tokens]
+
     result = subprocess.run(
-        ["pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-File", str(LOOP), "-Tracks", "product,playback", "-Lane", "sonnet", "-AllowEdits",
-         "-DryRun", "-MaxDispatchesPerCycle", "0"],
+        ["pwsh.exe", *argv, "-DryRun"],
         text=True, capture_output=True, timeout=120,
     )
-    assert "LOOP: tracks=product, playback" in result.stdout, result.stdout + result.stderr
+    assert "LOOP: tracks=product, playback" in result.stdout, (
+        "argLine=%r argv=%r\n%s%s" % (arg_line, argv, result.stdout, result.stderr)
+    )
 
 
 # --- kind/owner/scope-based lane resolution (deliverable 2) ---------------------------------
@@ -1108,6 +1142,87 @@ def run_dispatcher_lane_test(item, *extra):
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         return run_dispatcher(Path(td), [item], *extra)
+
+
+# --- deliverable 9 wiring: the dispatcher itself must call the pre-dispatch PR-review evidence
+# exporter before a review-lane starts (MAJOR 1, sol round-1 review). The exporter script has its
+# own standalone tests further down; these three exercise the DISPATCHER's wiring specifically,
+# with a fake exporter shim standing in for the real one -- matching the existing fake-gh shim
+# pattern rather than re-testing the exporter in isolation, which is exactly what sol's finding
+# says the previous suite was missing (the only reference to the exporter outside its own test
+# was in this file, never in a production caller).
+
+FAKE_EXPORTER_SHIM = (
+    "param([int]$PrNumber,[string]$RunDir,[string]$RepoRoot,[string]$GhExe)\n"
+    "if (-not (Test-Path -LiteralPath $RunDir)) { New-Item -ItemType Directory -Path $RunDir -Force | Out-Null }\n"
+    "Set-Content -LiteralPath (Join-Path $RunDir 'exporter-called.txt') "
+    "-Value ($PrNumber.ToString() + '|' + $RunDir)\n"
+    "exit 0\n"
+)
+
+FAKE_EXPORTER_SHIM_REFUSES = (
+    "param([int]$PrNumber,[string]$RunDir,[string]$RepoRoot,[string]$GhExe)\n"
+    "Write-Output \"REFUSED: pr-head-drift before=a after=b pr=$PrNumber\"\n"
+    "exit 3\n"
+)
+
+
+def test_a_review_lane_dispatch_calls_the_pr_evidence_exporter_before_the_lane_starts(tmp_path):
+    """The dispatcher must call Export-PrReviewEvidence.ps1 itself before a review-lane (routed
+    here by the REVIEW: scope rule to fable) starts, rather than leaving the lane to call `gh`
+    and hit the read-only sandbox's Access-is-denied wall. Run under -DryRun (via
+    run_dispatcher_lane_test), so the exporter call must happen BEFORE the dry-run exit -- exactly
+    like the generic hosted-evidence export it sits beside."""
+    fake_exporter = tmp_path / "fake-exporter.ps1"
+    fake_exporter.write_text(FAKE_EXPORTER_SHIM, encoding="ascii")
+    result = run_dispatcher_lane_test(
+        {"id": "TEST-REVIEW-EVIDENCE-1", "state": "queued", "track": "factory", "priority": 1,
+         "scope": "REVIEW: read the plan", "prNumber": 81},
+        "-Track", "factory", "-ExporterPath", str(fake_exporter),
+    )
+    assert "lane=fable" in result.stdout, result.stdout + result.stderr
+    # NOT \S+: the real board root is "C:\!Layi Wkspc\MLV-App", which contains a space, and
+    # runDir is the last field on its line -- capture to end-of-line, not to the first whitespace.
+    export_line = next(
+        (l for l in result.stdout.splitlines() if "pre-dispatch review-evidence export" in l), None
+    )
+    assert export_line, "no export line reported: %s" % result.stdout
+    run_dir = Path(export_line.split("runDir=", 1)[1].strip())
+    marker = run_dir / "exporter-called.txt"
+    try:
+        assert marker.exists(), "the dispatcher never invoked the exporter: %s" % result.stdout
+        assert marker.read_text(encoding="utf-8").startswith("81|"), marker.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def test_a_review_lane_dispatch_is_refused_when_the_exporter_refuses(tmp_path):
+    """Fail CLOSED, the opposite polarity of the generic hosted-evidence export: unverified PR
+    evidence is worse than no review at all, so an exporter refusal must stop the dispatch."""
+    fake_exporter = tmp_path / "fake-exporter-fail.ps1"
+    fake_exporter.write_text(FAKE_EXPORTER_SHIM_REFUSES, encoding="ascii")
+    result = run_dispatcher_lane_test(
+        {"id": "TEST-REVIEW-EVIDENCE-2", "state": "queued", "track": "factory", "priority": 1,
+         "scope": "REVIEW: read the plan", "prNumber": 81},
+        "-Track", "factory", "-ExporterPath", str(fake_exporter),
+    )
+    assert "REFUSED review-evidence-export-failed" in result.stdout, result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "WORKSTREAM: track=factory card=TEST-REVIEW-EVIDENCE-2" not in result.stdout
+
+
+def test_a_review_lane_dispatch_with_no_pr_number_does_not_call_the_exporter(tmp_path):
+    """Scoped to cards that actually name a PR: a review-lane card with nothing to bind the
+    exporter's mandatory -PrNumber to must not attempt the call at all."""
+    fake_exporter = tmp_path / "fake-exporter-unused.ps1"
+    fake_exporter.write_text(FAKE_EXPORTER_SHIM, encoding="ascii")
+    result = run_dispatcher_lane_test(
+        {"id": "TEST-REVIEW-EVIDENCE-3", "state": "queued", "track": "factory", "priority": 1,
+         "scope": "REVIEW: read the plan"},
+        "-Track", "factory", "-ExporterPath", str(fake_exporter),
+    )
+    assert "lane=fable" in result.stdout, result.stdout + result.stderr
+    assert "pre-dispatch review-evidence export" not in result.stdout, result.stdout
 
 
 # --- editing dispatch: procedure/worktree/composition/reservations (deliverables 2,3,5,6,7) -
@@ -1335,6 +1450,87 @@ def test_a_real_dispatch_refuses_when_the_kill_switch_is_armed_immediately_befor
         cleanup_lane_worktree(tmp_path, "TEST-EDIT-KILL-1")
 
 
+def test_kill_switch_armed_mid_run_by_the_lane_itself_blocks_the_next_dispatch(tmp_path):
+    """MINOR 3 (sol round-1 review): the test above pre-arms the switch from Python BEFORE either
+    dispatch runs, which an early one-time check (e.g. only at the top of a cycle, not
+    immediately before each lane's own start) could also satisfy. Here the fake lane shim arms
+    the switch itself, from inside what a real lane's own process would be, so only a check that
+    re-reads the file at THIS dispatch's own start -- not a cached or once-per-cycle value -- can
+    catch it before the second, separate dispatch."""
+    dual, head = editing_board(tmp_path, with_lane_shim=False)
+    proc_a = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-MIDRUN-A")
+    proc_b = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-MIDRUN-B")
+    kill_switch = dual / "WORKSTREAM-LOOP-DISABLED"
+    shim = dual / "Start-EditingLane.ps1"
+    shim.write_text(
+        "param([string]$Lane,[string]$PromptFile,[string]$WorkDir,[string]$Card,"
+        "[string]$RunDir,[string]$ExtraReadDir,[int]$TimeoutSec)\n"
+        "Set-Content -LiteralPath '%s' -Value 'armed mid-run by the lane'\n"
+        "Write-Output ('SHIM: lane=' + $Lane + ' card=' + $Card + ' workDir=' + $WorkDir)\n"
+        "exit 0\n" % kill_switch.as_posix(),
+        encoding="ascii",
+    )
+    items = [
+        {"id": "TEST-EDIT-MIDRUN-A", "state": "queued", "track": "product", "kind": "product",
+         "owner": "sonnet", "priority": 1,
+         "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-MIDRUN-A.md",
+         "procedureSha256": sha256_of(proc_a)},
+        {"id": "TEST-EDIT-MIDRUN-B", "state": "queued", "track": "product", "kind": "product",
+         "owner": "sonnet", "priority": 1,
+         "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-MIDRUN-B.md",
+         "procedureSha256": sha256_of(proc_b)},
+    ]
+    try:
+        first = run_editing_dispatch(tmp_path, items, "TEST-EDIT-MIDRUN-A", dry_run=False)
+        assert first.returncode == 0, first.stdout + first.stderr
+        assert "SHIM: lane=sonnet card=TEST-EDIT-MIDRUN-A" in first.stdout, first.stdout
+        assert kill_switch.exists(), "the shim did not arm the switch it was given"
+
+        second = run_editing_dispatch(tmp_path, items, "TEST-EDIT-MIDRUN-B", dry_run=False)
+        assert second.returncode == 6, second.stdout + second.stderr
+        assert "REFUSED kill-switch-armed" in second.stdout
+        assert "SHIM: lane=sonnet card=TEST-EDIT-MIDRUN-B" not in second.stdout
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-MIDRUN-A")
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-MIDRUN-B")
+
+
+def test_the_reservation_row_exists_before_the_lane_itself_finishes(tmp_path):
+    """MINOR 3 (sol round-1 review): appending a 'reserved' row before start and a 'charged' row
+    after would also pass a check that only inspects the file once the whole dispatcher process
+    has already returned. Here the fake lane shim reads the reservation file FROM INSIDE its own
+    run and asserts its 'reserved' row for THIS card is already on disk -- proving the row lands
+    before the lane's own process even finishes, not merely before the dispatcher's return."""
+    dual, head = editing_board(tmp_path, with_lane_shim=False)
+    proc = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-RESORDER-1")
+    reservations = dual / "receipts" / "dispatch-reservations.jsonl"
+    shim = dual / "Start-EditingLane.ps1"
+    shim.write_text(
+        "param([string]$Lane,[string]$PromptFile,[string]$WorkDir,[string]$Card,"
+        "[string]$RunDir,[string]$ExtraReadDir,[int]$TimeoutSec)\n"
+        "$rows = @()\n"
+        "if (Test-Path -LiteralPath '%s') {\n"
+        "    $rows = @(Get-Content -LiteralPath '%s' | ForEach-Object { $_ | ConvertFrom-Json })\n"
+        "}\n"
+        "$mine = @($rows | Where-Object { $_.card -eq $Card -and $_.state -eq 'reserved' })\n"
+        "if ($mine.Count -eq 0) { Write-Output 'SHIM: NO-RESERVED-ROW-YET'; exit 1 }\n"
+        "Write-Output ('SHIM: lane=' + $Lane + ' card=' + $Card + ' sawReservedRow=' + $mine[0].reservationId)\n"
+        "exit 0\n" % (reservations.as_posix(), reservations.as_posix()),
+        encoding="ascii",
+    )
+    item = {"id": "TEST-EDIT-RESORDER-1", "state": "queued", "track": "product", "kind": "product",
+            "owner": "sonnet", "priority": 1,
+            "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-RESORDER-1.md",
+            "procedureSha256": sha256_of(proc)}
+    try:
+        result = run_editing_dispatch(tmp_path, [item], "TEST-EDIT-RESORDER-1", dry_run=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "sawReservedRow=" in result.stdout, result.stdout
+        assert "NO-RESERVED-ROW-YET" not in result.stdout
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-RESORDER-1")
+
+
 # --- Invoke-Lane.ps1's own allowlist-required refusal, reachable only if something calls it
 # directly instead of going through Start-EditingLane.ps1 -- which is exactly why deliverable 3
 # requires EVERY editing dispatch to go through the wrapper.
@@ -1342,6 +1538,19 @@ def test_a_real_dispatch_refuses_when_the_kill_switch_is_armed_immediately_befor
 def test_invoke_lane_refuses_allowedtools_all(tmp_path):
     cmd = (
         "try { & '%s' -Lane sonnet -Prompt 'x' -WorkDir '%s' -AllowEdits -AllowedTools 'ALL' } "
+        "catch { $_.Exception.Message }" % (LANE_RUNNER.as_posix(), tmp_path.as_posix())
+    )
+    result = run_pwsh_command(cmd)
+    assert "allowlist-required" in (result.stdout + result.stderr)
+
+
+def test_invoke_lane_refuses_editing_with_allowedtools_entirely_absent(tmp_path):
+    """MINOR 2 (sol round-1 review): the existing test above only covers -AllowedTools 'ALL'.
+    The implementation's guard is `IsNullOrWhiteSpace($AllowedTools) -or $AllowedTools -eq 'ALL'`
+    -- an `-or` with two independently reachable branches -- and the absent-argument branch
+    (which binds $AllowedTools to its default '') had no test of its own until now."""
+    cmd = (
+        "try { & '%s' -Lane sonnet -Prompt 'x' -WorkDir '%s' -AllowEdits } "
         "catch { $_.Exception.Message }" % (LANE_RUNNER.as_posix(), tmp_path.as_posix())
     )
     result = run_pwsh_command(cmd)
@@ -1478,17 +1687,37 @@ def make_fake_gh(dir_path, pr_view_sequence, protection_sequence, checks_payload
     return shim, state
 
 
-def pr_evidence_repo(tmp_path):
+def pr_evidence_repo(tmp_path, with_fork_remote=True):
+    """A repo with base/head commits and (by default) a REAL `fork` remote pinned at the base
+    commit, so a genuine `git fetch fork` (MAJOR 2, sol round-1 review) succeeds instead of
+    silently no-op'ing against a remote that was never more than a manually poked ref.
+
+    The remote is a bare snapshot taken right after the base commit, not an alias to `repo`
+    itself: `repo`'s own branch keeps moving (the head commit below), and if `fork` pointed at
+    that same path, fetching AFTER the head commit would walk the live branch forward and
+    silently repoint `fork/master` at head_sha instead of base_sha.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
+    # Named explicitly, not left to `init.defaultBranch`: the exporter hardcodes `fork/master`,
+    # so the fork remote's default branch must actually be called `master` for a real fetch to
+    # populate `refs/remotes/fork/master`.
+    subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/master"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
     (repo / "f.txt").write_text("base\n")
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
     base_sha = git(repo, "rev-parse", "HEAD")
-    subprocess.run(["git", "update-ref", "refs/remotes/fork/master", base_sha], cwd=repo, check=True)
+
+    if with_fork_remote:
+        fork_remote = tmp_path / "fork_remote.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(fork_remote)], check=True)
+        subprocess.run(["git", "remote", "add", "fork", str(fork_remote)], cwd=repo, check=True)
+    # else: no remote named 'fork' at all -- `git fetch fork` fails deterministically (exit 128,
+    # "'fork' does not appear to be a git repository"), the fetch-failure case MAJOR 2 covers.
+
     (repo / "f.txt").write_text("head\n")
     subprocess.run(["git", "commit", "-qam", "head commit"], cwd=repo, check=True)
     head_sha = git(repo, "rev-parse", "HEAD")
@@ -1507,6 +1736,13 @@ def run_exporter(repo, run_dir, gh_shim, state_dir, pr_number=99):
 
 
 def test_exporter_pins_the_repository_on_every_gh_call(tmp_path):
+    """MAJOR 3 (sol round-1 review): the old assertion only checked that the repository STRING
+    occurred SOMEWHERE in the joined argv line, which a repo name appearing in the wrong place
+    (or coincidentally inside the API endpoint's path) would also satisfy -- it could false-green
+    a `-R` flag that carried the wrong value, or a `gh api` call with no repo pin at all. This
+    checks the actual argv TOKEN immediately after `-R` on every `pr view`/`pr checks` call, and
+    the exact `repos/<repo>/branches/master/protection` endpoint string on the `gh api` call --
+    not a substring hit against the whole line."""
     repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
     run_dir = tmp_path / "run"
     shim, state = make_fake_gh(
@@ -1522,11 +1758,72 @@ def test_exporter_pins_the_repository_on_every_gh_call(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     calls = (state / "call_log.txt").read_text(encoding="utf-8").splitlines()
     assert calls, "gh was never invoked"
+    saw_pr_call = False
+    saw_api_call = False
     for line in calls:
-        assert FAKE_GH_REPO_STRING in line, line
+        tokens = line.split("|")
+        if tokens[:2] in (["pr", "view"], ["pr", "checks"]):
+            saw_pr_call = True
+            assert "-R" in tokens, "no -R flag on a pr view/checks call: %s" % line
+            idx = tokens.index("-R")
+            assert tokens[idx + 1] == FAKE_GH_REPO_STRING, (
+                "the -R flag does not carry the exact pinned repo (got %r): %s" % (tokens[idx + 1], line)
+            )
+        if tokens[0] == "api":
+            saw_api_call = True
+            endpoint = tokens[1]
+            assert endpoint == "repos/%s/branches/master/protection" % FAKE_GH_REPO_STRING, (
+                "the gh api endpoint is not the exact pinned repo path: %s" % endpoint
+            )
+    assert saw_pr_call, "no pr view/checks call was observed"
+    assert saw_api_call, "no gh api call was observed"
+
+
+def test_exporter_repo_is_a_hardcoded_pin_not_a_caller_supplied_parameter(tmp_path):
+    """MAJOR 3 (sol round-1 review): '-Repo is caller-overridable' was the actual defect behind
+    the weak test above -- a parameter with a safe-looking default is still an argv path that can
+    carry a different value in. The fix removes the parameter entirely rather than merely
+    validating it, so this asserts on the source that no such parameter exists."""
+    text = EXPORT_PR_EVIDENCE.read_text(encoding="utf-8")
+    # Scoped to the SCRIPT's own param() block, not the internal Get-PrView/Get-RequiredContexts
+    # helper functions further down, which legitimately take a $Repo parameter fed from the one
+    # pinned script-scope value below -- that is an implementation detail, not a caller-facing
+    # argv path. \b so this also does not false-positive on the unrelated [string]$RepoRoot.
+    script_param_block = text[text.index("[CmdletBinding()]"):text.index("$ErrorActionPreference")]
+    assert not re.search(r"\[string\]\$Repo\b", script_param_block), (
+        "the repository is still a caller-settable parameter: %r" % script_param_block
+    )
+    assert "'layibabalola/MLV-App'" in text, "the pinned repo is no longer a literal in the source"
+
+
+def extract_json_array_bytes(raw, key):
+    """Slice out the raw bytes of a top-level JSON array value for `key` (e.g. b'"checks":
+    [...]'), by bracket-balancing rather than reparsing -- so the comparison below is a real
+    byte comparison of what was WRITTEN, not a reparse-and-recompare of what was MEANT."""
+    marker = ('"%s":' % key).encode("ascii")
+    idx = raw.index(marker)
+    start = raw.index(b"[", idx)
+    depth = 0
+    i = start
+    while i < len(raw):
+        c = raw[i:i + 1]
+        if c == b"[":
+            depth += 1
+        elif c == b"]":
+            depth -= 1
+            if depth == 0:
+                return raw[start:i + 1]
+        i += 1
+    raise AssertionError("unbalanced [ ] while extracting %r from JSON" % key)
 
 
 def test_exporter_writes_both_exports_byte_exact(tmp_path):
+    """MINOR 1 (sol round-1 review): a test named 'byte exact' that only reparses both files with
+    json.loads and compares fields never actually compares a single byte -- BOM, whitespace,
+    key ordering or any other byte-level change would still pass. The exporter writes the SAME
+    `checks` array into both pr-99-checks.json and pr-99-review.json from the same $checks value,
+    so their serialized `checks` bytes must be IDENTICAL; that is asserted here as a real
+    raw-bytes comparison, on top of (not instead of) the existing semantic checks."""
     repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
     run_dir = tmp_path / "run"
     checks_payload = [{"name": "build", "state": "SUCCESS", "link": "x"}]
@@ -1541,8 +1838,19 @@ def test_exporter_writes_both_exports_byte_exact(tmp_path):
     )
     result = run_exporter(repo, run_dir, shim, state)
     assert result.returncode == 0, result.stdout + result.stderr
-    checks_doc = json.loads((run_dir / "pr-99-checks.json").read_text(encoding="utf-8"))
-    review_doc = json.loads((run_dir / "pr-99-review.json").read_text(encoding="utf-8"))
+    checks_raw = (run_dir / "pr-99-checks.json").read_bytes()
+    review_raw = (run_dir / "pr-99-review.json").read_bytes()
+
+    # the actual byte comparison the test's name claims
+    checks_bytes = extract_json_array_bytes(checks_raw, "checks")
+    review_checks_bytes = extract_json_array_bytes(review_raw, "checks")
+    assert checks_bytes == review_checks_bytes, (
+        "the 'checks' array is not byte-identical between pr-99-checks.json and "
+        "pr-99-review.json: %r != %r" % (checks_bytes, review_checks_bytes)
+    )
+
+    checks_doc = json.loads(checks_raw.decode("utf-8"))
+    review_doc = json.loads(review_raw.decode("utf-8"))
     assert checks_doc["checks"] == checks_payload
     assert review_doc["headRefOidBefore"] == head_sha
     assert review_doc["headRefOidAfter"] == head_sha
@@ -1551,6 +1859,63 @@ def test_exporter_writes_both_exports_byte_exact(tmp_path):
     assert review_doc["body"] == "the body"
     assert review_doc["checks"] == checks_payload
     assert review_doc["missingRequiredContexts"] == []
+
+
+def test_exporter_refuses_when_git_fetch_fails(tmp_path):
+    """MAJOR 2 (sol round-1 review): `git fetch fork` used to be piped to Out-Null with its exit
+    code never checked, so a fetch failure was indistinguishable from success and the exporter
+    proceeded to review whatever objects happened to already be local. `with_fork_remote=False`
+    means no remote named 'fork' exists at all, so the fetch fails deterministically."""
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path, with_fork_remote=False)
+    run_dir = tmp_path / "run"
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[{"number": 99, "headRefOid": head_sha, "body": "b", "state": "OPEN"}],
+        protection_sequence=[["build"]],
+        checks_payload=[{"name": "build", "state": "SUCCESS", "link": "x"}],
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode != 0
+    assert "REFUSED: git-fetch-failed" in result.stdout, result.stdout + result.stderr
+    assert not (state / "call_log.txt").read_text(encoding="utf-8").strip(), (
+        "gh must never be called after a failed fetch"
+    )
+    assert not run_dir.exists() or not any(run_dir.iterdir())
+
+
+def test_exporter_refuses_on_an_empty_head_sha(tmp_path):
+    """MAJOR 2 (sol round-1 review): the old `if ($sha) { cat-file -e ... }` SKIPPED the
+    commit-existence check entirely for a falsy value, so an empty headRefOid silently passed
+    with no object ever verified. An empty or short sha must be a REFUSAL, not a skipped check."""
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[{"number": 99, "headRefOid": "", "body": "b", "state": "OPEN"}],
+        protection_sequence=[["build"]],
+        checks_payload=[{"name": "build", "state": "SUCCESS", "link": "x"}],
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode != 0
+    assert "REFUSED: pr-sha-invalid field=head" in result.stdout, result.stdout + result.stderr
+    assert not (run_dir / "pr-99-checks.json").exists()
+    assert not (run_dir / "pr-99-review.json").exists()
+
+
+def test_exporter_refuses_on_a_non_40_hex_head_sha(tmp_path):
+    """MAJOR 2 (sol round-1 review): a short or otherwise malformed value is just as unbindable
+    as an empty one -- both must fail the same explicit shape check before any cat-file call."""
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[{"number": 99, "headRefOid": "not-a-sha", "body": "b", "state": "OPEN"}],
+        protection_sequence=[["build"]],
+        checks_payload=[{"name": "build", "state": "SUCCESS", "link": "x"}],
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode != 0
+    assert "REFUSED: pr-sha-invalid field=head value=not-a-sha" in result.stdout, result.stdout + result.stderr
 
 
 def test_exporter_refuses_on_head_drift(tmp_path):
