@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from server_wrapper import SERVER_WRAPPER_SELF_RESTART_EXIT_CODE
+from core.win_process import native_process_entry
 from powershell_runtime import powershell_cim_command
 
 
@@ -32,6 +33,19 @@ def _short_hash(value: object) -> str:
 def _host_env_for_parent(parent_pid: int) -> dict[str, str]:
     env = {"AGENT_BRIDGE_TRAMPOLINE_PARENT_PID": str(parent_pid), "AGENT_BRIDGE_MCP_HOST_PID": str(parent_pid)}
     if sys.platform != "win32":
+        return env
+    # Record the fingerprint with the same probe the supervisors verify it with,
+    # so producer and consumer spell the host's identity identically.
+    native = native_process_entry(parent_pid)
+    if native is not None:
+        if native.get("name"):
+            env["AGENT_BRIDGE_MCP_HOST_PROCESS_NAME"] = str(native["name"])
+        if native.get("executable_path"):
+            env["AGENT_BRIDGE_MCP_HOST_EXECUTABLE_PATH"] = str(native["executable_path"])
+        if native.get("creation_date"):
+            env["AGENT_BRIDGE_MCP_HOST_CREATION_DATE"] = str(native["creation_date"])
+        if native.get("command_line"):
+            env["AGENT_BRIDGE_MCP_HOST_COMMAND_HASH"] = _short_hash(native["command_line"])
         return env
     command = powershell_cim_command(
         (

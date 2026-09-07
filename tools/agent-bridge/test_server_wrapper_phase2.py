@@ -759,8 +759,13 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="[]", stderr="")
         with mock.patch.object(_sw.sys, "platform", "win32"), mock.patch.object(_psrt.shutil, "which", side_effect=lambda name: "C:/Program Files/PowerShell/7/pwsh.exe" if name == "pwsh.exe" else None), mock.patch.object(_sw.subprocess, "run", return_value=completed) as run:
             table = _sw._process_table_from_system()
+            # _process_table_from_system() returns a lazy view on win32 so that
+            # looking up a handful of known pids never pays for a full CIM
+            # enumeration; force materialization here to exercise the CIM
+            # fallback this test actually targets.
+            materialized = dict(table)
 
-        self.assertEqual(table, {})
+        self.assertEqual(materialized, {})
         argv = run.call_args.args[0]
         self.assertPowerShellCimCommand(argv, "pwsh.exe")
         self.assertIn("Get-CimInstance Win32_Process", argv[-1])
@@ -782,7 +787,9 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
             return "C:/Program Files/PowerShell/7/pwsh" if name == "pwsh" else None
 
         with mock.patch.object(_sw.sys, "platform", "win32"), mock.patch.object(_psrt.shutil, "which", side_effect=which), mock.patch.object(_sw.subprocess, "run", return_value=completed) as run:
-            _sw._process_table_from_system()
+            # Force materialization: see the comment in
+            # test_windows_process_table_queries_prefer_pwsh_for_cim above.
+            dict(_sw._process_table_from_system())
 
         argv = run.call_args.args[0]
         self.assertPowerShellCimCommand(argv, "pwsh")
@@ -1654,6 +1661,53 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
             _sw._process_entry_from_system = original_entry
             _sw._process_table_from_system = original_table
             _sw._wrapper_identity_for_pid = original_wrapper_identity
+
+    @unittest.skipUnless(sys.platform == "win32", "native probe is Windows-only")
+    def test_owning_host_exited_uses_native_probe_without_spawning(self) -> None:
+        """The host-liveness check runs on a 2s timer; it must never shell out.
+
+        Exercises the real (unmocked) ``_process_entry_from_system`` against a
+        genuinely live pid -- this test process's parent -- so the native
+        kernel32/ntdll probe is what actually answers, not a stub standing in
+        for it. Before core/win_process.py this call spawned
+        pwsh + conhost + a WMI round trip on every poll.
+        """
+        state_dir = self.tempdir / "host-identity-no-spawn" / "state"
+        state_dir.mkdir(parents=True)
+        host_pid = os.getppid()
+        self.assertNotEqual(host_pid, os.getpid())
+
+        real_run, real_popen = _sw.subprocess.run, _sw.subprocess.Popen
+
+        def explode(*args, **kwargs):
+            raise AssertionError("host-exit liveness check spawned a subprocess")
+
+        _sw.subprocess.run = explode
+        _sw.subprocess.Popen = explode
+        try:
+            supervisor = _sw.ServerSupervisor(
+                command=[sys.executable, "-c", "import time; time.sleep(60)"],
+                state_dir=state_dir,
+                watch_paths=[],
+                config=SupervisorConfig(host_exit_check_interval_seconds=5.0),
+                host_identity={
+                    "host_key": "pid:%d" % host_pid,
+                    "host_pid": host_pid,
+                    "host_process_name": "test-parent",
+                    # Deliberately wrong: forces the code past the cheap
+                    # is_process_alive short-circuit and into
+                    # _process_entry_from_system, which is the call that must
+                    # not spawn anything.
+                    "host_creation_date": "not-a-real-timestamp",
+                },
+                storage=self.storage,
+                now_fn=lambda: 0.0,
+            )
+            # Must not raise -- if it does, something shelled out.
+            supervisor._owning_host_exited()
+        finally:
+            _sw.subprocess.run = real_run
+            _sw.subprocess.Popen = real_popen
 
 
 class ServerWrapperTrampolineTests(unittest.TestCase):
