@@ -392,6 +392,35 @@ TEST(DownloadManager, AbortWithOneSuccessAndOnePendingClearsStaleSuccessGetter)
     ASSERT_FALSE(manager.downloadSuccess());
 }
 
+TEST(DownloadManager, InitialAndFreshPendingRequestDoNotReportSuccess)
+{
+    FakeNetworkAccessManager net;
+    DownloadManager manager(&net);
+    ASSERT_TRUE(manager.isDownloadReady());
+    ASSERT_FALSE(manager.downloadSuccess());
+    manager.doDownload(QUrl("https://example.invalid/pixel_maps"));
+    ASSERT_FALSE(manager.isDownloadReady());
+    ASSERT_FALSE(manager.downloadSuccess());
+    manager.abortDownloads();
+}
+
+TEST(DownloadManager, NewRequestClearsPriorCompletedSuccess)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ScopedCurrentDir cwd(dir.path());
+    FakeNetworkAccessManager net;
+    DownloadManager manager(&net);
+    manager.doDownload(QUrl("https://example.invalid/pixel_maps"));
+    net.createdReplies.at(0)->succeedNow(QByteArray("[]"));
+    ASSERT_TRUE(manager.isDownloadReady());
+    ASSERT_TRUE(manager.downloadSuccess());
+    manager.doDownload(QUrl("https://example.invalid/releases"));
+    ASSERT_FALSE(manager.isDownloadReady());
+    ASSERT_FALSE(manager.downloadSuccess());
+    manager.abortDownloads();
+}
+
 TEST(DownloadManager, AbortWhenIdleDoesNotEmit)
 {
     FakeNetworkAccessManager net;

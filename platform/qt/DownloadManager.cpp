@@ -133,7 +133,7 @@ bool DownloadManager::downloadSuccess()
     // fail-first/succeed-last sequence within one operation is still an
     // overall failure, so this cannot simply reflect the last reply's
     // individual outcome (m_downloadSucess).
-    return !m_operationFailed;
+    return m_downloadSucess && !m_operationFailed;
 }
 
 void DownloadManager::execute()
