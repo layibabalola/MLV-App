@@ -645,6 +645,52 @@ class TestReceiptWriteFailureAfterQueueWrite(TmpCase):
         self.assertIn("queueSha256=", combined)
 
 
+class TestExistingFieldPresence(TmpCase):
+    def test_present_falsey_track_values_are_preserved(self):
+        for index, value in enumerate(("", None, 0, False, [], {})):
+            with self.subTest(value=value):
+                q = self.qpath(f"track-{index}.json")
+                r = self.rpath(f"receipt-{index}.json")
+                cards = [{"id": "TRACK", "state": "closed-fixed", "track": value}]
+                _write_queue(q, cards)
+                result = _run(["--queue", q, "--receipt", r, "--apply"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                actual = json.load(open(q, encoding="utf-8"))["items"][0]
+                self.assertEqual(actual["track"], value)
+                self.assertIs(type(actual["track"]), type(value))
+                self.assertEqual(actual["kind"], "factory")
+
+    def test_present_empty_kind_is_reported_and_never_retyped(self):
+        cards = [
+            {"id": "EMPTY", "kind": "", "state": "closed-fixed", "scope": "src/x.cpp"},
+            {"id": "SEEDED", "kind": "", "owner": "sonnet", "state": "queued"},
+        ]
+        q, r = self.qpath(), self.rpath()
+        _write_queue(q, cards)
+        before = open(q, "rb").read()
+        result = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(open(q, "rb").read(), before)
+        self.assertIn("EMPTY", result.stdout)
+        self.assertIn("SEEDED", result.stdout)
+
+    def test_present_nonstring_kind_refuses_without_mutating_any_card(self):
+        for index, value in enumerate((None, False, 0, [], {})):
+            with self.subTest(value=value):
+                q = self.qpath(f"kind-{index}.json")
+                r = self.rpath(f"kind-receipt-{index}.json")
+                _write_queue(q, [
+                    {"id": "WOULD-FREEZE", "state": "queued"},
+                    {"id": "INVALID", "kind": value, "scope": "src/x.cpp"},
+                ])
+                before = open(q, "rb").read()
+                result = _run(["--queue", q, "--receipt", r, "--apply"])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("non-string 'kind'", result.stderr)
+                self.assertEqual(open(q, "rb").read(), before)
+                self.assertFalse(os.path.exists(r))
+
+
 class TestRequiredArgs(TmpCase):
     def test_apply_without_receipt_fails(self):
         cards = [{"id": "RA-1", "state": "open"}]

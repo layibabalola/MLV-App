@@ -266,7 +266,12 @@ def compute_plan(data: dict) -> dict:
         card = dict(item)
         card_id = card["id"]
         owner = card.get("owner")
-        had_kind = "kind" in card and isinstance(card.get("kind"), str) and card["kind"] != ""
+        had_kind = "kind" in card
+        if had_kind and not isinstance(card["kind"], str):
+            raise QueueValidationError(
+                f"card '{card_id}' has an unsupported non-string 'kind'; "
+                "refusing to replace an existing historical field"
+            )
         original_kind = card.get("kind") if had_kind else None
 
         # Existing kind+owner=sonnet cards are deep-identical: never touched
@@ -286,7 +291,7 @@ def compute_plan(data: dict) -> dict:
                 scopeless_ids.append(card_id)
             card["kind"] = kind
             changes.append({"id": card_id, "field": "kind", "from": None, "to": kind})
-            if not card.get("track"):
+            if "track" not in card:
                 card["track"] = kind
                 changes.append({"id": card_id, "field": "track", "from": None, "to": kind})
 
@@ -474,7 +479,10 @@ def main(argv=None) -> int:
         return 0
 
     # --- apply mode ---
-    computed_queue_bytes = render_queue(data, plan["new_items"], len(original_bytes))
+    # A semantic no-op must preserve the original bytes, including formatting.
+    # Re-serializing untouched history would invalidate an existing receipt.
+    computed_queue_bytes = (render_queue(data, plan["new_items"], len(original_bytes))
+                            if plan["changes"] else original_bytes)
     computed_queue_sha = hashlib.sha256(computed_queue_bytes).hexdigest()
     computed_receipt = receipt_payload(
         recorded_utc="<pending>",

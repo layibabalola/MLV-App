@@ -23,9 +23,11 @@ py -3 tools/coordination/freeze-factory-cards.py --queue PATH.json [--dry-run | 
 
 ## Kind classification
 
-A card that already carries a non-empty `kind` field is **never** re-derived
-or re-typed, even if the value is unrecognized (an unknown existing kind is
-retained conservatively and reported on stdout, never silently changed).
+A card with an existing string `kind` field is **never** re-derived or re-typed,
+including an empty or unrecognized string. Unknown values are retained and
+reported. A present non-string `kind` refuses the operation before any writes;
+it is never silently replaced. Field presence, rather than truthiness, also
+governs preservation of existing `track` values.
 
 A card with no `kind` derives one from its `scope` field (a string or a list
 of strings). Each whitespace/comma-separated token is normalized
