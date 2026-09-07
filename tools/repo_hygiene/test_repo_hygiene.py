@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from collections import Counter
@@ -1922,6 +1923,62 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn('printf \'%s\\n\' "${tools_dir}" >> "${GITHUB_PATH}"', linux_workflow)
         self.assertLess(install_step.index("sha256sum -c"), install_step.index("chmod +x"))
         self.assertLess(install_step.index("chmod +x"), install_step.index('"${GITHUB_PATH}"'))
+
+    def test_linux_qt_dependency_preflight_executes_and_fails_closed(self) -> None:
+        workflow = (ROOT / ".github/workflows/Linux.yml").read_text(encoding="utf-8")
+        match = re.search(
+            r"(?ms)^    - name: Verify Qt Linux runtime dependencies\n      run: \|\n(.*?)(?=^    - name:)",
+            workflow,
+        )
+        self.assertIsNotNone(match)
+        body = textwrap.dedent(match.group(1))
+        self.assertLess(workflow.index("- name: Install Qt 6.10.2"), match.start())
+        self.assertLess(match.start(), workflow.index("- name: Build\n"))
+        bash = shutil.which("bash")
+        if os.name == "nt":
+            git_exe = shutil.which("git")
+            git_bash = Path(git_exe).resolve().parents[1] / "bin/bash.exe" if git_exe else None
+            if git_bash and git_bash.is_file():
+                bash = str(git_bash)
+            else:
+                self.skipTest("Git Bash is required for the Windows shell fixture")
+        if not bash:
+            self.fail("bash is required for the Linux workflow fixture")
+        with tempfile.TemporaryDirectory(prefix="mlv-qt-deps-") as td:
+            root = Path(td)
+            qt = root / "qt"
+            for name in ("lib/libQt6Multimedia.so", "plugins/multimedia/libffmpegmediaplugin.so"):
+                library = qt / name
+                library.parent.mkdir(parents=True, exist_ok=True)
+                library.write_bytes(b"inert fixture")
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_ldd = fake_bin / "ldd"
+            fake_ldd.write_text(
+                "#!/bin/sh\n"
+                "case \"$MLV_TEST_LDD_MODE\" in\n"
+                "  good) printf 'libpulse.so.0 => /usr/lib/libpulse.so.0\\n' ;;\n"
+                "  missing) printf 'libpulse.so.0 => not found\\n' ;;\n"
+                "  error) exit 2 ;;\n"
+                "esac\n", encoding="utf-8",
+            )
+            fake_ldd.chmod(0o755)
+            prelude = 'export PATH="${MLV_TEST_BIN}:${PATH}"\n'
+            if os.name == "nt":
+                prelude = 'export PATH="$(cygpath -u "$MLV_TEST_BIN"):${PATH}"\n'
+            script = root / "preflight.sh"
+            script.write_text(prelude + body, encoding="utf-8")
+            env = dict(os.environ, QT_ROOT_DIR=qt.as_posix(), RUNNER_TEMP=root.as_posix(),
+                       MLV_TEST_BIN=fake_bin.as_posix())
+            for mode, expected in (("good", 0), ("missing", 1), ("error", 2)):
+                with self.subTest(mode=mode):
+                    env["MLV_TEST_LDD_MODE"] = mode
+                    result = subprocess.run([bash, script.as_posix()], env=env, text=True,
+                                            capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                    if mode == "missing":
+                        self.assertIn("libpulse.so.0 => not found", result.stdout)
+                        self.assertIn("Qt Linux runtime dependencies are missing", result.stderr)
 
     def test_windows_and_linux_release_toolchains_are_fail_closed(self) -> None:
         workflow_dir = ROOT / ".github" / "workflows"

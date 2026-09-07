@@ -48,7 +48,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             gcc-13 g++-13 \
-            libgl1-mesa-dev libegl1 \
+            libgl1-mesa-dev libegl1 libpulse-dev \
             libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 \
             libxcb-xfixes0 libxcb-shape0 \
@@ -109,6 +109,26 @@ jobs:
            for plugin in "${required_plugins[@]}"; do
              test -f "${plugin_root}/${plugin}"
            done
+
+    - name: Verify Qt Linux runtime dependencies
+      run: |
+           set -euo pipefail
+           export LD_LIBRARY_PATH="${QT_ROOT_DIR}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+           report="${RUNNER_TEMP}/qt-runtime-dependencies.txt"
+           : > "${report}"
+           libraries=(
+             "${QT_ROOT_DIR}/lib/libQt6Multimedia.so"
+             "${QT_ROOT_DIR}/plugins/multimedia/libffmpegmediaplugin.so"
+           )
+           for library in "${libraries[@]}"; do
+             test -f "${library}"
+             printf 'Library=%s\n' "${library}" | tee -a "${report}"
+             ldd "${library}" | tee -a "${report}"
+           done
+           if grep -Fq 'not found' "${report}"; then
+             echo "Qt Linux runtime dependencies are missing; see ${report}" >&2
+             exit 1
+           fi
 
     - name: Create build directory
       run:  mkdir ${{ env.SOURCE_DIR }}/build

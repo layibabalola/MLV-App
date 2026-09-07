@@ -131,7 +131,7 @@ From the repository root, install the workflow dependencies:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y make gcc-13 g++-13 libgl1-mesa-dev libegl1 \
+sudo apt-get install -y make gcc-13 g++-13 libgl1-mesa-dev libegl1 libpulse-dev \
   libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
   libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 \
   libxcb-xfixes0 libxcb-shape0 libfuse2t64 appstream
@@ -152,6 +152,12 @@ make -j"$(nproc)"
 The workflow selects GCC 13 before building, verifies the resolved compiler
 and Qt versions, and uploads a `toolchain-receipt-<run-id>` artifact. Read the
 receipt for the particular run before claiming hosted build success.
+
+The Qt 6.10 multimedia kit links PulseAudio on this runner; `libpulse-dev`
+supplies its link and runtime libraries. The workflow checks the installed
+multimedia library and FFmpeg plugin with `ldd` before compilation, and fails
+on a missing shared library. See [Qt Multimedia on Linux](https://doc.qt.io/qt-6.10/qtmultimedia-linux.html)
+for the Linux audio requirements.
 
 ### AppImage packaging (per `.github/workflows/Linux.yml`)
 
