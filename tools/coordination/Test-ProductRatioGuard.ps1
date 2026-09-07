@@ -239,7 +239,7 @@ $prIds = @($recognized.Keys | ForEach-Object { [int]$_ } | Sort-Object)
 $provenanceComplete = $unknown.Count -eq 0
 $hasProductLandings = ($prIds.Count + $unknown.Count) -gt 0
 $rate = $null
-if ($provenanceComplete -and $prIds.Count -gt 0) {
+if ($evidence.available -and $provenanceComplete -and $prIds.Count -gt 0) {
     $rate = [double]$evidence.observed / [double]$prIds.Count
 }
 $decision = New-Decision -ProductShare $productShare -DispatchRate $rate -Coverage $evidence.coverage -EvidenceAvailable $evidence.available -ProvenanceComplete $provenanceComplete -HasProductLandings $hasProductLandings -MalformedRows $evidence.malformed

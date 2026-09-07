@@ -16,6 +16,9 @@ Reservations are the preferred observation source. The legacy dispatch log is
 used only when the reservations path is absent. An existing unreadable path
 produces unavailable evidence; it cannot trigger fallback. Empty reservations
 remain authoritative for observed rows. Malformed rows are counted separately.
+Unavailable observations produce a null dispatch rate even when a recognized
+PR denominator exists. The caller rejects a numeric rate in that case; a
+readable empty observation file still produces a valid zero rate.
 Neither source proves complete accounting across all dispatch venues, so current
 runtime output always reports `PARTIAL` coverage and `RED`.
 

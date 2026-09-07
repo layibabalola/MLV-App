@@ -336,9 +336,9 @@ function Test-RatioDispatchPermission {
 
         if ($null -ne $guard.dispatchesPerLandedProductPr7dLowerBound) {
             $rateValue = [double]$guard.dispatchesPerLandedProductPr7dLowerBound
-            if ([double]::IsNaN($rateValue) -or [double]::IsInfinity($rateValue) -or $rateValue -lt 0 -or -not $expectedProvenance -or $recognizedCount -eq 0) { throw 'invalid dispatch rate' }
+            if ([double]::IsNaN($rateValue) -or [double]::IsInfinity($rateValue) -or $rateValue -lt 0 -or -not [bool]$guard.dispatchEvidenceAvailable -or -not $expectedProvenance -or $recognizedCount -eq 0) { throw 'invalid dispatch rate' }
             if ([math]::Abs($rateValue - ([double]$observed / [double]$recognizedCount)) -gt 1e-12) { throw 'dispatch rate mismatch' }
-        } elseif ($expectedProvenance -and $recognizedCount -gt 0) { throw 'missing dispatch rate' }
+        } elseif ([bool]$guard.dispatchEvidenceAvailable -and $expectedProvenance -and $recognizedCount -gt 0) { throw 'missing dispatch rate' }
 
         if ([string]$guard.verdict -eq 'GREEN') {
             if ($guardExit -ne 0 -or $guard.dispatchCoverage -ne 'COMPLETE' -or -not [bool]$guard.dispatchEvidenceAvailable -or -not $expectedProvenance -or -not $expectedLandings -or $malformed -ne 0 -or $null -eq $guard.productShare7d -or [double]$guard.productShare7d -lt [double]$guard.productShareThreshold -or $null -eq $guard.dispatchesPerLandedProductPr7dLowerBound -or [double]$guard.dispatchesPerLandedProductPr7dLowerBound -gt [double]$guard.dispatchRateThreshold) { throw 'contradictory GREEN' }

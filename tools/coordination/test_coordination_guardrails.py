@@ -2553,7 +2553,8 @@ def ratio_run_helper(tmp_path, payload, kind="factory", exit_code=0, raw=None):
 
 def test_ratio_dispatch_read_failure_is_named_partial_red_and_never_uses_legacy(tmp_path):
     repo = ratio_source_init_repo(tmp_path / "repo")
-    ratio_source_commit(repo, "docs", 2_000_000_000 - 1, {"docs/a": "a"})
+    ratio_source_commit(repo, "docs", 2_000_000_000 - 2, {"docs/a": "a"})
+    ratio_source_commit(repo, "fix product (#101)", 2_000_000_000 - 1, {"src/a": "a"})
     reservations = tmp_path / "reservations"
     reservations.mkdir()
     legacy = tmp_path / "legacy.jsonl"
@@ -2566,9 +2567,20 @@ def test_ratio_dispatch_read_failure_is_named_partial_red_and_never_uses_legacy(
     assert payload["dispatchCoverage"] == "PARTIAL"
     assert payload["dispatchEvidenceAvailable"] is False
     assert payload["dispatchesObserved"] == 0
+    assert payload["recognizedProductPrIds"] == [101]
+    assert payload["dispatchesPerLandedProductPr7dLowerBound"] is None
     assert payload["malformedDispatchRows"] == 0
     assert payload["verdict"] == "RED"
     assert "UNAVAILABLE_DISPATCH_EVIDENCE" in payload["reasons"]
+
+
+@pytest.mark.parametrize("rate, expected", [(0.0, 3), (None, 0)])
+def test_ratio_unavailable_evidence_requires_null_rate_for_product_admission(tmp_path, rate, expected):
+    payload = ratio_guard_payload(dispatchEvidenceSource="unavailable",
+        dispatchEvidenceAvailable=False, dispatchesObserved=0,
+        dispatchesPerLandedProductPr7dLowerBound=rate,
+        reasons=["UNAVAILABLE_DISPATCH_EVIDENCE", "RED_DISPATCH_COVERAGE_PARTIAL"])
+    assert ratio_run_helper(tmp_path, payload, kind="product").returncode == expected
 
 
 def test_ratio_empty_window_has_null_share_and_valid_red_is_typed_allowed(tmp_path):
