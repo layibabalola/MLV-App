@@ -248,6 +248,9 @@ $exitCode   = -999
 $timedOut   = $false
 $final      = ''
 $failure    = $null
+# A PROVIDER REFUSAL is a third outcome beside ran/threw: the child exited cleanly and
+# the provider did no work. Detected from raw output after harvest; see lane-provider-refusal.ps1.
+$providerRefusal = $null
 $authority  = [ordered]@{ permissionMode = 'unset'; allowedTools = 'unset'; sandbox = 'unset'; writableRoot = $null }
 $denyRules  = @()
 # $null, never 0. An engine that does not REPORT cost and a run that cost nothing are
@@ -255,6 +258,7 @@ $denyRules  = @()
 # malformed-row counter follows.
 $costUsd = $null; $numTurns = $null
 $cacheCreateTokens = $null; $cacheReadTokens = $null; $outputTokens = $null
+. (Join-Path $PSScriptRoot 'lane-provider-refusal.ps1')
 
 try {
 
@@ -396,6 +400,11 @@ $stderrText = try { $errTask.Result } catch { '' }
 if ($null -eq $stderrText) { $stderrText = '' }
 Write-Utf8NoBom $outPath $stdout
 Write-Utf8NoBom $errPath $stderrText
+# Classify BEFORE parsing the answer: a refused run has no answer, and the 2026-09-07 sol
+# receipt proved that exitCode alone cannot tell "refused in 7 s" from "reviewed and objected".
+# Structurally, never by scanning the transcript (sol PR #80 R1+R2, both BLOCKER): the
+# transcript legitimately CONTAINS the refusal vocabulary even when the run answered.
+$providerRefusal = Get-ProviderRefusal -Text $stderrText -Answer $stdout -Engine $cfg.engine -Prompt $Prompt
 
 $final = ''
 if ($cfg.engine -eq 'claude') {
@@ -452,7 +461,10 @@ $receipt = [ordered]@{
     schema       = 'mlv-app/fleet-lane-receipt/v1'
     # SAME KEY AT EVERY STAGE. A reader checks `state` once - reserved, complete or
     # failed - instead of inferring liveness from which fields happen to be present.
-    state        = if ($null -ne $failure) { 'failed' } elseif ($exitCode -ne -999) { 'complete' } else { 'incomplete' }
+    state        = if ($null -ne $failure) { 'failed' }
+                   elseif ($null -ne $providerRefusal) { 'refused' }
+                   elseif ($exitCode -ne -999) { 'complete' }
+                   else { 'incomplete' }
     lane         = $Lane
     role         = $cfg.role
     engine       = $cfg.engine
@@ -480,7 +492,11 @@ $receipt = [ordered]@{
     stdoutPath   = $outPath
     stderrPath   = $errPath
     failure      = $failure
-    complete     = ($null -eq $failure -and $exitCode -ne -999)
+    # null when the provider did the work. Otherwise {kind, engine, match, retryAfter, remedy};
+    # `complete` is false in that case even though `failure` is null -- the lane script did not
+    # fail, the provider declined, and a reader must never mistake that for a verdict.
+    providerRefusal = $providerRefusal
+    complete     = ($null -eq $failure -and $null -eq $providerRefusal -and $exitCode -ne -999)
     spend        = [ordered]@{
         costUsd            = $costUsd
         costReported       = ($null -ne $costUsd)
@@ -505,6 +521,10 @@ Write-Host ("[{0}] {1}/{2} effort={3} exit={4} {5}s cost={6} -> {7}" -f `
     $rcptPath)
 
 if ($timedOut) { Write-Host "  TIMED OUT after ${TimeoutSec}s - output is partial." }
+if ($null -ne $providerRefusal) {
+    Write-Host ("  PROVIDER REFUSED ({0}): {1}" -f $providerRefusal.kind, $providerRefusal.match)
+    Write-Host ("  remedy: {0}" -f $providerRefusal.remedy)
+}
 
 # Emit the receipt so a caller can pipeline on it.
 [pscustomobject]$receipt
@@ -526,7 +546,12 @@ if ($timedOut) { Write-Host "  TIMED OUT after ${TimeoutSec}s - output is partia
 # exit code intact, and -1 would surface as 255. 124 for a timeout matches the taxonomy the repo
 # already uses in boundedRunnerExitCodes; 127 marks "reserved but never completed", which the
 # receipt also records as complete=false with the failure carried.
+# 125 = the provider refused (usage limit, 429, auth). Chosen beside 124/127 so a dispatcher
+# reading laneExitCode can tell "nobody did the work" from "the work was done and objected".
 $propagated = switch ($exitCode) {
+    # First and with `break`: PowerShell evaluates EVERY matching clause, and a refusal can
+    # arrive with any child exit code. "Nobody did the work" outranks how the child coded it.
+    { $null -ne $providerRefusal } { 125; break }   # provider refused; see receipt.providerRefusal
     -1      { 124 }   # timed out
     -999    { 127 }   # slot reserved, no completion recorded
     default { if ($exitCode -ge 0 -and $exitCode -le 255) { $exitCode } else { 1 } }
