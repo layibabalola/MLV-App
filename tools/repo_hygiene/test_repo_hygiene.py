@@ -1082,12 +1082,14 @@ class RepoHygieneTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 assert_aqt_install_is_bounded_and_fail_closed(falsified_step)
 
+        repo_start = workflow.index("\n  repo-hygiene-python:")
         bridge_start = workflow.index("\n  factory-bridge-regressions:")
         product_start = workflow.index("\n  windows-product-oracles:")
+        repo_job = workflow[repo_start:bridge_start]
         bridge_job = workflow[bridge_start:product_start]
-        self.assertIn("Run coordination and self-healing guardrails", bridge_job)
-        self.assertIn("tools\\coordination\\test_coordination_guardrails.py", bridge_job)
-        self.assertIn("tests\\coordination", bridge_job)
+        self.assertIn("Run coordination and self-healing guardrails", repo_job)
+        self.assertIn("tools\\coordination\\test_coordination_guardrails.py", repo_job)
+        self.assertIn("tests\\coordination", repo_job)
         self.assertIn("tools\\agent-bridge\\requirements-test.txt", bridge_job)
         self.assertNotRegex(bridge_job, r"pip install [\"']pytest")
 
@@ -1117,7 +1119,6 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("${{ runner.temp }}\\pipeline-golden-actual.json", artifact_step)
 
         route_start = workflow.index("\n  protected-check-route:")
-        repo_start = workflow.index("\n  repo-hygiene-python:")
         route_job = workflow[route_start:repo_start]
         self.assertIn("tools/repo_hygiene/protected_check_router.py", route_job)
         self.assertIn("fetch-depth: 0", route_job)
