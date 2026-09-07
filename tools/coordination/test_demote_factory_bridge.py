@@ -83,6 +83,42 @@ def receipts_dir(tmp_path):
     return d
 
 
+def test_board_root_is_genuinely_wired_to_the_default_receipts_path(tmp_path):
+    """sol round 2, PR #83, MAJOR (restated): -BoardRoot's ONLY effect in the script is
+    deriving the default -ReceiptsDir (Join-Path $BoardRoot
+    '.claude-state\\coordination\\dual-lane\\receipts') when -ReceiptsDir is not passed.
+    Every other test in this file always passes -ReceiptsDir explicitly, which bypasses that
+    code path entirely -- so no test proved -BoardRoot is wired to anything real. This test
+    is the one that does: it passes ONLY -BoardRoot (no -ReceiptsDir at all), places a valid
+    receipt pair at the path -BoardRoot's own derivation formula predicts, and asserts the
+    gate finds and validates them -- succeeding all the way to the happy-path stub output,
+    which is only reachable if -BoardRoot genuinely routed to the right receipts directory.
+    Measured to actually depend on -BoardRoot: renaming the script's -BoardRoot parameter
+    (so it is silently unbound, per PowerShell's -File invocation behavior measured
+    directly) makes this test fail, because the derived receipts directory would then be
+    wrong and the receipts this test wrote would not be found."""
+    board_root = tmp_path / "board"
+    receipts_dir = board_root / ".claude-state" / "coordination" / "dual-lane" / "receipts"
+    receipts_dir.mkdir(parents=True)
+    write_receipt(receipts_dir, GUARDRAIL_MOVE_NAME, VALID_GUARDRAIL_MOVE)
+    write_receipt(receipts_dir, REQUIRED_CHECKS_NAME, VALID_REQUIRED_CHECKS)
+
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(SCRIPT), "-BoardRoot", str(board_root)],
+        text=True, capture_output=True,
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, (
+        "expected the gate to find receipts via -BoardRoot's own derivation and succeed;"
+        " got exit=%r stdout=%r stderr=%r" % (result.returncode, result.stdout, result.stderr)
+    )
+    assert "both receipts validate" in combined, (
+        "expected the happy-path validation message, reachable only if -BoardRoot routed"
+        " correctly; stdout=%r stderr=%r" % (result.stdout, result.stderr)
+    )
+
+
 def test_refuses_when_both_receipts_are_absent(receipts_dir):
     result = run_gate(receipts_dir)
     assert_refused(result, GUARDRAIL_MOVE_NAME)
@@ -233,6 +269,23 @@ def test_refuses_when_required_checks_post_contexts_is_an_empty_array(receipts_d
     assert_refused(result, "postContexts is an empty array")
 
 
+def test_refuses_when_required_checks_post_contexts_has_a_non_string_element(receipts_dir):
+    """sol round 2, PR #83, MINOR: no test exercised the 'contains a non-string element'
+    refusal branch -- the implementation refused a direct synthetic repro, but deleting that
+    production branch would not have failed any committed test."""
+    write_receipt(receipts_dir, GUARDRAIL_MOVE_NAME, VALID_GUARDRAIL_MOVE)
+    write_receipt(
+        receipts_dir,
+        REQUIRED_CHECKS_NAME,
+        '{"headSha": "%s", "preContexts": [], '
+        '"postContexts": ["Windows GUI Pilot", 42], '
+        '"snapshotRowSha256": "%s"}' % ("a" * 40, "b" * 64),
+    )
+    result = run_gate(receipts_dir)
+    assert_refused(result, REQUIRED_CHECKS_NAME)
+    assert_refused(result, "non-string element")
+
+
 def test_refuses_when_required_checks_post_contexts_has_a_whitespace_near_match(receipts_dir):
     """sol round 1, PR #83: a whitespace-padded near-match to the blocked context name
     ('Factory Bridge Regressions ') was not an exact match and was silently accepted. A
@@ -279,13 +332,14 @@ def sandboxed_board_root(tmp_path):
 
 
 REFUSAL_CASES = [
-    ("both_receipts_absent", None, None),
-    ("only_guardrail_move_present", VALID_GUARDRAIL_MOVE, None),
-    ("only_required_checks_present", None, VALID_REQUIRED_CHECKS),
+    ("both_receipts_absent", None, None, GUARDRAIL_MOVE_NAME + " is absent"),
+    ("only_guardrail_move_present", VALID_GUARDRAIL_MOVE, None, REQUIRED_CHECKS_NAME + " is absent"),
+    ("only_required_checks_present", None, VALID_REQUIRED_CHECKS, GUARDRAIL_MOVE_NAME + " is absent"),
     (
         "guardrail_move_conclusion_not_success",
         {"conclusion": "failure"},
         VALID_REQUIRED_CHECKS,
+        "conclusion=success",
     ),
     (
         "required_checks_still_lists_bridge",
@@ -293,23 +347,41 @@ REFUSAL_CASES = [
         {**VALID_REQUIRED_CHECKS, "postContexts": VALID_REQUIRED_CHECKS["postContexts"] + [
             "Factory Bridge Regressions"
         ]},
+        "still lists \'Factory Bridge Regressions\'",
     ),
 ]
 
 
-@pytest.mark.parametrize("case_name,guardrail_payload,required_payload", REFUSAL_CASES)
+@pytest.mark.parametrize(
+    "case_name,guardrail_payload,required_payload,expected_substring", REFUSAL_CASES
+)
 def test_does_not_touch_any_workflow_file_on_refusal(
-    sandboxed_board_root, case_name, guardrail_payload, required_payload
+    sandboxed_board_root, case_name, guardrail_payload, required_payload, expected_substring
 ):
+    # sol round 2, PR #83, MAJOR: the previous version of this test asserted only a
+    # nonzero exit code, which cannot distinguish a genuine business-logic refusal from a
+    # PowerShell PARAMETER-BINDING failure -- if -BoardRoot were removed from the script or
+    # otherwise broken, invoking it with -BoardRoot still set would throw a binding error,
+    # which is ALSO a nonzero exit, and this test would have kept passing without -BoardRoot
+    # ever being exercised at all. Asserting the SPECIFIC refusal-reason substring (the same
+    # discipline every other test in this file already uses via assert_refused) closes that
+    # gap: a binding error's message never contains these business-logic strings.
     board_root, receipts_dir, sentinel_path = sandboxed_board_root
     write_receipt(receipts_dir, GUARDRAIL_MOVE_NAME, guardrail_payload)
     write_receipt(receipts_dir, REQUIRED_CHECKS_NAME, required_payload)
 
     result = run_gate(receipts_dir, board_root=board_root)
 
+    combined = result.stdout + result.stderr
     assert result.returncode != 0, (
         "case %r: expected refusal, got exit=%r stdout=%r stderr=%r"
         % (case_name, result.returncode, result.stdout, result.stderr)
+    )
+    assert expected_substring in combined, (
+        "case %r: expected %r in combined output (a generic nonzero exit is not enough --"
+        " it must be THIS specific refusal, not a parameter-binding failure or some other"
+        " error); stdout=%r stderr=%r"
+        % (case_name, expected_substring, result.stdout, result.stderr)
     )
     actual_content = sentinel_path.read_text(encoding="utf-8")
     assert actual_content == _SENTINEL_WORKFLOW_CONTENT, (
