@@ -40,6 +40,8 @@
 ****************************************************************************/
 
 #include "DownloadManager.h"
+#include "AtomicFileReplace.h"
+#include "FpmNameValidator.h"
 
 DownloadManager::DownloadManager()
 {
@@ -50,11 +52,8 @@ DownloadManager::DownloadManager()
 
 void DownloadManager::doDownload(const QUrl &url)
 {
+    m_downloadSucess = false;
     QNetworkRequest request(url);
-
-    QSslConfiguration conf = request.sslConfiguration();
-    conf.setPeerVerifyMode(QSslSocket::VerifyNone);
-    request.setSslConfiguration(conf);
 
     QNetworkReply *reply = manager.get(request);
 
@@ -63,37 +62,15 @@ void DownloadManager::doDownload(const QUrl &url)
 
 QString DownloadManager::saveFileName(const QUrl &url)
 {
-    QString path = url.path();
-    QString basename = QFileInfo(path).fileName();
-
-    if (basename.isEmpty())
-        basename = "download";
-
-    /*if (QFile::exists(basename)) {
-        // already exists, don't overwrite
-        int i = 0;
-        basename += '.';
-        while (QFile::exists(basename + QString::number(i)))
-            ++i;
-
-        basename += QString::number(i);
-    }*/
-
-    return basename;
+    return allowedDownloadBasenameForUrl(url);
 }
 
 bool DownloadManager::saveToDisk(const QString &filename, QIODevice *data)
 {
-    QFile file(filename);
-    if (!file.open(QIODevice::WriteOnly)) {
-        fprintf(stderr, "Could not open %s for writing: %s\n",
-                qPrintable(filename),
-                qPrintable(file.errorString()));
+    if (!writeAtomically(filename, data->readAll())) {
+        fprintf(stderr, "Could not atomically save %s\n", qPrintable(filename));
         return false;
     }
-
-    file.write(data->readAll());
-    file.close();
 
     return true;
 }
@@ -131,6 +108,7 @@ void DownloadManager::execute()
 
 void DownloadManager::downloadFinished(QNetworkReply *reply)
 {
+    m_downloadSucess = false;
     QUrl url = reply->url();
     if (reply->error()) {
         fprintf(stderr, "Download of %s failed: %s\n",
@@ -139,11 +117,11 @@ void DownloadManager::downloadFinished(QNetworkReply *reply)
         m_downloadSucess = false;
     } else {
         QString filename = saveFileName(url);
-        if (saveToDisk(filename, reply))
-        {
-            /*printf("Download of %s succeded (saved to %s)\n",
-                   url.toEncoded().constData(), qPrintable(filename));*/
-            m_downloadSucess = true;
+        if (filename.isEmpty()) {
+            fprintf(stderr, "Rejected invalid pixel-map filename from %s\n",
+                    url.toEncoded().constData());
+        } else {
+            m_downloadSucess = saveToDisk(filename, reply);
         }
     }
 
