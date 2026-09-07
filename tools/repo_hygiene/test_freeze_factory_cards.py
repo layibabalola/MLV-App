@@ -383,6 +383,268 @@ class TestConcurrentModification(TmpCase):
         self.assertNotEqual(current_bytes, original_bytes)
 
 
+class TestFreezeProvenancePreservation(TmpCase):
+    def test_existing_freeze_provenance_on_transitioning_card_refuses(self):
+        # Untyped card (no 'kind'), derives to factory, non-terminal state --
+        # but already carries a 'freezeProvenance' field from some earlier
+        # (hand-edited or replayed) source. Must fail closed before any write.
+        cards = [{"id": "FP-1", "state": "open", "scope": "tools/x.py",
+                  "freezeProvenance": {"previousState": "weird-earlier-state"}}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        before = open(q, "rb").read()
+        r = self.rpath()
+        res = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(open(q, "rb").read(), before)
+        self.assertFalse(os.path.exists(r))
+
+    def test_already_frozen_card_stays_idempotent_and_retains_field(self):
+        cards = [{"id": "FP-2", "kind": "factory", "owner": "codex",
+                  "state": FROZEN_STATE,
+                  "freezeProvenance": {"previousState": "open",
+                                        "frozenReason": "factory-card-freeze-phase0.5"}}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        r = self.rpath()
+        res = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        result = json.load(open(q, encoding="utf-8"))
+        self.assertEqual(result["items"][0]["state"], FROZEN_STATE)
+        self.assertEqual(result["items"][0]["freezeProvenance"]["previousState"], "open")
+
+
+class TestChangeListCompleteness(TmpCase):
+    def test_change_list_includes_freeze_provenance_and_replays_to_proposed_queue(self):
+        cards = [
+            {"id": "CL-1", "state": "open", "scope": "tools/x.py"},
+            {"id": "CL-2", "state": "closed-fixed", "scope": "tools/y.py"},
+            {"id": "CL-3", "kind": "product", "owner": "codex", "state": "open",
+             "scope": "src/x.cpp"},
+        ]
+        data = {"items": copy.deepcopy(cards)}
+        plan = ffc.compute_plan(data)
+
+        cl1_fields = {c["field"] for c in plan["changes"] if c["id"] == "CL-1"}
+        self.assertIn("freezeProvenance", cl1_fields)
+        self.assertIn("state", cl1_fields)
+        self.assertIn("kind", cl1_fields)
+        self.assertIn("track", cl1_fields)
+
+        # Terminal card: kind/track are still derived and recorded, but no
+        # state/freezeProvenance change since it's already done.
+        cl2_fields = {c["field"] for c in plan["changes"] if c["id"] == "CL-2"}
+        self.assertNotIn("state", cl2_fields)
+        self.assertNotIn("freezeProvenance", cl2_fields)
+
+        # Replaying the change list onto a fresh copy of the ORIGINAL items
+        # must reproduce the actual proposed queue (plan['new_items']), not
+        # just the aggregate expected totals.
+        replayed = {c["id"]: dict(c) for c in copy.deepcopy(cards)}
+        for change in plan["changes"]:
+            replayed[change["id"]][change["field"]] = change["to"]
+        replayed_items = [replayed[c["id"]] for c in cards]
+        self.assertEqual(replayed_items, plan["new_items"])
+
+
+class TestUnsupportedScopeTypes(TmpCase):
+    def test_number_scope_zero_mutations(self):
+        cards = [{"id": "BADSCOPE-1", "state": "open", "scope": 42}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        before = open(q, "rb").read()
+        r = self.rpath()
+        res = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(open(q, "rb").read(), before)
+        self.assertFalse(os.path.exists(r))
+
+    def test_object_scope_zero_mutations(self):
+        cards = [{"id": "BADSCOPE-2", "state": "open", "scope": {"path": "tools/x.py"}}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        before = open(q, "rb").read()
+        r = self.rpath()
+        res = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(open(q, "rb").read(), before)
+        self.assertFalse(os.path.exists(r))
+
+    def test_mixed_list_scope_zero_mutations(self):
+        cards = [{"id": "BADSCOPE-3", "state": "open", "scope": ["tools/x.py", 5]}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        before = open(q, "rb").read()
+        r = self.rpath()
+        res = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(open(q, "rb").read(), before)
+        self.assertFalse(os.path.exists(r))
+
+    def test_protected_typed_sonnet_card_untouched_despite_bad_scope(self):
+        # Typed + sonnet-owned cards are deep-identical and never re-derived,
+        # so an unsupported scope shape on one of THEM must not be validated
+        # or block the run at all.
+        cards = [{"id": "SAFE-1", "kind": "product", "owner": "sonnet",
+                  "state": "open", "scope": 42}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        r = self.rpath()
+        res = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        result = json.load(open(q, encoding="utf-8"))
+        self.assertEqual(result["items"][0], cards[0])
+
+
+class TestConcurrentModificationRealSeam(TmpCase):
+    def test_apply_refuses_when_queue_mutated_between_load_and_prewrite_check(self):
+        cards = [{"id": "CM-2", "state": "open", "scope": "tools/a.py"}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        r = self.rpath()
+        original_bytes = open(q, "rb").read()
+        mutated_bytes = original_bytes + b" "
+
+        calls = {"n": 0}
+        real_load = ffc.load_queue_bytes
+
+        def fake_load(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_load(path)
+            # Simulate a concurrent writer landing between the initial load
+            # and the prewrite recheck, without touching the file ourselves.
+            return mutated_bytes
+
+        ffc.load_queue_bytes = fake_load
+        try:
+            rc = ffc.main(["--queue", q, "--receipt", r, "--apply"])
+        finally:
+            ffc.load_queue_bytes = real_load
+
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(open(q, "rb").read(), original_bytes)
+        self.assertFalse(os.path.exists(r))
+
+    def test_existing_matching_receipt_refuses_if_queue_changed_since(self):
+        cards = [{"id": "CM-3", "state": "open", "scope": "tools/a.py"}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        r = self.rpath()
+        rc1 = ffc.main(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(rc1, 0)
+        queue_after = open(q, "rb").read()
+        receipt_after = open(r, "rb").read()
+
+        real_load = ffc.load_queue_bytes
+        calls = {"n": 0}
+        tampered = queue_after + b" "
+
+        def fake_load(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_load(path)
+            return tampered
+
+        ffc.load_queue_bytes = fake_load
+        try:
+            rc2 = ffc.main(["--queue", q, "--receipt", r, "--apply"])
+        finally:
+            ffc.load_queue_bytes = real_load
+
+        self.assertNotEqual(rc2, 0)
+        self.assertEqual(open(q, "rb").read(), queue_after)
+        self.assertEqual(open(r, "rb").read(), receipt_after)
+
+
+class TestMalformedExistingReceiptSchema(TmpCase):
+    def _base_valid_receipt(self):
+        return {
+            "recordedUtc": "2026-01-01T00:00:00Z",
+            "queueSha256": "0" * 64,
+            "frozenCount": 0,
+            "dryRunDiffSha256": "1" * 64,
+            "scopelessIds": [],
+        }
+
+    def _write_receipt(self, r, receipt):
+        with open(r, "w", encoding="utf-8") as fh:
+            json.dump(receipt, fh)
+
+    def _assert_refuses_before_mutation(self, receipt):
+        cards = [{"id": "SCH-1", "state": "open", "scope": "tools/a.py"}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        r = self.rpath()
+        self._write_receipt(r, receipt)
+        before_q = open(q, "rb").read()
+        before_r = open(r, "rb").read()
+        res = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(open(q, "rb").read(), before_q)
+        self.assertEqual(open(r, "rb").read(), before_r)
+
+    def test_bad_recorded_utc_refuses(self):
+        receipt = self._base_valid_receipt()
+        receipt["recordedUtc"] = "not-a-date"
+        self._assert_refuses_before_mutation(receipt)
+
+    def test_bool_frozen_count_refuses(self):
+        receipt = self._base_valid_receipt()
+        receipt["frozenCount"] = True
+        self._assert_refuses_before_mutation(receipt)
+
+    def test_negative_frozen_count_refuses(self):
+        receipt = self._base_valid_receipt()
+        receipt["frozenCount"] = -1
+        self._assert_refuses_before_mutation(receipt)
+
+    def test_non_hex_queue_sha_refuses(self):
+        receipt = self._base_valid_receipt()
+        receipt["queueSha256"] = "z" * 64
+        self._assert_refuses_before_mutation(receipt)
+
+    def test_duplicate_scopeless_ids_refuses(self):
+        receipt = self._base_valid_receipt()
+        receipt["scopelessIds"] = ["A", "A"]
+        self._assert_refuses_before_mutation(receipt)
+
+    def test_valid_schema_with_stale_diff_hash_still_idempotent(self):
+        # A second run against an already-frozen queue legitimately computes
+        # an empty diff, so dryRunDiffSha256 differs from the first run's --
+        # that alone must not be treated as malformed or as a conflict.
+        cards = [{"id": "SCH-2", "state": "open", "scope": "tools/a.py"}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        r = self.rpath()
+        rc1 = ffc.main(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(rc1, 0)
+        first_receipt_bytes = open(r, "rb").read()
+        rc2 = ffc.main(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(rc2, 0)
+        self.assertEqual(open(r, "rb").read(), first_receipt_bytes)
+
+
+class TestReceiptWriteFailureAfterQueueWrite(TmpCase):
+    def test_generic_io_failure_after_queue_write_reports_truthfully(self):
+        cards = [{"id": "IOFAIL-1", "state": "open", "scope": "tools/a.py"}]
+        q = self.qpath()
+        _write_queue(q, cards)
+        original_q_bytes = open(q, "rb").read()
+        # Parent directory does not exist -> exclusive creation ('x' mode)
+        # raises FileNotFoundError, a generic OSError distinct from the
+        # FileExistsError race, AFTER the queue write has already landed.
+        r = os.path.join(self.tmp.name, "no-such-subdir", "receipt.json")
+        res = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertFalse(os.path.exists(r))
+        after_q_bytes = open(q, "rb").read()
+        self.assertNotEqual(after_q_bytes, original_q_bytes)
+        combined = res.stdout + res.stderr
+        self.assertIn("QUEUE WAS WRITTEN", combined)
+        self.assertIn("queueSha256=", combined)
+
+
 class TestRequiredArgs(TmpCase):
     def test_apply_without_receipt_fails(self):
         cards = [{"id": "RA-1", "state": "open"}]

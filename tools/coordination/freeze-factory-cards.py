@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -87,12 +88,24 @@ class QueueValidationError(ValueError):
     """Raised for a malformed or unsupported queue document. No writes happen."""
 
 
+class FreezeProvenanceConflictError(QueueValidationError):
+    """Raised when a card about to transition already carries 'freezeProvenance'.
+
+    Fail closed before any write: overwriting existing freeze evidence would
+    erase history that a prior (possibly hand-edited or replayed) run
+    recorded. The caller must resolve this manually.
+    """
+
+
 class ReceiptConflictError(RuntimeError):
     """Raised when an existing receipt disagrees with the freshly computed result."""
 
 
 class ConcurrentModificationError(RuntimeError):
     """Raised when the queue file changed on disk between load and write."""
+
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # --------------------------------------------------------------------- I/O
@@ -187,6 +200,31 @@ def _classify_token(token: str) -> str:
     return "factory"
 
 
+def _validate_scope_type(card_id: str, scope_value) -> None:
+    """Raise QueueValidationError for any 'scope' shape besides the supported
+    absent/null/str/list-of-str set. Only called for cards with no existing
+    'kind' -- a typed (and especially sonnet-owned) card is never re-derived,
+    so its scope shape is never consulted and never validated here."""
+    if scope_value is None:
+        return
+    if isinstance(scope_value, str):
+        return
+    if isinstance(scope_value, list):
+        for entry in scope_value:
+            if not isinstance(entry, str):
+                raise QueueValidationError(
+                    f"card '{card_id}' has an unsupported 'scope' list entry "
+                    f"type ({type(entry).__name__}); only string entries are "
+                    "supported"
+                )
+        return
+    raise QueueValidationError(
+        f"card '{card_id}' has an unsupported 'scope' type "
+        f"({type(scope_value).__name__}); only null, a string, or a list of "
+        "strings is supported"
+    )
+
+
 def derive_kind(card_id: str, scope_value) -> tuple[str, bool]:
     """Derive (kind, is_scopeless) for a card with no existing 'kind'.
 
@@ -242,6 +280,7 @@ def compute_plan(data: dict) -> dict:
                 unknown_kind_ids.append(card_id)
             # track is never touched for a card that already carried a kind.
         else:
+            _validate_scope_type(card_id, card.get("scope"))
             kind, is_scopeless = derive_kind(card_id, card.get("scope"))
             if is_scopeless:
                 scopeless_ids.append(card_id)
@@ -258,10 +297,26 @@ def compute_plan(data: dict) -> dict:
             elif state in TERMINAL_STATES:
                 pass  # done work is left alone
             else:
-                card["freezeProvenance"] = {
+                if "freezeProvenance" in card:
+                    raise FreezeProvenanceConflictError(
+                        f"card '{card_id}' already has a 'freezeProvenance' field but is "
+                        f"about to transition from state {state!r}; refusing to overwrite "
+                        "existing freeze evidence. No writes performed -- resolve manually "
+                        "(confirm the existing field is correct, or clear it deliberately) "
+                        "before re-running."
+                    )
+                provenance = {
                     "previousState": state,
                     "frozenReason": "factory-card-freeze-phase0.5",
                 }
+                card["freezeProvenance"] = provenance
+                # Every changed/added field is recorded, in write order, so
+                # the dry-run hash binds the FULL mutation (not just 'state')
+                # and replaying this list onto the input reproduces the
+                # proposed queue.
+                changes.append(
+                    {"id": card_id, "field": "freezeProvenance", "from": None, "to": provenance}
+                )
                 changes.append(
                     {"id": card_id, "field": "state", "from": state, "to": FROZEN_STATE}
                 )
@@ -315,6 +370,38 @@ def receipt_payload(recorded_utc: str, queue_sha256: str, frozen_count: int,
     }
 
 
+def validate_receipt_schema(receipt) -> str | None:
+    """Validate a loaded existing receipt against its full required schema.
+
+    Returns an error message string if invalid, or None if valid. Never
+    raises -- callers decide how to refuse. Must be checked before any
+    no-op/idempotency decision is made from an existing receipt's contents,
+    and before any queue mutation.
+    """
+    if not isinstance(receipt, dict):
+        return "receipt is not a JSON object"
+    recorded_utc = receipt.get("recordedUtc")
+    if not isinstance(recorded_utc, str):
+        return "'recordedUtc' is missing or not a string"
+    try:
+        datetime.strptime(recorded_utc, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return f"'recordedUtc' is not a valid UTC datetime: {recorded_utc!r}"
+    for key in ("queueSha256", "dryRunDiffSha256"):
+        value = receipt.get(key)
+        if not isinstance(value, str) or not _SHA256_HEX_RE.match(value):
+            return f"'{key}' is not a 64-char lowercase hex sha256 digest"
+    frozen_count = receipt.get("frozenCount")
+    if isinstance(frozen_count, bool) or not isinstance(frozen_count, int) or frozen_count < 0:
+        return "'frozenCount' is not a non-negative int"
+    scopeless_ids = receipt.get("scopelessIds")
+    if not isinstance(scopeless_ids, list) or not all(isinstance(i, str) for i in scopeless_ids):
+        return "'scopelessIds' is not a list of strings"
+    if len(set(scopeless_ids)) != len(scopeless_ids):
+        return "'scopelessIds' contains duplicate entries"
+    return None
+
+
 def receipts_match(existing: dict, computed: dict) -> bool:
     # dryRunDiffSha256 is inherently run-relative (it is the diff a plan
     # computes against WHATEVER the queue currently looks like), so a second,
@@ -365,7 +452,11 @@ def main(argv=None) -> int:
         print(f"freeze-factory-cards: REFUSED (malformed queue): {exc}", file=sys.stderr)
         return 3
 
-    plan = compute_plan(data)
+    try:
+        plan = compute_plan(data)
+    except QueueValidationError as exc:
+        print(f"freeze-factory-cards: REFUSED (invalid card data): {exc}", file=sys.stderr)
+        return 10
     dd_sha = diff_sha256(plan["changes"])
 
     print(f"freeze-factory-cards: {len(plan['changes'])} field change(s) across "
@@ -401,7 +492,25 @@ def main(argv=None) -> int:
                 print(f"freeze-factory-cards: REFUSED (unreadable existing receipt): {exc}",
                       file=sys.stderr)
                 return 4
+        schema_error = validate_receipt_schema(existing_receipt)
+        if schema_error:
+            print(f"freeze-factory-cards: REFUSED (malformed existing receipt schema): "
+                  f"{schema_error}. Queue was NOT touched.", file=sys.stderr)
+            return 9
         if receipts_match(existing_receipt, computed_receipt):
+            # Recheck actual on-disk queue bytes immediately before declaring
+            # success -- a concurrent writer could have changed the queue
+            # after our initial read, even though the receipt we just loaded
+            # appears to match. Success is never claimed off a stale read.
+            recheck_bytes = load_queue_bytes(args.queue)
+            recheck_sha = hashlib.sha256(recheck_bytes).hexdigest()
+            if recheck_sha != existing_receipt["queueSha256"]:
+                print(
+                    "freeze-factory-cards: REFUSED - queue file changed on disk since it was "
+                    "read, even though the existing receipt appeared to match; re-run to "
+                    "compute a fresh plan. No writes performed.", file=sys.stderr,
+                )
+                return 6
             print("freeze-factory-cards: existing receipt already matches computed result; "
                   "no-op (queue and receipt left byte-identical)")
             return 0
@@ -459,6 +568,30 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 7
+    except OSError as exc:
+        # Any other receipt creation/write failure (missing parent dir,
+        # permission denied, disk full mid-write, etc.), not just the
+        # already-exists race above. The queue write already landed and is
+        # NOT rolled back -- report that fact plainly, never a bare
+        # traceback-only failure that leaves the caller assuming no
+        # mutation happened. A partial/incomplete file that this open()
+        # call may have left behind at --receipt must never be treated as
+        # valid evidence by a later run: validate_receipt_schema() refuses
+        # it on the next --apply before any further queue mutation.
+        print(
+            "freeze-factory-cards: QUEUE WAS WRITTEN (queueSha256="
+            f"{queue_sha}) but the receipt at {args.receipt} could not be "
+            f"created or written: {exc}. This run did NOT knowingly "
+            "overwrite any pre-existing evidence at that path, but do not "
+            "claim no mutation occurred: the queue at --queue reflects this "
+            "run's result. If a partial/incomplete file now exists at "
+            "--receipt, remove or inspect it manually -- it is not valid "
+            "evidence -- then re-run with the same --queue/--receipt; the "
+            "queue mutation is already applied, so the re-run will compute "
+            "an empty diff and simply (re)write a complete receipt.",
+            file=sys.stderr,
+        )
+        return 11
 
     print(f"freeze-factory-cards: applied. queueSha256={queue_sha} frozenCount(total)="
           f"{plan['frozen_count']}")

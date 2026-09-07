@@ -77,8 +77,20 @@ A card whose resolved kind is `factory` and whose state is neither terminal
 nor already the frozen state transitions to `frozen-factory-20260906`. Its
 original state is preserved under a `freezeProvenance.previousState` field
 that is never erased on subsequent runs. A card already in the frozen state
-is left alone (idempotent). A terminal factory card is left alone (it is
-done, not live).
+is left alone (idempotent), retaining its existing `freezeProvenance`
+untouched. A terminal factory card is left alone (it is done, not live).
+
+If a card about to transition (non-terminal, not already frozen) already
+carries a `freezeProvenance` field -- e.g. from a hand edit or a replayed
+change list -- the run refuses before any write, rather than silently
+overwriting existing freeze evidence. Resolve manually (confirm or clear the
+field deliberately) before re-running.
+
+A card with no existing `kind` must have a `scope` that is absent, `null`, a
+string, or a list of strings; any other shape (a number, an object, or a
+list containing a non-string entry) refuses the entire run before any write.
+This check never applies to a card that already carries a `kind` (including
+sonnet-owned cards), since such a card's scope is never consulted.
 
 **Exception:** a card that already carried an explicit `kind` *and* whose
 `owner` is `sonnet` is deep-identical — untouched in every field, including
@@ -90,7 +102,10 @@ card owned by anyone else still freezes normally if non-terminal.
 `--dry-run` prints every proposed field change, the full `scopelessIds`
 list, and a `dryRunDiffSha256` — the sha256 of the canonical (sorted-key,
 compact-separator) JSON change list for *this run*, excluding any
-timestamp.
+timestamp. The change list records **every** changed or added field per
+card (`kind`, `track`, `freezeProvenance`, and `state`, as applicable) in
+write order, so the hash binds the full mutation and replaying the list
+onto the original input reproduces the proposed queue.
 
 `--apply` writes the queue atomically (sibling temp file + `os.replace`),
 after re-reading the queue file immediately before the write and refusing
@@ -106,17 +121,32 @@ never overwrites existing evidence. Its required fields are `recordedUtc`,
 cards newly transitioned this run — so repeated runs don't reset it),
 `dryRunDiffSha256`, and `scopelessIds`.
 
-- If a receipt already exists at `--receipt` and its `queueSha256`,
-  `frozenCount`, and `scopelessIds` match what this run computes, the run is
-  a no-op: queue and receipt are left byte-identical, exit 0.
-- If an existing receipt disagrees, the run refuses **before** touching the
-  queue and exits non-zero — existing evidence is never overwritten or
-  deleted.
-- If the queue write succeeds but receipt creation then fails (e.g. a
-  concurrent run raced this one and created the receipt first), the script
-  prints the queue's resulting `queueSha256` and states plainly that the
-  queue **was** mutated — it never claims "no mutation" after a partial
-  write — and exits non-zero so the caller can reconcile.
+- An existing receipt is first validated against its full required schema
+  (`recordedUtc` a valid UTC datetime, `queueSha256`/`dryRunDiffSha256` each
+  a 64-char lowercase hex sha256 digest, `frozenCount` a non-negative int
+  that is not a bool, `scopelessIds` a list of unique strings). A malformed
+  existing receipt refuses the run **before** any queue mutation.
+- If a valid receipt already exists at `--receipt` and its `queueSha256`,
+  `frozenCount`, and `scopelessIds` match what this run computes, the queue
+  is re-read immediately before declaring success and its hash is checked
+  against the receipt's `queueSha256` one more time — closing the window
+  where a concurrent writer changed the queue after the initial read but
+  the (now stale) receipt still looked like a match. Only then is it a
+  no-op: queue and receipt are left byte-identical, exit 0. (A matching
+  receipt's own `dryRunDiffSha256` may legitimately differ from the diff
+  this run computes — an already-applied queue computes an empty diff —
+  so that field is never compared for the match.)
+- If an existing (valid) receipt disagrees, the run refuses **before**
+  touching the queue and exits non-zero — existing evidence is never
+  overwritten or deleted.
+- If the queue write succeeds but receipt creation then fails — for any
+  I/O reason, not just a concurrent run racing this one and creating the
+  receipt first — the script prints the queue's resulting `queueSha256`
+  and states plainly that the queue **was** mutated — it never claims "no
+  mutation" after a partial write — and exits non-zero so the caller can
+  reconcile. Any partial/incomplete file such a failure may leave behind
+  at `--receipt` is never treated as valid evidence by a later run: the
+  schema validation above refuses it before any further mutation.
 
 No locking beyond this narrow correctness is used; the script needs no
 subprocess, git, or network access to do its job.
