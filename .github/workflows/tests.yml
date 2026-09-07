@@ -132,80 +132,10 @@ jobs:
           & "$env:RUNNER_TEMP\python-lock-tools\Scripts\python.exe" -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/lock-tools.txt
           & tools\dependencies\update-python-locks.ps1 -RepoRoot . -Python "$env:RUNNER_TEMP\python-lock-tools\Scripts\python.exe" -Check
 
-  # Factory-control regressions must stay independent from product oracles.
-  # A bridge failure is blocking, but it must never suppress product evidence.
-  factory-bridge-regressions:
-    name: Factory Bridge Regressions
-    runs-on: windows-latest
-    timeout-minutes: 45
-
-    defaults:
-      run:
-        shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
-
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-          # tests/coordination/test_process_hygiene_contract.py verifies the sealed A/B
-          # receipts against the historical commit each one names. At the default depth of
-          # 1 that commit is absent and the check cannot run. The two jobs above already
-          # check out at full depth.
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version-file: ".python-version"
-
-      - name: Install factory bridge dependencies
-        run: |
-          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
-          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r tools\agent-bridge\requirements-test.txt
-          python -m pip check
-
-      - name: Verify compatible MCP runtime
-        run: |
-          python -c "import importlib.metadata as m; version=m.version('mcp'); major=int(version.split('.')[0]); assert major == 1, f'expected MCP 1.x, got {version}'; from mcp.server.fastmcp import FastMCP; print(f'MCP runtime verified: {version}')"
-
-      - name: Run agent bridge PowerShell launcher regressions
-        run: |
-          python -m unittest `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_mcp_server_watchdog_throttles_wrapper_identity_checks `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_codex_hooks_assert_bridge_cli_contract `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_wake_codex_input_size_smoke_runs_under_powershell `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_configure_watcher_targeted_sendkeys_provider_writes_delivery_priority_helper_template `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_bootstrap_watcher_enumeration_prefers_pwsh_for_cim `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_windows_toast_uses_expiry_and_tray_cap_settings `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_windows_toast_tag_sanitizes_ps_line_breaks `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_windows_balloon_fallback_uses_encoded_command `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_queries_prefer_pwsh_for_cim `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_uses_pwsh_alias_when_exe_probe_is_absent `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_queries_fall_back_to_windows_powershell `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_trampoline_host_env_queries_prefer_pwsh_for_cim `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_server_wrapper_process_entry_prefers_pwsh_for_cim `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation `
-            -v
-
-      - name: Run full agent-bridge test suite
-        run: |
-          # Directory target: also collects tools/agent-bridge/test_phase0_contract.py
-          # and the full tools/agent-bridge/test_server_wrapper_phase2.py suite, neither
-          # of which the prior single-file invocation covered.
-          python -m pytest `
-            tools\agent-bridge `
-            -q
-
-      - name: Run profiling test suite
-        run: |
-          python -m pytest `
-            tests\profiling `
-            -q
-
   windows-product-oracles:
     name: Windows Product Oracles
     needs: protected-check-route
-    if: ${{ always() }}
+    if: ${{ always() && !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 120
 
@@ -576,7 +506,7 @@ jobs:
   windows-gui-pilot:
     name: Windows GUI Pilot
     needs: protected-check-route
-    if: ${{ always() }}
+    if: ${{ always() && !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 60
 

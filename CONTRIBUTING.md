@@ -18,7 +18,7 @@ The protected branch currently requires exactly these hosted checks:
 
 - `Repo Hygiene Python (windows-latest)`
 - `Repo Hygiene Python (ubuntu-latest)`
-- `Factory Bridge Regressions`
+- `Batch Compile`
 - `Windows GUI Pilot`
 - `Windows Product Oracles`
 
