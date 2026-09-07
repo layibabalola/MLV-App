@@ -7,11 +7,50 @@
 
 #include "FocusPixelMapManager.h"
 #include <QByteArray>
+#include <QPointer>
+
+namespace {
+// Shared helper: waits for DownloadManager's downloadsFinished(bool) signal,
+// starting the given URL's download only after the wait's connection is
+// live (see SyncDownloadWaiter.h for why that ordering matters). On timeout
+// or on the sender being destroyed mid-wait, aborts and reports failure --
+// this bounds what used to be an unbounded polling loop that repeatedly
+// pumped the Qt event queue with a finite deadline, ordered completion/cancel
+// semantics, and destroyed-sender safety. It does NOT prove immunity to
+// reentrancy from unrelated Qt event sources during the wait (see
+// SyncDownloadWaiter.h).
+bool waitForDownload(DownloadManager *manager, const QUrl &url, int timeoutMs)
+{
+    // Watched via QPointer, not the raw `manager` pointer: a synchronous
+    // ready notification during startOp followed by the sender being
+    // destroyed before startOp returns still latches result.senderDestroyed
+    // (see SyncDownloadWaiter.h), and this guard is what stops the
+    // downloadSuccess() call below from dereferencing a dead manager.
+    QPointer<DownloadManager> guarded(manager);
+    SyncDownloadWaiter waiter;
+    SyncDownloadWaiter::Result result = waiter.wait(
+        manager,
+        [manager](std::function<void()> notify) {
+            return QObject::connect(manager, &DownloadManager::downloadsFinished,
+                                     [notify](bool) { notify(); });
+        },
+        [manager, url]() { manager->doDownload(url); },
+        [manager]() { return manager->isDownloadReady(); },
+        [manager]() { manager->abortDownloads(); },
+        timeoutMs);
+    if (result.senderDestroyed || guarded.isNull()) {
+        return false;
+    }
+    return result.finished && guarded->downloadSuccess();
+}
+}
 
 //Constructor
 FocusPixelMapManager::FocusPixelMapManager(QObject *parent) : QObject(parent)
 {
     manager = new DownloadManager();
+    m_operationInProgress = false;
+    m_downloadTimeoutMs = 30000;
 }
 
 //Destructor
@@ -30,6 +69,12 @@ bool FocusPixelMapManager::isDownloaded(mlvObject_t *pMlvObject)
 //Check for fpm in repos online
 bool FocusPixelMapManager::isMapAvailable(mlvObject_t *pMlvObject)
 {
+    SyncDownloadWaiter::ScopedOperationGuard guard(&m_operationInProgress);
+    if( !guard.acquired() )
+    {
+        return false;
+    }
+
     QString searchName = getMapName( pMlvObject );
     QJsonArray files = getMapList();
     if( files.empty() )
@@ -46,6 +91,12 @@ bool FocusPixelMapManager::isMapAvailable(mlvObject_t *pMlvObject)
 //Download and install fpm from repos in application
 bool FocusPixelMapManager::downloadMap(mlvObject_t *pMlvObject)
 {
+    SyncDownloadWaiter::ScopedOperationGuard guard(&m_operationInProgress);
+    if( !guard.acquired() )
+    {
+        return false;
+    }
+
     QString searchName = getMapName( pMlvObject );
     QJsonArray files = getMapList();
     if( files.empty() )
@@ -56,12 +107,8 @@ bool FocusPixelMapManager::downloadMap(mlvObject_t *pMlvObject)
     {
         if( entry.toObject().value( "name" ).toString() == searchName )
         {
-            manager->doDownload( QUrl( entry.toObject().value( "download_url" ).toString() ) );
-            while( !manager->isDownloadReady() )
-            {
-                qApp->processEvents();
-            }
-            return manager->downloadSuccess();
+            QUrl url( entry.toObject().value( "download_url" ).toString() );
+            return waitForDownload( manager, url, m_downloadTimeoutMs );
         }
     }
     return false;
@@ -70,6 +117,12 @@ bool FocusPixelMapManager::downloadMap(mlvObject_t *pMlvObject)
 //Download and install all fpm for current camera from repos in application
 bool FocusPixelMapManager::downloadAllMaps(mlvObject_t *pMlvObject)
 {
+    SyncDownloadWaiter::ScopedOperationGuard guard(&m_operationInProgress);
+    if( !guard.acquired() )
+    {
+        return false;
+    }
+
     bool installed = false;
     QString searchName = QString( "%1" ).arg( pMlvObject->IDNT.cameraModel, 0, 16 );
     QJsonArray files = getMapList();
@@ -81,12 +134,8 @@ bool FocusPixelMapManager::downloadAllMaps(mlvObject_t *pMlvObject)
     {
         if( entry.toObject().value( "name" ).toString().startsWith( searchName ) )
         {
-            manager->doDownload( QUrl( entry.toObject().value( "download_url" ).toString() ) );
-            while( !manager->isDownloadReady() )
-            {
-                qApp->processEvents();
-            }
-            if( manager->downloadSuccess() ) installed = true;
+            QUrl url( entry.toObject().value( "download_url" ).toString() );
+            if( waitForDownload( manager, url, m_downloadTimeoutMs ) ) installed = true;
             else return false;
         }
     }
@@ -97,6 +146,12 @@ bool FocusPixelMapManager::downloadAllMaps(mlvObject_t *pMlvObject)
 //Update all the downloaded maps
 int FocusPixelMapManager::updateAllMaps( bool justCheck )
 {
+    SyncDownloadWaiter::ScopedOperationGuard guard(&m_operationInProgress);
+    if( !guard.acquired() )
+    {
+        return 0;
+    }
+
     int installed = 0;
     QJsonArray files = getMapList();
     if( files.empty() )
@@ -129,12 +184,8 @@ int FocusPixelMapManager::updateAllMaps( bool justCheck )
                 }
                 else
                 {
-                    manager->doDownload( QUrl( entry.toObject().value( "download_url" ).toString() ) );
-                    while( !manager->isDownloadReady() )
-                    {
-                        qApp->processEvents();
-                    }
-                    if( manager->downloadSuccess() ) installed++;
+                    QUrl url( entry.toObject().value( "download_url" ).toString() );
+                    if( waitForDownload( manager, url, m_downloadTimeoutMs ) ) installed++;
                     else return installed;
                 }
             }
@@ -147,11 +198,18 @@ int FocusPixelMapManager::updateAllMaps( bool justCheck )
 //Get map list online from repos
 QJsonArray FocusPixelMapManager::getMapList()
 {
-    manager->doDownload( QUrl( "https://api.github.com/repos/ilia3101/MLV-App/contents/pixel_maps" ) );
-
-    while( !manager->isDownloadReady() )
+    // NOTE: intentionally callable while a guard from an outer function
+    // (isMapAvailable/downloadMap/downloadAllMaps/updateAllMaps) is held --
+    // this helper does not try to re-acquire the mutually-exclusive guard.
+    QUrl url( "https://api.github.com/repos/ilia3101/MLV-App/contents/pixel_maps" );
+    bool ok = waitForDownload( manager, url, m_downloadTimeoutMs );
+    if( !ok )
     {
-        qApp->processEvents();
+        // Timeout, destroyed sender, or a failed request: return an empty
+        // list. Do NOT fall back to a previously-downloaded/cached catalog
+        // as if it were a fresh success.
+        QJsonArray a;
+        return a;
     }
 
     QString fileName = QString( "%1/pixel_maps" ).arg( QCoreApplication::applicationDirPath() );

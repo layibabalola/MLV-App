@@ -555,10 +555,21 @@ def _assert_native_bundle_architecture(
     inventory: dict[str, Any],
     target_os: str,
     target_arch: str,
+    *,
+    compatibility_admissions: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Inspect every native inventory member, not only the declared main executable."""
+    """Inspect every native inventory member, not only the declared main executable.
+
+    ``compatibility_admissions`` (keyed by exact root-relative output path) is a fully
+    validated, hash-bound exception set loaded from the pinned vendored-payload
+    manifest -- it never widens what counts as the target architecture; it only lets
+    one pre-declared, byte-matched WOW64 child-process group through as explicitly
+    non-native, still reported with its true observed architecture.
+    """
     expected_format = {"windows": "pe", "linux": "elf", "macos": "macho"}[target_os]
+    compatibility_admissions = compatibility_admissions or {}
     native_records: list[dict[str, Any]] = []
+    matched_admissions: set[str] = set()
     for inventory_record in inventory["files"]:
         relative = inventory_record["path"]
         candidate = inventory_root.joinpath(*PurePosixPath(relative).parts)
@@ -578,6 +589,26 @@ def _assert_native_bundle_architecture(
             candidate,
             snapshot=(observed_sha256, data),
         )
+        admission = compatibility_admissions.get(relative)
+        if admission is not None:
+            if observed_size != admission.get("bytes") or observed_sha256 != admission.get("sha256"):
+                raise EvidenceError(
+                    f"compatibility admission byte/hash mismatch for {relative}: staged member does "
+                    "not match the validated vendored-payload manifest exception"
+                )
+            if architecture["format"] != "pe" or admission.get("machine") not in architecture["architectures"]:
+                raise EvidenceError(
+                    f"compatibility admission architecture mismatch for {relative}: expected pe/"
+                    f"{admission.get('machine')!r}, observed {architecture['format']}/{architecture['architectures']}"
+                )
+            native_records.append({
+                "path": relative,
+                **architecture,
+                "compatibility_mode": admission.get("compatibility_mode"),
+                "payload_id": admission.get("payload_id"),
+            })
+            matched_admissions.add(relative)
+            continue
         if not architecture["format"].startswith(expected_format):
             raise EvidenceError(
                 f"native inventory member format mismatch for {relative}: target {target_os} "
@@ -589,9 +620,54 @@ def _assert_native_bundle_architecture(
                 f"observed {architecture['architectures']}"
             )
         native_records.append({"path": relative, **architecture})
+    if compatibility_admissions and matched_admissions != set(compatibility_admissions):
+        raise EvidenceError(
+            "compatibility admission group is incomplete in the staged release inventory: "
+            f"expected {sorted(compatibility_admissions)}, found {sorted(matched_admissions)}"
+        )
     if not native_records:
         raise EvidenceError("staged release inventory contains no native binaries")
     return native_records
+
+
+def _load_release_compatibility_admission(
+    repo_root: Path, vendored_manifest: str, target_os: str, target_arch: str
+) -> dict[str, dict[str, Any]]:
+    """Load the fully validated WOW64 compatibility exceptions for one release target.
+
+    This reruns the production vendored-payload validator (the same one the release
+    workflow's integrity gate runs) so the admission is never merely parsed from the
+    manifest -- it is proven byte-for-byte, group-complete, and architecture-correct
+    before release evidence can rely on it.
+    """
+    if target_os != "windows" or target_arch != "x86_64":
+        return {}
+    from tools.repo_hygiene.vendored_native_payloads import (
+        PayloadIntegrityError,
+        validate as validate_vendored_manifest,
+    )
+
+    try:
+        result = validate_vendored_manifest(
+            repo_root, Path(vendored_manifest), required_target=f"{target_os}-{target_arch}"
+        )
+    except PayloadIntegrityError as exc:
+        raise EvidenceError(f"vendored payload compatibility admission failed validation: {exc}") from exc
+    members = result.get("target_compatibility", {}).get("members", [])
+    admissions: dict[str, dict[str, Any]] = {}
+    for member in members:
+        if not member.get("compatibility_mode"):
+            continue
+        output_name = member.get("output_name")
+        if not isinstance(output_name, str) or not output_name or "/" in output_name:
+            raise EvidenceError("compatibility admission member has an invalid output_name")
+        if output_name in admissions:
+            raise EvidenceError(f"compatibility admission repeats output_name {output_name!r}")
+        for field in ("machine", "kind", "payload_id", "compatibility_mode", "bytes", "sha256"):
+            if field not in member:
+                raise EvidenceError(f"compatibility admission member is missing {field}")
+        admissions[output_name] = member
+    return admissions
 
 
 def _assert_inventory_unchanged(inventory_root: Path, expected: dict[str, Any]) -> None:
@@ -697,6 +773,7 @@ def generate_evidence(
     tools: Sequence[str] = (),
     tool_versions: Sequence[str] = (),
     vendored_manifest: str = DEFAULT_VENDORED_MANIFEST,
+    enable_compatibility_admission: bool = False,
 ) -> tuple[Path, Path]:
     """Generate contents and build-info JSON, returning their output paths."""
     repo_root = Path(repo_root)
@@ -768,11 +845,21 @@ def generate_evidence(
         target_os,
         target_arch,
     )
+    compatibility_admissions: dict[str, dict[str, Any]] = {}
+    if enable_compatibility_admission:
+        compatibility_admissions = _load_release_compatibility_admission(
+            repo_root, vendored_manifest, target_os, target_arch
+        )
+        if PurePosixPath(expected_main).name in compatibility_admissions:
+            raise EvidenceError(
+                "expected main executable cannot be admitted through a compatibility exception"
+            )
     native_binaries = _assert_native_bundle_architecture(
         inventory_root,
         contents_inventory,
         target_os,
         target_arch,
+        compatibility_admissions=compatibility_admissions,
     )
     contents = inventory_document(contents_inventory)
 
@@ -885,6 +972,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--tool", action="append", default=[])
     parser.add_argument("--tool-version", action="append", default=[])
     parser.add_argument("--vendored-manifest", default=DEFAULT_VENDORED_MANIFEST)
+    parser.add_argument(
+        "--enable-vendored-compatibility-admission",
+        action="store_true",
+        help=(
+            "admit one fully re-validated WOW64 child-process exception from the pinned "
+            "vendored-payload manifest (windows/x86_64 only); default off preserves the "
+            "strict single-architecture bundle check"
+        ),
+    )
     return parser
 
 
@@ -913,6 +1009,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             tools=args.tool,
             tool_versions=args.tool_version,
             vendored_manifest=args.vendored_manifest,
+            enable_compatibility_admission=args.enable_vendored_compatibility_admission,
         )
     except (EvidenceError, OSError) as exc:
         print(f"release evidence generation failed: {exc}", file=sys.stderr)
