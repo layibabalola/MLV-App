@@ -434,7 +434,10 @@ def receipts_match(existing: dict, computed: dict) -> bool:
     # first run's diff was non-empty. "Identical result" is judged on the
     # artifacts a reader would actually rely on: the resulting queue content
     # and its derived totals, not the incidental diff of this particular run.
-    keys = ("queueSha256", "frozenCount", "scopelessIds")
+    # scopelessIds also records the first run's derivation: newly written kinds
+    # make those cards ineligible for derivation on a replay. Keep that history
+    # in the original receipt instead of comparing it to the empty replay list.
+    keys = ("queueSha256", "frozenCount")
     return all(existing.get(k) == computed.get(k) for k in keys)
 
 

@@ -717,6 +717,36 @@ class TestMalformedExistingReceiptSchema(TmpCase):
         self.assertEqual(open(r, "rb").read(), first_receipt_bytes)
 
 
+class TestScopelessReplay(TmpCase):
+    def test_missing_kind_and_scope_replay_preserves_history_and_refuses_stale_inputs(self):
+        q, r = self.qpath(), self.rpath()
+        _write_queue(q, [{"id": "REPLAY-SCOPELESS-1", "state": "open"}])
+        first = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        qb, rb = open(q, "rb").read(), open(r, "rb").read()
+        receipt = json.loads(rb)
+        self.assertEqual(receipt["scopelessIds"], ["REPLAY-SCOPELESS-1"])
+        replay = _run(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(open(q, "rb").read(), qb)
+        self.assertEqual(open(r, "rb").read(), rb)
+        with open(q, "ab") as f:
+            f.write(b" ")
+        changed = open(q, "rb").read()
+        self.assertEqual(_run(["--queue", q, "--receipt", r, "--apply"]).returncode, 5)
+        self.assertEqual(open(q, "rb").read(), changed)
+        self.assertEqual(open(r, "rb").read(), rb)
+        with open(q, "wb") as f:
+            f.write(qb)
+        receipt["frozenCount"] += 1
+        with open(r, "w", encoding="utf-8") as f:
+            json.dump(receipt, f)
+        changed_receipt = open(r, "rb").read()
+        self.assertEqual(_run(["--queue", q, "--receipt", r, "--apply"]).returncode, 5)
+        self.assertEqual(open(q, "rb").read(), qb)
+        self.assertEqual(open(r, "rb").read(), changed_receipt)
+
+
 class TestReceiptWriteFailureAfterQueueWrite(TmpCase):
     def test_generic_io_failure_after_queue_write_reports_truthfully(self):
         cards = [{"id": "IOFAIL-1", "state": "open", "scope": "tools/a.py"}]
