@@ -98,5 +98,12 @@ Refresh `orchestrator-resume-CURRENT.md` IN THE SAME TOOL-CALL BLOCK as the work
 ignition, a commit, a receipt. A checkpoint written only at hand-off is stale exactly when the hand-off is unplanned.
 
 ## 5. Stop conditions — the only ones
+
+Apply the standing [automatic error-remediation workflow](../../../agents/error-remediation.md)
+to ordinary execution failures: the hub gathers bounded read-only Luna shards,
+obtains Fable/Opus wisdom adjudication, preserves the failed receipts, repairs and
+retests the same gate. A BLOCKED phase prevents advancement, not authorized
+diagnosis. Keep ratification, review and owner-reserved actions as explicit gates.
+
 Phase 0 complete with `0.2-loop-enabled.json` finalised; or a blocker that names an owner-only act (a credential, a machine setting).
 Everything else you resolve yourself, record, and continue.

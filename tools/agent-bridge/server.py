@@ -20,6 +20,7 @@ import urllib.request
 from agent_bridge import AgentBridge, add_common_args
 from compact import reap_stale_server_pids
 from core.processes import is_process_alive
+from core.win_process import native_process_entry, normalize_executable_path
 from core.runtime import build_runtime_breadcrumb, write_runtime_breadcrumb
 from core.storage import StorageCapability
 from dashboard_server import DEFAULT_DASHBOARD_PORT, DashboardServerHandle, start_dashboard_server
@@ -293,6 +294,12 @@ def _wrapper_pid_from_env() -> Optional[int]:
 
 def _wrapper_process_entry(pid: int) -> Optional[dict]:
     if sys.platform == "win32":
+        # Fast path: answer from kernel32/ntdll without spawning anything. The
+        # PowerShell fallback below costs a shell cold start plus a conhost plus
+        # a WMI round trip, and this runs on a supervisor's poll loop.
+        native = native_process_entry(pid)
+        if native is not None:
+            return native
         command = powershell_cim_command(
             (
                 "Get-CimInstance Win32_Process -Filter \"ProcessId = %s\" | "
@@ -339,7 +346,10 @@ def _wrapper_process_matches_env(wrapper_pid: int) -> bool:
         return True
     if expected_creation_date and str(entry.get("creation_date") or "") != expected_creation_date:
         return False
-    current_executable_path = str(entry.get("executable_path") or "")
+    # Normalize both sides: the expected value may have been recorded by the
+    # PowerShell probe, which spells the same file differently from the native one.
+    current_executable_path = normalize_executable_path(str(entry.get("executable_path") or ""))
+    expected_executable_path = normalize_executable_path(expected_executable_path)
     if (
         expected_executable_path
         and current_executable_path
