@@ -106,6 +106,11 @@ def test_read_only_argv_json_stdin_and_tool_denial(fixture_tree):
     argv=json.loads((fixture_tree["root"]/"args.json").read_text(encoding="utf-8-sig"))
     i=argv.index("--disallowedTools"); assert argv[i+1]=="Agent,Task"
     j=argv.index("--allowedTools"); assert argv[j+1]=="Read,Grep,Glob"
+    assert "--append-system-prompt" in argv
+    notice=argv[argv.index("--append-system-prompt")+1]
+    assert argv.count("--append-system-prompt")==1
+    assert "only Read, Grep, and Glob" in notice and "do not call or retry" in notice
+    assert q["authority"]["capabilityNotice"]==notice
     assert q["outputBytes"]>0 and q["spend"]["costUsd"]==0
     assert q["effort"]=="low"
     assert (fixture_tree["root"]/"effort.txt").read_text(encoding="utf-8-sig").strip()=="low"
@@ -153,6 +158,7 @@ def test_editing_argv_preserves_allowlist_and_denies_nested_tools(fixture_tree):
     assert argv[argv.index("--permission-mode")+1]=="acceptEdits"
     assert argv[argv.index("--allowedTools")+1]=="Read,Write,Edit"
     assert argv[argv.index("--disallowedTools")+1]=="Agent,Task"
+    assert "--append-system-prompt" not in argv
     q=json.loads(receipt.read_text(encoding="utf-8")); assert q["authority"]["disallowedTools"]==["Agent","Task"]
 
 
@@ -170,6 +176,7 @@ def test_codex_launch_stays_direct_without_claude_flags(fixture_tree):
     assert r.returncode==0,(r.stdout,r.stderr)
     argv=json.loads((fixture_tree["root"]/"args.json").read_text(encoding="utf-8-sig"))
     assert argv[0]=="exec" and "--disallowedTools" not in argv and "--allowedTools" not in argv
+    assert "--append-system-prompt" not in argv
     assert argv[argv.index("-s")+1]=="read-only"
     assert 'model_reasoning_effort=low' in argv or 'model_reasoning_effort="low"' in argv
     q=json.loads(receipt.read_text(encoding="utf-8"))

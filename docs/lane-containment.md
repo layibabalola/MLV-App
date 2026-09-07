@@ -41,6 +41,14 @@ tests run in the existing Windows coordination check. They invoke no model or
 network service. Provider lifecycle completion is not card acceptance: tests,
 commit, independent review, merge and target verification remain separate gates.
 
+Read-only Claude lanes receive a model-visible capability notice through the
+supported `--append-system-prompt` argument. It states that only Read, Grep and
+Glob are permitted, directs reviews to hub-exported evidence, and prohibits
+retrying unavailable shells. The receipt records the exact notice. User prompt
+bytes remain unchanged. This notice informs the model; the existing permission
+allowlist and Agent/Task deny still enforce tool permissions. The hub must
+export any required Git diff or hosted evidence before starting such a review.
+
 The production dispatcher must use the reviewed launcher revision and the
 applicable updated execution-control receipt before resuming editing dispatch.
 This change does not enable the workstream loop or rewrite historical receipts.

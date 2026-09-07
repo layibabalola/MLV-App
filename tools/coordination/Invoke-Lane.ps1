@@ -383,6 +383,10 @@ if ($cfg.engine -eq 'claude') {
         # follows and the CLI dies with "Input must be provided...".
         $argv += @('--permission-mode', 'dontAsk',
                    '--allowedTools', 'Read,Grep,Glob')
+        # A permission allowlist does not hide other tools from the model. A
+        # readonly review previously burned its turn cap retrying denied shells.
+        $capabilityNotice = 'This read-only lane has permission to use only Read, Grep, and Glob. Bash, PowerShell, editing tools, Agent, and Task are unavailable: do not call or retry them. Inspect hub-exported diffs and evidence with the available read tools. If a required export is missing, name that missing evidence and return an unmeasured finding; do not claim you ran shell commands or tests.'
+        $argv += @('--append-system-prompt', $capabilityNotice)
     }
     # Prevent nested provider fan-out through the CLI's supported deny surface.
     # One comma-separated token avoids the same variadic swallowing hazard as allowedTools.
@@ -406,6 +410,7 @@ if ($cfg.engine -eq 'claude') {
         bulkReads      = if ($AllowBulkReads) { 'ALLOWED' } else { 'DENIED' }
         denyRules      = if ($AllowBulkReads) { @() } else { $denyRules }
         disallowedTools = @('Agent', 'Task')
+        capabilityNotice = if ($AllowEdits) { $null } else { $capabilityNotice }
     }
 } else {
     $exe  = $CODEX_EXE
