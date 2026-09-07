@@ -1054,9 +1054,10 @@ def test_provider_refusal_claude_survives_diagnostic_noise_around_the_envelope(t
     # ANY non-whitespace diagnostic line before or after the envelope, the old code's single
     # try/catch swallowed a REAL refusal as null. Invoke-Lane harvests raw, unfiltered stdout, so
     # this is reachable whenever anything else writes to stdout alongside --output-format json.
-    # sol's own repro, verbatim in shape: a "diagnostic" line before the envelope.
+    # sol's own repro, verbatim in shape: a "diagnostic" line before the envelope. The envelope
+    # carries "type":"result" -- the real --output-format json shape (sol PR #80 R4 MAJOR below).
     envelope = (
-        '{"is_error":true,"api_error_status":429,'
+        '{"type":"result","subtype":"error","is_error":true,"api_error_status":429,'
         '"result":"You\'ve hit your session limit"}'
     )
     r = _classify(tmp_path, "", "claude", answer="diagnostic\n" + envelope)
@@ -1064,6 +1065,32 @@ def test_provider_refusal_claude_survives_diagnostic_noise_around_the_envelope(t
     assert r["kind"] == "provider-usage-limit"
     # Noise AFTER the envelope must not hide it either.
     r2 = _classify(tmp_path, "", "claude", answer=envelope + "\ntrailing diagnostic noise")
+    assert r2 is not None
+    assert r2["kind"] == "provider-usage-limit"
+
+
+def test_provider_refusal_claude_requires_the_result_envelope_shape_not_any_json_line(tmp_path):
+    # sol PR #80 R4 MAJOR (sol's own repro, verbatim in shape): the R3 fix trusted the FIRST
+    # parseable JSON-object line, so a JSON-shaped diagnostic carrying its own is_error /
+    # api_error_status fields -- printed BEFORE the real envelope -- was picked instead, producing
+    # a FALSE refusal even though the run completed successfully. Only a line shaped like the real
+    # --output-format json envelope (carries "type":"result") may be treated as the envelope.
+    fake_diagnostic = (
+        '{"is_error":true,"api_error_status":429,"result":"You have hit your usage limit"}'
+    )
+    real_envelope = (
+        '{"type":"result","subtype":"success","is_error":false,'
+        '"result":"ordinary completed answer","num_turns":2}'
+    )
+    r = _classify(tmp_path, "", "claude", answer=fake_diagnostic + "\n" + real_envelope)
+    assert r is None, "a JSON-shaped diagnostic without type:result must never be mistaken for the envelope"
+    # Mirror: a benign JSON diagnostic must not hide a later GENUINE refusal envelope either.
+    benign_diagnostic = '{"note":"some other tool wrote this JSON line"}'
+    real_refusal = (
+        '{"type":"result","subtype":"error","is_error":true,"api_error_status":429,'
+        '"result":"You\'ve hit your session limit"}'
+    )
+    r2 = _classify(tmp_path, "", "claude", answer=benign_diagnostic + "\n" + real_refusal)
     assert r2 is not None
     assert r2["kind"] == "provider-usage-limit"
 

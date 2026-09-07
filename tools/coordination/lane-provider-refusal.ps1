@@ -71,6 +71,12 @@ function Get-ProviderRefusal {
         # Invoke-Lane harvests raw, unfiltered stdout, so a contaminated stream must not eat a real
         # refusal. --output-format json emits the envelope as ONE LINE; scan lines and use the first
         # one that parses as a JSON object, skipping any diagnostic lines around it.
+        # sol PR #80 R4 MAJOR: the first-parseable-object rule trusted ANY JSON-shaped line, so a
+        # JSON-shaped diagnostic line with its own is_error/api_error_status fields (printed before
+        # the real envelope) was picked instead -- a false refusal, or the mirror false negative if
+        # the diagnostic came first and hid a later real one. --output-format json's envelope always
+        # carries "type":"result" (see REAL_CLAUDE_429_ENVELOPE / CLAUDE_SUCCESS_QUOTING_ENVELOPE in
+        # the tests); require that exact shape so an unrelated JSON blob is never mistaken for it.
         $j = $null
         foreach ($ln in ($Answer -split "`r?`n")) {
             $t = $ln.Trim()
@@ -78,6 +84,8 @@ function Get-ProviderRefusal {
             $cand = $null
             try { $cand = $t | ConvertFrom-Json -ErrorAction Stop } catch { continue }
             if ($null -eq $cand -or $cand -isnot [System.Management.Automation.PSCustomObject]) { continue }
+            $candNames = @($cand.PSObject.Properties.Name)
+            if (-not ($candNames -contains 'type') -or [string]$cand.type -ne 'result') { continue }
             $j = $cand
             break
         }
