@@ -54,6 +54,11 @@ platform/build-*
 # Local nested agent worktrees are load-bearing but not repo content.
 .claude/worktrees/
 
+# Profiling scratch DNGs are large, disposable, and reproducible; the
+# metadata/evidence files that accompany them stay tracked. Goldens under
+# tests/fixtures/ are unaffected.
+.claude/**/*.dng
+
 # Local property-test cache.
 .hypothesis/
 
