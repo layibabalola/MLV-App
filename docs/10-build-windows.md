@@ -20,20 +20,27 @@ App on Windows. It covers the full loop:
   - Qt 5: **Win32** `5.6 .. 5.15.2`, **Win64** `5.13.2 .. 5.15.2`
   - Qt 6: `6.5 or later`
 - **MinGW32/64 compiler** that matches the installed Qt kit.
-- **FFmpeg for Windows**: unpack `platform/qt/FFmpeg/ffmpegWin.zip` once, then
+- **FFmpeg for Windows**: unpack `platform/qt/FFmpeg/ffmpegWin64.zip` once, then
   copy its contents into each `release/` build directory so the app can shell
   out to `ffmpeg` at runtime.
 
-The official workflow (`.github/workflows/Windows.yml`) pins Qt `5.15.2` with
-the MinGW 81 64-bit kit (`C:\Qt\5.15.2\mingw81_64\bin`). The separate
-regression-test workflow (`.github/workflows/tests.yml`) provisions Qt
-`6.10.2` with MinGW 13.1 via `aqtinstall`, and that toolchain is the one used
-for local verification in this workspace.
+The official workflow (`.github/workflows/Windows.yml`) provisions Qt
+`6.10.2` with the MinGW 13.1 64-bit kit via `aqtinstall`
+(`python -m aqt install-qt ... win64_mingw`, `python -m aqt install-tool ...
+tools_mingw1310`), installed under `<workspace>\qt\6.10.2\mingw_64` and
+`<workspace>\qt\Tools\mingw1310_64`. The separate regression-test workflow
+(`.github/workflows/tests.yml`) provisions the same Qt `6.10.2` / MinGW 13.1
+toolchain via `aqtinstall`, so both workflows and local verification in this
+workspace use one shared toolchain version. The workflow prints and uploads a
+`toolchain-receipt-<run-id>` artifact (`Print toolchain` /
+`Upload toolchain receipt` steps) recording the exact Qt and compiler
+versions used for that run — no hosted build success is claimed here; use
+that receipt to confirm what a given run actually built with.
 
 ## Qt Creator path
 
 1. Install the Qt kit listed above (MinGW variant).
-2. Unpack `platform/qt/FFmpeg/ffmpegWin.zip` and copy its contents next to the
+2. Unpack `platform/qt/FFmpeg/ffmpegWin64.zip` and copy its contents next to the
    built `MLVApp.exe` once the build has produced a `release/` directory.
 3. Open `platform/qt/MLVApp.pro` in Qt Creator.
 4. Configure the project with the matching MinGW kit.
@@ -44,31 +51,41 @@ for local verification in this workspace.
 The command-line flow mirrors the official `Windows.yml` release workflow and
 the `tests.yml` test workflow.
 
-### Release build (Qt 5.15.2 + MinGW 8.1, per `Windows.yml`)
+### Release build (Qt 6.10.2 + MinGW 13.1, per `Windows.yml`)
 
 ```powershell
+python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/aqtinstall.txt
+python -m aqt install-qt --outputdir qt windows desktop 6.10.2 win64_mingw -m qtmultimedia
+python -m aqt install-tool --outputdir qt windows desktop tools_mingw1310 qt.tools.win64_mingw1310
+
+$toolchainRoot = (Resolve-Path qt).Path
+$env:PATH = "$toolchainRoot\6.10.2\mingw_64\bin;$toolchainRoot\Tools\mingw1310_64\bin;" + $env:PATH
 mkdir platform\build
 cd platform\build
-C:\Qt\5.15.2\mingw81_64\bin\qmake.exe -r ..\qt\MLVApp.pro
-make.exe
+..\..\qt\6.10.2\mingw_64\bin\qmake.exe -r ..\qt\MLVApp.pro
+..\..\qt\Tools\mingw1310_64\bin\mingw32-make.exe
 ```
 
 After build:
 
 ```powershell
 cd release
-C:\Qt\5.15.2\mingw81_64\bin\windeployqt MLVApp.exe
-copy C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\libgomp-1.dll .
+..\..\..\qt\6.10.2\mingw_64\bin\windeployqt.exe MLVApp.exe
+copy ..\..\..\qt\Tools\mingw1310_64\bin\libgomp-1.dll .
+copy ..\..\..\qt\Tools\mingw1310_64\bin\libstdc++-6.dll .
+copy ..\..\..\qt\Tools\mingw1310_64\bin\libwinpthread-1.dll .
+copy ..\..\..\qt\Tools\mingw1310_64\bin\libgcc_s_seh-1.dll .
 copy "C:\Program Files\OpenSSL\bin\libcrypto*" .
 copy "C:\Program Files\OpenSSL\bin\libssl*" .
 ```
 
-Then decompress the bundled FFmpeg and `raw2mlv` archives into the same
-`release` folder:
+Return from `platform/build/release` to the repository root, then use the
+same verified payload extractor as CI for FFmpeg and RAW2MLV:
 
 ```powershell
-7z x platform\qt\FFmpeg\ffmpegWin64.zip -oplatform\build\release
-7z x platform\qt\raw2mlv\raw2mlvWin64.zip -oplatform\build\release
+Set-Location ..\..\..
+python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root . --payload-id ffmpeg-windows-x86_64 --archive-reference ffmpegWin64.zip --output-dir platform/build/release --verify-installed
+python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root . --payload-id raw2mlv-windows-x86-compat --archive-reference raw2mlvWin64.zip --output-dir platform/build/release --verify-installed
 ```
 
 ### Test-harness build (Qt 6.10.2 + MinGW 13.1, per `tests.yml`)
@@ -187,7 +204,7 @@ Use `.claude-state\scripts\run-mlvapp.ps1` for deterministic launches. It:
   parts live next to the main `.MLV` file; MLV App expects a flat directory.
 
 - **FFmpeg export fails with "ffmpeg not found".** FFmpeg is not bundled at
-  build time. Copy the contents of `platform\qt\FFmpeg\ffmpegWin.zip` into the
+  build time. Copy the contents of `platform\qt\FFmpeg\ffmpegWin64.zip` into the
   same `release\` directory as the built `MLVApp.exe`.
 
 ## Cross-references
