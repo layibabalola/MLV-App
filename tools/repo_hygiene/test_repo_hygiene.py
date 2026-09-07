@@ -841,7 +841,7 @@ class RepoHygieneTests(unittest.TestCase):
             self.assertIn(lf_contract, attributes)
 
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
-        self.assertEqual(workflow.count('python-version-file: ".python-version"'), 5)
+        self.assertEqual(workflow.count('python-version-file: ".python-version"'), 6)
         self.assertNotRegex(workflow, r"(?m)^\s+python-version:\s*")
         self.assertNotIn("pip install --upgrade", workflow)
         self.assertNotRegex(
@@ -856,7 +856,7 @@ class RepoHygieneTests(unittest.TestCase):
             for line in workflow.splitlines()
             if "-m pip install " in line
         ]
-        self.assertEqual(len(install_lines), 9)
+        self.assertEqual(len(install_lines), 11)
         for line in install_lines:
             for required_flag in (
                 "--disable-pip-version-check",
@@ -868,7 +868,7 @@ class RepoHygieneTests(unittest.TestCase):
                 self.assertIn(required_flag, line, f"unsafe Python install command: {line}")
             lock_path = line.rsplit(" -r ", 1)[1].strip()
             self.assertIn(lock_path, allowed_locks, f"unapproved Python lock: {lock_path}")
-        self.assertEqual(workflow.count("python -m pip check"), 4)
+        self.assertEqual(workflow.count("python -m pip check"), 5)
 
         observed_locks: dict[str, dict[str, str]] = {}
         for relative_path, roots in PYTHON_LOCK_ROOTS.items():
@@ -964,6 +964,7 @@ class RepoHygieneTests(unittest.TestCase):
             "factory-bridge-regressions": 45,
             "windows-product-oracles": 120,
             "windows-gui-pilot": 60,
+            "batch-compile": 30,
         }
         jobs_text = workflow[workflow.index("\njobs:") :]
         job_matches = list(re.finditer(r"(?m)^  ([a-z0-9-]+):\r?$", jobs_text))
@@ -980,7 +981,7 @@ class RepoHygieneTests(unittest.TestCase):
         expected_remote_uses = [
             ("actions/checkout", "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09", "v5"),
             ("actions/setup-python", "ece7cb06caefa5fff74198d8649806c4678c61a1", "v6"),
-        ] * 5 + [
+        ] * 6 + [
             ("actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7"),
         ] * 3
         uses_entries = []
@@ -1019,7 +1020,7 @@ class RepoHygieneTests(unittest.TestCase):
             r"\s+persist-credentials: false\s*$",
             workflow,
         )
-        self.assertEqual(len(checkout_blocks), 5)
+        self.assertEqual(len(checkout_blocks), 6)
 
         aqt_steps = re.findall(
             r"(?ms)^      - name: Install Qt 6\.10\.2 \+ MinGW 13\.1\r?\n"
@@ -1663,8 +1664,8 @@ class RepoHygieneTests(unittest.TestCase):
 
         expected_remote_inventory = Counter(
             {
-                ("actions/checkout", "v5"): 9,
-                ("actions/setup-python", "v6"): 9,
+                ("actions/checkout", "v5"): 10,
+                ("actions/setup-python", "v6"): 10,
                 ("actions/upload-artifact", "v7"): 11,
                 ("ConorMacBride/install-package", "v1"): 2,
             }
