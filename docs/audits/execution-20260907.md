@@ -197,6 +197,24 @@ repo with an unrelated dirty sibling: the sibling stays byte-identical, product
 status is accurate, global cleanup remains visibly retained. This is a small
 contract migration, not authority to disable all closeout checks.
 
+Implementation observation on September 7: the toolchain editing lane returned
+provider exit code 0 and `complete=true`, but its final output said it was waiting
+for a background test. It left three modified files, two required documentation
+files untouched, and no commit. The hub retained the work as incomplete. This is
+a measured counterexample to treating provider success as delivery success.
+Workers should hand back bounded patches; the coordinator must verify foreground
+test completion, exact owned changes, the commit, and review-bound artifacts
+before advancing a card. Background work with no terminal result is pending.
+
+Dispatch accounting also needs a documented cutover. The legacy dispatch log
+omits direct editing-wrapper runs, and the new reservation ledger has not yet
+been initialized. An absent ledger must not be fabricated into zero usage or
+block the first product dispatch. Report historical coverage as incomplete,
+establish complete future accounting, and qualify the dispatch-rate threshold
+only after a full measured window. Product source share remains independently
+measurable. Preserve the historical 5.5% diagnosis as a dated observation; never
+force a new seven-day reading to reproduce it.
+
 ## Weekly proof that the churn has stopped
 
 Use one derived digest; no parallel maturity scorecard.
@@ -204,7 +222,7 @@ Use one derived digest; no parallel maturity scorecard.
 | Measure | Definition / proposed success criterion |
 |---|---|
 | Accepted product output | Count merged product PRs with applicable target checks and named acceptance evidence; link the user-facing result. |
-| Product source share | Mainline-only non-merge commits touching `src/` or `platform/`; report mixed commits separately. Existing target: at least 50% for three weeks. It is a proxy, not the objective. |
+| Product source share | Non-merge commits reachable from the pinned `fork/master` SHA, bucketed by committer epoch in the explicit seven-day window, touching `src/` or `platform/`; report mixed commits separately. Existing target: at least 50% for three weeks. It is a proxy, not the objective. |
 | Cost per accepted result | Sum actual tokens/cost over implementation, review and retries divided by accepted tasks. Null stays unknown. Keep provider refusal and cached/input/output usage separate. |
 | Dispatch efficiency | Existing target at most four dispatches per accepted product PR; explicitly account for read-only and refused attempts. |
 | Cycle time and blockers | Queue-ready to accepted, plus age and named release event for each blocked capability. |
