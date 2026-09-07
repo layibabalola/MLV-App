@@ -704,5 +704,48 @@ class TestRequiredArgs(TmpCase):
         self.assertNotEqual(res.returncode, 0)
 
 
+
+
+class TestLiveScopeRegression(TmpCase):
+    def test_live_slash_prose_preserves_playback(self):
+        scopes = {'C2-TELEM-2': 'Convert LAST_PRESENTED single-row container to per-frame counts for all ten keys; bank clock resolution/monotonicity columns (opus SEQ 638) and a hash-verified build-identity field in the same gated range. LANE-4 reviews.', 'C2-SUBMIT-2': "Keep the proven pending-buffer submit path. Make the copy run CONCURRENT with the kernel, not serialized behind it: dedicated CUDA stream for the H2D + pinned host staging (reviewer leads, opus SEQ 686-688 / LANE-4 verdict). Extend wb-9ca35b9f or open a fresh block - structural call is the implementer's. Acceptance UNCHANGED: both submitted_while_prior_run_active AND used non-zero; counts admissible without sidecar per the SEQ 662 split.", 'C2-PROV-1': 'SRCHASH-1/C2-PROV-1 (opus SEQ 697 / LANE-4 SEQ 508, sol SEQ 835): the incomplete 6c6b65b1 and complete 5ec25ef4 builds reported the SAME source SHA while byte-identical tools/gpu source produced DIFFERENT DLL hashes - neither pin is a reliable provenance binding. Any future leg/result must self-bind by range head sha + llrawproc.c blob id + pending-symbol presence derivation (the SEQ 1289 check set). Fix the job/result manifest fields accordingly; this is also the C2-TELEM-2 build-identity debt (the 94a72be2 stale self-report was its first receipt).'}
+        cards = [{"id": key, "scope": scope, "state": "dispatched"} for key, scope in scopes.items()]
+        q = self.qpath()
+        _write_queue(q, cards)
+        result = _run(["--queue", q, "--apply", "--receipt", self.rpath()])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(q, encoding="utf-8") as handle:
+            after = json.load(handle)["items"]
+        for card in after:
+            self.assertEqual(card["kind"], "playback", card["id"])
+            self.assertEqual(card["state"], "dispatched", card["id"])
+            self.assertNotIn("freezeProvenance", card)
+
+    def test_scope_grammar_and_factory_precedence(self):
+        cases = [
+            ("resolution/monotonicity / leg/result job/result SRCHASH-1/C2-PROV-1", "playback", True),
+            ("tools/gpu", "playback", False),
+            ("tools/gpu/file.py", "playback", False),
+            ("./src/gpu/file.cu:42", "playback", False),
+            ("src", "product", False),
+            ("docs", "factory", False),
+            (".github/workflows", "factory", False),
+            (".claude/worktrees", "factory", False),
+            ("specs/real.md", "factory", False),
+            ("unknown/path/", "factory", False),
+            ("//server/share/artifact", "factory", False),
+            ("C:/scope/artifact", "factory", False),
+            ("platform/qt/MainWindow.cpp docs/plan.md", "factory", False),
+        ]
+        for scope, kind, scopeless in cases:
+            with self.subTest(scope=scope):
+                self.assertEqual(ffc.derive_kind("C2-TELEM-2", scope), (kind, scopeless))
+        self.assertEqual(ffc.derive_kind("ORDINARY", "resolution/monotonicity"), ("factory", True))
+        for card_id in ffc.KEEP_LIVE_PLAYBACK_IDS:
+            plan = ffc.compute_plan({"items": [{"id": card_id, "state": "open", "scope": "docs/real.md"}]})
+            self.assertEqual(plan["new_items"][0]["kind"], "factory")
+            self.assertEqual(plan["new_items"][0]["state"], FROZEN_STATE)
+
+
 if __name__ == "__main__":
     unittest.main()

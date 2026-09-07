@@ -32,9 +32,15 @@ governs preservation of existing `track` values.
 A card with no `kind` derives one from its `scope` field (a string or a list
 of strings). Each whitespace/comma-separated token is normalized
 (backslashes to forward slashes, harmless surrounding punctuation and a
-trailing `:<line>` suffix stripped) and classified only if it contains a
-`/` after normalization — bare filenames and prose never prove product or
-playback.
+trailing `:<line>` suffix stripped). Leading dots in repository paths remain
+intact. A known directory root matches both itself and its descendants, so
+`tools/gpu` is playback. Bare filenames do not prove a scope path.
+
+For an unknown root, a slash token counts as a path only when it has UNC or
+drive-rooted syntax, a trailing slash, or a dotted basename. Slash prose such as
+`resolution/monotonicity`, `leg/result`, `job/result`, and a standalone `/` is
+ignored. Unknown scopes still fall back to factory when no path is recognized;
+only the exact six exceptions below receive the scopeless playback fallback.
 
 Recognized roots, checked narrowest-first:
 
@@ -42,7 +48,7 @@ Recognized roots, checked narrowest-first:
   `platform/qt/RenderThread*`, `platform/qt/OpenGLRenderThread*`
 - **product**: `src/`, `platform/qt/`, `tests/console/`, `tests/gui/`,
   `tests/pipeline/`, `tests/fixtures/`, `pixel_maps/`, `data/`
-- **factory**: every other slash-path token, including `tools/`, `docs/`,
+- **factory**: every other recognized path token, including `tools/`, `docs/`,
   `.github/`, `agents/`, `.dual-lane/`, `.claude*/`, and any unrecognized
   root.
 

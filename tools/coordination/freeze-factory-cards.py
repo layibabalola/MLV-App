@@ -57,24 +57,18 @@ KEEP_LIVE_PLAYBACK_IDS = frozenset(
 
 # Narrower playback roots checked first -- a match here beats a plain product
 # root even though e.g. "platform/qt/" is also a product root.
-PLAYBACK_PREFIXES = (
-    "src/gpu/",
-    "tools/gpu/",
+PLAYBACK_ROOTS = ("src/gpu", "tools/gpu")
+PLAYBACK_PLATFORM_STEMS = (
     "platform/qt/GpuDisplay",
     "platform/qt/RenderThread",
     "platform/qt/OpenGLRenderThread",
 )
 
-PRODUCT_PREFIXES = (
-    "src/",
-    "platform/qt/",
-    "tests/console/",
-    "tests/gui/",
-    "tests/pipeline/",
-    "tests/fixtures/",
-    "pixel_maps/",
-    "data/",
+PRODUCT_ROOTS = (
+    "src", "platform/qt", "tests/console", "tests/gui",
+    "tests/pipeline", "tests/fixtures", "pixel_maps", "data",
 )
+FACTORY_ROOTS = ("tools", "docs", ".github", "agents", ".dual-lane")
 
 KNOWN_KINDS = frozenset(["product", "playback", "factory"])
 
@@ -153,22 +147,22 @@ def validate_queue(data) -> None:
 
 
 def _normalize_token(raw_token: str) -> str | None:
-    """Normalize one raw scope token; return a slash-path token or None.
+    """Normalize one possible path; classification distinguishes slash prose.
 
     Bare filenames and prose never prove product/playback/factory -- only a
-    token that contains a '/' after normalization is a path token.
+    known directory root or token containing '/' is a classification candidate.
     """
     tok = raw_token.replace("\\", "/").strip()
-    tok = tok.strip(_STRIP_CHARS)
+    tok = tok.strip(_STRIP_CHARS.replace(".", "")).rstrip(".")
     # Strip a trailing line-suffix like "path/to/file.cpp:123".
     if ":" in tok:
         head, _, tail = tok.rpartition(":")
         if tail.isdigit() and head:
             tok = head
-    tok = tok.strip(_STRIP_CHARS)
+    tok = tok.strip(_STRIP_CHARS.replace(".", "")).rstrip(".")
     if tok.startswith("./"):
         tok = tok[2:]
-    if "/" not in tok:
+    if "/" not in tok and tok not in PRODUCT_ROOTS + FACTORY_ROOTS:
         return None
     return tok
 
@@ -191,13 +185,35 @@ def _scope_tokens(scope_value) -> list[str]:
     return tokens
 
 
-def _classify_token(token: str) -> str:
-    """Every slash-path token classifies as playback, product, or factory."""
-    if any(token.startswith(p) for p in PLAYBACK_PREFIXES):
+def _at_or_below(token: str, root: str) -> bool:
+    return token == root or token.startswith(root + "/")
+
+
+def _unknown_token_is_pathlike(token: str) -> bool:
+    if token == "/":
+        return False
+    basename = token.rstrip("/").rsplit("/", 1)[-1]
+    return (
+        token.startswith("//")
+        or re.match(r"^[A-Za-z]:/", token) is not None
+        or token.endswith("/")
+        or ("." in basename and basename not in (".", ".."))
+    )
+
+
+def _classify_token(token: str) -> str | None:
+    """Recognized roots and filesystem syntax count; slash prose does not."""
+    if any(_at_or_below(token, root) for root in PLAYBACK_ROOTS):
         return "playback"
-    if any(token.startswith(p) for p in PRODUCT_PREFIXES):
+    if any(token.startswith(prefix) for prefix in PLAYBACK_PLATFORM_STEMS):
+        return "playback"
+    if any(_at_or_below(token, root) for root in PRODUCT_ROOTS):
         return "product"
-    return "factory"
+    if any(_at_or_below(token, root) for root in FACTORY_ROOTS):
+        return "factory"
+    if re.match(r"^\.claude[^/]*(?:/|$)", token):
+        return "factory"
+    return "factory" if _unknown_token_is_pathlike(token) else None
 
 
 def _validate_scope_type(card_id: str, scope_value) -> None:
@@ -232,7 +248,11 @@ def derive_kind(card_id: str, scope_value) -> tuple[str, bool]:
     when the exact keep-live exception applies.
     """
     tokens = _scope_tokens(scope_value)
-    classes = {_classify_token(t) for t in tokens}
+    classes = {
+        classification
+        for token in tokens
+        if (classification := _classify_token(token)) is not None
+    }
     if "factory" in classes:
         return "factory", False
     if "playback" in classes:
