@@ -62,10 +62,7 @@ void DownloadManager::doDownload(const QUrl &url)
 
 QString DownloadManager::saveFileName(const QUrl &url)
 {
-    QString path = url.path();
-    QString basename = QFileInfo(path).fileName();
-
-    return isValidFpmName(basename) ? basename : QString();
+    return allowedDownloadBasenameForUrl(url);
 }
 
 bool DownloadManager::saveToDisk(const QString &filename, QIODevice *data)
