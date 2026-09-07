@@ -740,7 +740,7 @@ jobs:
           for ($attempt = 1; $attempt -le 3; $attempt++) {
             if (Test-Path -LiteralPath $qtInstallRoot) { Remove-Item -LiteralPath $qtInstallRoot -Recurse -Force -ErrorAction Stop }
             if (Test-Path -LiteralPath $qtInstallRoot) { throw "Qt retry cleanup did not remove $qtInstallRoot" }
-            python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
+            python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw -m qtmultimedia
             $qtExit = $LASTEXITCODE
             if ($qtExit -eq 0 -and (Test-Path -LiteralPath $qtQmake -PathType Leaf)) { $qtReady = $true; break }
             if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
