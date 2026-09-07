@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/project-audit-20260907",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 8,
+  "createdAt": "2026-09-07T08:05:04+00:00",
+  "detectorHash": "f879e463d8c5f63537e3fd4febc532e9",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "c42090890828060f06d8b6377e59dd182877c379",
+  "schemaVersion": "1.0",
+  "targetHead": "1a4f152d3536fa40b5b6018061aeeb6dd6f12d15",
+  "workBlockId": "project-audit-20260907"
+}
