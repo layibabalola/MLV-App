@@ -15,7 +15,6 @@ env:
   ARTIFACT:     ${{ github.workspace }}\platform\build\MLVApp\MLVApp.Win64.zip
   OPENSSL_BIN:  C:\Program Files\OpenSSL\bin
   QT_VERSION:   6.10.2
-  QT_OUTPUT_DIR: ${{ runner.temp }}\mlv-release-qt
 
 jobs:
   build:
@@ -54,6 +53,8 @@ jobs:
       timeout-minutes: 20
       run: |
            $ErrorActionPreference = "Stop"
+           $env:QT_OUTPUT_DIR = Join-Path $env:RUNNER_TEMP "mlv-release-qt"
+           "QT_OUTPUT_DIR=$env:QT_OUTPUT_DIR" >> $env:GITHUB_ENV
            $qtInstallRoot = Join-Path $env:QT_OUTPUT_DIR $env:QT_VERSION
            $qtRoot = Join-Path $qtInstallRoot "mingw_64"
            $qtQmake = Join-Path $qtRoot "bin\qmake.exe"

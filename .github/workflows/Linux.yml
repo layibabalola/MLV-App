@@ -14,7 +14,6 @@ env:
   SOURCE_DIR:   ${{ github.workspace }}/platform
   ARTIFACT:     ${{ github.workspace }}/platform/build/MLVApp.AppImage
   QT_VERSION:   6.10.2
-  QT_OUTPUT_DIR: ${{ runner.temp }}/mlv-release-qt
 
 jobs:
   build:
@@ -59,6 +58,8 @@ jobs:
     - name: Install Qt 6.10.2
       run: |
            set -euo pipefail
+           export QT_OUTPUT_DIR="${RUNNER_TEMP}/mlv-release-qt"
+           echo "QT_OUTPUT_DIR=${QT_OUTPUT_DIR}" >> "${GITHUB_ENV}"
            qt_install_root="${QT_OUTPUT_DIR}/${QT_VERSION}"
            qt_root="${qt_install_root}/gcc_64"
            qt_qmake="${qt_root}/bin/qmake"
