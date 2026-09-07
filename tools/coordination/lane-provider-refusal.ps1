@@ -66,8 +66,21 @@ function Get-ProviderRefusal {
     )
     if ($Engine -eq 'claude') {
         if ([string]::IsNullOrWhiteSpace($Answer)) { return $null }
+        # sol PR #80 R3 MAJOR: whole-string ConvertFrom-Json fails open (silently returns null) the
+        # instant stdout carries ANY non-whitespace diagnostic line before or after the envelope.
+        # Invoke-Lane harvests raw, unfiltered stdout, so a contaminated stream must not eat a real
+        # refusal. --output-format json emits the envelope as ONE LINE; scan lines and use the first
+        # one that parses as a JSON object, skipping any diagnostic lines around it.
         $j = $null
-        try { $j = $Answer | ConvertFrom-Json -ErrorAction Stop } catch { return $null }
+        foreach ($ln in ($Answer -split "`r?`n")) {
+            $t = $ln.Trim()
+            if ($t.Length -eq 0) { continue }
+            $cand = $null
+            try { $cand = $t | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            if ($null -eq $cand -or $cand -isnot [System.Management.Automation.PSCustomObject]) { continue }
+            $j = $cand
+            break
+        }
         if ($null -eq $j) { return $null }
         $names = @($j.PSObject.Properties.Name)
         $isError = ($names -contains 'is_error') -and ($j.is_error -eq $true)

@@ -1049,6 +1049,25 @@ def test_provider_refusal_claude_success_envelope_quoting_the_phrase_is_null(tmp
     assert r is None
 
 
+def test_provider_refusal_claude_survives_diagnostic_noise_around_the_envelope(tmp_path):
+    # sol PR #80 R3 MAJOR: whole-string ConvertFrom-Json fails OPEN -- the instant stdout carries
+    # ANY non-whitespace diagnostic line before or after the envelope, the old code's single
+    # try/catch swallowed a REAL refusal as null. Invoke-Lane harvests raw, unfiltered stdout, so
+    # this is reachable whenever anything else writes to stdout alongside --output-format json.
+    # sol's own repro, verbatim in shape: a "diagnostic" line before the envelope.
+    envelope = (
+        '{"is_error":true,"api_error_status":429,'
+        '"result":"You\'ve hit your session limit"}'
+    )
+    r = _classify(tmp_path, "", "claude", answer="diagnostic\n" + envelope)
+    assert r is not None, "a diagnostic line before the envelope must not hide a real refusal"
+    assert r["kind"] == "provider-usage-limit"
+    # Noise AFTER the envelope must not hide it either.
+    r2 = _classify(tmp_path, "", "claude", answer=envelope + "\ntrailing diagnostic noise")
+    assert r2 is not None
+    assert r2["kind"] == "provider-usage-limit"
+
+
 # sol PR #80 round 1 BLOCKER (2026-09-07): codex echoes the prompt into stderr, and the first
 # version scanned every line, so a review whose PROMPT quoted the incident classified itself as
 # refused. sol PR #80 round 2 BLOCKER (finding 1): a completed review that READS this repo prints
