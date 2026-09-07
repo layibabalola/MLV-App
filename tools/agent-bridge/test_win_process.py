@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # Match the other bridge suites before the first bare core import. Named
 # unittest loading starts at the repo root; an ambient or editable bridge install
@@ -402,6 +403,151 @@ class ProbeDeniedTests(unittest.TestCase):
 
         self.assertFalse(native_probe_denied(0x7FFFFFF0))
         self.assertFalse(native_probe_denied(0))
+
+
+@WINDOWS_ONLY
+class NativeLivenessFallbackDecisionTests(unittest.TestCase):
+    def test_unavailable_native_probe_is_uncertain(self):
+        import core.win_process as probe
+
+        with mock.patch.object(probe, "NATIVE_PROCESS_PROBE_AVAILABLE", False):
+            self.assertTrue(probe.native_process_may_exist(42))
+            self.assertFalse(probe.native_process_may_exist(0))
+            self.assertFalse(probe.native_process_may_exist(-1))
+
+    def test_only_invalid_pid_open_failure_confirms_absence(self):
+        import core.win_process as probe
+
+        for error, expected in ((87, False), (5, True), (6, True), (0, True)):
+            with self.subTest(error=error), \
+                    mock.patch.object(probe, "_open_process", return_value=None), \
+                    mock.patch.object(probe.ctypes, "get_last_error", return_value=error):
+                self.assertEqual(probe.native_process_may_exist(42), expected)
+
+    def test_successful_exit_query_distinguishes_running_from_exited(self):
+        import core.win_process as probe
+
+        for exit_code, expected in ((259, True), (0, False), (7, False)):
+            with self.subTest(exit_code=exit_code), \
+                    mock.patch.object(probe, "_open_process", return_value=123), \
+                    mock.patch.object(probe, "_kernel32") as kernel:
+                def query(_handle, output):
+                    output._obj.value = exit_code
+                    return 1
+
+                kernel.GetExitCodeProcess.side_effect = query
+                self.assertEqual(probe.native_process_may_exist(42), expected)
+                kernel.CloseHandle.assert_called_once_with(123)
+
+    def test_failed_exit_query_preserves_uncertainty_and_closes_handle(self):
+        import core.win_process as probe
+
+        with mock.patch.object(probe, "_open_process", return_value=123), \
+                mock.patch.object(probe, "_kernel32") as kernel:
+            kernel.GetExitCodeProcess.return_value = 0
+            self.assertTrue(probe.native_process_may_exist(42))
+            kernel.CloseHandle.assert_called_once_with(123)
+
+
+@WINDOWS_ONLY
+class LazyProcessFallbackTests(unittest.TestCase):
+    def test_live_process_without_native_identity_uses_cim(self):
+        import core.win_process as probe
+        import server_wrapper as wrapper
+
+        row = {"pid": os.getpid(), "executable_path": sys.executable}
+        # The real probe deliberately defers to CIM when servicing blanks the
+        # image path. The still-live, openable PID must not become "absent".
+        with mock.patch.object(probe, "_executable_path", return_value=""), \
+                mock.patch.object(wrapper, "_cim_process_entry_from_system", return_value=(row, True)) as fallback:
+            table = wrapper._LazyWindowsProcessTable()
+            self.assertEqual(table.get(os.getpid()), row)
+            fallback.assert_called_once_with(os.getpid())
+            self.assertEqual(table.get(os.getpid()), row)
+            fallback.assert_called_once()
+
+    def test_failed_cim_does_not_cache_an_uncertain_pid_as_absent(self):
+        import core.win_process as probe
+        import server_wrapper as wrapper
+
+        row = {"pid": os.getpid(), "executable_path": sys.executable}
+        with mock.patch.object(probe, "_executable_path", return_value=""), \
+                mock.patch.object(wrapper, "_cim_process_entry_from_system", side_effect=[(None, False), (row, True)]) as fallback:
+            table = wrapper._LazyWindowsProcessTable()
+            self.assertIsNone(table.get(os.getpid()))
+            self.assertEqual(table.get(os.getpid()), row)
+            self.assertEqual(fallback.call_count, 2)
+
+    def test_successful_cim_no_row_is_cached_as_absent(self):
+        import core.win_process as probe
+        import server_wrapper as wrapper
+
+        with mock.patch.object(probe, "_executable_path", return_value=""), \
+                mock.patch.object(wrapper, "_cim_process_entry_from_system", return_value=(None, True)) as fallback:
+            table = wrapper._LazyWindowsProcessTable()
+            for _ in range(3):
+                self.assertIsNone(table.get(os.getpid()))
+            fallback.assert_called_once_with(os.getpid())
+
+    def test_native_identity_can_recover_after_a_failed_cim_query(self):
+        import core.win_process as probe
+        import server_wrapper as wrapper
+
+        table = wrapper._LazyWindowsProcessTable()
+        with mock.patch.object(probe, "_executable_path", return_value=""), \
+                mock.patch.object(wrapper, "_cim_process_entry_from_system", return_value=(None, False)) as fallback:
+            self.assertIsNone(table.get(os.getpid()))
+        self.assertEqual(table.get(os.getpid())["pid"], os.getpid())
+        fallback.assert_called_once()
+
+    def test_access_denied_still_uses_cim(self):
+        import core.win_process as probe
+        import server_wrapper as wrapper
+
+        row = {"pid": 42, "executable_path": "protected.exe"}
+        with mock.patch.object(probe, "_open_process", return_value=None), \
+                mock.patch.object(probe.ctypes, "get_last_error", return_value=5), \
+                mock.patch.object(wrapper, "_cim_process_entry_from_system", return_value=(row, True)) as fallback:
+            self.assertEqual(wrapper._LazyWindowsProcessTable().get(42), row)
+            fallback.assert_called_once_with(42)
+
+    def test_cim_query_distinguishes_failures_from_successful_empty_result(self):
+        import server_wrapper as wrapper
+
+        cases = ((0, "", True), (1, "", False), (0, "broken-json", False),
+                 (0, "[]", False))
+        for code, output, succeeded in cases:
+            with self.subTest(code=code, output=output), \
+                    mock.patch.object(wrapper.subprocess, "run", return_value=subprocess.CompletedProcess([], code, output)) as run:
+                self.assertEqual(wrapper._cim_process_entry_from_system(42), (None, succeeded))
+                self.assertIn("-ErrorAction Stop", run.call_args.args[0][-1])
+        with mock.patch.object(wrapper.subprocess, "run", side_effect=subprocess.TimeoutExpired("cim", 5)):
+            self.assertEqual(wrapper._cim_process_entry_from_system(42), (None, False))
+
+    def test_lazy_table_does_not_cache_malformed_or_mismatched_cim_identity(self):
+        import server_wrapper as wrapper
+
+        for payload in ("{}", '{"ProcessId": 43}'):
+            with self.subTest(payload=payload), \
+                    mock.patch.object(wrapper, "native_process_entry", return_value=None), \
+                    mock.patch.object(wrapper, "native_process_may_exist", return_value=True), \
+                    mock.patch.object(wrapper.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, payload)) as run:
+                table = wrapper._LazyWindowsProcessTable()
+                self.assertIsNone(table.get(42))
+                self.assertIsNone(table.get(42))
+                self.assertEqual(run.call_count, 2)
+
+    def test_cim_query_preserves_a_successful_identity_row(self):
+        import server_wrapper as wrapper
+
+        payload = json.dumps({"ProcessId": 42, "ParentProcessId": 7, "Name": "host.exe",
+                              "ExecutablePath": "original.exe", "CommandLine": "host.exe --mcp",
+                              "CreationDate": "stamp"})
+        with mock.patch.object(wrapper.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, payload)):
+            self.assertEqual(wrapper._cim_process_entry_from_system(42), ({
+                "pid": 42, "parent_pid": 7, "name": "host.exe", "executable_path": "original.exe",
+                "command_line": "host.exe --mcp", "creation_date": "stamp",
+            }, True))
 
 
 @WINDOWS_ONLY

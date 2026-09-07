@@ -14,7 +14,7 @@ from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Set
 
 from compact import process_runtime_identity_status, reap_stale_server_pids
 from core.processes import is_process_alive
-from core.win_process import native_probe_denied, native_process_entry
+from core.win_process import native_process_entry, native_process_may_exist
 from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths
 from core.runtime import build_runtime_breadcrumb
 from core.storage import StorageCapability
@@ -173,13 +173,19 @@ class _LazyWindowsProcessTable(dict):
         entry = native_process_entry(pid)
         if entry is not None:
             return entry
-        # Pay for a CIM query only when the kernel said "alive but protected";
-        # a pid that is simply gone needs no second opinion.
-        if native_probe_denied(pid):
-            # _process_entry_from_system falls through to CIM when the native
-            # probe returns None, which it just did -- so this is the CIM query.
-            return _process_entry_from_system(pid)
-        return None
+        # A miss can be a live process with unavailable identity (e.g. servicing),
+        # not just access denial. Only confirmed exits may be negatively cached.
+        if not native_process_may_exist(pid):
+            self._absent.add(pid)
+            return None
+        entry, query_succeeded = _cim_process_entry_from_system(pid)
+        if entry is not None and entry.get("pid") != pid:
+            # Preserve the legacy per-PID API's row decoding, but do not cache
+            # malformed/mismatched identity as either this PID or its absence.
+            return None
+        if entry is None and query_succeeded:
+            self._absent.add(pid)
+        return entry
 
     def get(self, key: Any, default: Any = None) -> Any:  # type: ignore[override]
         try:
@@ -192,7 +198,6 @@ class _LazyWindowsProcessTable(dict):
             return default
         entry = self._resolve(pid)
         if entry is None:
-            self._absent.add(pid)
             return default
         self[pid] = entry
         return entry
@@ -332,40 +337,46 @@ def _process_entry_from_system(pid: int) -> Optional[Dict[str, Any]]:
         native = native_process_entry(pid)
         if native is not None:
             return native
-        command = powershell_cim_command(
-            (
-                "Get-CimInstance Win32_Process -Filter \"ProcessId = %s\" | "
-                "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath,CreationDate | "
-                "ConvertTo-Json -Compress"
-            )
-            % pid,
-        )
-        kwargs: Dict[str, Any] = {
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.DEVNULL,
-            "text": True,
-            "timeout": 5,
-        }
-        if hasattr(subprocess, "CREATE_NO_WINDOW"):
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        try:
-            proc = subprocess.run(command, **kwargs)
-            if proc.returncode != 0 or not proc.stdout.strip():
-                return None
-            row = json.loads(proc.stdout)
-            if not isinstance(row, dict):
-                return None
-            return {
-                "pid": int(row.get("ProcessId") or 0),
-                "parent_pid": int(row.get("ParentProcessId") or 0),
-                "name": row.get("Name") or "",
-                "command_line": row.get("CommandLine") or "",
-                "executable_path": row.get("ExecutablePath") or "",
-                "creation_date": str(row.get("CreationDate") or ""),
-            }
-        except Exception:
-            return None
+        return _cim_process_entry_from_system(pid)[0]
     return _process_table_from_system().get(pid)
+
+
+def _cim_process_entry_from_system(pid: int) -> tuple[Optional[Dict[str, Any]], bool]:
+    """Return (entry, query_succeeded), preserving failure vs. confirmed no row."""
+    command = powershell_cim_command(
+        (
+            "Get-CimInstance Win32_Process -Filter \"ProcessId = %s\" -ErrorAction Stop | "
+            "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath,CreationDate | "
+            "ConvertTo-Json -Compress"
+        ) % pid,
+    )
+    kwargs: Dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.DEVNULL,
+        "text": True,
+        "timeout": 5,
+    }
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run(command, **kwargs)
+        if proc.returncode != 0:
+            return None, False
+        if not proc.stdout.strip():
+            return None, True
+        row = json.loads(proc.stdout)
+        if not isinstance(row, dict):
+            return None, False
+        return {
+            "pid": int(row.get("ProcessId") or 0),
+            "parent_pid": int(row.get("ParentProcessId") or 0),
+            "name": row.get("Name") or "",
+            "command_line": row.get("CommandLine") or "",
+            "executable_path": row.get("ExecutablePath") or "",
+            "creation_date": str(row.get("CreationDate") or ""),
+        }, True
+    except Exception:
+        return None, False
 
 
 def _is_bridge_launcher_process(process: Dict[str, Any]) -> bool:

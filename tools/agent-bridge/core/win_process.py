@@ -33,6 +33,7 @@ __all__ = [
     "filetime_to_cim_string",
     "native_probe_denied",
     "native_process_entry",
+    "native_process_may_exist",
     "native_process_table",
     "normalize_command_line",
 ]
@@ -51,6 +52,7 @@ _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
 _ERROR_INSUFFICIENT_BUFFER = 122
 _ERROR_ACCESS_DENIED = 5
+_ERROR_INVALID_PARAMETER = 87
 _STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 
 # NtQueryInformationProcess classes.
@@ -310,15 +312,16 @@ def _command_line(handle) -> str:
 
 
 def native_process_entry(pid: int) -> Optional[Dict[str, Any]]:
-    """Return one process-table entry, or ``None`` when the pid is not running.
+    """Return one process-table entry, or ``None`` when native identity is unavailable.
 
     Field-for-field compatible with the CIM probe it replaces.  A field the
     kernel refuses to disclose comes back as ``""``; that is *unknown*, not
     *empty*, and the fingerprint comparators already skip an unknown field
     rather than scoring it a mismatch.
 
-    ``None`` means the process is genuinely gone (or unopenable), which is the
-    same signal the CIM probe gave by returning no row.
+    ``None`` can mean gone, unopenable, or temporarily missing identity metadata.
+    Use ``native_process_may_exist`` to distinguish a confirmed absence from a
+    case needing CIM fallback; a native miss alone is not evidence of exit.
     """
     if not NATIVE_PROCESS_PROBE_AVAILABLE:
         return None
@@ -367,15 +370,40 @@ def native_process_entry(pid: int) -> Optional[Dict[str, Any]]:
         _kernel32.CloseHandle(handle)
 
 
+def native_process_may_exist(pid: int) -> bool:
+    """False only when native evidence confirms that this PID is not running.
+
+    A live process whose image is being serviced may be openable but lack a
+    stable native identity. Access denial and failed liveness queries are also
+    uncertain, so callers must try CIM rather than cache any of them as absent.
+    With the fixed query flags used here, OpenProcess ERROR_INVALID_PARAMETER
+    (87) identifies an invalid PID and therefore also confirms absence.
+    This check spawns nothing and is needed only after a native identity miss.
+    """
+    pid = int(pid)
+    if pid <= 0:
+        return False
+    if not NATIVE_PROCESS_PROBE_AVAILABLE:
+        return True
+    ctypes.set_last_error(0)
+    handle = _open_process(pid)
+    if handle is None:
+        return ctypes.get_last_error() != _ERROR_INVALID_PARAMETER
+    try:
+        exit_code = wintypes.DWORD(0)
+        if not _kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == _STILL_ACTIVE
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
 def native_probe_denied(pid: int) -> bool:
     """True when the process exists but this token may not open it.
 
-    ``native_process_entry`` returns ``None`` for two very different situations:
-    the process is gone, or it is alive but protected (a service, anything
-    elevated).  Only the second is worth paying a CIM query to answer, so this
-    separates them from ``OpenProcess``'s last-error code.  Guessing wrong the
-    cheap way -- treating "denied" as "gone" -- would silently drop elevated
-    processes out of a parent-chain walk.
+    This reports access denial only. A False result does not establish absence:
+    openable processes can also have unavailable identity metadata. Callers
+    deciding whether to try CIM should use ``native_process_may_exist``.
     """
     if not NATIVE_PROCESS_PROBE_AVAILABLE or int(pid) <= 0:
         return False
