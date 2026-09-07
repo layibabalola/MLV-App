@@ -48,20 +48,19 @@ def write_receipt(receipts_dir, name, payload):
         path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def run_gate(receipts_dir):
-    result = subprocess.run(
-        [
-            "pwsh",
-            "-NoProfile",
-            "-NonInteractive",
-            "-File",
-            str(SCRIPT),
-            "-ReceiptsDir",
-            str(receipts_dir),
-        ],
-        text=True,
-        capture_output=True,
-    )
+def run_gate(receipts_dir, board_root=None):
+    args = [
+        "pwsh",
+        "-NoProfile",
+        "-NonInteractive",
+        "-File",
+        str(SCRIPT),
+        "-ReceiptsDir",
+        str(receipts_dir),
+    ]
+    if board_root is not None:
+        args += ["-BoardRoot", str(board_root)]
+    result = subprocess.run(args, text=True, capture_output=True)
     return result
 
 
@@ -180,8 +179,8 @@ def test_refuses_when_required_checks_receipt_post_contexts_is_a_single_bridge_s
     receipts_dir,
 ):
     """A single-element JSON array can deserialize to a PowerShell scalar rather than an
-    array in some ConvertFrom-Json shapes; this pins that the -contains check still catches
-    the bridge job when postContexts holds exactly one (blocked) entry."""
+    array in some ConvertFrom-Json shapes; this pins that the shape/containment check still
+    catches the bridge job when postContexts holds exactly one (blocked) entry."""
     write_receipt(receipts_dir, GUARDRAIL_MOVE_NAME, VALID_GUARDRAIL_MOVE)
     write_receipt(
         receipts_dir,
@@ -198,11 +197,137 @@ def test_refuses_when_required_checks_receipt_post_contexts_is_a_single_bridge_s
     assert_refused(result, "still lists 'Factory Bridge Regressions'")
 
 
-def test_does_not_touch_any_workflow_file_on_refusal(receipts_dir, tmp_path):
-    """Every refusal path fires before any file write; the script never even opens the
-    workflow file, but this asserts the observable contract: no files besides the two
-    synthetic receipts exist in the tmp tree after a refused run."""
+def test_refuses_when_required_checks_post_contexts_is_a_json_object(receipts_dir):
+    """sol round 1, PR #83: an object-valued postContexts was being silently @()-coerced
+    into a one-element array and accepted. Must now be refused as a malformed shape."""
+    write_receipt(receipts_dir, GUARDRAIL_MOVE_NAME, VALID_GUARDRAIL_MOVE)
+    write_receipt(
+        receipts_dir,
+        REQUIRED_CHECKS_NAME,
+        '{"headSha": "%s", "preContexts": [], '
+        '"postContexts": {"name": "Factory Bridge Regressions"}, '
+        '"snapshotRowSha256": "%s"}' % ("a" * 40, "b" * 64),
+    )
     result = run_gate(receipts_dir)
-    assert result.returncode != 0
-    all_files = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file())
-    assert all_files == [], "refusal must not create or modify any file: found %r" % all_files
+    assert_refused(result, REQUIRED_CHECKS_NAME)
+    assert_refused(result, "postContexts is not a JSON array")
+
+
+def test_refuses_when_required_checks_post_contexts_is_an_empty_array(receipts_dir):
+    """sol round 1, PR #83: an empty postContexts trivially 'does not contain' the bridge
+    context and was silently accepted. An empty required-context list is itself malformed
+    for a repo with any required checks and must be refused."""
+    write_receipt(receipts_dir, GUARDRAIL_MOVE_NAME, VALID_GUARDRAIL_MOVE)
+    write_receipt(
+        receipts_dir,
+        REQUIRED_CHECKS_NAME,
+        {
+            "headSha": "a" * 40,
+            "preContexts": [],
+            "postContexts": [],
+            "snapshotRowSha256": "b" * 64,
+        },
+    )
+    result = run_gate(receipts_dir)
+    assert_refused(result, REQUIRED_CHECKS_NAME)
+    assert_refused(result, "postContexts is an empty array")
+
+
+def test_refuses_when_required_checks_post_contexts_has_a_whitespace_near_match(receipts_dir):
+    """sol round 1, PR #83: a whitespace-padded near-match to the blocked context name
+    ('Factory Bridge Regressions ') was not an exact match and was silently accepted. A
+    receipt whose elements need trimming to match is itself a data-quality problem and must
+    be refused, not auto-corrected."""
+    write_receipt(receipts_dir, GUARDRAIL_MOVE_NAME, VALID_GUARDRAIL_MOVE)
+    write_receipt(
+        receipts_dir,
+        REQUIRED_CHECKS_NAME,
+        {
+            "headSha": "a" * 40,
+            "preContexts": [],
+            "postContexts": ["Factory Bridge Regressions "],
+            "snapshotRowSha256": "b" * 64,
+        },
+    )
+    result = run_gate(receipts_dir)
+    assert_refused(result, REQUIRED_CHECKS_NAME)
+    assert_refused(result, "whitespace near-match")
+
+
+# ---------------------------------------------------------------------------------------
+# sol round 1, PR #83, MAJOR 2: the prior single test here supplied no receipts, created no
+# sentinel file, and left -BoardRoot at its real-repository default, so it only exercised
+# the FIRST refusal path and could not have detected a write bug anywhere else. This
+# version sandboxes -BoardRoot at tmp_path, creates a real sentinel workflow file there
+# BEFORE running the gate, and re-checks the sentinel's content after EACH of several
+# distinct refusal paths -- not just the first one checked.
+# ---------------------------------------------------------------------------------------
+
+_SENTINEL_WORKFLOW_CONTENT = "name: Tests\n# sentinel content the gate must never touch\n"
+
+
+@pytest.fixture
+def sandboxed_board_root(tmp_path):
+    board_root = tmp_path / "board"
+    receipts_dir = board_root / ".claude-state" / "coordination" / "dual-lane" / "receipts"
+    receipts_dir.mkdir(parents=True)
+    workflows_dir = board_root / ".github" / "workflows"
+    workflows_dir.mkdir(parents=True)
+    sentinel_path = workflows_dir / "tests.yml"
+    sentinel_path.write_text(_SENTINEL_WORKFLOW_CONTENT, encoding="utf-8")
+    return board_root, receipts_dir, sentinel_path
+
+
+REFUSAL_CASES = [
+    ("both_receipts_absent", None, None),
+    ("only_guardrail_move_present", VALID_GUARDRAIL_MOVE, None),
+    ("only_required_checks_present", None, VALID_REQUIRED_CHECKS),
+    (
+        "guardrail_move_conclusion_not_success",
+        {"conclusion": "failure"},
+        VALID_REQUIRED_CHECKS,
+    ),
+    (
+        "required_checks_still_lists_bridge",
+        VALID_GUARDRAIL_MOVE,
+        {**VALID_REQUIRED_CHECKS, "postContexts": VALID_REQUIRED_CHECKS["postContexts"] + [
+            "Factory Bridge Regressions"
+        ]},
+    ),
+]
+
+
+@pytest.mark.parametrize("case_name,guardrail_payload,required_payload", REFUSAL_CASES)
+def test_does_not_touch_any_workflow_file_on_refusal(
+    sandboxed_board_root, case_name, guardrail_payload, required_payload
+):
+    board_root, receipts_dir, sentinel_path = sandboxed_board_root
+    write_receipt(receipts_dir, GUARDRAIL_MOVE_NAME, guardrail_payload)
+    write_receipt(receipts_dir, REQUIRED_CHECKS_NAME, required_payload)
+
+    result = run_gate(receipts_dir, board_root=board_root)
+
+    assert result.returncode != 0, (
+        "case %r: expected refusal, got exit=%r stdout=%r stderr=%r"
+        % (case_name, result.returncode, result.stdout, result.stderr)
+    )
+    actual_content = sentinel_path.read_text(encoding="utf-8")
+    assert actual_content == _SENTINEL_WORKFLOW_CONTENT, (
+        "case %r: sentinel workflow file was modified on refusal (expected %r, got %r)"
+        % (case_name, _SENTINEL_WORKFLOW_CONTENT, actual_content)
+    )
+    # No file besides the sentinel and whichever receipts this case wrote may exist.
+    all_files = sorted(p.relative_to(board_root).as_posix() for p in board_root.rglob("*") if p.is_file())
+    expected_files = {".github/workflows/tests.yml"}
+    if guardrail_payload is not None:
+        expected_files.add(
+            ".claude-state/coordination/dual-lane/receipts/" + GUARDRAIL_MOVE_NAME
+        )
+    if required_payload is not None:
+        expected_files.add(
+            ".claude-state/coordination/dual-lane/receipts/" + REQUIRED_CHECKS_NAME
+        )
+    assert set(all_files) == expected_files, (
+        "case %r: unexpected files after refusal: found %r, expected %r"
+        % (case_name, all_files, sorted(expected_files))
+    )

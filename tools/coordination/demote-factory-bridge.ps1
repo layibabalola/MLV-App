@@ -87,22 +87,65 @@ function Assert-RequiredChecksReceiptDropsBridgeContext {
     <#
     0.4b-required-checks.json is a LATER plan step's receipt (0.4b-i/0.4b-ii). Its
     `postContexts` field is the required-status-checks list AFTER that step landed, and it
-    must NOT contain "Factory Bridge Regressions" -- if it still does, GitHub still requires
-    that job and demoting it here would strand a check that can never go green (the job
-    keeps running, but nothing in it is genuinely required signal after 0.4c-i moved the one
-    suite that was).
+    must be a genuine JSON array of strings that does NOT contain "Factory Bridge
+    Regressions" -- if it still does, GitHub still requires that job and demoting it here
+    would strand a check that can never go green.
+
+    O172-adjacent lesson (sol round 1, PR #83): PowerShell's ConvertFrom-Json can collapse a
+    single-element JSON array to a bare scalar, and the previous revision's `@(...)`
+    coercion made an object-valued, scalar-valued, or empty postContexts pass silently
+    instead of being refused as malformed. This version inspects the RAW JSON TEXT with
+    System.Text.Json, never the ConvertFrom-Json result's .NET type, so the shape check is
+    exact regardless of PowerShell version quirks.
     #>
-    param([Parameter(Mandatory = $true)]$Receipt, [Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$RawJson
+    )
     $hasPostContexts = $Receipt.PSObject.Properties.Name -contains "postContexts"
     if (-not $hasPostContexts -or $null -eq $Receipt.postContexts) {
         throw "demote-factory-bridge refused: $RequiredChecksReceiptName is missing postContexts ($Path)"
     }
-    # ConvertFrom-Json returns a scalar (not an array) for a single-element JSON array in
-    # some PowerShell versions; @(...) normalises every shape -- a scalar, an array, an
-    # empty array -- to a PowerShell array so -contains below is always well-defined.
-    $postContexts = @($Receipt.postContexts)
-    if ($postContexts -contains $BlockedRequiredContext) {
-        throw "demote-factory-bridge refused: $RequiredChecksReceiptName still lists '$BlockedRequiredContext' in postContexts ($Path)"
+
+    try {
+        $doc = [System.Text.Json.JsonDocument]::Parse($RawJson)
+    } catch {
+        throw "demote-factory-bridge refused: $RequiredChecksReceiptName does not parse as JSON for shape inspection ($Path)"
+    }
+    try {
+        $root = $doc.RootElement
+        $postContextsElement = $root.GetProperty("postContexts")
+        if ($postContextsElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+            throw "demote-factory-bridge refused: $RequiredChecksReceiptName postContexts is not a JSON array ($Path)"
+        }
+        $elements = @($postContextsElement.EnumerateArray())
+        if ($elements.Count -eq 0) {
+            throw "demote-factory-bridge refused: $RequiredChecksReceiptName postContexts is an empty array ($Path)"
+        }
+        $values = New-Object System.Collections.Generic.List[string]
+        foreach ($el in $elements) {
+            if ($el.ValueKind -ne [System.Text.Json.JsonValueKind]::String) {
+                throw "demote-factory-bridge refused: $RequiredChecksReceiptName postContexts contains a non-string element ($Path)"
+            }
+            $values.Add($el.GetString())
+        }
+    } finally {
+        $doc.Dispose()
+    }
+
+    # Exact match (case-insensitive) is the ONLY accepted match. A value that only matches
+    # after trimming whitespace is itself a malformed receipt and is refused, not
+    # auto-corrected -- a data-quality problem in a receipt this gate trusts is exactly what
+    # "fail closed" means here.
+    foreach ($value in $values) {
+        if ($value -ieq $BlockedRequiredContext) {
+            throw "demote-factory-bridge refused: $RequiredChecksReceiptName still lists '$BlockedRequiredContext' in postContexts ($Path)"
+        }
+    }
+    $trimmedNearMatches = @($values | Where-Object { $_.Trim() -ieq $BlockedRequiredContext -and $_ -cne $BlockedRequiredContext })
+    if ($trimmedNearMatches.Count -gt 0) {
+        throw "demote-factory-bridge refused: $RequiredChecksReceiptName postContexts contains a whitespace near-match for '$BlockedRequiredContext' ($Path)"
     }
 }
 
@@ -113,7 +156,8 @@ $guardrailMoveReceipt = Read-JsonObjectReceipt -Path $guardrailMovePath -Name $G
 Assert-GuardrailMoveReceiptIsSuccess -Receipt $guardrailMoveReceipt -Path $guardrailMovePath
 
 $requiredChecksReceipt = Read-JsonObjectReceipt -Path $requiredChecksPath -Name $RequiredChecksReceiptName
-Assert-RequiredChecksReceiptDropsBridgeContext -Receipt $requiredChecksReceipt -Path $requiredChecksPath
+$requiredChecksRawJson = Get-Content -LiteralPath $requiredChecksPath -Raw -ErrorAction Stop
+Assert-RequiredChecksReceiptDropsBridgeContext -Receipt $requiredChecksReceipt -Path $requiredChecksPath -RawJson $requiredChecksRawJson
 
 Write-Output "demote-factory-bridge: both receipts validate ($GuardrailMoveReceiptName conclusion=success; $RequiredChecksReceiptName postContexts drops '$BlockedRequiredContext')."
 
