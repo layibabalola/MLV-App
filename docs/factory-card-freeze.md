@@ -156,5 +156,12 @@ cards newly transitioned this run — so repeated runs don't reset it),
   at `--receipt` is never treated as valid evidence by a later run: the
   schema validation above refuses it before any further mutation.
 
-No locking beyond this narrow correctness is used; the script needs no
-subprocess, git, or network access to do its job.
+The actor re-reads and hashes the actual queue immediately before creating a
+receipt, including a queue no-op, and again before reporting success. A mismatch
+returns 6; an unavailable post-write read returns 12. If a receipt has already
+been created, the diagnostic marks it `receipt_stale` and preserves it for
+inspection. These failures never roll back a concurrent writer's queue bytes.
+
+These checks observe the queue at verification time; they provide no ongoing
+lock against other writers. Run the actor under one hub's queue ownership. The
+script needs no subprocess, git, or network access to do its job.

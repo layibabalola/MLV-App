@@ -438,6 +438,26 @@ def receipts_match(existing: dict, computed: dict) -> bool:
     return all(existing.get(k) == computed.get(k) for k in keys)
 
 
+def verify_applied_queue(path: str, expected_sha: str, *, wrote_queue: bool,
+                         receipt_created: bool) -> int:
+    """Observe the actual queue; do not undo another writer or discard evidence."""
+    phase = "QUEUE WAS WRITTEN" if wrote_queue else "QUEUE WRITE WAS A NO-OP"
+    evidence = ("receipt_stale: preserve the created receipt and inspect both files."
+                if receipt_created else "No receipt was created.")
+    try:
+        actual_sha = hashlib.sha256(load_queue_bytes(path)).hexdigest()
+    except OSError as exc:
+        print(f"freeze-factory-cards: {phase}, but the queue cannot be verified: "
+              f"{exc}. {evidence} No rollback attempted.", file=sys.stderr)
+        return 12
+    if actual_sha != expected_sha:
+        print(f"freeze-factory-cards: {phase}, but queue bytes changed on disk; "
+              f"expected={expected_sha} actual={actual_sha}. {evidence} "
+              "Concurrent bytes were preserved; no rollback attempted.", file=sys.stderr)
+        return 6
+    return 0
+
+
 # --------------------------------------------------------------------- main
 
 
@@ -567,6 +587,12 @@ def main(argv=None) -> int:
         queue_written_bytes = computed_queue_bytes
 
     queue_sha = hashlib.sha256(queue_written_bytes).hexdigest()
+    verification = verify_applied_queue(
+        args.queue, queue_sha, wrote_queue=computed_queue_bytes != original_bytes,
+        receipt_created=False,
+    )
+    if verification:
+        return verification
     recorded_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     final_receipt = receipt_payload(
         recorded_utc=recorded_utc,
@@ -620,6 +646,13 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 11
+
+    verification = verify_applied_queue(
+        args.queue, queue_sha, wrote_queue=computed_queue_bytes != original_bytes,
+        receipt_created=True,
+    )
+    if verification:
+        return verification
 
     print(f"freeze-factory-cards: applied. queueSha256={queue_sha} frozenCount(total)="
           f"{plan['frozen_count']}")

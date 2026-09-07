@@ -497,6 +497,98 @@ class TestUnsupportedScopeTypes(TmpCase):
 
 
 class TestConcurrentModificationRealSeam(TmpCase):
+    def test_apply_refuses_queue_replacement_before_receipt(self):
+        from unittest import mock
+        q, r = self.qpath(), self.rpath()
+        _write_queue(q, [{"id": "CM-POST", "state": "open", "scope": "tools/a.py"}])
+        concurrent = b'{"items": [], "concurrent": true}\n'
+        real_replace = ffc.os.replace
+
+        def replace_then_change(source, destination):
+            real_replace(source, destination)
+            with open(destination, "wb") as handle:
+                handle.write(concurrent)
+
+        with mock.patch.object(ffc.os, "replace", side_effect=replace_then_change):
+            rc = ffc.main(["--queue", q, "--receipt", r, "--apply"])
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(open(q, "rb").read(), concurrent)
+        self.assertFalse(os.path.exists(r))
+
+    def test_apply_refuses_queue_change_during_receipt_creation(self):
+        from unittest import mock
+        import contextlib
+        import io
+        q, r = self.qpath(), self.rpath()
+        _write_queue(q, [{"id": "CM-RECEIPT", "state": "open", "scope": "tools/a.py"}])
+        concurrent = b'{"items": [], "concurrent": true}\n'
+        real_dump = ffc.json.dump
+
+        def dump_then_change(*args, **kwargs):
+            real_dump(*args, **kwargs)
+            with open(q, "wb") as handle:
+                handle.write(concurrent)
+
+        diagnostics = io.StringIO()
+        with mock.patch.object(ffc.json, "dump", side_effect=dump_then_change), \
+                contextlib.redirect_stderr(diagnostics):
+            rc = ffc.main(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(rc, 6)
+        self.assertIn("receipt_stale", diagnostics.getvalue())
+        self.assertIn("QUEUE WAS WRITTEN", diagnostics.getvalue())
+        self.assertEqual(open(q, "rb").read(), concurrent)
+        self.assertTrue(os.path.exists(r), "Preserve newly written evidence for diagnosis")
+        self.assertNotEqual(json.load(open(r))["queueSha256"], hashlib.sha256(concurrent).hexdigest())
+
+    def test_apply_refuses_postwrite_read_failure_without_receipt(self):
+        from unittest import mock
+        import contextlib
+        import io
+        q, r = self.qpath(), self.rpath()
+        _write_queue(q, [{"id": "CM-READ", "state": "open", "scope": "tools/a.py"}])
+        real_load = ffc.load_queue_bytes
+        calls = 0
+
+        def load_then_fail(path):
+            nonlocal calls
+            calls += 1
+            if calls >= 3:
+                raise OSError("fixture post-write read unavailable")
+            return real_load(path)
+
+        diagnostics = io.StringIO()
+        with mock.patch.object(ffc, "load_queue_bytes", side_effect=load_then_fail), \
+                contextlib.redirect_stderr(diagnostics):
+            rc = ffc.main(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(rc, 12)
+        self.assertIn("QUEUE WAS WRITTEN", diagnostics.getvalue())
+        self.assertIn("No receipt was created", diagnostics.getvalue())
+        self.assertEqual(json.load(open(q))["items"][0]["state"], FROZEN_STATE)
+        self.assertFalse(os.path.exists(r))
+
+    def test_noop_without_receipt_detects_concurrent_change(self):
+        from unittest import mock
+        q, r = self.qpath(), self.rpath()
+        _write_queue(q, [{"id": "NOOP", "kind": "product", "track": "product",
+                          "owner": "sonnet", "state": "open"}])
+        real_load = ffc.load_queue_bytes
+        calls = 0
+        concurrent = b'{"items": [], "concurrent": true}\n'
+
+        def load_then_change(path):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                with open(q, "wb") as handle:
+                    handle.write(concurrent)
+            return real_load(path)
+
+        with mock.patch.object(ffc, "load_queue_bytes", side_effect=load_then_change):
+            rc = ffc.main(["--queue", q, "--receipt", r, "--apply"])
+        self.assertEqual(rc, 6)
+        self.assertEqual(open(q, "rb").read(), concurrent)
+        self.assertFalse(os.path.exists(r))
+
     def test_apply_refuses_when_queue_mutated_between_load_and_prewrite_check(self):
         cards = [{"id": "CM-2", "state": "open", "scope": "tools/a.py"}]
         q = self.qpath()
