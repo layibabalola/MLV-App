@@ -42,7 +42,7 @@ jobs:
         python -m pip check
 
     - name: Verify vendored native payload integrity
-      run: python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
+      run: python -m tools.repo_hygiene.vendored_native_payloads --repo-root . --require-target-compatible windows-x86_64
 
     - name: Install OpenSSL
       timeout-minutes: 15
@@ -253,7 +253,8 @@ jobs:
              --tool "windeployqt=$DeployPath" `
              --tool-version "qmake=$QtVersion" `
              --tool-version "compiler=$CompilerVersion|$CompilerTarget" `
-             --tool-version "windeployqt=$QtVersion"
+             --tool-version "windeployqt=$QtVersion" `
+             --enable-vendored-compatibility-admission
 
     - name: Save release evidence
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

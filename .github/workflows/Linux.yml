@@ -121,6 +121,15 @@ jobs:
       run:  |
             export PATH="${QT_ROOT_DIR}/bin:${PATH}"
             qmake ${{ env.SOURCE_DIR }}/qt/MLVApp.pro
+            generated_cxxflags="$(sed -n 's/^CXXFLAGS[[:space:]]*=[[:space:]]*//p' Makefile | head -n 1)"
+            echo "generated CXXFLAGS=${generated_cxxflags}"
+            case " ${generated_cxxflags} " in
+              *" -std=c++17 "*) ;;
+              *) echo "qmake did not generate -std=c++17 for Linux Qt ${QT_VERSION}" >&2; exit 1 ;;
+            esac
+            case " ${generated_cxxflags} " in
+              *" -std=c++11 "*) echo "qmake retained conflicting -std=c++11 for Linux Qt ${QT_VERSION}" >&2; exit 1 ;;
+            esac
             make -j8
             ls -al
             mkdir image

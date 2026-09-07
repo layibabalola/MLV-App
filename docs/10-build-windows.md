@@ -207,6 +207,14 @@ Use `.claude-state\scripts\run-mlvapp.ps1` for deterministic launches. It:
   build time. Copy the contents of `platform\qt\FFmpeg\ffmpegWin64.zip` into the
   same `release\` directory as the built `MLVApp.exe`.
 
+The release package includes the existing 32-bit `raw2mlv.exe` and `libraw.dll`
+helper pair. MLVApp launches RAW2MLV in a separate process; it requires Windows
+WOW64 support. Release evidence records these exact, hash-verified members as
+`x86` with `wow64-child-process` compatibility. The application and its Qt/MinGW
+libraries must remain x64. Nested, renamed, modified, or additional x86 members
+fail validation. This compatibility declaration does not resolve the vendored
+payload's existing provenance or redistribution-readiness blockers.
+
 ## Cross-references
 
 - [`docs/11-build-macos-linux.md`](11-build-macos-linux.md) — macOS and Linux

@@ -2101,6 +2101,20 @@ class RepoHygieneTests(unittest.TestCase):
             verify_block = blocks["Verify required Qt multimedia plugins"]
             copy_block = blocks["Copy Qt multimedia plugins"]
             install_qt_block = blocks["Install Qt 6.10.2"]
+            build_block = blocks["Build"]
+            generated_flag_contract = (
+                "qmake ${{ env.SOURCE_DIR }}/qt/MLVApp.pro",
+                "generated_cxxflags=\"$(sed -n 's/^CXXFLAGS[[:space:]]*=[[:space:]]*//p' Makefile | head -n 1)\"",
+                '*" -std=c++17 "*) ;;',
+                '*) echo "qmake did not generate -std=c++17 for Linux Qt ${QT_VERSION}" >&2; exit 1 ;;',
+                '*" -std=c++11 "*) echo "qmake retained conflicting -std=c++11 for Linux Qt ${QT_VERSION}" >&2; exit 1 ;;',
+                "make -j8",
+            )
+            positions = []
+            for token in generated_flag_contract:
+                self.assertEqual(build_block.count(token), 1)
+                positions.append(build_block.index(token))
+            self.assertEqual(positions, sorted(positions))
             expected_tool_probes = (
                 "command -v qmake",
                 "qmake -v",
