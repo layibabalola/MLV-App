@@ -161,9 +161,9 @@ counter logic or other independent product work.
 
 Adopt these limits through the existing policy amendment process:
 
-- Retain the plan's maximum four model attempts: initial Sonnet, one corrected
+- Propose a maximum of three model attempts: initial Sonnet, one corrected
   attempt with the failure attached, one senior repair/adjudication, then a
-  terminal disposition. Do not start a fifth differently named card for the same
+  terminal disposition. Do not start a fourth differently named card for the same
   failed tuple. Record provider refusals separately from implementation failures.
 - An identical input/head/test failure is not retried until a named input changes.
   Infrastructure checks may be reattempted only with a recorded external-state

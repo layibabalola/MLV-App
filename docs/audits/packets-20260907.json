@@ -6,7 +6,7 @@
   "worker_contract": {
     "base_binding": "Coordinator substitutes a fresh full base SHA and exact artifacts at dispatch; the audit base is evidence only.",
     "mandatory_read": "Applicable AGENTS.md and scoped policies plus this packet and its named existing card.",
-    "max_attempts": 4,
+    "max_attempts": 3,
     "default_editor_now": "sonnet through existing wrapper",
     "luna_now": "read-only; current adapter uses high reasoning",
     "result_fields": [
