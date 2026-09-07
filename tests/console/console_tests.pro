@@ -1,6 +1,6 @@
 include(../common/test_defaults.pri)
 
-QT += core
+QT += core network
 
 TEMPLATE = app
 TARGET = console_tests
@@ -13,6 +13,7 @@ SOURCES += \
     $$REPO_ROOT/tests/common/hash_helpers.cpp \
     $$REPO_ROOT/tests/common/repo_paths.cpp \
     $$REPO_ROOT/platform/qt/ReceiptSettings.cpp \
+    $$REPO_ROOT/platform/qt/DownloadManager.cpp \
     $$REPO_ROOT/src/mlv/frame_caching.c \
     $$REPO_ROOT/src/mlv/pipeline_stage_capture.c \
     $$REPO_ROOT/src/batch/BatchContext.cpp \
@@ -39,11 +40,15 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_playback_quality_auto_mode.cpp \
     $$REPO_ROOT/tests/console/test_receipt_loader.cpp \
     $$REPO_ROOT/tests/console/test_receipt_applier.cpp \
-    $$REPO_ROOT/tests/console/test_rendered_video_runner.cpp
+    $$REPO_ROOT/tests/console/test_rendered_video_runner.cpp \
+    $$REPO_ROOT/tests/console/test_sync_download_waiter.cpp \
+    $$REPO_ROOT/tests/console/test_download_manager.cpp
 
 HEADERS += \
     $$REPO_ROOT/platform/qt/FpmNameValidator.h \
     $$REPO_ROOT/platform/qt/AtomicFileReplace.h \
+    $$REPO_ROOT/platform/qt/SyncDownloadWaiter.h \
+    $$REPO_ROOT/platform/qt/DownloadManager.h \
     $$REPO_ROOT/tests/common/minitest.h \
     $$REPO_ROOT/tests/common/test_artifacts.h \
     $$REPO_ROOT/tests/common/test_runtime.h \
