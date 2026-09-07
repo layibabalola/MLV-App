@@ -43,9 +43,19 @@ stopped, the HUB reconciles the canonical checkout and updates the raw
 preserving all prior values and adding a fresh, harmless hook-wiring probe.
 This actor and its tests do not edit any live receipt or registry. Old
 worktrees checked out before this `.gitattributes` change must be refreshed
-from the reviewed commit (a plain `git checkout`/re-clone re-smudges tracked
-files against the new rules) or are ineligible for hash-sensitive work; no
-prior evidence is erased to force that refresh.
+from the reviewed commit or are ineligible for hash-sensitive work. A fresh
+checkout applies the rules, but switching an existing checkout or using
+`checkout-index --force` may leave unchanged CRLF files untouched. Verify raw
+hashes rather than assuming a switch refreshed them. Preserve the original
+bytes, verify their normalized content equals the reviewed blobs, materialize
+those exact blobs, and refresh only the affected index entries. Require zero
+staged diff and a clean checkout afterward; retain all prior evidence.
+
+Run the complete hook-registration suite in a fresh isolated checkout. Its
+venue-away fixture assumes the checkout differs from `BoardRoot`; running that
+fixture at the canonical root does not test that condition. The actual harmless
+CLI wiring probe must observe a denied tool invocation. On Windows, pass its
+multiline prompt through stdin: the `claude.cmd` argument path can lose lines.
 
 Before PATCH, an immutable `0.4b-transition-intent.json` preserves the old check
 set. A fresh GET must prove all five resulting checks and their app bindings.
@@ -62,3 +72,15 @@ A completed transition is one-shot. No automatic rollback or blind retry occurs.
 The fixtures in `tools/repo_hygiene/test_set_required_checks.py` run against a fake
 GitHub executable and temporary receipts. They never contact GitHub or alter the
 machine's protection policy.
+
+### Separating bridge diagnostics
+
+After the guardrail move and required-check transition receipts exist,
+`demote-factory-bridge.ps1` previews a local workflow move. Pass the isolated
+checkout as `-RepoRoot` and the receipt directory as `-ReceiptsDir`; use
+`-Apply` to materialize it there. The actor does not change branch protection
+or write receipts. The reviewed PR must preserve the bridge job's steps and
+pinned actions, move them to the visible `Factory Bridge` workflow on every PR,
+and update the contributor list and workflow inventory together. Bridge failures
+remain visible follow-up work; the five product and hygiene checks above remain
+required. The hub records `0.4c-demoted.json` after the reviewed PR lands.
