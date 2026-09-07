@@ -15,6 +15,38 @@ hash and exact-head Sol approval, the pinned Batch Compile falsifier, a guardrai
 head bound to its own `execution-control-0.4c-i.json` receipt, successful
 nonempty Windows guardrail coverage, and the existing protection snapshot.
 
+The guardrail-head binding compares `0.4c-guardrail-move.json.headSha` against
+`execution-control-0.4c-i.json.reviewedHeadSha` -- the PR HEAD the hosted
+guardrail workflow actually ran against and Sol reviewed -- never against that
+receipt's `mergeSha`. On a valid chain the merge commit is legitimately a
+different SHA than the reviewed/tested head; comparing against `mergeSha`
+rejects real, valid evidence. Both `reviewedHeadSha` and `mergeSha` are
+still validated as full 40-hex commit SHAs.
+
+### Deterministic control-plane checkout bytes
+
+The fixed-set receipts (and this actor) hash Git *blob* bytes, which Git
+always LF-normalizes. Other consumers (the coordination wrapper, the 0.2
+gate) hash raw *disk* bytes after checkout. Under `core.autocrlf=true` those
+only agree for paths `.gitattributes` pins to `text eol=lf`. `.gitattributes`
+now pins the eleven control-plane paths this actor and the coordination
+loop depend on (hooks, their tests, and the `tools/coordination/*.ps1`/`*.py`
+scripts) to `text eol=lf`, so a fresh checkout on any `core.autocrlf=true`
+machine byte-matches the Git blob. `tools/repo_hygiene/test_control_plane_line_endings.py`
+proves this with a disposable Git fixture (no real hook files touched, no
+global Git config written) and proves the guarantee breaks -- and is
+restored -- when a pinned rule is removed.
+
+**Migration constraint:** after the reviewed merge, and with editing workers
+stopped, the HUB reconciles the canonical checkout and updates the raw
+`hookSha256`/`hookTestSha256` fields in the existing enforcement receipt,
+preserving all prior values and adding a fresh, harmless hook-wiring probe.
+This actor and its tests do not edit any live receipt or registry. Old
+worktrees checked out before this `.gitattributes` change must be refreshed
+from the reviewed commit (a plain `git checkout`/re-clone re-smudges tracked
+files against the new rules) or are ineligible for hash-sensitive work; no
+prior evidence is erased to force that refresh.
+
 Before PATCH, an immutable `0.4b-transition-intent.json` preserves the old check
 set. A fresh GET must prove all five resulting checks and their app bindings.
 Only then does the actor append a snapshot row and create the completion receipt.

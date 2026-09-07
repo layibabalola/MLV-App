@@ -37,7 +37,12 @@ class RequiredChecksTransitionTests(unittest.TestCase):
         self.write('0.4c-guardrail-move.json', {
             'headSha': 'c' * 40, 'conclusion': 'success', 'collectedTests': 176,
             'requiredJobs': ['Repo Hygiene Python (windows-latest)']})
-        self.write('execution-control-0.4c-i.json', {'mergeSha': 'c' * 40})
+        # reviewedHeadSha is the PR HEAD the hosted guardrail workflow actually ran
+        # against; mergeSha is deliberately a DIFFERENT commit, matching the real
+        # chain (0.4c-guardrail-move headSha=230bb4be.., execution-control-0.4c-i
+        # reviewedHeadSha=230bb4be.., mergeSha=4c5b8d3f..) that the old headSha ==
+        # mergeSha comparison wrongly refused.
+        self.write('execution-control-0.4c-i.json', {'reviewedHeadSha': 'c' * 40, 'mergeSha': '9' * 40})
         (self.board / 'approval.json').write_text(json.dumps({'verdict': 'APPROVE', 'subject_sha': 'd' * 40}), encoding='utf-8')
         self.write('execution-control-0.4b-i.json', {
             'mergeSha': 'e' * 40, 'reviewedHeadSha': 'd' * 40, 'solVerdictPath': 'approval.json',
@@ -120,11 +125,35 @@ exit 0
                 finally:
                     path.write_bytes(original)
 
-    def test_guardrail_head_must_match_its_execution_control_receipt(self):
+    def test_guardrail_head_must_match_reviewed_head_not_merge_sha(self):
+        # Fixture proof that a genuinely valid receipt chain (reviewedHeadSha ==
+        # guardrail headSha, mergeSha legitimately different) is accepted -- this
+        # also proves the OLD comparison (headSha against mergeSha) would have
+        # refused this exact valid chain, since mergeSha != headSha here.
+        name = 'execution-control-0.4c-i.json'
+        control = self.read(name)
+        guardrail = self.read('0.4c-guardrail-move.json')
+        self.assertEqual(control['reviewedHeadSha'], guardrail['headSha'])
+        self.assertNotEqual(control['mergeSha'], guardrail['headSha'],
+                             'fixture must exercise reviewedHeadSha != mergeSha, the real-world shape')
+        result = self.run_actor()
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_wrong_reviewed_head_is_refused(self):
         name = 'execution-control-0.4c-i.json'
         original = self.read(name)
-        self.write(name, {**original, 'mergeSha': 'f' * 40})
+        self.write(name, {**original, 'reviewedHeadSha': 'f' * 40})
         self.assert_refused_without_api('guardrail head is not bound to its execution-control-0.4c-i receipt')
+        self.write(name, original)
+
+    def test_wrong_merge_sha_alone_no_longer_causes_a_refusal(self):
+        # Documents the fix: mergeSha diverging from headSha is expected and must
+        # not, by itself, refuse -- only a mismatched reviewedHeadSha may.
+        name = 'execution-control-0.4c-i.json'
+        original = self.read(name)
+        self.write(name, {**original, 'mergeSha': '8' * 40})
+        result = self.run_actor()
+        self.assertEqual(0, result.returncode, result.stderr)
         self.write(name, original)
 
     def test_malformed_receipt_json_refuses_without_writes(self):

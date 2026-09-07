@@ -84,10 +84,14 @@ Sha $falsifier.workflowBaseSha 'falsifier workflowBaseSha'
 Sha $falsifier.headSha 'falsifier headSha'
 Sha $guardrail.headSha 'guardrail headSha'
 Sha $guardrailControl.mergeSha 'guardrail control mergeSha'
+Sha $guardrailControl.reviewedHeadSha 'guardrail control reviewedHeadSha'
 if ($falsifier.workflowBaseSha -cne $base.mergeSha -or $falsifier.headSha -ceq $base.mergeSha -or
     $falsifier.failingContext -cne 'Batch Compile' -or $falsifier.failingStep -cne 'Build MLVApp' -or
     $falsifier.conclusion -cne 'failure') { Refuse 'falsifier does not prove Batch Compile at the pinned workflow base' }
-if ($guardrail.headSha -cne $guardrailControl.mergeSha) { Refuse 'guardrail head is not bound to its execution-control-0.4c-i receipt' }
+# The hosted guardrail workflow runs against the PR HEAD that Sol independently
+# reviewed (reviewedHeadSha), not against the later merge commit (mergeSha) --
+# those two are legitimately different SHAs on a valid receipt chain.
+if ($guardrail.headSha -cne $guardrailControl.reviewedHeadSha) { Refuse 'guardrail head is not bound to its execution-control-0.4c-i receipt' }
 if ($guardrail.conclusion -cne 'success' -or
     -not (EqualNames $guardrail.requiredJobs @('Repo Hygiene Python (windows-latest)')) -or
     ($guardrail.collectedTests -isnot [long] -and $guardrail.collectedTests -isnot [int]) -or
