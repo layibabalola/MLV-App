@@ -105,6 +105,23 @@ jobs:
           python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
 
+      - name: Run coordination and self-healing guardrails
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pytest `
+            tools\coordination\test_coordination_guardrails.py `
+            tests\coordination `
+            -q
+
+      - name: Run demote-factory-bridge refusal-path tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pytest `
+            tools\coordination\test_demote_factory_bridge.py `
+            -q
+
       - name: Verify generated Python dependency locks
         if: runner.os == 'Windows'
         run: |
@@ -174,13 +191,6 @@ jobs:
           # of which the prior single-file invocation covered.
           python -m pytest `
             tools\agent-bridge `
-            -q
-
-      - name: Run coordination and self-healing guardrails
-        run: |
-          python -m pytest `
-            tools\coordination\test_coordination_guardrails.py `
-            tests\coordination `
             -q
 
       - name: Run profiling test suite
