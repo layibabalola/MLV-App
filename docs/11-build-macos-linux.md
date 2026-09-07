@@ -57,7 +57,8 @@ For Qt 6 on Apple Silicon the flow is the same as Intel:
 4. Build and Start.
 
 The official `macOS-Arm64.yml` workflow mirrors the Intel flow against
-`/opt/homebrew/opt/qt@5/bin` and runs on `macos-14`.
+`/opt/homebrew/opt/qt@5/bin` and runs on `macos-15`; that automated workflow
+still uses Qt 5, independently of the manual Qt 6 instructions above.
 
 ## macOS (Apple Silicon, with Qt 5 from source)
 
@@ -119,74 +120,53 @@ Alternative: download the easy-to-use
 [compiler app from @dannephoto](https://bitbucket.org/Dannephoto/mlv_app_compiler-git/downloads/mlv_app_compiler_arm64.dmg)
 and double-click to build.
 
-## Linux (general)
+## Linux (Qt 6.10.2 / GCC 13)
 
-Install Qt (5.6 .. 5.15.2 or 6.4+), FFmpeg (the project targets v3.3.2), and
-the other dependencies. The GitHub Linux runner uses:
+The official release workflow uses Ubuntu 24.04, GCC/G++ 13, and the Qt
+6.10.2 `gcc_64` kit including `qtmultimedia`. Qt's prebuilt Linux binaries
+require glibc 2.39; building this AppImage on Ubuntu 24.04 does not establish
+compatibility with older distributions. See the [Qt 6.10 Linux requirements](https://doc.qt.io/qt-6.10/linux.html).
 
-```bash
-sudo apt-get install --no-install-recommends \
-  make g++ qt5-qmake qtbase5-dev qtmultimedia5-dev \
-  libqt5multimedia5 libqt5multimedia5-plugins \
-  libqt5opengl5-dev libqt5designer5 libqt5svg5-dev \
-  libfuse2 libxkbcommon-x11-0 appstream
-```
-
-Then build:
+From the repository root, install the workflow dependencies:
 
 ```bash
-cd platform/qt/
-qmake MLVApp.pro   # or equivalent (depending on distro, version, etc.)
-make -j$(nproc)
-./mlvapp
+sudo apt-get update
+sudo apt-get install -y make gcc-13 g++-13 libgl1-mesa-dev libegl1 \
+  libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+  libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 \
+  libxcb-xfixes0 libxcb-shape0 libfuse2t64 appstream
+python -m pip install --disable-pip-version-check --no-input --only-binary=:all: \
+  --require-hashes -r .github/requirements/pip.txt
+python -m pip install --disable-pip-version-check --no-input --only-binary=:all: \
+  --require-hashes -r .github/requirements/aqtinstall.txt
+python -m pip check
+python -m aqt install-qt --outputdir qt linux desktop 6.10.2 linux_gcc_64 -m qtmultimedia
+export QT_ROOT_DIR="$PWD/qt/6.10.2/gcc_64"
+export PATH="$QT_ROOT_DIR/bin:$PATH"
+mkdir -p platform/build
+cd platform/build
+qmake ../qt/MLVApp.pro QMAKE_CC=gcc-13 QMAKE_CXX=g++-13 QMAKE_LINK=g++-13
+make -j"$(nproc)"
 ```
 
-A detailed step-by-step guide for compiling MLV App on Linux lives at
-[sternenkarten.com/tutorial-englisch](https://sternenkarten.com/tutorial-englisch/)
-(courtesy of @seescho).
+The workflow selects GCC 13 before building, verifies the resolved compiler
+and Qt versions, and uploads a `toolchain-receipt-<run-id>` artifact. Read the
+receipt for the particular run before claiming hosted build success.
 
 ### AppImage packaging (per `.github/workflows/Linux.yml`)
 
-The official `Linux.yml` workflow produces a portable `.AppImage` on
-`ubuntu-22.04`. The full recipe is in the workflow file; the condensed flow
-is:
+Use the complete workflow for packaging. It verifies and extracts the
+vendored FFmpeg and RAW2MLV payloads, then copies the Qt 6 multimedia plugins
+from `$(qmake -query QT_INSTALL_PLUGINS)/multimedia`. It requires
+`libffmpegmediaplugin.so` both before and after copying. Missing plugins fail
+the build.
 
-```bash
-cd platform/build
-qmake ../qt/MLVApp.pro
-make -j8
-mkdir image
-cp ../qt/RetinaIMG/MLVAPP.png image/
-cp ../qt/mlvapp.desktop image/
-
-mkdir -p image/usr/bin
-tar -C ../qt/FFmpeg/ -xvJf ../qt/FFmpeg/ffmpegLinux.tar.xz --strip=1 --wildcards */ffmpeg
-chmod +x ../qt/FFmpeg/ffmpeg
-mv ../qt/FFmpeg/ffmpeg image/usr/bin/
-
-tar -C ../qt/raw2mlv/ -xvJf ../qt/raw2mlv/raw2mlvLinux.tar.xz --strip=1 --wildcards */raw2mlv
-chmod +x ../qt/raw2mlv/raw2mlv
-mv ../qt/raw2mlv/raw2mlv image/usr/bin/
-
-mkdir -p image/usr/plugins/audio
-mkdir -p image/usr/plugins/mediaservice
-mkdir -p image/usr/plugins/playlistformats
-cp -r /usr/lib/x86_64-linux-gnu/qt5/plugins/audio/*          image/usr/plugins/audio/          || true
-cp -r /usr/lib/x86_64-linux-gnu/qt5/plugins/mediaservice/*   image/usr/plugins/mediaservice/   || true
-cp -r /usr/lib/x86_64-linux-gnu/qt5/plugins/playlistformats/* image/usr/plugins/playlistformats/ || true
-
-export QT_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/qt5/plugins
-linuxdeploy-x86_64.AppImage \
-  --desktop-file=image/mlvapp.desktop \
-  --executable=mlvapp \
-  --appdir=image \
-  --plugin=qt \
-  --output=appimage \
-  --verbosity=3 \
-  --icon-file=image/MLVAPP.png
-```
-
-The resulting `MLVApp-*.AppImage` is the artifact uploaded by the workflow.
+The workflow downloads version-pinned linuxdeploy and its Qt/AppImage
+plugins, verifies their SHA-256 hashes, and packages `mlvapp` with
+`--plugin=qt --output=appimage`. It uploads the resulting `MLVApp.AppImage`
+and a separate release-evidence inventory. The AppImage still requires a
+compatible host glibc and graphics stack; packaging alone does not prove
+runtime compatibility.
 
 ### Debian / Arch / NixOS packages
 

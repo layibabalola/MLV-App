@@ -13,11 +13,13 @@ concurrency:
 env:
   SOURCE_DIR:   ${{ github.workspace }}/platform
   ARTIFACT:     ${{ github.workspace }}/platform/build/MLVApp.AppImage
+  QT_VERSION:   6.10.2
+  QT_OUTPUT_DIR: ${{ github.workspace }}/qt
 
 jobs:
   build:
 
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
 
     steps:
@@ -30,10 +32,12 @@ jobs:
       with:
         python-version-file: ".python-version"
 
-    - name: Install hash-locked payload verification dependencies
+    - name: Install hash-locked Python dependencies
+      timeout-minutes: 15
       run: |
         python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
         python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/repo-hygiene.txt
+        python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/aqtinstall.txt
         python -m pip check
 
     - name: Verify vendored native payload integrity
@@ -43,27 +47,61 @@ jobs:
       run: |
           sudo apt-get update
           sudo apt-get install -y \
-            make g++ qt5-qmake qtbase5-dev qtmultimedia5-dev \
-            libqt5multimedia5 libqt5multimedia5-plugins \
-            libqt5opengl5-dev libqt5designer5 libqt5svg5-dev \
-            libfuse2 libxkbcommon-x11-0 appstream
+            gcc-13 g++-13 \
+            libgl1-mesa-dev libegl1 \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 \
+            libxcb-xfixes0 libxcb-shape0 \
+            libfuse2t64 appstream
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100
+
+    - name: Install Qt 6.10.2
+      run: |
+           set -euo pipefail
+           qt_install_root="${QT_OUTPUT_DIR}/${QT_VERSION}"
+           qt_root="${qt_install_root}/gcc_64"
+           qt_qmake="${qt_root}/bin/qmake"
+           qt_ready=0
+           for attempt in 1 2 3; do
+             rm -rf "${qt_install_root}"
+             if [ -d "${qt_install_root}" ]; then echo "Qt retry cleanup did not remove ${qt_install_root}" >&2; exit 1; fi
+             if python -m aqt install-qt --outputdir "${QT_OUTPUT_DIR}" linux desktop "${QT_VERSION}" linux_gcc_64 -m qtmultimedia && [ -x "${qt_qmake}" ]; then
+               qt_ready=1
+               break
+             fi
+             sleep $((5 * attempt))
+           done
+           if [ "${qt_ready}" -ne 1 ]; then echo "aqt Qt install failed or qmake is missing after 3 attempts" >&2; exit 1; fi
+           echo "QT_ROOT_DIR=${qt_root}" >> "${GITHUB_ENV}"
+           echo "${qt_root}/bin" >> "${GITHUB_PATH}"
 
     - name: Verify required Qt multimedia plugins
       run: |
            set -euo pipefail
+           export PATH="${QT_ROOT_DIR}/bin:${PATH}"
+           export CC=gcc-13
+           export CXX=g++-13
            command -v qmake
            qmake -v
            command -v make
            make --version
            command -v g++
            g++ --version
-           plugin_root=/usr/lib/x86_64-linux-gnu/qt5/plugins
-           required_directories=(audio mediaservice playlistformats)
+           compiler_major="$(g++ -dumpversion | cut -d. -f1)"
+           if [ "${compiler_major}" != "13" ]; then
+             echo "expected native GCC major version 13, observed ${compiler_major}" >&2
+             exit 1
+           fi
+           qt_version="$(qmake -query QT_VERSION)"
+           if [ "${qt_version}" != "${QT_VERSION}" ]; then
+             echo "expected Qt ${QT_VERSION}, observed ${qt_version}" >&2
+             exit 1
+           fi
+           plugin_root="$(qmake -query QT_INSTALL_PLUGINS)"
+           required_directories=(multimedia)
            required_plugins=(
-             audio/libqtaudio_alsa.so
-             audio/libqtmedia_pulse.so
-             mediaservice/libgstmediaplayer.so
-             playlistformats/libqtmultimedia_m3u.so
+             multimedia/libffmpegmediaplugin.so
            )
            for directory in "${required_directories[@]}"; do
              test -d "${plugin_root}/${directory}"
@@ -71,14 +109,27 @@ jobs:
            for plugin in "${required_plugins[@]}"; do
              test -f "${plugin_root}/${plugin}"
            done
-           
+
     - name: Create build directory
       run:  mkdir ${{ env.SOURCE_DIR }}/build
 
     - name: Build
       working-directory: ${{ env.SOURCE_DIR }}/build
+      env:
+        CC: gcc-13
+        CXX: g++-13
       run:  |
+            export PATH="${QT_ROOT_DIR}/bin:${PATH}"
             qmake ${{ env.SOURCE_DIR }}/qt/MLVApp.pro
+            generated_cxxflags="$(sed -n 's/^CXXFLAGS[[:space:]]*=[[:space:]]*//p' Makefile | head -n 1)"
+            echo "generated CXXFLAGS=${generated_cxxflags}"
+            case " ${generated_cxxflags} " in
+              *" -std=c++17 "*) ;;
+              *) echo "qmake did not generate -std=c++17 for Linux Qt ${QT_VERSION}" >&2; exit 1 ;;
+            esac
+            case " ${generated_cxxflags} " in
+              *" -std=c++11 "*) echo "qmake retained conflicting -std=c++11 for Linux Qt ${QT_VERSION}" >&2; exit 1 ;;
+            esac
             make -j8
             ls -al
             mkdir image
@@ -98,13 +149,10 @@ jobs:
       working-directory: ${{ env.SOURCE_DIR }}/build
       run: |
            set -euo pipefail
-           plugin_root=/usr/lib/x86_64-linux-gnu/qt5/plugins
-           required_directories=(audio mediaservice playlistformats)
+           plugin_root="$(qmake -query QT_INSTALL_PLUGINS)"
+           required_directories=(multimedia)
            required_plugins=(
-             audio/libqtaudio_alsa.so
-             audio/libqtmedia_pulse.so
-             mediaservice/libgstmediaplayer.so
-             playlistformats/libqtmultimedia_m3u.so
+             multimedia/libffmpegmediaplugin.so
            )
            for directory in "${required_directories[@]}"; do
              source_directory="${plugin_root}/${directory}"
@@ -149,9 +197,41 @@ jobs:
     - name: Create Appimage
       working-directory: ${{ env.SOURCE_DIR }}/build
       run: |
-           export QT_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/qt5/plugins
+           export QT_PLUGIN_PATH="$(qmake -query QT_INSTALL_PLUGINS)"
            linuxdeploy-x86_64.AppImage --desktop-file=image/mlvapp.desktop --executable=mlvapp --appdir=image --plugin=qt --output=appimage --verbosity=3 --icon-file=image/MLVAPP.png
            cp MLVApp-*.AppImage ${{ env.ARTIFACT }}
+
+    - name: Print toolchain
+      run: |
+           set -euo pipefail
+           qt_version="$(qmake -query QT_VERSION)"
+           compiler_version="$(g++ -dumpfullversion -dumpversion)"
+           echo "qmake QT_VERSION=${qt_version}"
+           echo "g++ version=${compiler_version}"
+           if [ "${qt_version}" != "6.10.2" ]; then
+             echo "Print toolchain: expected Qt 6.10.2, observed '${qt_version}'" >&2
+             exit 1
+           fi
+           compiler_major="$(g++ -dumpversion | cut -d. -f1)"
+           if [ "${compiler_major}" != "13" ]; then
+             echo "Print toolchain: expected native GCC major 13, observed '${compiler_major}'" >&2
+             exit 1
+           fi
+           toolchain_log="${RUNNER_TEMP}/toolchain-log.txt"
+           {
+             echo "QT_VERSION=${qt_version}"
+             echo "COMPILER_VERSION=${compiler_version}"
+             echo "QMAKE_EXE=$(command -v qmake)"
+             echo "GXX_EXE=$(command -v g++)"
+           } > "${toolchain_log}"
+           echo "TOOLCHAIN_LOG=${toolchain_log}" >> "${GITHUB_ENV}"
+
+    - name: Upload toolchain receipt
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: toolchain-receipt-${{ github.run_id }}
+        path: ${{ env.TOOLCHAIN_LOG }}
+        if-no-files-found: error
 
     - name: Generate single-build release evidence
       run: |
