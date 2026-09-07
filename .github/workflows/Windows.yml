@@ -15,7 +15,7 @@ env:
   ARTIFACT:     ${{ github.workspace }}\platform\build\MLVApp\MLVApp.Win64.zip
   OPENSSL_BIN:  C:\Program Files\OpenSSL\bin
   QT_VERSION:   6.10.2
-  QT_OUTPUT_DIR: ${{ github.workspace }}\qt
+  QT_OUTPUT_DIR: ${{ runner.temp }}\mlv-release-qt
 
 jobs:
   build:
@@ -163,10 +163,15 @@ jobs:
     - name: Build
       working-directory: ${{ env.SOURCE_DIR }}\build
       run:  |
+            $ErrorActionPreference = "Stop"
+            python "${{ github.workspace }}\tools\release\build_stamp.py" generate --repo-root "${{ github.workspace }}" --expected-sha "${{ github.sha }}" --output-header "${{ env.SOURCE_DIR }}\build\build_buildinfo.h"
+            if ($LASTEXITCODE -ne 0) { throw "build stamp generation failed with exit code $LASTEXITCODE" }
             & $env:QMAKE_EXE -r "${{ env.SOURCE_DIR }}\qt\MLVApp.pro"
             if ($LASTEXITCODE -ne 0) { throw "qmake failed with exit code $LASTEXITCODE" }
             & $env:MAKE_EXE
             if ($LASTEXITCODE -ne 0) { throw "make failed with exit code $LASTEXITCODE" }
+            python "${{ github.workspace }}\tools\release\build_stamp.py" verify --binary "${{ env.SOURCE_DIR }}\build\release\MLVApp.exe" --expected-sha "${{ github.sha }}"
+            if ($LASTEXITCODE -ne 0) { throw "compiled build stamp verification failed with exit code $LASTEXITCODE" }
             Set-Location release
             & $env:WINDEPLOYQT_EXE MLVApp.exe
             if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with exit code $LASTEXITCODE" }
@@ -195,6 +200,8 @@ jobs:
       working-directory: ${{ env.SOURCE_DIR }}\build
       run: |
            ren release MLVApp
+           python "${{ github.workspace }}\tools\release\build_stamp.py" verify --binary "${{ env.SOURCE_DIR }}\build\MLVApp\MLVApp.exe" --expected-sha "${{ github.sha }}"
+           if ($LASTEXITCODE -ne 0) { throw "packaged build stamp verification failed with exit code $LASTEXITCODE" }
            dir
 
     - name: Print toolchain

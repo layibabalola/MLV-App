@@ -14,7 +14,7 @@ env:
   SOURCE_DIR:   ${{ github.workspace }}/platform
   ARTIFACT:     ${{ github.workspace }}/platform/build/MLVApp.AppImage
   QT_VERSION:   6.10.2
-  QT_OUTPUT_DIR: ${{ github.workspace }}/qt
+  QT_OUTPUT_DIR: ${{ runner.temp }}/mlv-release-qt
 
 jobs:
   build:
@@ -139,7 +139,9 @@ jobs:
         CC: gcc-13
         CXX: g++-13
       run:  |
+            set -euo pipefail
             export PATH="${QT_ROOT_DIR}/bin:${PATH}"
+            python "${{ github.workspace }}/tools/release/build_stamp.py" generate --repo-root "${GITHUB_WORKSPACE}" --expected-sha "${GITHUB_SHA}" --output-header "${{ env.SOURCE_DIR }}/build/build_buildinfo.h"
             qmake ${{ env.SOURCE_DIR }}/qt/MLVApp.pro
             generated_cxxflags="$(sed -n 's/^CXXFLAGS[[:space:]]*=[[:space:]]*//p' Makefile | head -n 1)"
             echo "generated CXXFLAGS=${generated_cxxflags}"
@@ -151,6 +153,7 @@ jobs:
               *" -std=c++11 "*) echo "qmake retained conflicting -std=c++11 for Linux Qt ${QT_VERSION}" >&2; exit 1 ;;
             esac
             make -j8
+            python "${{ github.workspace }}/tools/release/build_stamp.py" verify --binary "${{ env.SOURCE_DIR }}/build/mlvapp" --expected-sha "${GITHUB_SHA}"
             ls -al
             mkdir image
             cd image
@@ -217,8 +220,10 @@ jobs:
     - name: Create Appimage
       working-directory: ${{ env.SOURCE_DIR }}/build
       run: |
+           set -euo pipefail
            export QT_PLUGIN_PATH="$(qmake -query QT_INSTALL_PLUGINS)"
            linuxdeploy-x86_64.AppImage --desktop-file=image/mlvapp.desktop --executable=mlvapp --appdir=image --plugin=qt --output=appimage --verbosity=3 --icon-file=image/MLVAPP.png
+           python "${{ github.workspace }}/tools/release/build_stamp.py" verify --binary "${{ env.SOURCE_DIR }}/build/image/usr/bin/mlvapp" --expected-sha "${GITHUB_SHA}"
            cp MLVApp-*.AppImage ${{ env.ARTIFACT }}
 
     - name: Print toolchain
