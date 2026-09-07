@@ -53,6 +53,12 @@ param(
     [ValidateSet('opus','sonnet','fable','sol','luna')]
     [string]$Lane,
 
+    # Grant the dispatched lane write access via $D\Start-EditingLane.ps1 (never
+    # Invoke-Lane.ps1 -AllowEdits directly - the wrapper is the only sanctioned
+    # entry point for write access, and this script adds its own refusals on top
+    # of the wrapper's). OFF by default: a read-only analysis lane is the norm.
+    [switch]$AllowEdits,
+
     [int]$TimeoutSec = 1800,
 
     [switch]$Force,
@@ -71,12 +77,22 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$RepoRoot   = 'C:\!Layi Wkspc\MLV-App'
+# MLV_BOARD_ROOT: only a test sets it (a tmp-dir board fixture, mirroring Invoke-Lane.ps1's own
+# resolution); the default is the real board. Needed so a test can point -AllowEdits worktree
+# creation and Start-EditingLane.ps1 resolution at a throwaway git repo instead of the live board.
+$RepoRoot   = if ($env:MLV_BOARD_ROOT) { $env:MLV_BOARD_ROOT } else { 'C:\!Layi Wkspc\MLV-App' }
 $DualLane   = Join-Path $RepoRoot '.claude-state\coordination\dual-lane'
 if (-not $QueuePath) { $QueuePath = Join-Path $DualLane 'queue.json' }
 else { Write-Output "WORKSTREAM: NON-CANONICAL QUEUE in use: $QueuePath" }
 $LogPath    = Join-Path $DualLane 'workstream-dispatch-log.jsonl'
 $PromptDir  = Join-Path $RepoRoot '.claude-state\fleet-runs\prompts'
+# S76: every lane start (editing or read-only) appends a 'reserved' row here BEFORE the lane
+# runs, and a 'charged'/'refunded' row after - Invoke-WorkstreamLoop.ps1 reads this exact file
+# for spentToday, never workstream-dispatch-log.jsonl.
+$ReservationsPath = Join-Path $DualLane 'receipts\dispatch-reservations.jsonl'
+$KillSwitch        = Join-Path $DualLane 'WORKSTREAM-LOOP-DISABLED'
+# The one sanctioned entry point for write access (hub-owned, never edited from a lane).
+$StartEditingLane  = Join-Path $DualLane 'Start-EditingLane.ps1'
 # THE LANE RUNNER MUST COME FROM THE TREE THIS SCRIPT LIVES IN, NOT FROM $RepoRoot.
 # Invoke-WorkstreamLoop pins a driver worktree to fork/master precisely so the unattended loop
 # runs reviewed code - and then this line reached OUTSIDE that pin, back to the canonical
@@ -195,6 +211,51 @@ function Get-LastDispatchAgeHours([string]$id) {
 # vocabulary would be widened once and left stale - the single most frequently paid failure on
 # this board. Read that file for the rules and for the measured incident behind each one.
 . (Join-Path $PSScriptRoot 'landing-probe.ps1')
+
+# The permanent composer (plan 0.35). Needs the resolved branch name before an editing
+# dispatch can create its worktree, not just the prompt text, so this script dot-sources
+# the pure logic directly rather than shelling out to Compose-LanePrompt.ps1.
+. (Join-Path $PSScriptRoot 'compose-lane-prompt-core.ps1')
+
+function Write-DispatchReservation {
+    # APPENDED, never updated in place - a reservation is a fact about a point in time, not
+    # a mutable record. Two rows per lane start: 'reserved' immediately before the process
+    # launches, then 'charged' or 'refunded' once the outcome of actually launching it is
+    # known. Invoke-WorkstreamLoop.ps1 reads only the 'reserved' rows for today's spend.
+    param(
+        [Parameter(Mandatory)][string]$ReservationId,
+        [Parameter(Mandatory)][ValidateSet('reserved','charged','refunded')][string]$State,
+        [string]$Card = '',
+        [string]$Kind = '',
+        [string]$Lane = ''
+    )
+    $dir = Split-Path -Parent $ReservationsPath
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $row = [ordered]@{
+        reservationId = $ReservationId
+        state         = $State
+        card          = $Card
+        kind          = $Kind
+        lane          = $Lane
+        recordedUtc   = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    Add-Content -LiteralPath $ReservationsPath -Value ($row | ConvertTo-Json -Compress) -Encoding UTF8
+}
+
+function Test-KillSwitchArmed { return (Test-Path -LiteralPath $KillSwitch) }
+
+# Lane resolution: the card's own `kind`/`owner` fields win (0.18 seeds them for every
+# product/playback card), then a RECON:/REVIEW: scope prefix routes to the breadth-recon or
+# review-guidance lane, then the legacy needsShell heuristic is the last resort for a card
+# that carries none of the above (e.g. factory/UNSET-track cards, and every existing test
+# fixture). Never consulted when the caller passed an explicit -Lane - that always wins.
+function Get-ResolvedLane {
+    param($Kind, $Owner, [string]$Scope, [bool]$NeedsShell)
+    if (@('product', 'playback') -contains $Kind -and $Owner -eq 'sonnet') { return 'sonnet' }
+    if ($Scope -match '^RECON:') { return 'luna' }
+    if ($Scope -match '^REVIEW:') { return 'fable' }
+    return $(if ($NeedsShell) { 'luna' } else { 'fable' })
+}
 
 $landedById = @{}
 $landedHow = @{}
@@ -337,7 +398,10 @@ $cardTrack = Get-Track $card
 # one when invoked read-only, so route those to codex and pure analysis to claude.
 $cardText   = ($card | ConvertTo-Json -Depth 8)
 $needsShell = $cardText -match '(?i)re-derive|derive|measure|reproduce|proving command|prove by|verify by execution|run the'
-if (-not $Lane) { $Lane = if ($needsShell) { 'luna' } else { 'fable' } }
+$cardKind   = Get-Prop $card 'kind'
+$cardOwner  = Get-Prop $card 'owner'
+$cardScope  = [string](Get-Prop $card 'scope')
+if (-not $Lane) { $Lane = Get-ResolvedLane -Kind $cardKind -Owner $cardOwner -Scope $cardScope -NeedsShell $needsShell }
 $engine = if ($Lane -eq 'sol' -or $Lane -eq 'luna') { 'codex' } else { 'claude' }
 
 # The run directory is named here, not at dispatch, because the brief has to be able to NAME
@@ -370,7 +434,11 @@ $runDir = Join-Path $RepoRoot ".claude-state\fleet-runs\ws-$cardId-$stamp"
 # FAIL-OPEN, exactly like the landing probe: if `gh` is missing, denied, offline or slow, the brief
 # SAYS SO IN THOSE WORDS and the lane is dispatched anyway. Silence would put the lane straight back
 # into the wall while looking like a clean brief.
-$needsHostedEvidence = $cardText -match '(?i)\bgh\b|github|branch protection|ruleset|status check|actions run|workflow run|ci history|consecutive failure|hosted evidence|pull request|\bPR #'
+# Gated off for an -AllowEdits dispatch: an editing lane gets a real shell (unlike the
+# read-only claude lane this export exists for) and composes its prompt from a card
+# procedure, not from the $ghSection this export feeds - so exporting here would be pure
+# waste (API calls, run-dir bytes) with nothing downstream ever reading the result.
+$needsHostedEvidence = (-not $AllowEdits) -and ($cardText -match '(?i)\bgh\b|github|branch protection|ruleset|status check|actions run|workflow run|ci history|consecutive failure|hosted evidence|pull request|\bPR #')
 $ghRows    = @()   # one row per attempted export: name, file, bytes-or-reason
 $ghSection = ''
 
@@ -500,16 +568,18 @@ command that would produce it, so the export set can be widened.
 "@
 }
 
-# ------------------------------------------------------------------ the brief
-if ($engine -eq 'codex') {
-    $capability = @'
+if (-not $AllowEdits) {
+    # ==================================================================== read-only dispatch
+    # ------------------------------------------------------------------ the brief
+    if ($engine -eq 'codex') {
+        $capability = @'
 You are invoked READ-ONLY on the codex engine: ALL tools under a `read-only` sandbox.
 YOU CAN EXECUTE (git, python, pwsh) but CANNOT write files. Prove by EXECUTION and PRINT the
 ref you bound to. Run a FALSIFIER beside every subject check - a control and a subject that
 return the same reason prove nothing.
 '@
-} else {
-    $capability = @'
+    } else {
+        $capability = @'
 You are invoked READ-ONLY on a claude engine. YOUR ONLY TOOLS ARE `Read`, `Grep`, `Glob`.
 YOU HAVE NO SHELL - `Bash` and `PowerShell` calls are DENIED by the runner, so no git, no
 python, no pwsh. The board's standing "prove by EXECUTION" rule is UNSATISFIABLE for you on
@@ -517,12 +587,12 @@ this invocation; that is a known runner asymmetry, not your failing. Substitute:
 PATH AND LINE via Grep/Read, and label anything you could not check
 CANNOT-VERIFY-WITHOUT-SHELL. Never fold CANNOT-VERIFY into a pass.
 '@
-}
+    }
 
-$cardJson = $card | ConvertTo-Json -Depth 8
-$fence    = '```'
+    $cardJson = $card | ConvertTo-Json -Depth 8
+    $fence    = '```'
 
-$brief = @"
+    $brief = @"
 # LANE BRIEF - card $cardId (track: $cardTrack)
 
 ## YOUR CAPABILITIES ON THIS INVOCATION - read before planning
@@ -605,51 +675,242 @@ $fence
    and who owns it.
 "@
 
-$promptPath = Join-Path $PromptDir ("ws-$cardId-$stamp.md")
-[System.IO.File]::WriteAllText($promptPath, $brief, [System.Text.UTF8Encoding]::new($false))
+    $promptPath = Join-Path $PromptDir ("ws-$cardId-$stamp.md")
+    [System.IO.File]::WriteAllText($promptPath, $brief, [System.Text.UTF8Encoding]::new($false))
 
-$briefKb   = [math]::Round(($brief.Length / 1KB), 1)
-$onTrack   = @($live | Where-Object { (Get-Track $_) -eq $cardTrack }).Count
+    $briefKb   = [math]::Round(($brief.Length / 1KB), 1)
+    $onTrack   = @($live | Where-Object { (Get-Track $_) -eq $cardTrack }).Count
 
-Write-Output "WORKSTREAM: track=$cardTrack card=$cardId priority=$(Get-Rank $card) state=$(Get-Prop $card 'state')"
-Write-Output "WORKSTREAM: lane=$Lane engine=$engine needsShell=$needsShell briefKB=$briefKb"
-Write-Output "WORKSTREAM: live cards on this track = $onTrack (live overall = $($live.Count))"
-Write-Output "WORKSTREAM: prompt=$promptPath"
-if ($needsHostedEvidence) {
-    $okCount = @($ghRows | Where-Object { $_.Result -notlike 'FAILED*' -and $_.Result -notlike 'CANNOT-DETERMINE*' }).Count
-    Write-Output "WORKSTREAM: gh-evidence $okCount/$($ghRows.Count) export(s) ok -> $(Join-Path $runDir 'github-evidence')"
-} else {
-    Write-Output 'WORKSTREAM: gh-evidence not-needed (card text names no hosted-evidence subject)'
-}
+    Write-Output "WORKSTREAM: track=$cardTrack card=$cardId priority=$(Get-Rank $card) state=$(Get-Prop $card 'state')"
+    Write-Output "WORKSTREAM: lane=$Lane engine=$engine needsShell=$needsShell briefKB=$briefKb"
+    Write-Output "WORKSTREAM: live cards on this track = $onTrack (live overall = $($live.Count))"
+    Write-Output "WORKSTREAM: prompt=$promptPath"
+    if ($needsHostedEvidence) {
+        $okCount = @($ghRows | Where-Object { $_.Result -notlike 'FAILED*' -and $_.Result -notlike 'CANNOT-DETERMINE*' }).Count
+        Write-Output "WORKSTREAM: gh-evidence $okCount/$($ghRows.Count) export(s) ok -> $(Join-Path $runDir 'github-evidence')"
+    } else {
+        Write-Output 'WORKSTREAM: gh-evidence not-needed (card text names no hosted-evidence subject)'
+    }
 
-if ($DryRun) {
-    # The exports above ALREADY RAN and are on disk. Saying "nothing dispatched" without saying
-    # that would be a lie by omission about a directory this command created.
-    Write-Output 'WORKSTREAM: DRY RUN - no lane dispatched. Any gh-evidence export above is real and on disk.'
+    if ($DryRun) {
+        # The exports above ALREADY RAN and are on disk. Saying "nothing dispatched" without saying
+        # that would be a lie by omission about a directory this command created.
+        Write-Output 'WORKSTREAM: DRY RUN - no lane dispatched. Any gh-evidence export above is real and on disk.'
+        exit 0
+    }
+
+    # Kill switch re-checked IMMEDIATELY before this lane starts (deliverable 7) - not only once
+    # at the top of the loop's cycle, which can dispatch several lanes across a single cycle.
+    if (Test-KillSwitchArmed) {
+        Write-Output "WORKSTREAM: REFUSED kill-switch-armed card=$cardId"
+        exit 6
+    }
+
+    # Reservation events (deliverable 7, S76): APPENDED, never updated in place. 'reserved' is
+    # written the instant before the process launches, and the loop counts ONLY these rows for
+    # today's budget - never workstream-dispatch-log.jsonl below, which a lane could in principle
+    # never reach if it dies before this script resumes.
+    $reservationId = [guid]::NewGuid().ToString()
+    Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane
+
+    $reservationOutcome = 'refunded'
+    try {
+        & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $LaneRunner `
+            -Lane $Lane -PromptFile $promptPath -Card $cardId -RunDir $runDir -TimeoutSec $TimeoutSec
+        $laneExit = $LASTEXITCODE
+        $reservationOutcome = 'charged'
+    } finally {
+        Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane
+    }
+
+    $record = [ordered]@{
+        schema          = 'mlv-app/workstream-dispatch/v1'
+        cardId          = $cardId
+        track           = $cardTrack
+        priority        = (Get-Rank $card)
+        stateAtDispatch = (Get-Prop $card 'state')
+        lane            = $Lane
+        engine          = $engine
+        needsShell      = [bool]$needsShell
+        promptPath      = $promptPath
+        promptBytes     = $brief.Length
+        runDir          = $runDir
+        ghEvidence      = if ($needsHostedEvidence) { @($ghRows | ForEach-Object { "$($_.Name)=$($_.Result)" }) } else { @() }
+        dispatchedUtc   = (Get-Date).ToUniversalTime().ToString('o')
+        laneExitCode    = $laneExit
+    }
+    Add-Content -LiteralPath $LogPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+
+    Write-Output "WORKSTREAM: dispatched, laneExit=$laneExit runDir=$runDir"
     exit 0
 }
 
-& pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $LaneRunner `
-    -Lane $Lane -PromptFile $promptPath -Card $cardId -RunDir $runDir -TimeoutSec $TimeoutSec
-$laneExit = $LASTEXITCODE
+# ==================================================================== editing dispatch
+# Reached only when $AllowEdits: the read-only branch above always exits before falling through.
+    # Refusal 1: a codex lane can never be granted write access (no Claude hook is visible to
+    # codex exec). Start-EditingLane.ps1 refuses this too, but failing here means the refusal
+    # reason lands in stdout - and so in the loop's cycle receipt - before any process starts.
+    if ($Lane -eq 'sol' -or $Lane -eq 'luna') {
+        Write-Output "WORKSTREAM: REFUSED codex-lane-never-edits lane=$Lane card=$cardId"
+        exit 6
+    }
 
-$record = [ordered]@{
-    schema          = 'mlv-app/workstream-dispatch/v1'
-    cardId          = $cardId
-    track           = $cardTrack
-    priority        = (Get-Rank $card)
-    stateAtDispatch = (Get-Prop $card 'state')
-    lane            = $Lane
-    engine          = $engine
-    needsShell      = [bool]$needsShell
-    promptPath      = $promptPath
-    promptBytes     = $brief.Length
-    runDir          = $runDir
-    ghEvidence      = if ($needsHostedEvidence) { @($ghRows | ForEach-Object { "$($_.Name)=$($_.Result)" }) } else { @() }
-    dispatchedUtc   = (Get-Date).ToUniversalTime().ToString('o')
-    laneExitCode    = $laneExit
-}
-Add-Content -LiteralPath $LogPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+    # Refusal 2: an editing lane composes its prompt from the card's OWN procedure, never from
+    # the generic read-only analysis brief below - so a card with no procedure, or whose tracked
+    # file has drifted from what the queue recorded, cannot be granted write access at all.
+    # procedureSha256 is REQUIRED, never optional (mirrors check_roadmap_queue_parity.py's rule).
+    $procedureRel = Get-Prop $card 'procedure'
+    $procedureSha = Get-Prop $card 'procedureSha256'
+    if (-not $procedureRel -or -not $procedureSha) {
+        Write-Output "WORKSTREAM: REFUSED procedure-missing-or-drifted card=$cardId reason=no-procedure-or-sha"
+        exit 6
+    }
+    $procedurePath = Join-Path $RepoRoot $procedureRel
+    if (-not (Test-Path -LiteralPath $procedurePath)) {
+        Write-Output "WORKSTREAM: REFUSED procedure-missing-or-drifted card=$cardId reason=file-missing path=$procedurePath"
+        exit 6
+    }
+    $actualProcedureSha = (Get-FileHash -LiteralPath $procedurePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualProcedureSha -ne ([string]$procedureSha).ToLowerInvariant()) {
+        Write-Output ("WORKSTREAM: REFUSED procedure-missing-or-drifted card=$cardId reason=sha-mismatch " +
+            "recorded=$procedureSha actual=$actualProcedureSha")
+        exit 6
+    }
 
-Write-Output "WORKSTREAM: dispatched, laneExit=$laneExit runDir=$runDir"
-exit 0
+    $laneWorkDir = Join-Path 'C:\mlvtmp' "lane-$cardId-$stamp"
+
+    $baseSha = (& git -C $RepoRoot rev-parse fork/master 2>$null | Select-Object -First 1)
+    if (-not $baseSha -or $baseSha -notmatch '^[0-9a-f]{40}$') {
+        Write-Output "WORKSTREAM: CANNOT-DETERMINE - could not resolve fork/master to a full sha at $RepoRoot"
+        exit 3
+    }
+
+    # GH-CAPABILITY drives which of the two ratified PR_STEP literals the composer inserts.
+    # Absent or unreadable is NOT fatal - it just means the safer ('otherwise') literal is
+    # used, matching Get-PrStepLiteral's own default (anything other than the one ratified
+    # 'lane-can-open-pr' string takes that branch).
+    $ghCapability = 'unknown'
+    $ghCapPath = Join-Path $DualLane 'lane-gh-capability.json'
+    if (Test-Path -LiteralPath $ghCapPath) {
+        try {
+            $capRec = Get-Content -LiteralPath $ghCapPath -Raw | ConvertFrom-Json
+            if (($capRec.PSObject.Properties.Name -contains 'ghCapability') -and $capRec.ghCapability) {
+                $ghCapability = [string]$capRec.ghCapability
+            }
+        } catch { }
+    }
+
+    if (-not (Test-Path -LiteralPath $runDir)) { New-Item -ItemType Directory -Path $runDir -Force | Out-Null }
+    $templatePath = Join-Path $DualLane 'prompts\v2\product-card-TEMPLATE.md'
+
+    # Refusal 3 (unknown-field): thrown by the composer itself when a fields file carries a
+    # top-level label outside the COMPOSER CONTRACT - nothing is silently dropped.
+    try {
+        $composed = Get-ComposedLanePrompt -ProcedurePath $procedurePath -TemplatePath $templatePath `
+            -WorkDir $laneWorkDir -BaseSha $baseSha -RunDir $runDir -Ts $stamp -GhCapability $ghCapability
+    } catch {
+        $composerMsg = $_.Exception.Message
+        if ($composerMsg -like 'unknown-field:*') {
+            Write-Output "WORKSTREAM: REFUSED unknown-field card=$cardId detail=$composerMsg"
+        } else {
+            Write-Output "WORKSTREAM: REFUSED procedure-missing-or-drifted card=$cardId detail=$composerMsg"
+        }
+        exit 6
+    }
+
+    $branch = $composed.Branch
+    $promptPath = Join-Path $runDir 'lane-prompt.md'
+    [System.IO.File]::WriteAllText($promptPath, $composed.Text, [System.Text.UTF8Encoding]::new($false))
+
+    # ------------------------------------------------------- worktree (deliverable 5)
+    # baseSha is fork/master resolved HERE, at dispatch time - never the plan's fixed
+    # diagnosis-base sha - and is recorded on the receipt below. A real branch checkout, never
+    # --detach: the composed procedure itself tells the lane to `git switch -c` this branch, so
+    # the worktree must already be on it.
+    & git -C $RepoRoot -c core.longpaths=true worktree add -b $branch $laneWorkDir $baseSha 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "WORKSTREAM: CANNOT-DETERMINE - git worktree add failed for $laneWorkDir at $baseSha (branch $branch)"
+        exit 3
+    }
+
+    function Remove-LaneWorktreeIfClean([string]$WorkDirToCheck) {
+        # Never removes a worktree the lane left dirty - the path is recorded on the dispatch
+        # record instead, so nothing a lane produced is silently discarded.
+        $statusOut = & git -C $WorkDirToCheck status --porcelain 2>$null
+        if ($LASTEXITCODE -eq 0 -and -not $statusOut) {
+            & git -C $RepoRoot -c core.longpaths=true worktree remove $WorkDirToCheck --force 2>&1 | Out-Null
+            return $true
+        }
+        Write-Output "WORKSTREAM: worktree left in place (not clean): $WorkDirToCheck"
+        return $false
+    }
+
+    Write-Output "WORKSTREAM: track=$cardTrack card=$cardId priority=$(Get-Rank $card) state=$(Get-Prop $card 'state')"
+    Write-Output "WORKSTREAM: lane=$Lane engine=$engine allowEdits=True branch=$branch"
+    Write-Output "WORKSTREAM: workDir=$laneWorkDir"
+    Write-Output "WORKSTREAM: baseSha=$baseSha"
+    Write-Output "WORKSTREAM: prompt=$promptPath"
+
+    if ($DryRun) {
+        # The worktree above is REAL, exactly like the gh-evidence export in the read-only path
+        # is real under -DryRun: what you inspect is byte-identical to what a lane would receive.
+        # Nothing ran in it, so it is guaranteed clean - remove it rather than leaving debris.
+        Write-Output 'WORKSTREAM: DRY RUN - no lane dispatched. Worktree and prompt above were real and are now removed.'
+        Remove-LaneWorktreeIfClean $laneWorkDir | Out-Null
+        exit 0
+    }
+
+    # Kill switch re-checked IMMEDIATELY before this lane starts, not only once at the top of
+    # the loop's cycle: a long cycle can dispatch several lanes, and the switch may be armed
+    # between the cycle's own check and this particular start.
+    if (Test-KillSwitchArmed) {
+        Write-Output "WORKSTREAM: REFUSED kill-switch-armed card=$cardId"
+        Remove-LaneWorktreeIfClean $laneWorkDir | Out-Null
+        exit 6
+    }
+
+    # Reservation events (deliverable 7, S76): APPENDED, never updated in place. 'reserved' is
+    # written the instant before the process launches - the earliest point a slot is actually
+    # spent, regardless of how the lane later exits - and the loop counts ONLY these rows for
+    # today's budget.
+    $reservationId = [guid]::NewGuid().ToString()
+    Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane
+
+    $laneExit = $null
+    $reservationOutcome = 'refunded'
+    try {
+        & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $StartEditingLane `
+            -Lane $Lane -PromptFile $promptPath -WorkDir $laneWorkDir -Card $cardId -RunDir $runDir `
+            -ExtraReadDir $runDir -TimeoutSec $TimeoutSec
+        $laneExit = $LASTEXITCODE
+        # Charged once the process has actually run, regardless of ITS OWN exit code: the model
+        # turn was spent either way. Only a failure to even launch the wrapper is a refund.
+        $reservationOutcome = 'charged'
+    } finally {
+        Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane
+    }
+
+    $cleanRemoved = Remove-LaneWorktreeIfClean $laneWorkDir
+
+    $record = [ordered]@{
+        schema          = 'mlv-app/workstream-dispatch/v1'
+        cardId          = $cardId
+        track           = $cardTrack
+        priority        = (Get-Rank $card)
+        stateAtDispatch = (Get-Prop $card 'state')
+        lane            = $Lane
+        engine          = $engine
+        allowEdits      = $true
+        workDir         = $laneWorkDir
+        baseSha         = $baseSha
+        branch          = $branch
+        promptPath      = $promptPath
+        runDir          = $runDir
+        worktreeRemoved = $cleanRemoved
+        dispatchedUtc   = (Get-Date).ToUniversalTime().ToString('o')
+        laneExitCode    = $laneExit
+    }
+    Add-Content -LiteralPath $LogPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+
+    Write-Output "WORKSTREAM: dispatched, laneExit=$laneExit runDir=$runDir workDir=$laneWorkDir"
+    exit 0
