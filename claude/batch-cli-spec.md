@@ -1,5 +1,21 @@
 # Batch CLI Implementation Spec (detail)
 
+## Status: Phases 0-6 SHIPPED
+
+The instructions below are design history, kept for context; the batch CDNG CLI has already shipped. Evidence per phase:
+
+| Phase | Status | Scope | Evidence |
+|---|---|---|---|
+| 0 | SHIPPED | Recon | `66549181` and direct DNG exporter integration |
+| 1 | SHIPPED | Foundation | `src/batch/BatchTypes.h`, `BatchContext`, `BatchPrompts`, `BatchLogger`, `BatchRunner` |
+| 2 | SHIPPED | CLI | `platform/qt/main.cpp` `runBatch`, `receiptOpt` |
+| 3 | SHIPPED | CDNG | `src/batch/BatchRunner.cpp` `BatchRunner::run` and `66549181` |
+| 4 | SHIPPED | Prompt handling | `src/batch/BatchPrompts.cpp` |
+| 5 | SHIPPED | Runner/logging/exits | `BatchRunner::run` and `skipped=` log records |
+| 6 | SHIPPED | Receipts | `ReceiptLoader::loadFromFile`, `ReceiptApplier::applyToMlv`, `main.cpp` `receiptOpt` |
+
+---
+
 Demoted verbatim from [`CLAUDE.md`](../CLAUDE.md) under [docs/22-doc-fragmentation-policy.md](../docs/22-doc-fragmentation-policy.md). Headings are unchanged and remain the stable IDs referenced from the parent index.
 ## Architecture (Locked — Do Not Deviate)
 
