@@ -25,7 +25,19 @@ $contexts = @('Repo Hygiene Python (windows-latest)', 'Repo Hygiene Python (ubun
 $legacy = @($contexts | ForEach-Object { if ($_ -ceq 'Batch Compile') { 'Factory Bridge Regressions' } else { $_ } })
 $body = @{ strict = $true; checks = @($contexts | ForEach-Object { @{context = $_; app_id = 15368} }) }
 $utf8 = [Text.UTF8Encoding]::new($false)
-function Refuse([string]$Reason) { throw "set-required-checks refused: $Reason" }
+function Refuse([string]$Reason) {
+    # Emit one plain, unwrapped stderr line so a machine-facing caller (e.g. a
+    # test harness on a narrow hosted CI terminal) can substring-match the
+    # exact reason. A `throw` here would instead surface via PowerShell's
+    # default terminating-error host view, which adds ANSI color codes and
+    # wraps at the console width -- splitting the phrase across lines on
+    # narrow/ANSI-enabled hosts (observed on Ubuntu-hosted CI, not Windows).
+    # `exit` still unwinds through any pending `finally` (e.g. the transition
+    # lock dispose) before the process terminates, so no cleanup is skipped
+    # and no statement after the call site ever runs.
+    [Console]::Error.WriteLine("set-required-checks refused: $Reason")
+    exit 1
+}
 function Stamp { (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) }
 function ObjectJson([string]$Text, [string]$Label) {
     try { $value = ConvertFrom-Json -InputObject $Text -AsHashtable -NoEnumerate }

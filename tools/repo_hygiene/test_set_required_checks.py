@@ -125,6 +125,30 @@ exit 0
                 finally:
                     path.write_bytes(original)
 
+    def test_refusal_is_a_single_plain_unwrapped_stderr_line(self):
+        # Regression for a hosted-CI-only failure: `throw` reaches PowerShell's
+        # default terminating-error host view, which on some hosted-CI
+        # terminals (observed Ubuntu, never Windows) adds ANSI color codes and
+        # wraps at the console width -- splitting a contiguous refusal phrase
+        # across multiple lines and breaking a plain substring match. Assert
+        # the exact single plain line so color/width regressions fail loudly
+        # instead of only on a narrow hosted runner.
+        name = '0.4a-batch-compile-falsifier.json'
+        path = self.receipts / name
+        original = path.read_bytes()
+        path.unlink()
+        try:
+            result = self.run_actor(True)
+        finally:
+            path.write_bytes(original)
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertNotIn('\x1b', result.stderr)
+        lines = result.stderr.splitlines()
+        self.assertEqual(1, len(lines), result.stderr)
+        self.assertEqual('set-required-checks refused: ' + name + ' is absent', lines[0])
+        self.assertEqual('', result.stdout)
+        self.assertFalse((self.board / 'calls.txt').exists())
+
     def test_guardrail_head_must_match_reviewed_head_not_merge_sha(self):
         # Fixture proof that a genuinely valid receipt chain (reviewedHeadSha ==
         # guardrail headSha, mergeSha legitimately different) is accepted -- this
