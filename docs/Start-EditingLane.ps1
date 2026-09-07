@@ -30,7 +30,8 @@ param(
     [string]$Card = '',
     [string]$RunDir = '',
     [string]$ExtraReadDir = '',
-    [int]$TimeoutSec = 1500
+    [int]$TimeoutSec = 1500,
+    [int]$MaxTurns = 0
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -90,6 +91,7 @@ $argsList = @('-Lane', $Lane, '-PromptFile', $PromptFile, '-WorkDir', $WorkDir, 
 if ($Card)   { $argsList += @('-Card', $Card) }
 if ($RunDir) { $argsList += @('-RunDir', $RunDir) }
 if ($ExtraReadDir) { $argsList += @('-ExtraReadDir', $ExtraReadDir) }
+if ($MaxTurns -ne 0) { $argsList += @('-MaxTurns', $MaxTurns) }
 
 Write-Output ("WRAPPER: hook={0} receipt-ok lane={1} card={2} workDir={3}" -f $hookSha.Substring(0,12), $Lane, $Card, $WorkDir)
 & pwsh -NoProfile -File $InvokeLane @argsList
