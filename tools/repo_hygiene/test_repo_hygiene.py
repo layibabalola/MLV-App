@@ -659,22 +659,28 @@ class RepoHygieneTests(unittest.TestCase):
 
     def test_ci_product_oracles_are_isolated_from_factory_bridge_failures(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
-        bridge_start = workflow.index("\n  factory-bridge-regressions:")
+        bridge_workflow = (ROOT / ".github" / "workflows" / "factory-bridge.yml").read_text(
+            encoding="utf-8"
+        )
         product_start = workflow.index("\n  windows-product-oracles:")
         gui_start = workflow.index("\n  windows-gui-pilot:")
-        bridge_job = workflow[bridge_start:product_start]
+        bridge_start = bridge_workflow.index("\n  factory-bridge-regressions:")
+        bridge_job = bridge_workflow[bridge_start:]
         product_job = workflow[product_start:gui_start]
 
         self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertIn("permissions:\n  contents: read", bridge_workflow)
         self.assertIn("Run agent bridge PowerShell launcher regressions", bridge_job)
         self.assertIn("Verify compatible MCP runtime", bridge_job)
+        self.assertNotIn("factory-bridge-regressions:", workflow)
         self.assertNotIn("Run agent bridge PowerShell launcher regressions", product_job)
         self.assertIn("    needs: protected-check-route", product_job)
         self.assertIn("Run console_tests --check-golden", product_job)
         self.assertIn("Run pipeline_tests --check-golden (bounded shards)", product_job)
         self.assertIn("Record explicit product-oracle N/A", product_job)
         self.assertIn("outputs.product == 'true'", product_job)
-        self.assertIn("    if: ${{ always() }}", product_job)
+        self.assertIn("    if: ${{ always() && !cancelled() }}", product_job)
+        self.assertNotRegex(product_job, r"\n    if: \$\{\{ always\(\) \}\}")
         self.assertIn("needs.protected-check-route.result != 'success'", product_job)
         self.assertIn("outputs.product != 'true'", product_job)
         self.assertIn("outputs.product != 'false'", product_job)
@@ -744,7 +750,7 @@ class RepoHygieneTests(unittest.TestCase):
         required_checks = (
             "Repo Hygiene Python (windows-latest)",
             "Repo Hygiene Python (ubuntu-latest)",
-            "Factory Bridge Regressions",
+            "Batch Compile",
             "Windows GUI Pilot",
             "Windows Product Oracles",
         )
@@ -841,7 +847,14 @@ class RepoHygieneTests(unittest.TestCase):
             self.assertIn(lf_contract, attributes)
 
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
-        self.assertEqual(workflow.count('python-version-file: ".python-version"'), 6)
+        bridge_workflow = (ROOT / ".github" / "workflows" / "factory-bridge.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(workflow.count('python-version-file: ".python-version"'), 5)
+        self.assertEqual(bridge_workflow.count('python-version-file: ".python-version"'), 1)
+        # The moved job retains the same locked dependency policy; count both
+        # reviewed workflow surfaces so relocation cannot weaken its checks.
+        workflow += "\n" + bridge_workflow
         self.assertNotRegex(workflow, r"(?m)^\s+python-version:\s*")
         self.assertNotIn("pip install --upgrade", workflow)
         self.assertNotRegex(
@@ -941,6 +954,9 @@ class RepoHygieneTests(unittest.TestCase):
 
     def test_ci_workflow_hardening_is_fail_closed_and_coordination_aware(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        bridge_workflow = (ROOT / ".github" / "workflows" / "factory-bridge.yml").read_text(
+            encoding="utf-8"
+        )
         trigger_section = workflow[: workflow.index("\npermissions:")]
 
         self.assertIn(
@@ -961,7 +977,6 @@ class RepoHygieneTests(unittest.TestCase):
         expected_timeouts = {
             "protected-check-route": 10,
             "repo-hygiene-python": 45,
-            "factory-bridge-regressions": 45,
             "windows-product-oracles": 120,
             "windows-gui-pilot": 60,
             "batch-compile": 30,
@@ -981,7 +996,7 @@ class RepoHygieneTests(unittest.TestCase):
         expected_remote_uses = [
             ("actions/checkout", "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09", "v5"),
             ("actions/setup-python", "ece7cb06caefa5fff74198d8649806c4678c61a1", "v6"),
-        ] * 6 + [
+        ] * 5 + [
             ("actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7"),
         ] * 3
         uses_entries = []
@@ -1020,7 +1035,7 @@ class RepoHygieneTests(unittest.TestCase):
             r"\s+persist-credentials: false\s*$",
             workflow,
         )
-        self.assertEqual(len(checkout_blocks), 6)
+        self.assertEqual(len(checkout_blocks), 5)
 
         aqt_steps = re.findall(
             r"(?ms)^      - name: Install Qt 6\.10\.2 \+ MinGW 13\.1\r?\n"
@@ -1083,10 +1098,9 @@ class RepoHygieneTests(unittest.TestCase):
                 assert_aqt_install_is_bounded_and_fail_closed(falsified_step)
 
         repo_start = workflow.index("\n  repo-hygiene-python:")
-        bridge_start = workflow.index("\n  factory-bridge-regressions:")
         product_start = workflow.index("\n  windows-product-oracles:")
-        repo_job = workflow[repo_start:bridge_start]
-        bridge_job = workflow[bridge_start:product_start]
+        repo_job = workflow[repo_start:product_start]
+        bridge_job = bridge_workflow[bridge_workflow.index("\n  factory-bridge-regressions:") :]
         self.assertIn("Run coordination and self-healing guardrails", repo_job)
         self.assertIn("tools\\coordination\\test_coordination_guardrails.py", repo_job)
         self.assertIn("tests\\coordination", repo_job)
@@ -1095,7 +1109,8 @@ class RepoHygieneTests(unittest.TestCase):
 
         product_job = workflow[product_start : workflow.index("\n  windows-gui-pilot:")]
         self.assertIn("    needs: protected-check-route", product_job)
-        self.assertIn("    if: ${{ always() }}", product_job)
+        self.assertIn("    if: ${{ always() && !cancelled() }}", product_job)
+        self.assertNotRegex(product_job, r"\n    if: \$\{\{ always\(\) \}\}")
         self.assertIn("needs.protected-check-route.result != 'success'", product_job)
         self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", product_job)
         self.assertIn("ref: ${{ env.EXPECTED_ROUTE_HEAD }}", product_job)
@@ -1130,7 +1145,8 @@ class RepoHygieneTests(unittest.TestCase):
         gui_start = workflow.index("\n  windows-gui-pilot:")
         gui_job = workflow[gui_start:]
         self.assertIn("    needs: protected-check-route", gui_job)
-        self.assertIn("    if: ${{ always() }}", gui_job)
+        self.assertIn("    if: ${{ always() && !cancelled() }}", gui_job)
+        self.assertNotRegex(gui_job, r"\n    if: \$\{\{ always\(\) \}\}")
         self.assertIn("needs.protected-check-route.result != 'success'", gui_job)
         self.assertIn("outputs.gui != 'true'", gui_job)
         self.assertIn("outputs.gui != 'false'", gui_job)
@@ -1147,12 +1163,21 @@ class RepoHygieneTests(unittest.TestCase):
 
         required_display_names = {
             "Repo Hygiene Python (${{ matrix.os }})",
-            "Factory Bridge Regressions",
+            "Batch Compile",
             "Windows Product Oracles",
             "Windows GUI Pilot",
         }
         observed_names = set(re.findall(r"(?m)^    name: (.+)$", jobs_text))
         self.assertTrue(required_display_names.issubset(observed_names))
+        self.assertNotIn("Factory Bridge Regressions", observed_names)
+
+        bridge_jobs_text = bridge_workflow[bridge_workflow.index("\njobs:") :]
+        bridge_job_matches = list(re.finditer(r"(?m)^  ([a-z0-9-]+):\r?$", bridge_jobs_text))
+        self.assertEqual({match.group(1) for match in bridge_job_matches}, {"factory-bridge-regressions"})
+        self.assertIn("    timeout-minutes: 45", bridge_jobs_text)
+        self.assertIn("Factory Bridge Regressions", bridge_jobs_text)
+        self.assertNotRegex(bridge_workflow, r"(?im)^\s*continue-on-error\s*:")
+        self.assertIn("  pull_request:\n", bridge_workflow[: bridge_workflow.index("\npermissions:")])
 
     def test_protected_check_router_is_conservative_and_provider_specific(self) -> None:
         provider = classify_paths(
