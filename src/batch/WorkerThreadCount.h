@@ -5,6 +5,8 @@
 #include <QThread>
 #include <QtGlobal>
 
+#include "EnvFlags.h"
+
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -26,16 +28,7 @@ inline bool mlvappWorkerThreadOverrideActive()
 
 inline bool mlvappEnvFlagEnabled(const char *name)
 {
-    const QByteArray value = qgetenv(name);
-    if (value.isNull()) {
-        return false;
-    }
-
-    const QByteArray normalized = value.trimmed().toLower();
-    return normalized.isEmpty()
-        || (normalized != QByteArrayLiteral("0")
-            && normalized != QByteArrayLiteral("false")
-            && normalized != QByteArrayLiteral("off"));
+    return mlvappEnvFlagEnabled(qgetenv(name));
 }
 
 /* Test and debug override.

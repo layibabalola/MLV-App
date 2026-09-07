@@ -23,6 +23,7 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_cache_behavior.cpp \
     $$REPO_ROOT/tests/console/test_avx_golden.cpp \
     $$REPO_ROOT/tests/console/test_worker_thread_count.cpp \
+    $$REPO_ROOT/tests/console/test_env_flags.cpp \
     $$REPO_ROOT/tests/console/test_dual_iso_playback_policy.cpp \
     $$REPO_ROOT/tests/console/test_frame_compare.cpp \
     $$REPO_ROOT/tests/console/test_phase3_quality_policy.cpp \
@@ -45,6 +46,7 @@ HEADERS += \
     $$REPO_ROOT/tests/common/hash_helpers.h \
     $$REPO_ROOT/tests/common/repo_paths.h \
     $$REPO_ROOT/src/batch/BatchTypes.h \
+    $$REPO_ROOT/src/batch/EnvFlags.h \
     $$REPO_ROOT/src/batch/BatchRunner.h \
     $$REPO_ROOT/src/batch/RawAspectStretchPolicy.h \
     $$REPO_ROOT/platform/qt/ClipLifecycleBarrier.h \
