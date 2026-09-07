@@ -674,7 +674,8 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("Run pipeline_tests --check-golden (bounded shards)", product_job)
         self.assertIn("Record explicit product-oracle N/A", product_job)
         self.assertIn("outputs.product == 'true'", product_job)
-        self.assertIn("    if: ${{ always() }}", product_job)
+        self.assertIn("    if: ${{ always() && !cancelled() }}", product_job)
+        self.assertNotRegex(product_job, r"\n    if: \$\{\{ always\(\) \}\}")
         self.assertIn("needs.protected-check-route.result != 'success'", product_job)
         self.assertIn("outputs.product != 'true'", product_job)
         self.assertIn("outputs.product != 'false'", product_job)
@@ -1095,7 +1096,8 @@ class RepoHygieneTests(unittest.TestCase):
 
         product_job = workflow[product_start : workflow.index("\n  windows-gui-pilot:")]
         self.assertIn("    needs: protected-check-route", product_job)
-        self.assertIn("    if: ${{ always() }}", product_job)
+        self.assertIn("    if: ${{ always() && !cancelled() }}", product_job)
+        self.assertNotRegex(product_job, r"\n    if: \$\{\{ always\(\) \}\}")
         self.assertIn("needs.protected-check-route.result != 'success'", product_job)
         self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", product_job)
         self.assertIn("ref: ${{ env.EXPECTED_ROUTE_HEAD }}", product_job)
@@ -1130,7 +1132,8 @@ class RepoHygieneTests(unittest.TestCase):
         gui_start = workflow.index("\n  windows-gui-pilot:")
         gui_job = workflow[gui_start:]
         self.assertIn("    needs: protected-check-route", gui_job)
-        self.assertIn("    if: ${{ always() }}", gui_job)
+        self.assertIn("    if: ${{ always() && !cancelled() }}", gui_job)
+        self.assertNotRegex(gui_job, r"\n    if: \$\{\{ always\(\) \}\}")
         self.assertIn("needs.protected-check-route.result != 'success'", gui_job)
         self.assertIn("outputs.gui != 'true'", gui_job)
         self.assertIn("outputs.gui != 'false'", gui_job)
