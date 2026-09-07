@@ -16,7 +16,14 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+
+# Match the other bridge suites before the first bare core import. Named
+# unittest loading starts at the repo root; an ambient or editable bridge install
+# otherwise wins and remains cached when the wrapper suite imports core.storage.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.win_process import (
     NATIVE_PROCESS_PROBE_AVAILABLE,
@@ -30,6 +37,52 @@ from core.win_process import (
 from powershell_runtime import powershell_cim_command
 
 WINDOWS_ONLY = unittest.skipUnless(sys.platform == "win32", "Windows-only probe")
+
+
+class SuiteImportIsolationTests(unittest.TestCase):
+    def test_named_suites_use_this_checkout_with_foreign_pythonpath(self):
+        """Named unittest loading must not bind core to another bridge checkout."""
+        bridge = Path(__file__).resolve().parent
+        suites = [
+            "tools.agent-bridge.test_win_process",
+            "tools.agent-bridge.test_server_wrapper_phase2",
+        ]
+        probe = """
+import importlib
+import json
+import sys
+from pathlib import Path
+
+for name in sys.argv[1:]:
+    importlib.import_module(name)
+from core.storage import StorageCapability
+names = ('core', 'core.win_process', 'core.storage', 'powershell_runtime',
+         'server', 'server_wrapper', 'server_wrapper_trampoline')
+print(json.dumps({name: str(Path(importlib.import_module(name).__file__).resolve())
+                  for name in names}))
+"""
+        # Inert disposable stand-in; never import or modify the real sibling repo.
+        with tempfile.TemporaryDirectory(prefix="bridge-import-fixture-") as temp:
+            foreign = Path(temp) / "core"
+            foreign.mkdir()
+            (foreign / "__init__.py").write_text(
+                "raise RuntimeError('foreign core selected')\n", encoding="utf-8"
+            )
+            env = dict(os.environ, PYTHONPATH=temp, PYTHONDONTWRITEBYTECODE="1")
+            for order in (suites, list(reversed(suites))):
+                with self.subTest(first=order[0]):
+                    result = subprocess.run(
+                        [sys.executable, "-c", probe, *order],
+                        cwd=bridge.parents[1], env=env, capture_output=True,
+                        text=True, timeout=60,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    origins = json.loads(result.stdout)
+                    for name, origin in origins.items():
+                        self.assertTrue(
+                            Path(origin).is_relative_to(bridge),
+                            "%s imported from %s instead of %s" % (name, origin, bridge),
+                        )
 
 
 def _cim_process_table():
