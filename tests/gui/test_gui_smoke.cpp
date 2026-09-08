@@ -15,6 +15,7 @@
 
 #include <QApplication>
 #include <QFile>
+#include <QFontInfo>
 #include <QFrame>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
@@ -26,6 +27,8 @@
 #include <QPalette>
 #include <QPaintEvent>
 #include <QScopeGuard>
+#include <QScreen>
+#include <QScrollBar>
 #include <QtTest/QtTest>
 
 #include <cmath>
@@ -41,11 +44,9 @@ namespace {
 
 QImage presenter_expected_orientation(const QImage &submitted)
 {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    return submitted.flipped(Qt::Vertical);
-#else
-    return submitted.mirrored(false, true);
-#endif
+    // Display coordinates preserve the submitted image's top row, just like
+    // the raster pixmap fallback. Offscreen GL passes have a separate origin.
+    return submitted;
 }
 
 QMap<QString, QString> load_expected_hashes()
@@ -264,9 +265,11 @@ QImage rgb16_to_qimage(const std::vector<uint16_t> &rgb16, int width, int height
         uint8_t *line = image.scanLine(y);
         for (int x = 0; x < width; ++x) {
             const std::size_t base = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 3u;
-            line[x * 3 + 0] = static_cast<uint8_t>((rgb16[base + 0] + 128u) >> 8);
-            line[x * 3 + 1] = static_cast<uint8_t>((rgb16[base + 1] + 128u) >> 8);
-            line[x * 3 + 2] = static_cast<uint8_t>((rgb16[base + 2] + 128u) >> 8);
+            // Round normalized U16 to U8; a rounded shift can produce 256 and
+            // wrap saturated highlights to zero when narrowed to uint8_t.
+            line[x * 3 + 0] = static_cast<uint8_t>((rgb16[base + 0] + 128u) / 257u);
+            line[x * 3 + 1] = static_cast<uint8_t>((rgb16[base + 1] + 128u) / 257u);
+            line[x * 3 + 2] = static_cast<uint8_t>((rgb16[base + 2] + 128u) / 257u);
         }
     }
     return image;
@@ -502,6 +505,11 @@ QImage render_scopes_label_output(const std::vector<uint8_t> &raw,
                                   ScopesLabel::ScopeType type)
 {
     ScopesLabel label;
+    if (!QTest::qCompare(label.devicePixelRatioF(), qreal(1.0),
+                        "scope fixture device-pixel ratio", "golden device-pixel ratio 1",
+                        __FILE__, __LINE__)) {
+        return QImage();
+    }
     label.resize(511, 160);
 
     label.setScope(const_cast<uint8_t *>(raw.data()),
@@ -512,6 +520,16 @@ QImage render_scopes_label_output(const std::vector<uint8_t> &raw,
                    type);
 
     const QPixmap pixmap = label.pixmap();
+    if (qEnvironmentVariableIntValue("MLVAPP_TEST_SCOPE_DIAGNOSTICS") == 1) {
+        const QFontInfo font(label.font());
+        qInfo() << "scope-fixture" << type << QGuiApplication::platformName()
+                << "screenDpr" << label.screen()->devicePixelRatio()
+                << "labelDpr" << label.devicePixelRatioF()
+                << "labelSize" << label.size() << "pixmapSize" << pixmap.size()
+                << "logicalSize" << pixmap.deviceIndependentSize()
+                << "font" << font.family() << font.pixelSize()
+                << "rawHash" << QString::fromStdString(image_regression::sha256_rgb888(pixmap.toImage()));
+    }
     if (pixmap.isNull()) {
         return QImage();
     }
@@ -551,6 +569,7 @@ class GuiSmokeTest : public QObject
     Q_OBJECT
 
 private slots:
+    void rgb16DisplayReferencePreservesEndpoints();
     void checkedStateUpdatesPalette();
     void mainWindowGpuPreviewPolicyAllowsGpu16OnlyWithoutScopes();
     void mainWindowGpuPreviewPolicyScopesVetoOnlyWhenDisplayed();
@@ -561,6 +580,7 @@ private slots:
     void gpuViewportFallsBackToPixmapWhenNotInstalled();
     void gpuViewportQueuesAndClearsPresentedFrame();
     void gpuViewportOwnsPaintOnlyWhileFramePending();
+    void gpuViewportPreservesContinuousFrameEdges();
     void gpuViewportPresentsThroughNormalPaintEvents();
     void gpuViewportQueuesRgb16Frame();
     void gpuViewportQueuesBayer16Frame();
@@ -1222,6 +1242,19 @@ void GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame()
     qunsetenv(GpuDisplayViewport::environmentVariableName());
 }
 
+void GuiSmokeTest::rgb16DisplayReferencePreservesEndpoints()
+{
+    const QImage endpoints = rgb16_to_qimage({0, 65535, 65408}, 1, 1);
+    QCOMPARE(endpoints.pixelColor(0, 0), QColor(0, 255, 255));
+    std::vector<uint16_t> levels(256 * 3);
+    for (int level = 0; level < 256; ++level)
+        for (int channel = 0; channel < 3; ++channel)
+            levels[level * 3 + channel] = static_cast<uint16_t>(level * 257);
+    const QImage roundtrip = rgb16_to_qimage(levels, 256, 1);
+    for (int level = 0; level < 256; ++level)
+        QCOMPARE(roundtrip.pixelColor(level, 0), QColor(level, level, level));
+}
+
 void GuiSmokeTest::gpuViewportOwnsPaintOnlyWhileFramePending()
 {
     const QByteArray previous = qgetenv(GpuDisplayViewport::environmentVariableName());
@@ -1271,6 +1304,37 @@ void GuiSmokeTest::gpuViewportOwnsPaintOnlyWhileFramePending()
     QPaintEvent fallbackPaint(view.viewport()->rect());
     QApplication::sendEvent(view.viewport(), &fallbackPaint);
     QCOMPARE(view.scenePaints, 2);
+}
+
+void GuiSmokeTest::gpuViewportPreservesContinuousFrameEdges()
+{
+    const QByteArray previous = qgetenv(GpuDisplayViewport::environmentVariableName());
+    const auto restore = qScopeGuard([previous]() {
+        qputenv(GpuDisplayViewport::environmentVariableName(), previous);
+    });
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+    QGraphicsScene scene;
+    QPixmap fallback(4, 4);
+    fallback.fill(Qt::black);
+    auto *item = scene.addPixmap(fallback);
+    std::unique_ptr<QGraphicsView> view(make_presenter_view(scene, item, QSize(4, 4)));
+    QVERIFY(GpuDisplayViewport::installOn(view.get()));
+    auto *viewport = qobject_cast<GpuDisplayViewport *>(view->viewport());
+    QVERIFY(viewport);
+    QVERIFY(GpuDisplayViewport::presentImage(view.get(), item, make_presenter_pattern()));
+    // QRect's inclusive integer endpoints used to inflate this extent to 5x5.
+    QCOMPARE(viewport->targetRectInViewport().size(), QSizeF(4, 4));
+    view->scale(1.25, 1.5);
+    QCOMPARE(viewport->targetRectInViewport().size(), QSizeF(5, 6));
+    // The caller's scene rectangle carries de-squeeze independently of texture
+    // dimensions. Preserve that rectangle through fractional zoom and scrolling.
+    view->setSceneRect(QRectF(0, 0, 2048, 512));
+    QCOMPARE(viewport->targetRectInViewport().size(), QSizeF(2560, 768));
+    view->horizontalScrollBar()->setValue(20);
+    const QRectF beforeScroll = viewport->targetRectInViewport();
+    view->horizontalScrollBar()->setValue(27);
+    QCOMPARE(viewport->targetRectInViewport().left(), beforeScroll.left() - 7);
+    QCOMPARE(viewport->targetRectInViewport().size(), beforeScroll.size());
 }
 
 void GuiSmokeTest::gpuViewportPresentsThroughNormalPaintEvents()
@@ -1571,6 +1635,9 @@ void GuiSmokeTest::gpuViewportPresentsRgb888PatternExactly()
 
     const QImage trimmed = trim_rounding_border(actual, submitted.size());
     QCOMPARE(trimmed.size(), expected.size());
+    QString difference_message;
+    QVERIFY2(image_regression::images_match_rgb888(expected, trimmed, 0, &difference_message),
+             qPrintable(difference_message));
     assert_expected_hash(expected_hashes, QStringLiteral("gpu.viewport.rgb888.pattern_nearest"), trimmed);
 
     GpuDisplayViewport::clearPresentedImage(view.get(), item);
@@ -1616,6 +1683,9 @@ void GuiSmokeTest::gpuViewportPresentsRgb16PatternExactly()
 
     const QImage trimmed = trim_rounding_border(actual, submitted.size());
     QCOMPARE(trimmed.size(), expected.size());
+    QString difference_message;
+    QVERIFY2(image_regression::images_match_rgb888(expected, trimmed, 0, &difference_message),
+             qPrintable(difference_message));
     assert_expected_hash(expected_hashes, QStringLiteral("gpu.viewport.rgb16.pattern_nearest"), trimmed);
 
     GpuDisplayViewport::clearPresentedImage(view.get(), item);
@@ -1940,6 +2010,10 @@ int main(int argc, char ** argv)
     test_runtime::prefer_desktop_opengl_on_windows();
 #ifdef Q_OS_WIN
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    // These pixel goldens were captured at device-pixel ratio 1. Scale-factor
+    // multipliers alone do not disable native Windows per-monitor scaling.
+    // This is confined to the test process; real GUI smoke uses the host DPI.
+    qputenv("QT_ENABLE_HIGHDPI_SCALING", QByteArrayLiteral("0"));
 #endif
     if ( qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") )
     {
