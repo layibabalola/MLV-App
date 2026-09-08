@@ -13,6 +13,7 @@
 #include "../../src/batch/BatchRunner.h"
 #include "../../src/batch/BatchLogger.h"
 #include "../../src/batch/MlvTrim.h"
+#include "../../src/batch/EnvFlags.h"
 #include "debug/ForceSingleThread.h"
 
 #include <QByteArray>
@@ -73,13 +74,8 @@ static bool hasGuiPlaybackSmokeFlag(int argc, char *argv[])
 
 static bool envFlagEnabled(const char *name)
 {
-    if (!name || !qEnvironmentVariableIsSet(name)) return false;
-    const QByteArray value = qgetenv(name).trimmed().toLower();
-    return !value.isEmpty()
-        && value != QByteArrayLiteral("0")
-        && value != QByteArrayLiteral("false")
-        && value != QByteArrayLiteral("off")
-        && value != QByteArrayLiteral("no");
+    if (!name) return false;
+    return mlvappEnvFlagEnabled(qgetenv(name));
 }
 
 static bool argvOptionMatches(const char *arg, const char *option)

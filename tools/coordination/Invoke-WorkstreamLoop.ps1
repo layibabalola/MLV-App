@@ -44,6 +44,12 @@ param(
     # Tracks to rotate through, in preference order.
     [string[]]$Tracks = @('playback','factory','product','UNSET'),
 
+    # Lane and edit-authority to forward to Invoke-Workstream.ps1 on every dispatch this cycle.
+    # Empty $Lane preserves the dispatcher's own kind/owner-based resolution.
+    [ValidateSet('', 'opus', 'sonnet', 'fable', 'sol', 'luna')]
+    [string]$Lane = '',
+    [switch]$AllowEdits,
+
     [switch]$DryRun,
     [switch]$Install,
     [switch]$Status
@@ -51,6 +57,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Pure -Install/-Tracks helpers, dot-sourced so a test can exercise them without running the loop
+# (which syncs a real git worktree and would mutate live board state).
+. (Join-Path $PSScriptRoot 'loop-install-args.ps1')
+
+# A pwsh -File scheduled-task action hands back a persisted -Tracks value as ONE literal string;
+# turn a comma-joined string back into an array before it is used for anything, including -Status
+# output and the cycle receipt.
+$Tracks = Resolve-Tracks -Tracks $Tracks
 
 $RepoRoot   = 'C:\!Layi Wkspc\MLV-App'
 $DualLane   = Join-Path $RepoRoot '.claude-state\coordination\dual-lane'
@@ -150,11 +165,21 @@ if ($Install) {
     # no budget arguments, so the task ALWAYS ran the defaults no matter what -Install was
     # given. When the measured spend (USD 22-25 per fable lane) forced an emergency cap, it
     # had to be applied by editing the live task action - a change that any later -Install
-    # would silently have thrown away. Pass them through, so the registered task states its
-    # own bound and the bound is auditable from the task itself.
-    $argLine = ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" ' +
-                '-DailyBudget {1} -MaxDispatchesPerCycle {2} -TimeoutSec {3} -StaleHours {4}') -f `
-               $PSCommandPath, $DailyBudget, $MaxDispatchesPerCycle, $TimeoutSec, $StaleHours
+    # would silently have thrown away. Pass EVERY schedulable parameter through, including
+    # -Tracks/-Lane/-AllowEdits (dropped silently until now - see Get-InstallArgLine's own
+    # header), so the registered task states its own bound and the bound is auditable from
+    # the task itself.
+    $argLine = Get-InstallArgLine -ScriptPath $PSCommandPath -DailyBudget $DailyBudget `
+        -MaxDispatchesPerCycle $MaxDispatchesPerCycle -TimeoutSec $TimeoutSec -StaleHours $StaleHours `
+        -Tracks $Tracks -Lane $Lane -AllowEdits:$AllowEdits
+
+    if ($DryRun) {
+        # Show what would be installed without registering anything - the escape hatch that lets
+        # a test (or a human) verify the arg line by construction rather than by reading source.
+        Write-Output "LOOP: install argLine = $argLine"
+        exit 0
+    }
+
     $action  = New-ScheduledTaskAction -Execute 'pwsh.exe' `
         -Argument $argLine `
         -WorkingDirectory $RepoRoot
@@ -180,6 +205,25 @@ $stamp      = $cycleStart.ToString('yyyyMMddTHHmmssZ')
 $dispatched = @()
 $skipped    = @()
 $halted     = $null
+Write-Output "LOOP: tracks=$($Tracks -join ', ')"
+
+# RACE SAFETY: only one cycle of this loop may run at a time. A named, machine-wide mutex
+# (not a lock FILE - a crashed holder leaks a file forever but the OS reclaims a mutex on
+# process exit) held for the whole cycle, so a scheduled task firing on top of a still-running
+# previous cycle waits rather than double-dispatching against the same budget.
+$cycleMutex = New-Object System.Threading.Mutex($false, 'Global\MLV-WorkstreamLoop')
+$gotMutex = $false
+try {
+    $gotMutex = $cycleMutex.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+    # A previous holder crashed without releasing it. The mutex is still valid; take it.
+    $gotMutex = $true
+}
+if (-not $gotMutex) {
+    Write-Output 'LOOP: HALTED - another cycle already holds Global\MLV-WorkstreamLoop'
+    exit 0
+}
+try {
 
 $syncError = $null
 if (Test-Path -LiteralPath $KillSwitch) {
@@ -200,16 +244,21 @@ if ($halted) {
     $halted = "dispatcher missing at $Dispatcher even after syncing to $TargetRef - it is not on the target branch yet"
     Write-Output "LOOP: CANNOT-DETERMINE - $halted"
 } else {
-    # Budget is DERIVED from the log's own records for today, so it cannot drift
-    # from what actually happened the way a stored counter can.
+    # Budget is DERIVED from the reservations file's own records for today, so it cannot drift
+    # from what actually happened the way a stored counter can. Reads dispatch-reservations.jsonl
+    # (S76), not workstream-dispatch-log.jsonl: every lane start - editing or read-only - now
+    # appends a 'reserved' row there BEFORE the lane runs, which is the earliest point a slot is
+    # actually spent regardless of how the lane later exits.
+    $ReservationsPath = Join-Path $DualLane 'receipts\dispatch-reservations.jsonl'
     $todayUtc = $cycleStart.ToString('yyyy-MM-dd')
     $spentToday = 0
-    if (Test-Path -LiteralPath $LogPath) {
-        foreach ($line in (Get-Content -LiteralPath $LogPath)) {
+    if (Test-Path -LiteralPath $ReservationsPath) {
+        foreach ($line in (Get-Content -LiteralPath $ReservationsPath)) {
             if (-not $line.Trim()) { continue }
             try {
                 $row = $line | ConvertFrom-Json
-                $t = $row.PSObject.Properties['dispatchedUtc']
+                if ([string]$row.state -ne 'reserved') { continue }
+                $t = $row.PSObject.Properties['recordedUtc']
                 # ConvertFrom-Json already materialises an ISO-8601 'Z' timestamp as a
                 # [datetime] with Kind=Utc. Passing THAT to [datetime]::Parse() stringifies it in
                 # LOCAL format first, losing the Kind, so it re-parses as Local and
@@ -250,6 +299,8 @@ if ($halted) {
 
             $argv = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Dispatcher,
                       '-Track',$track,'-TimeoutSec',$TimeoutSec,'-StaleHours',$StaleHours)
+            if ($Lane) { $argv += @('-Lane', $Lane) }
+            if ($AllowEdits) { $argv += '-AllowEdits' }
             if ($DryRun) { $argv += '-DryRun' }
 
             $out = & pwsh @argv 2>&1
@@ -290,4 +341,11 @@ $receipt = [ordered]@{
 $receiptPath = Join-Path $CycleDir "cycle-$stamp.json"
 [System.IO.File]::WriteAllText($receiptPath, ($receipt | ConvertTo-Json -Depth 6), [System.Text.UTF8Encoding]::new($false))
 Write-Output "LOOP: cycle receipt $receiptPath (dispatched=$($dispatched.Count) skipped=$($skipped.Count))"
+
+} finally {
+    # Release before exit, not merely on the fall-through path: an unhandled throw anywhere in the
+    # cycle body above must not leave the mutex held for the next scheduled firing.
+    if ($gotMutex) { $cycleMutex.ReleaseMutex() | Out-Null }
+    $cycleMutex.Dispose()
+}
 exit 0

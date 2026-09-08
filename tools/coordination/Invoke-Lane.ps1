@@ -81,7 +81,17 @@ param(
     # the facts into a 4-7 KB brief, so a lane re-reading it pays full price for context
     # it was already given. A compact brief bounds the PROMPT; it does not bound the
     # READING, and nothing here did until now.
-    [switch]$AllowBulkReads
+    [switch]$AllowBulkReads,
+
+    # 0.1: the explicit tool allowlist an editing lane is granted. REQUIRED with
+    # -AllowEdits; 'ALL' is never accepted (allowlist-required). Comma-separated,
+    # passed straight through to claude's --allowedTools.
+    [string]$AllowedTools = '',
+
+    # 0.1: an extra directory the lane may read beyond -WorkDir (e.g. board
+    # coordination paths an editing lane needs without a full -AllowBulkReads
+    # grant). Optional; claude engine only (--add-dir).
+    [string]$ExtraReadDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -126,6 +136,49 @@ if ($PromptFile) {
 
 if (-not $WorkDir) { $WorkDir = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path }
 $WorkDir = (Resolve-Path -LiteralPath $WorkDir).Path
+
+# ---------------------------------------------------------------- 0.1 pre-flight (before any process, before any run dir)
+# (a) A codex lane (sol, luna) can never be granted write access: no Claude hook is
+# visible to codex exec, so nothing here could enforce NA-1..NA-10 against it.
+if ($AllowEdits -and ($Lane -eq 'sol' -or $Lane -eq 'luna')) {
+    throw "codex-lane-never-edits: -Lane $Lane with -AllowEdits (no Claude hook is visible to codex exec)"
+}
+# (b) An editing lane's tool grant must be an explicit, auditable list. 'ALL' is
+# never accepted - that is the exact grant this whole patch exists to narrow.
+if ($AllowEdits -and ([string]::IsNullOrWhiteSpace($AllowedTools) -or $AllowedTools -eq 'ALL')) {
+    throw "allowlist-required: -AllowEdits requires -AllowedTools <comma-separated list>; 'ALL' is never granted"
+}
+# MLV_BOARD_ROOT: only a test sets it (a tmp-dir board fixture); the default is the
+# real board (mirrors Start-EditingLane.ps1's own resolution, O107).
+$RepoRoot = if ($env:MLV_BOARD_ROOT) { $env:MLV_BOARD_ROOT } else { 'C:\!Layi Wkspc\MLV-App' }
+$HookEnforcedReceipt = Join-Path $RepoRoot '.claude-state\coordination\dual-lane\receipts\0.05-hook-enforced.json'
+$WorkDirHookPath     = Join-Path $WorkDir 'tools\hooks\mlv-never-authorized.py'
+# hookSha256 is computed unconditionally (when the file exists) so the receipt can
+# always carry it, per 0.1's receipt-fields requirement - not only on editing lanes.
+$WorkDirHookSha256 = if (Test-Path -LiteralPath $WorkDirHookPath) {
+    (Get-FileHash -LiteralPath $WorkDirHookPath -Algorithm SHA256).Hash.ToLowerInvariant()
+} else { $null }
+# (e) The worktree's OWN hook copy is what actually governs an editing lane's
+# session (Claude Code loads it from -WorkDir), so this checks THAT copy against
+# the board's receipt of what the ratified hook hashes to - never the board root's
+# own copy, which the lane never runs against.
+if ($AllowEdits) {
+    if (-not (Test-Path -LiteralPath $HookEnforcedReceipt)) {
+        throw "hook-not-enforced: receipt missing at $HookEnforcedReceipt"
+    }
+    if ($null -eq $WorkDirHookSha256) {
+        throw "hook-not-enforced: hook script missing in worktree: $WorkDirHookPath"
+    }
+    $hookEnforcedRec = Get-Content -LiteralPath $HookEnforcedReceipt -Raw | ConvertFrom-Json
+    $receiptHookSha256 = ([string]$hookEnforcedRec.hookSha256).ToLowerInvariant()
+    if ($WorkDirHookSha256 -ne $receiptHookSha256) {
+        throw ("hook-not-enforced: worktree hook sha256={0} != receipt hookSha256={1}" -f $WorkDirHookSha256, $receiptHookSha256)
+    }
+}
+$BaseSha = try {
+    (& git -C $WorkDir rev-parse HEAD 2>$null | Select-Object -First 1)
+} catch { $null }
+if ([string]::IsNullOrWhiteSpace($BaseSha)) { $BaseSha = $null }
 
 if (-not $RunDir) {
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
@@ -195,6 +248,9 @@ $exitCode   = -999
 $timedOut   = $false
 $final      = ''
 $failure    = $null
+# A PROVIDER REFUSAL is a third outcome beside ran/threw: the child exited cleanly and
+# the provider did no work. Detected from raw output after harvest; see lane-provider-refusal.ps1.
+$providerRefusal = $null
 $authority  = [ordered]@{ permissionMode = 'unset'; allowedTools = 'unset'; sandbox = 'unset'; writableRoot = $null }
 $denyRules  = @()
 # $null, never 0. An engine that does not REPORT cost and a run that cost nothing are
@@ -202,6 +258,7 @@ $denyRules  = @()
 # malformed-row counter follows.
 $costUsd = $null; $numTurns = $null
 $cacheCreateTokens = $null; $cacheReadTokens = $null; $outputTokens = $null
+. (Join-Path $PSScriptRoot 'lane-provider-refusal.ps1')
 
 try {
 
@@ -213,6 +270,7 @@ Write-Utf8NoBom $promptPath $Prompt
 if ($cfg.engine -eq 'claude') {
     $exe  = $CLAUDE_EXE
     $argv = @('-p', '--model', $cfg.model, '--output-format', 'json', '--add-dir', $WorkDir)
+    if ($ExtraReadDir) { $argv += @('--add-dir', $ExtraReadDir) }
     if ($MaxTurns -gt 0) { $argv += @('--max-turns', [string]$MaxTurns) }
     # Deny-list written to the RUN DIR so the grant is auditable beside the receipt that
     # it produced, rather than being an invisible property of the invocation.
@@ -229,7 +287,10 @@ if ($cfg.engine -eq 'claude') {
         $argv += @('--settings', $settingsPath)
     }
     if ($AllowEdits) {
-        $argv += @('--permission-mode', 'acceptEdits')
+        # 0.1: acceptEdits still takes an explicit --allowedTools list - the mode
+        # decides HOW an allowed tool behaves (auto-accept vs prompt), the list
+        # decides WHICH tools are allowed at all. 'ALL' was refused above.
+        $argv += @('--permission-mode', 'acceptEdits', '--allowedTools', $AllowedTools)
     } else {
         # No read-only permission mode exists, so restrict the TOOLS instead.
         # COMMA-SEPARATED, ONE TOKEN: --allowedTools is VARIADIC, so passing the
@@ -250,7 +311,7 @@ if ($cfg.engine -eq 'claude') {
     # authority so a receipt can be audited against the policy that produced it.
     $authority = [ordered]@{
         permissionMode = if ($AllowEdits) { 'acceptEdits' } else { 'dontAsk' }
-        allowedTools   = if ($AllowEdits) { 'ALL' } else { 'Read,Grep,Glob' }
+        allowedTools   = if ($AllowEdits) { $AllowedTools } else { 'Read,Grep,Glob' }
         sandbox        = 'n/a (claude)'
         writableRoot   = if ($AllowEdits) { $WorkDir } else { $null }
         maxTurns       = if ($MaxTurns -gt 0) { $MaxTurns } else { 'unset' }
@@ -339,6 +400,11 @@ $stderrText = try { $errTask.Result } catch { '' }
 if ($null -eq $stderrText) { $stderrText = '' }
 Write-Utf8NoBom $outPath $stdout
 Write-Utf8NoBom $errPath $stderrText
+# Classify BEFORE parsing the answer: a refused run has no answer, and the 2026-09-07 sol
+# receipt proved that exitCode alone cannot tell "refused in 7 s" from "reviewed and objected".
+# Structurally, never by scanning the transcript (sol PR #80 R1+R2, both BLOCKER): the
+# transcript legitimately CONTAINS the refusal vocabulary even when the run answered.
+$providerRefusal = Get-ProviderRefusal -Text $stderrText -Answer $stdout -Engine $cfg.engine -Prompt $Prompt
 
 $final = ''
 if ($cfg.engine -eq 'claude') {
@@ -395,7 +461,10 @@ $receipt = [ordered]@{
     schema       = 'mlv-app/fleet-lane-receipt/v1'
     # SAME KEY AT EVERY STAGE. A reader checks `state` once - reserved, complete or
     # failed - instead of inferring liveness from which fields happen to be present.
-    state        = if ($null -ne $failure) { 'failed' } elseif ($exitCode -ne -999) { 'complete' } else { 'incomplete' }
+    state        = if ($null -ne $failure) { 'failed' }
+                   elseif ($null -ne $providerRefusal) { 'refused' }
+                   elseif ($exitCode -ne -999) { 'complete' }
+                   else { 'incomplete' }
     lane         = $Lane
     role         = $cfg.role
     engine       = $cfg.engine
@@ -404,6 +473,9 @@ $receipt = [ordered]@{
     card         = $Card
     workDir      = $WorkDir
     allowEdits   = [bool]$AllowEdits
+    allowedTools = if ($AllowEdits) { $AllowedTools } else { $authority.allowedTools }
+    baseSha      = $BaseSha
+    hookSha256   = $WorkDirHookSha256
     authority    = $authority
     startedUtc   = $startedUtc.ToString('o')
     endedUtc     = (Get-Date).ToUniversalTime().ToString('o')
@@ -420,7 +492,11 @@ $receipt = [ordered]@{
     stdoutPath   = $outPath
     stderrPath   = $errPath
     failure      = $failure
-    complete     = ($null -eq $failure -and $exitCode -ne -999)
+    # null when the provider did the work. Otherwise {kind, engine, match, retryAfter, remedy};
+    # `complete` is false in that case even though `failure` is null -- the lane script did not
+    # fail, the provider declined, and a reader must never mistake that for a verdict.
+    providerRefusal = $providerRefusal
+    complete     = ($null -eq $failure -and $null -eq $providerRefusal -and $exitCode -ne -999)
     spend        = [ordered]@{
         costUsd            = $costUsd
         costReported       = ($null -ne $costUsd)
@@ -445,6 +521,10 @@ Write-Host ("[{0}] {1}/{2} effort={3} exit={4} {5}s cost={6} -> {7}" -f `
     $rcptPath)
 
 if ($timedOut) { Write-Host "  TIMED OUT after ${TimeoutSec}s - output is partial." }
+if ($null -ne $providerRefusal) {
+    Write-Host ("  PROVIDER REFUSED ({0}): {1}" -f $providerRefusal.kind, $providerRefusal.match)
+    Write-Host ("  remedy: {0}" -f $providerRefusal.remedy)
+}
 
 # Emit the receipt so a caller can pipeline on it.
 [pscustomobject]$receipt
@@ -466,7 +546,12 @@ if ($timedOut) { Write-Host "  TIMED OUT after ${TimeoutSec}s - output is partia
 # exit code intact, and -1 would surface as 255. 124 for a timeout matches the taxonomy the repo
 # already uses in boundedRunnerExitCodes; 127 marks "reserved but never completed", which the
 # receipt also records as complete=false with the failure carried.
+# 125 = the provider refused (usage limit, 429, auth). Chosen beside 124/127 so a dispatcher
+# reading laneExitCode can tell "nobody did the work" from "the work was done and objected".
 $propagated = switch ($exitCode) {
+    # First and with `break`: PowerShell evaluates EVERY matching clause, and a refusal can
+    # arrive with any child exit code. "Nobody did the work" outranks how the child coded it.
+    { $null -ne $providerRefusal } { 125; break }   # provider refused; see receipt.providerRefusal
     -1      { 124 }   # timed out
     -999    { 127 }   # slot reserved, no completion recorded
     default { if ($exitCode -ge 0 -and $exitCode -le 255) { $exitCode } else { 1 } }
