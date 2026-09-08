@@ -149,15 +149,14 @@ void maybeGrabDisplayFrame(const QImage &image)
     }
 }
 
-/* Bug A on-screen present A/B (env-selectable, ONE binary, all inert unless the
- * matching var is set, freely combinable). The Dell Optimus hybrid renders the GL
- * viewport correctly into its offscreen FBO -- QWidget::grab()/--window-screenshot
- * look right -- but never composites it to the iGPU-driven panel, so the physical
- * screen stays solid BLACK while the non-GL pixmap viewport displays fine. These
- * probe whether a different swap / flush / native-window present mode makes the
- * cross-adapter present land on the panel. VALIDATE WITH EYES ON THE DELL SCREEN;
- * screenshots capture the FBO and lie on hybrids. The matching global toggles
- * (AA_ShareOpenGLContexts skip, global default QSurfaceFormat) live in main.cpp. */
+/* Historical presentation probes, inert unless explicitly enabled. The black
+ * viewport was reproduced on both Bachelor and UltraMagnus on September 8:
+ * QGraphicsView consumed normal paint events while internal grabs forced GL
+ * rendering. Explicit viewport paint ownership fixed that defect on both hosts.
+ * Hybrid composition, swap and flush remain hypotheses for other incidents,
+ * not the established cause here. Validate the actual application HWND with
+ * compositor captures; an internal framebuffer grab cannot prove visibility.
+ * The matching global format/context probes live in main.cpp. */
 QSurfaceFormat::SwapBehavior viewportAbSwapBehavior(bool *isSet)
 {
     const QByteArray v = qgetenv("MLVAPP_VIEWPORT_AB_SWAP").trimmed().toLower();
@@ -190,20 +189,16 @@ bool viewportAbNativeWindow()
     return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_NATIVE"));
 }
 
-/* Add an alpha channel to the per-widget requested format. Qt documents that a
- * QOpenGLWidget needs an alpha channel in the top-level backing store or its content
- * "will not be visible" -- the exact correct-FBO-but-black symptom. The decisive part
- * is the GLOBAL default format set before QApplication (main.cpp); this is the
- * belt-and-suspenders per-widget half. Highest-probability cheap fix. */
+/* Probe an alpha channel in the per-widget format. Top-level backing-store alpha
+ * is a separate Qt composition requirement; this flag did not establish the
+ * cause of the September 8 paint-routing defect. */
 bool viewportAbAlphaEnabled()
 {
     return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_ALPHA"));
 }
 
-/* Qt's explicit escape hatch for the QOpenGLWidget composition limitation that
- * causes the alpha-less-backing-store black: WA_AlwaysStackOnTop presents the GL
- * widget outside the normal flushed backing-store composite. Per-widget, so it works
- * for an embedded viewport. Breaks sibling stacking, fine for a full-bleed viewport. */
+/* Probe WA_AlwaysStackOnTop composition. This changes sibling stacking and is
+ * retained as an explicit diagnostic option, not the normal playback fix. */
 bool viewportAbStackTopEnabled()
 {
     return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_STACKTOP"));
@@ -2185,7 +2180,9 @@ QRectF GpuDisplayViewport::targetRectInViewport() const
 
     if ( sceneRect.isEmpty() ) return QRectF();
 
-    return m_view->mapFromScene(sceneRect).boundingRect();
+    // GL vertices describe continuous edges. Integer QPolygon/QRect bounds
+    // include both endpoints and would expand a 4x4 frame to a 5x5 quad.
+    return m_view->viewportTransform().mapRect(sceneRect);
 }
 
 int GpuDisplayViewport::pendingWidth() const

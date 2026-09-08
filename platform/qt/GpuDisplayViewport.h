@@ -132,6 +132,7 @@ protected:
     void resizeGL(int w, int h) override;
 
 private:
+    friend class GuiSmokeTest; // Exercise display geometry without requiring GL.
     static GpuDisplayViewport *from(QGraphicsView *view);
     static const GpuDisplayViewport *from(const QGraphicsView *view);
 

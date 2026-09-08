@@ -48,13 +48,62 @@ When `visualQuality.lookAssist.safetyFallback` is true, inspect `safetyWarning`,
 correction was applied. The CPU and GPU frame-120 controls both reported
 `global-green-cast`, decision `none`, null preset exposure and exposure zero.
 
-The initial native GUI suite comparison had 30 passes/10 failures before the
-paint fix and 32 passes/8 failures after it. The two new paint regressions turned
-green. The eight identical existing failures remain open: six GPU expectations
-still vertically flip their reference image, and two `ScopesLabel` widget hashes
-differ on native Windows. The offscreen run passed 31 tests and skipped nine
-native OpenGL tests. These results do not constitute an all-green native suite,
-and no golden hashes were changed to accept them.
+Use Bachelor for routine playback validation, with UltraMagnus available for
+CUDA builds and additional GPU coverage. Record the host, renderer, build hash
+and CUDA architecture before interpreting a result. Bachelor requires `sm_86`;
+an UltraMagnus-only `sm_89` DLL does not validate its RTX 3060 laptop GPU. Build
+from the same pinned source and verify the actual binary architectures. Stage
+each run from the preserved clean package: a live app can update its `releases`
+metadata, so a previously used runtime folder is not an immutable package.
+
+Paint-fix build `688b505ce228` was verified on both hosts. On Bachelor, a separate
+run with internal screenshots disabled produced 727 presented frames (first 0,
+last 123, skipped/unpresented ratio zero), and all 13 HWND compositor captures
+succeeded. Inspected captures showed changing footage. The 726 post-warmup
+frames reported accepted, used and exact async uploads. A separate output
+validation run had 794 presented frames (first 0, last 96, ratio zero), 80/80
+texture parity matches and no mismatches. These checks do not establish exposure
+correctness against an independently known-good build, and their instrumentation
+precludes a no-overhead performance claim.
+
+## Native image tests and continuous display geometry
+
+The initial suite had 30 passes/10 failures before the paint fix and 32/8 after
+it. Investigation of the remaining failures found an additional geometry bug:
+`mapFromScene(rect).boundingRect()` converts continuous rectangle edges into
+integer inclusive bounds, expanding a 4x4 frame to 5x5. The viewport now maps
+the `QRectF` through `viewportTransform()` directly. The regression exercises
+the actual target rectangle without GL, including fractional zoom, the caller's
+de-squeezed scene rectangle and scrolling. Native zebra and pixel comparisons
+also detect the resulting sampling error.
+
+The tests contained two separate reference-construction defects. Their shader
+comparison helper vertically flipped the submitted pixels, and their U16-to-U8
+conversion could wrap 65535 to zero. The helpers now preserve image orientation
+and round normalized values using division by 257. Endpoint and grayscale
+roundtrip tests cover the latter. The two basic RGB pattern tests previously
+checked only size and a frozen hash; they now also compare exact pixels against
+the submitted pattern before checking the hash.
+
+The scope goldens were captured at DPR 1, while native Windows used DPR 1.5
+despite the existing scale-factor environment settings. Only the test process
+now disables automatic Windows DPI scaling before creating `QApplication` and
+asserts unit DPR for the scope fixture. Real application/WGC runs retain the
+host's display settings. `MLVAPP_TEST_SCOPE_DIAGNOSTICS=1` records the effective
+platform, DPR, pixmap geometry and raw hash. See the supported testing setting
+in [Qt's high-DPI documentation](https://doc.qt.io/qt-6.10/highdpi.html).
+
+Before the reference correction, the native suite had 40 passes and exactly
+two frozen-hash failures, with no skips. Both old hashes encode a vertically
+flipped 4x4 pattern inflated to 5x5 and cropped back to 4x4. The corrected
+RGB888/RGB16 output matches the original pattern exactly. The owner delegated
+this exact proposal to two adversarial Luna reviewers and the Fable hub; their
+approval and bounded authority are recorded in `agents/release-and-regression.md`.
+After applying only those two hashes, the unchanged native executable passed
+all 42 tests with no failures or skips. Offscreen passed 33 tests with nine
+native GL skips. The geometry fix still requires a fresh application build and
+Bachelor real-footage validation before delivery; synthetic tests do not replace
+the independently known-good build comparison.
 
 This instrumentation adds a viewport readback to screenshot smokes. Their timing
 is not evidence of no-readback playback performance. Ordinary playback and smoke
