@@ -29,3 +29,12 @@ independently of scalar timer availability. Retained-device presentation that
 does not reconstruct in that call reports no new preupload status. Check every
 frame in the async leg for positive accepted/used/exact-match counts; a successful
 smoke or zero counters alone cannot establish async operation.
+
+Preupload is submitted from the admitted prepare-only RAW processing path after
+bit-depth expansion and other RAW corrections, using the reconstruction input
+snapshot. Decoded input can have different bytes for the same frame; the backend
+keeps its exact token and byte comparison and safely falls back on a mismatch.
+The pipeline regression expands a synthetic 12-bit frame and observes the real
+submission boundary for frames zero and one. Disabled and ineligible paths must
+not submit. That observer proves the input contract, while GPU smoke telemetry
+must independently prove that the application actually consumed async uploads.
