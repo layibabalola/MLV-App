@@ -291,6 +291,7 @@ SOURCES += \
     ../../src/librtprocess/src/include/librtprocesswrapper.cpp \
     ../../src/debayer/ahdOld.c \
     ../../src/batch/BatchContext.cpp \
+    ../../src/batch/BatchRenderedVideoPlan.cpp \
     ../../src/batch/BatchPrompts.cpp \
     ../../src/batch/BatchRunner.cpp \
     ../../src/batch/MlvTrim.cpp \
@@ -449,6 +450,7 @@ HEADERS += MainWindow.h \
     ../../src/librtprocess/src/include/sleef.h \
     ../../src/librtprocess/src/include/sleefsseavx.h \
     ../../src/batch/BatchTypes.h \
+    ../../src/batch/BatchRenderedVideoPlan.h \
     ../../src/batch/BatchContext.h \
     ../../src/batch/BatchPrompts.h \
     ../../src/batch/BatchRunner.h \

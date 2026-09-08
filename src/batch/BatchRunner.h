@@ -2,7 +2,7 @@
 #define BATCHRUNNER_H
 
 #include <QString>
-#include "BatchTypes.h"
+#include "BatchRenderedVideoPlan.h"
 #include "RawAspectStretchPolicy.h"
 
 #include <cstdint>

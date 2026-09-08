@@ -272,7 +272,7 @@ MediaProbeFacts mediaProbeFactsFromJson(const QByteArray &json)
 
 /* Same facts, read from `ffmpeg -i <file>` instead of ffprobe.
  *
- * The PARSING lives in BatchTypes.h (batchRenderedVideoFfmpegDumpFacts) so the console
+ * The PARSING lives in BatchRenderedVideoPlan.cpp (batchRenderedVideoFfmpegDumpFacts) so the console
  * tests can pin the regexes without linking this GUI-dependent translation unit; this
  * wrapper only adapts the result into MediaProbeFacts and stamps the probe source.
  *
@@ -760,7 +760,7 @@ int BatchRunner::exportRenderedVideoFile(
         }
         /* A non-1:1 SAR would silently re-stretch the image on playback, undoing the
          * receipt's stretch. This is exactly the aspect defect the check exists for.
-         * The square-pixel spellings live in BatchTypes.h so the product check and the
+         * The square-pixel spellings live in BatchRenderedVideoPlan.cpp so the product check and the
          * console test share ONE definition and cannot drift apart. */
         if( !batchRenderedVideoSampleAspectIsSquare( facts.sampleAspectRatio ) )
         {
