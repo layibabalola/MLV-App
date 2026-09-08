@@ -24,6 +24,7 @@
 #include <QElapsedTimer>
 #include <QTimer>
 #include <QDir>
+#include <QEvent>
 #include <QVector2D>
 #include <QVector3D>
 #include <QtDebug>
@@ -463,16 +464,12 @@ const char *GpuDisplayViewport::environmentVariableName()
     return "MLVAPP_EXPERIMENTAL_GL_VIEWPORT";
 }
 
-/* Known hybrid-GPU limitation: on NVIDIA Optimus laptops (discrete GPU renders,
- * Intel iGPU drives the panel), this experimental QOpenGLWidget viewport renders
- * correctly into its offscreen framebuffer -- QWidget::grab()/--window-screenshot
- * is correct -- but the result is NOT presented to the physical display: the panel
- * stays solid BLACK, while the normal non-GL pixmap viewport displays fine.
- * Observed on an RTX 3060 Laptop across NVIDIA drivers 591.74 / 596.08 / 610.62; a
- * driver update did NOT fix the on-screen black (it only changed an offscreen
- * CPU-texture-upload detail that grab() captures, which is why FBO screenshots
- * looked fine). Desktop GPUs (RTX 4090) and Mesa llvmpipe present correctly.
- * Prefer the non-GL pixmap viewport on hybrid laptops. */
+/* QGraphicsView normally consumes viewport Paint events to draw its scene.
+ * Our GPU path hides the scene's pixmap and paints in QOpenGLWidget::paintGL,
+ * so it must own Paint while a GPU frame is pending. Otherwise ordinary playback
+ * paints an empty scene even though grab()/grabFramebuffer() can force a correct
+ * offscreen image. Reproduced with compositor capture on RTX 4090; internal grabs
+ * alone cannot establish physical presentation on desktop or hybrid GPUs. */
 bool GpuDisplayViewport::installOn(QGraphicsView *view)
 {
     if ( !view || !isRequestedByEnvironment() ) return false;
@@ -480,12 +477,27 @@ bool GpuDisplayViewport::installOn(QGraphicsView *view)
 
     GpuDisplayViewport *viewport = new GpuDisplayViewport(view);
     view->setViewport(viewport);
+    // Install after setViewport: Qt invokes the newest event filter first.
+    viewport->installEventFilter(viewport);
     view->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     view->setCacheMode(QGraphicsView::CacheNone);
     qInfo() << "Experimental GPU viewport enabled via"
             << environmentVariableName()
             << "- QGraphicsView now renders through QOpenGLWidget.";
     return true;
+}
+
+bool GpuDisplayViewport::eventFilter(QObject *watched, QEvent *event)
+{
+    if ( watched == this && event->type() == QEvent::Paint && hasPendingFrame() )
+    {
+        // Invoke Qt's paint-event path, which binds the widget FBO, calls paintGL,
+        // and schedules composition. Calling paintGL directly skips that setup.
+        QOpenGLWidget::event(event);
+        return true;
+    }
+    // Preserve QGraphicsView's scene/fallback, input, resize and scroll handling.
+    return QOpenGLWidget::eventFilter(watched, event);
 }
 
 bool GpuDisplayViewport::isInstalledOn(const QGraphicsView *view)

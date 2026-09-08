@@ -24,6 +24,8 @@
 #include <QJsonObject>
 #include <QMap>
 #include <QPalette>
+#include <QPaintEvent>
+#include <QScopeGuard>
 #include <QtTest/QtTest>
 
 #include <cmath>
@@ -558,6 +560,8 @@ private slots:
     void mainWindowMlvAspectKeepsNeutralReceiptFromSuppressingDesqueeze();
     void gpuViewportFallsBackToPixmapWhenNotInstalled();
     void gpuViewportQueuesAndClearsPresentedFrame();
+    void gpuViewportOwnsPaintOnlyWhileFramePending();
+    void gpuViewportPresentsThroughNormalPaintEvents();
     void gpuViewportQueuesRgb16Frame();
     void gpuViewportQueuesBayer16Frame();
     void gpuViewportRejectsInvalidPlaybackReconTexture();
@@ -1216,6 +1220,98 @@ void GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame()
     QVERIFY(item->isVisible());
 
     qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuViewportOwnsPaintOnlyWhileFramePending()
+{
+    const QByteArray previous = qgetenv(GpuDisplayViewport::environmentVariableName());
+    const auto restore = qScopeGuard([previous]() {
+        qputenv(GpuDisplayViewport::environmentVariableName(), previous);
+    });
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+
+    class PaintRoutingView : public QGraphicsView {
+    public:
+        explicit PaintRoutingView(QGraphicsScene *scene) : QGraphicsView(scene) {}
+        int scenePaints = 0;
+        int userEvents = 0;
+    protected:
+        void paintEvent(QPaintEvent *) override { ++scenePaints; }
+        bool viewportEvent(QEvent *event) override {
+            if (event->type() == QEvent::User) ++userEvents;
+            return QGraphicsView::viewportEvent(event);
+        }
+    };
+    QGraphicsScene scene;
+    QPixmap fallback(8, 6);
+    fallback.fill(Qt::blue);
+    QGraphicsPixmapItem *item = scene.addPixmap(fallback);
+    PaintRoutingView view(&scene);
+    view.resize(64, 64);
+    QVERIFY(GpuDisplayViewport::installOn(&view));
+
+    // Exercise Qt's actual viewport event filters without using grab(), which
+    // can render a correct FBO even when ordinary paint events go to the scene.
+    QPaintEvent emptyPaint(view.viewport()->rect());
+    QApplication::sendEvent(view.viewport(), &emptyPaint);
+    QCOMPARE(view.scenePaints, 1);
+    QImage image(8, 6, QImage::Format_RGB888);
+    image.fill(Qt::red);
+    QVERIFY(GpuDisplayViewport::presentImage(&view, item, image));
+    QVERIFY(!item->isVisible());
+    QPaintEvent framePaint(view.viewport()->rect());
+    QApplication::sendEvent(view.viewport(), &framePaint);
+    QCOMPARE(view.scenePaints, 1);
+
+    QEvent userEvent(QEvent::User);
+    QApplication::sendEvent(view.viewport(), &userEvent);
+    QCOMPARE(view.userEvents, 1);
+    GpuDisplayViewport::clearPresentedImage(&view, item);
+    QVERIFY(item->isVisible());
+    QPaintEvent fallbackPaint(view.viewport()->rect());
+    QApplication::sendEvent(view.viewport(), &fallbackPaint);
+    QCOMPARE(view.scenePaints, 2);
+}
+
+void GuiSmokeTest::gpuViewportPresentsThroughNormalPaintEvents()
+{
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen"))
+        QSKIP("Native OpenGL presentation is validated separately with QT_QPA_PLATFORM=windows.");
+    const QByteArray previous = qgetenv(GpuDisplayViewport::environmentVariableName());
+    const auto restore = qScopeGuard([previous]() {
+        qputenv(GpuDisplayViewport::environmentVariableName(), previous);
+    });
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+    QGraphicsScene scene;
+    QPixmap fallback(8, 6);
+    fallback.fill(Qt::blue);
+    QGraphicsPixmapItem *item = scene.addPixmap(fallback);
+    QGraphicsView view(&scene);
+    view.resize(128, 96);
+    QVERIFY(GpuDisplayViewport::installOn(&view));
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    auto *viewport = qobject_cast<GpuDisplayViewport *>(view.viewport());
+    QVERIFY(viewport);
+    QVERIFY2(viewport->isValid(), "Native validation requires a working OpenGL context.");
+
+    QImage image(8, 6, QImage::Format_RGB888);
+    image.fill(Qt::red);
+    QVERIFY(GpuDisplayViewport::presentImage(&view, item, image));
+    // No QWidget::grab or grabFramebuffer before this assertion: those calls
+    // force paintGL and would hide a broken normal playback paint route.
+    QTRY_VERIFY_WITH_TIMEOUT(GpuDisplayViewport::isTexturePresentationActive(&view), 2000);
+    // Optional bounded dwell for an external compositor capture of this synthetic
+    // red frame. The assertions above do not depend on screenshots or the dwell.
+    const int captureHoldMs = qBound(0, qEnvironmentVariableIntValue("MLVAPP_TEST_VISIBLE_HOLD_MS"), 5000);
+    if (captureHoldMs > 0) QTest::qWait(captureHoldMs);
+    image.fill(Qt::green);
+    QVERIFY(GpuDisplayViewport::presentImage(&view, item, image));
+    QVERIFY(!GpuDisplayViewport::isTexturePresentationActive(&view));
+    QTRY_VERIFY_WITH_TIMEOUT(GpuDisplayViewport::isTexturePresentationActive(&view), 2000);
+    QVERIFY(!item->isVisible());
+    GpuDisplayViewport::clearPresentedImage(&view, item);
+    QVERIFY(item->isVisible());
 }
 
 void GuiSmokeTest::gpuViewportQueuesRgb16Frame()

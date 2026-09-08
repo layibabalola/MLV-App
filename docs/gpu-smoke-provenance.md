@@ -1,10 +1,60 @@
 # GPU screenshot evidence
 
-Explicit GUI screenshot smokes capture actual viewport pixels before releasing
+Explicit GUI screenshot smokes capture internal viewport pixels before releasing
 each presented frame and emit a separate gpu_present_content event. The evidence
 consumer binds its sampled hash, serial, generation and dimensions to the same
 request/ready/frame chain as the final screenshot. Raw Bayer parity hashes remain
-a separate stream; they do not establish what the viewport displayed.
+a separate stream; neither proves that Windows composed the image into the visible
+playback window.
+
+## Visible playback and the paint-event regression
+
+The September 8, 2026 UltraMagnus investigation reproduced a black playback
+window on an RTX 4090 while the internal screenshot showed the footage and GPU
+texture parity passed. An independent, HWND-only Windows Graphics Capture
+filmstrip also showed black; the CPU control showed the dark scene. A synthetic
+solid-red frame reproduced black without footage, receipts or Look Assist.
+
+`QGraphicsView` installs a viewport event filter that routes ordinary paint
+events to its scene. The GPU presenter hides the scene's fallback pixmap and
+draws in `QOpenGLWidget::paintGL`. Without explicit paint ownership, normal
+playback therefore paints the empty scene. A widget/framebuffer grab can force
+the GPU render and conceal this failure. The viewport now handles its own paint
+events while a frame is pending, through Qt's complete widget paint path; scene
+fallback, resize and input events retain their normal routing.
+
+`gpuViewportOwnsPaintOnlyWhileFramePending` exercises Qt's event routing and
+fallback transitions without requiring OpenGL. The separate native test
+`gpuViewportPresentsThroughNormalPaintEvents` must pass with a working desktop
+OpenGL context and no grab before the presentation assertions. Run it with
+`QT_QPA_PLATFORM=windows`; the offscreen suite explicitly skips this native
+test. For an external capture of its synthetic red frame, set
+`MLVAPP_TEST_VISIBLE_HOLD_MS=2500` (bounded to five seconds).
+
+For any presentation-path change, inspect timestamped compositor captures during
+playback as well as the associated internal images. Capture only the identified
+application HWND, bind its PID/creation time and executable hash, bound the
+capture helper, and preserve failed captures. Do not use a desktop capture or
+PrintWindow alone as the GPU presentation oracle. Require visible content to
+advance, not merely UI timecode or internal frame counters. Compositor captures
+are additional evidence: the existing playback, parity, aspect, artifact and
+independent known-good-build output A/B gates still apply. The known-good binding
+in `tools/gates/output-budget.json` remains pending; same-build CPU parity cannot
+substitute for it.
+
+Look Assist's `applied` flag indicates completed analysis/application handling.
+When `visualQuality.lookAssist.safetyFallback` is true, inspect `safetyWarning`,
+`safetyDecision`, preset fields and the recorded visual state before claiming a
+correction was applied. The CPU and GPU frame-120 controls both reported
+`global-green-cast`, decision `none`, null preset exposure and exposure zero.
+
+The initial native GUI suite comparison had 30 passes/10 failures before the
+paint fix and 32 passes/8 failures after it. The two new paint regressions turned
+green. The eight identical existing failures remain open: six GPU expectations
+still vertically flip their reference image, and two `ScopesLabel` widget hashes
+differ on native Windows. The offscreen run passed 31 tests and skipped nine
+native OpenGL tests. These results do not constitute an all-green native suite,
+and no golden hashes were changed to accept them.
 
 This instrumentation adds a viewport readback to screenshot smokes. Their timing
 is not evidence of no-readback playback performance. Ordinary playback and smoke
