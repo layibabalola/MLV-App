@@ -2220,3 +2220,484 @@ def test_exporter_reports_a_missing_required_context_as_a_failure(tmp_path):
     review_doc = json.loads((run_dir / "pr-99-review.json").read_text(encoding="utf-8"))
     assert review_doc["missingRequiredContexts"] == ["lint"]
     assert "EXPORT: missing-required-context lint" in result.stdout
+
+
+# Product ratio admission: disposable history and actual dispatcher fixtures.
+import json
+import os
+import re
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+RATIO_SOURCE_GUARD = ROOT / "tools" / "coordination" / "Test-ProductRatioGuard.ps1"
+RATIO_SOURCE_DISPATCHER = ROOT / "tools" / "coordination" / "Invoke-Workstream.ps1"
+RATIO_SOURCE_AS_OF = 2_000_000_000
+RATIO_SOURCE_DAY = 86400
+
+
+def ratio_source_run(*args, cwd=None, env=None):
+    return subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True)
+
+
+def ratio_source_git(repo, *args, env=None):
+    result = ratio_source_run("git", *args, cwd=repo, env=env)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def ratio_source_init_repo(path):
+    path.mkdir()
+    ratio_source_git(path, "init", "-q", "-b", "master")
+    ratio_source_git(path, "config", "user.name", "Ratio Test")
+    ratio_source_git(path, "config", "user.email", "ratio@example.invalid")
+    return path
+
+
+def ratio_source_commit(repo, subject, epoch, paths, author_epoch=None):
+    for name, text in paths.items():
+        target = repo / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    ratio_source_git(repo, "add", "-A")
+    env = dict(os.environ)
+    env["GIT_COMMITTER_DATE"] = f"@{epoch} +0000"
+    env["GIT_AUTHOR_DATE"] = f"@{author_epoch if author_epoch is not None else epoch} +0000"
+    ratio_source_git(repo, "commit", "-qm", subject, env=env)
+    return ratio_source_git(repo, "rev-parse", "HEAD")
+
+
+def ratio_source_invoke_guard(repo, *, as_of=RATIO_SOURCE_AS_OF, reservations=None, legacy=None, ref="master"):
+    command = [
+        "pwsh", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(RATIO_SOURCE_GUARD), "-RepoRoot", str(repo), "-SourceRef", ref,
+        "-AsOfEpoch", str(as_of),
+    ]
+    if reservations is not None:
+        command += ["-ReservationsPath", str(reservations)]
+    if legacy is not None:
+        command += ["-LegacyDispatchPath", str(legacy)]
+    result = ratio_source_run(*command)
+    payload = json.loads(result.stdout)
+    return result, payload
+
+
+def ratio_source_populate(repo, count, product_indices, *, start=RATIO_SOURCE_AS_OF - RATIO_SOURCE_DAY):
+    for index in range(count):
+        path = f"src/p{index}.txt" if index in product_indices else f"docs/d{index}.txt"
+        ratio_source_commit(repo, f"commit {index}", start + index, {path: str(index)})
+
+
+@pytest.mark.parametrize("count,products,expected", [(10, set(range(6)), 0.60), (20, {3}, 0.05)])
+def test_ratio_source_product_share_populations(tmp_path, count, products, expected):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_populate(repo, count, products)
+    _, payload = ratio_source_invoke_guard(repo)
+    assert payload["commitPopulation"] == count
+    assert payload["productCommitCount"] == len(products)
+    assert payload["productShare7d"] == pytest.approx(expected)
+    assert payload["verdict"] == "RED"
+
+
+def test_ratio_source_boundary_committer_date_docs_merge_and_mixed_commit(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "included boundary", RATIO_SOURCE_AS_OF - 7 * RATIO_SOURCE_DAY, {"src/a": "a"}, author_epoch=RATIO_SOURCE_AS_OF - 30 * RATIO_SOURCE_DAY)
+    ratio_source_commit(repo, "excluded old", RATIO_SOURCE_AS_OF - 7 * RATIO_SOURCE_DAY - 1, {"src/old": "old"}, author_epoch=RATIO_SOURCE_AS_OF)
+    ratio_source_commit(repo, "docs denominator", RATIO_SOURCE_AS_OF - 10, {"docs/readme": "d"})
+    ratio_source_commit(repo, "mixed once", RATIO_SOURCE_AS_OF - 9, {"src/m": "m", "docs/m": "m"})
+    ratio_source_git(repo, "checkout", "-qb", "side", "HEAD~1")
+    ratio_source_commit(repo, "side", RATIO_SOURCE_AS_OF - 8, {"platform/side": "s"})
+    ratio_source_git(repo, "checkout", "-q", "master")
+    env = dict(os.environ, GIT_COMMITTER_DATE=f"@{RATIO_SOURCE_AS_OF - 7} +0000", GIT_AUTHOR_DATE=f"@{RATIO_SOURCE_AS_OF - 7} +0000")
+    ratio_source_git(repo, "merge", "--no-ff", "-qm", "ordinary merge", "side", env=env)
+    _, payload = ratio_source_invoke_guard(repo)
+    assert payload["commitPopulation"] == 4
+    assert payload["productCommitCount"] == 3
+
+
+def test_ratio_source_future_commit_is_excluded(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "present", RATIO_SOURCE_AS_OF, {"src/a": "a"})
+    ratio_source_commit(repo, "future", RATIO_SOURCE_AS_OF + 1, {"src/b": "b"})
+    _, payload = ratio_source_invoke_guard(repo)
+    assert payload["commitPopulation"] == 1
+    assert payload["productCommitCount"] == 1
+
+
+def test_ratio_source_github_merge_squash_dedup_and_batch_count_once(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "base", RATIO_SOURCE_AS_OF - 100, {"docs/base": "base"})
+    ratio_source_git(repo, "checkout", "-qb", "feature")
+    ratio_source_commit(repo, "part one", RATIO_SOURCE_AS_OF - 90, {"src/a": "a"})
+    ratio_source_commit(repo, "part two", RATIO_SOURCE_AS_OF - 80, {"src/b": "b"})
+    ratio_source_git(repo, "checkout", "-q", "master")
+    env = dict(os.environ, GIT_COMMITTER_DATE=f"@{RATIO_SOURCE_AS_OF - 70} +0000", GIT_AUTHOR_DATE=f"@{RATIO_SOURCE_AS_OF - 70} +0000")
+    ratio_source_git(repo, "merge", "--no-ff", "-qm", "Merge pull request #91 from example/batch", "feature", env=env)
+    ratio_source_commit(repo, "squashed product (#92)", RATIO_SOURCE_AS_OF - 60, {"platform/c": "c"})
+    _, payload = ratio_source_invoke_guard(repo)
+    assert payload["recognizedProductPrIds"] == [91, 92]
+    assert payload["recognizedProductPrCount"] == 2
+
+
+def test_ratio_source_unknown_product_landing_nulls_rate(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "direct product landing", RATIO_SOURCE_AS_OF - 2, {"src/a": "a"})
+    reservations = tmp_path / "reservations.jsonl"
+    reservations.write_text(json.dumps({"state": "reserved", "recordedUtc": datetime.fromtimestamp(RATIO_SOURCE_AS_OF - 1, timezone.utc).isoformat()}) + "\n")
+    _, payload = ratio_source_invoke_guard(repo, reservations=reservations)
+    assert payload["unrecognizedProductLandings"]
+    assert payload["dispatchesPerLandedProductPr7dLowerBound"] is None
+    assert "UNAVAILABLE_LANDING_PROVENANCE" in payload["reasons"]
+
+
+def test_ratio_source_missing_and_malformed_observations_are_partial_red(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "docs", RATIO_SOURCE_AS_OF - 1, {"docs/a": "a"})
+    missing = tmp_path / "missing"
+    _, absent = ratio_source_invoke_guard(repo, reservations=missing, legacy=missing)
+    assert absent["dispatchCoverage"] == "PARTIAL"
+    assert absent["dispatchesObserved"] == 0
+    assert absent["verdict"] == "RED"
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("not-json\n")
+    _, malformed = ratio_source_invoke_guard(repo, reservations=bad, legacy=missing)
+    assert malformed["malformedDispatchRows"] == 1
+    assert malformed["verdict"] == "RED"
+    assert "ERROR_DISPATCH_EVIDENCE_MALFORMED" in malformed["reasons"]
+
+
+def test_ratio_source_reservations_take_precedence_and_are_not_combined_with_legacy(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "docs", RATIO_SOURCE_AS_OF - 1, {"docs/a": "a"})
+    stamp = datetime.fromtimestamp(RATIO_SOURCE_AS_OF - 1, timezone.utc).isoformat()
+    reservations = tmp_path / "reservations.jsonl"
+    legacy = tmp_path / "legacy.jsonl"
+    reservations.write_text(json.dumps({"state": "reserved", "recordedUtc": stamp}) + "\n")
+    legacy.write_text("\n".join(json.dumps({"dispatchedUtc": stamp}) for _ in range(4)) + "\n")
+    _, payload = ratio_source_invoke_guard(repo, reservations=reservations, legacy=legacy)
+    assert payload["dispatchEvidenceSource"] == "dispatch-reservations"
+    assert payload["dispatchesObserved"] == 1
+
+
+def test_ratio_source_invalid_ref_and_invalid_repo_are_error_exit_3(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "base", RATIO_SOURCE_AS_OF - 1, {"docs/a": "a"})
+    result, payload = ratio_source_invoke_guard(repo, ref="missing")
+    assert result.returncode == 3
+    assert payload["verdict"] == "ERROR"
+    assert payload["errorCode"] == "ERROR_REF_UNRESOLVED"
+    invalid = tmp_path / "not-repo"
+    invalid.mkdir()
+    result, payload = ratio_source_invoke_guard(invalid)
+    assert result.returncode == 3
+    assert payload["verdict"] == "ERROR"
+
+
+def ratio_source_extract_decision_function(tmp_path):
+    source = RATIO_SOURCE_GUARD.read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^function New-Decision \{.*?^\}", source)
+    assert match
+    script = tmp_path / "decision.ps1"
+    script.write_text("param([double]$Rate)\n" + match.group(0) + "\nNew-Decision -ProductShare 0.6 -Coverage COMPLETE -EvidenceAvailable $true -ProvenanceComplete $true -HasProductLandings $true -DispatchRate $Rate | ConvertTo-Json -Compress\n", encoding="utf-8")
+    return script
+
+
+def test_ratio_source_synthetic_complete_decision_green_at_four_and_red_above(tmp_path):
+    script = ratio_source_extract_decision_function(tmp_path)
+    green = ratio_source_run("pwsh", "-NoProfile", "-File", str(script), "-Rate", "4")
+    red = ratio_source_run("pwsh", "-NoProfile", "-File", str(script), "-Rate", "4.01")
+    assert json.loads(green.stdout)["verdict"] == "GREEN"
+    assert json.loads(red.stdout)["verdict"] == "RED"
+    assert "RED_DISPATCH_RATE" in json.loads(red.stdout)["reasons"]
+
+
+def test_ratio_source_caller_has_helper_at_both_post_kill_pre_reservation_seams():
+    source = RATIO_SOURCE_DISPATCHER.read_text(encoding="utf-8")
+    assert source.count("function Test-RatioDispatchPermission") == 1
+    assert source.count("$ratioExit = Test-RatioDispatchPermission -Kind $cardKind") == 2
+    for match in re.finditer(r"\$ratioExit = Test-RatioDispatchPermission -Kind \$cardKind", source):
+        prefix = source[:match.start()]
+        suffix = source[match.end():]
+        assert prefix.rfind("if (Test-KillSwitchArmed)") > prefix.rfind("if ($DryRun)")
+        assert suffix.find("Write-DispatchReservation") >= 0
+        assert suffix.find("Write-DispatchReservation") < suffix.find("& pwsh")
+
+
+def ratio_source_make_fake_guard(path, verdict, reasons=None, rate=None, malformed=False):
+    rate = 4 if rate is None else rate
+    payload = ratio_guard_payload(
+        dispatchesPerLandedProductPr7dLowerBound=rate, dispatchesObserved=int(rate),
+        dispatchCoverage="COMPLETE" if verdict == "GREEN" else "PARTIAL",
+        verdict=verdict, reasons=reasons or [],
+        errorCode="ERROR_GIT_HISTORY" if verdict == "ERROR" else None,
+    )
+    body = "Write-Output 'not-json'" if malformed else "Write-Output '" + json.dumps(payload, separators=(",", ":")) + "'"
+    path.write_text(body + "\nexit " + ("3" if verdict == "ERROR" else "0") + "\n", encoding="utf-8")
+
+
+def test_ratio_source_caller_helper_routing_and_malformed_output(tmp_path):
+    source = RATIO_SOURCE_DISPATCHER.read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^function Test-RatioDispatchPermission \{.*?^\}", source)
+    assert match
+    harness = tmp_path / "harness.ps1"
+    guard = tmp_path / "guard.ps1"
+    harness.write_text("param($Guard,$Kind)\n$ProductRatioGuard=$Guard\n$RepoRoot='x'\n" + match.group(0) + "\nexit (Test-RatioDispatchPermission -Kind $Kind)\n", encoding="utf-8")
+    for kind, expected in [("product", 0), ("playback", 0), ("factory", 6), ("", 6)]:
+        ratio_source_make_fake_guard(guard, "RED", ["RED_DISPATCH_COVERAGE_PARTIAL"])
+        result = ratio_source_run("pwsh", "-NoProfile", "-File", str(harness), "-Guard", str(guard), "-Kind", kind)
+        assert result.returncode == expected
+    ratio_source_make_fake_guard(guard, "ERROR", ["ERROR_GIT_HISTORY"])
+    assert ratio_source_run("pwsh", "-NoProfile", "-File", str(harness), "-Guard", str(guard), "-Kind", "product").returncode == 3
+    ratio_source_make_fake_guard(guard, "GREEN")
+    assert ratio_source_run("pwsh", "-NoProfile", "-File", str(harness), "-Guard", str(guard), "-Kind", "factory").returncode == 0
+    ratio_source_make_fake_guard(guard, "RED", malformed=True)
+    assert ratio_source_run("pwsh", "-NoProfile", "-File", str(harness), "-Guard", str(guard), "-Kind", "product").returncode == 3
+
+
+def test_ratio_source_dry_run_precedes_reservation_and_launch_in_both_paths():
+    source = RATIO_SOURCE_DISPATCHER.read_text(encoding="utf-8")
+    read_only = source[source.index("if (-not $AllowEdits)"):source.index("# ==================================================================== editing dispatch")]
+    editing = source[source.index("# ==================================================================== editing dispatch"):]
+    assert read_only.index("if ($DryRun)") < read_only.index("Write-DispatchReservation") < read_only.index("& pwsh")
+    assert editing.index("if ($DryRun)") < editing.index("Write-DispatchReservation") < editing.index("& pwsh")
+
+
+def test_ratio_source_dispatch_timestamp_boundaries_preserve_explicit_offsets(tmp_path):
+    repo=ratio_source_init_repo(tmp_path/'repo')
+    ratio_source_commit(repo,'base',RATIO_SOURCE_AS_OF-2,{'docs/base':'base'})
+    records=[]
+    for epoch in [RATIO_SOURCE_AS_OF-7*RATIO_SOURCE_DAY-1,RATIO_SOURCE_AS_OF-7*RATIO_SOURCE_DAY,RATIO_SOURCE_AS_OF,RATIO_SOURCE_AS_OF+1]:
+        records.append({'state':'reserved','recordedUtc':datetime.fromtimestamp(epoch,timezone.utc).isoformat()})
+    path=tmp_path/'reservations.jsonl'
+    path.write_text('\n'.join(json.dumps(x) for x in records)+'\n')
+    result,payload=ratio_source_invoke_guard(repo,reservations=path)
+    assert result.returncode==0,result.stderr
+    assert payload['dispatchesObserved']==2 and payload['malformedDispatchRows']==0
+
+
+def test_ratio_source_old_history_does_not_spawn_a_process_per_commit(tmp_path):
+    repo=ratio_source_init_repo(tmp_path/'repo')
+    ratio_source_populate(repo,30,set(),start=RATIO_SOURCE_AS_OF-30*RATIO_SOURCE_DAY)
+    ratio_source_commit(repo,'current',RATIO_SOURCE_AS_OF,{'src/current':'current'})
+    trace=tmp_path/'git-trace.jsonl'
+    env=dict(os.environ,GIT_TRACE2_EVENT=str(trace))
+    result=ratio_source_run('pwsh','-NoProfile','-File',str(RATIO_SOURCE_GUARD),'-RepoRoot',str(repo),'-SourceRef','master','-AsOfEpoch',str(RATIO_SOURCE_AS_OF),env=env)
+    assert result.returncode==0,result.stderr
+    assert json.loads(result.stdout)['commitPopulation']==1
+    starts=[json.loads(line) for line in trace.read_text().splitlines() if json.loads(line).get('event')=='start']
+    assert len(starts)<=8,[(x.get('argv')) for x in starts]
+
+
+
+# Prefix every addition to avoid collisions with the existing guardrail helpers.
+RATIO_GUARD = ROOT / "tools" / "coordination" / "Test-ProductRatioGuard.ps1"
+RATIO_WORKSTREAM = ROOT / "tools" / "coordination" / "Invoke-Workstream.ps1"
+RATIO_LOOP = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
+
+
+def ratio_guard_payload(**overrides):
+    payload = {
+        "schema": "mlv-app/product-ratio-guard/v1",
+        "asOfUtc": "2033-05-18T03:33:20.0000000Z",
+        "windowStartUtc": "2033-05-11T03:33:20.0000000Z",
+        "windowEndUtc": "2033-05-18T03:33:20.0000000Z",
+        "sourceRef": "fork/master",
+        "sourceSha": "1" * 40,
+        "commitPopulation": 10,
+        "productCommitCount": 6,
+        "productShare7d": 0.6,
+        "productShareThreshold": 0.5,
+        "recognizedProductPrCount": 1,
+        "recognizedProductPrIds": [101],
+        "unrecognizedProductLandings": [],
+        "landingProvenanceComplete": True,
+        "hasProductLandings": True,
+        "dispatchEvidenceSource": "dispatch-reservations",
+        "dispatchCoverage": "PARTIAL",
+        "dispatchEvidenceAvailable": True,
+        "dispatchesObserved": 5,
+        "malformedDispatchRows": 0,
+        "dispatchesPerLandedProductPr7dLowerBound": 5.0,
+        "dispatchRateThreshold": 4.0,
+        "verdict": "RED",
+        "reasons": ["RED_DISPATCH_COVERAGE_PARTIAL", "RED_DISPATCH_RATE"],
+        "errorCode": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def ratio_write_guard(path, payload, exit_code=0, raw=None):
+    text = raw if raw is not None else json.dumps(payload, separators=(",", ":"))
+    path.write_text("Write-Output '" + text.replace("'", "''") + "'\nexit %d\n" % exit_code, encoding="utf-8")
+
+
+def ratio_extract_helper(tmp_path):
+    source = RATIO_WORKSTREAM.read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^function Test-RatioDispatchPermission \{.*?^\}", source)
+    assert match
+    harness = tmp_path / "ratio-helper.ps1"
+    harness.write_text("param($Guard,$Kind)\n$ProductRatioGuard=$Guard\n$RepoRoot='x'\n" + match.group(0) + "\nexit (Test-RatioDispatchPermission -Kind $Kind)\n", encoding="utf-8")
+    return harness
+
+
+def ratio_run_helper(tmp_path, payload, kind="factory", exit_code=0, raw=None):
+    helper = ratio_extract_helper(tmp_path)
+    guard = tmp_path / "ratio-fake-guard.ps1"
+    ratio_write_guard(guard, payload, exit_code=exit_code, raw=raw)
+    return subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(helper), "-Guard", str(guard), "-Kind", kind], text=True, capture_output=True)
+
+
+def test_ratio_dispatch_read_failure_is_named_partial_red_and_never_uses_legacy(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "docs", 2_000_000_000 - 2, {"docs/a": "a"})
+    ratio_source_commit(repo, "fix product (#101)", 2_000_000_000 - 1, {"src/a": "a"})
+    reservations = tmp_path / "reservations"
+    reservations.mkdir()
+    legacy = tmp_path / "legacy.jsonl"
+    legacy.write_text(json.dumps({"dispatchedUtc": "2033-05-18T03:33:19+00:00"}) + "\n", encoding="utf-8")
+    command = ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(RATIO_GUARD), "-RepoRoot", str(repo), "-SourceRef", "master", "-AsOfEpoch", "2000000000", "-ReservationsPath", str(reservations), "-LegacyDispatchPath", str(legacy)]
+    result = subprocess.run(command, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["dispatchEvidenceSource"] == "unavailable"
+    assert payload["dispatchCoverage"] == "PARTIAL"
+    assert payload["dispatchEvidenceAvailable"] is False
+    assert payload["dispatchesObserved"] == 0
+    assert payload["recognizedProductPrIds"] == [101]
+    assert payload["dispatchesPerLandedProductPr7dLowerBound"] is None
+    assert payload["malformedDispatchRows"] == 0
+    assert payload["verdict"] == "RED"
+    assert "UNAVAILABLE_DISPATCH_EVIDENCE" in payload["reasons"]
+
+
+@pytest.mark.parametrize("rate, expected", [(0.0, 3), (None, 0)])
+def test_ratio_unavailable_evidence_requires_null_rate_for_product_admission(tmp_path, rate, expected):
+    payload = ratio_guard_payload(dispatchEvidenceSource="unavailable",
+        dispatchEvidenceAvailable=False, dispatchesObserved=0,
+        dispatchesPerLandedProductPr7dLowerBound=rate,
+        reasons=["UNAVAILABLE_DISPATCH_EVIDENCE", "RED_DISPATCH_COVERAGE_PARTIAL"])
+    assert ratio_run_helper(tmp_path, payload, kind="product").returncode == expected
+
+
+def test_ratio_empty_window_has_null_share_and_valid_red_is_typed_allowed(tmp_path):
+    payload = ratio_guard_payload(commitPopulation=0, productCommitCount=0, productShare7d=None, recognizedProductPrCount=0, recognizedProductPrIds=[], hasProductLandings=False, dispatchesObserved=0, dispatchesPerLandedProductPr7dLowerBound=None, reasons=["RED_PRODUCT_SHARE", "RED_DISPATCH_COVERAGE_PARTIAL", "NO_PRODUCT_LANDINGS"])
+    assert ratio_run_helper(tmp_path, payload, kind="product").returncode == 0
+    assert ratio_run_helper(tmp_path, payload, kind="playback").returncode == 0
+    assert ratio_run_helper(tmp_path, payload, kind="factory").returncode == 6
+
+
+@pytest.mark.parametrize("mutation", [
+    {"dispatchCoverage": "MAYBE"},
+    {"verdict": "AMBER"},
+    {"commitPopulation": "10"},
+    {"productShare7d": float("nan")},
+    {"productShare7d": 1.2},
+    {"productCommitCount": 7},
+    {"recognizedProductPrCount": 2},
+    {"landingProvenanceComplete": False},
+    {"dispatchEvidenceAvailable": False},
+    {"unexpected": True},
+    {"productShare7d": "0.6"},
+    {"productShare7d": None, "productCommitCount": 0},
+    {"productShareThreshold": "0.5"},
+    {"dispatchRateThreshold": None},
+    {"dispatchesPerLandedProductPr7dLowerBound": "5"},
+    {"sourceSha": "not-a-sha"},
+])
+def test_ratio_unknown_types_ranges_and_count_contradictions_fail_closed(tmp_path, mutation):
+    payload = ratio_guard_payload()
+    payload.update(mutation)
+    assert ratio_run_helper(tmp_path, payload, kind="product").returncode == 3
+
+
+def test_ratio_contradictory_green_fails_closed_and_complete_green_passes(tmp_path):
+    green = ratio_guard_payload(dispatchCoverage="COMPLETE", dispatchesObserved=4, dispatchesPerLandedProductPr7dLowerBound=4.0, verdict="GREEN", reasons=[])
+    assert ratio_run_helper(tmp_path, green, kind="factory").returncode == 0
+    partial = dict(green, dispatchCoverage="PARTIAL")
+    assert ratio_run_helper(tmp_path, partial, kind="factory").returncode == 3
+    missing_provenance = dict(green, landingProvenanceComplete=False)
+    assert ratio_run_helper(tmp_path, missing_provenance, kind="factory").returncode == 3
+
+
+def test_ratio_error_exit_three_blocks_every_kind(tmp_path):
+    payload = ratio_guard_payload(sourceSha="", commitPopulation=0, productCommitCount=0, productShare7d=None, recognizedProductPrCount=0, recognizedProductPrIds=[], landingProvenanceComplete=False, hasProductLandings=False, dispatchEvidenceSource="unavailable", dispatchEvidenceAvailable=False, dispatchesObserved=0, dispatchesPerLandedProductPr7dLowerBound=None, verdict="ERROR", reasons=["ERROR_GIT_HISTORY"], errorCode="ERROR_GIT_HISTORY")
+    for kind in ("factory", "product", "playback", ""):
+        assert ratio_run_helper(tmp_path, payload, kind=kind, exit_code=3).returncode == 3
+
+
+def ratio_full_dispatch_board(tmp_path, guard_payload, use_real_guard=False):
+    dual, _ = editing_board(tmp_path, with_lane_shim=True)
+    guard = tmp_path / "fake-product-ratio-guard.ps1"
+    ratio_write_guard(guard, guard_payload)
+    # The dispatcher resolves the guard beside itself; use a copied dispatcher plus fake guard,
+    # while retaining fake lane/wrapper fixtures and a synthetic queue.
+    tool_dir = tmp_path / "tools" / "coordination"
+    tool_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(RATIO_WORKSTREAM, tool_dir / "Invoke-Workstream.ps1")
+    shutil.copy2(RATIO_GUARD if use_real_guard else guard, tool_dir / "Test-ProductRatioGuard.ps1")
+    for dependency in ("landing-probe.ps1", "compose-lane-prompt-core.ps1"):
+        shutil.copy2(RATIO_WORKSTREAM.parent / dependency, tool_dir / dependency)
+    (tool_dir / "Invoke-Lane.ps1").write_text("param($Lane,$PromptFile,$Card,$RunDir,$TimeoutSec)\nWrite-Output 'RATIO_FAKE_LANE'\nexit 0\n", encoding="ascii")
+    (tool_dir / "Export-PrReviewEvidence.ps1").write_text("exit 0\n", encoding="ascii")
+    return dual, tool_dir / "Invoke-Workstream.ps1"
+
+
+@pytest.mark.parametrize("use_real_guard", [False, True])
+def test_ratio_full_dispatcher_read_only_and_editing_apply_valid_red(tmp_path, use_real_guard):
+    red = ratio_guard_payload()
+    dual, dispatcher = ratio_full_dispatch_board(tmp_path, red, use_real_guard=use_real_guard)
+    procedure = write_fields_card(dual / "prompts" / "v2", "RATIO-EDIT-PRODUCT")
+    factory_procedure = write_fields_card(dual / "prompts" / "v2", "RATIO-EDIT-FACTORY")
+    queue = tmp_path / "queue.json"
+    items = [
+        {"id": "RATIO-READ-PRODUCT", "state": "queued", "track": "product", "kind": "product", "owner": "sonnet", "priority": 1},
+        {"id": "RATIO-READ-FACTORY", "state": "queued", "track": "factory", "kind": "factory", "owner": "sonnet", "priority": 1},
+        {"id": "RATIO-EDIT-PRODUCT", "state": "queued", "track": "product", "kind": "product", "owner": "sonnet", "priority": 1, "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-RATIO-EDIT-PRODUCT.md", "procedureSha256": sha256_of(procedure)},
+        {"id": "RATIO-EDIT-FACTORY", "state": "queued", "track": "factory", "kind": "factory", "owner": "sonnet", "priority": 1, "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-RATIO-EDIT-FACTORY.md", "procedureSha256": sha256_of(factory_procedure)},
+    ]
+    queue.write_text(json.dumps({"schema": "test", "items": items}), encoding="utf-8")
+    queue_before = queue.read_bytes()
+    base = ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(dispatcher), "-QueuePath", str(queue), "-NoLandingProbe", "-TimeoutSec", "1"]
+    env = editing_dispatch_env(tmp_path)
+    read_product = subprocess.run(base + ["-CardId", "RATIO-READ-PRODUCT"], text=True, capture_output=True, env=env)
+    read_factory = subprocess.run(base + ["-CardId", "RATIO-READ-FACTORY"], text=True, capture_output=True, env=env)
+    try:
+        edit_product = subprocess.run(base + ["-CardId", "RATIO-EDIT-PRODUCT", "-AllowEdits"], text=True, capture_output=True, env=env)
+        edit_factory = subprocess.run(base + ["-CardId", "RATIO-EDIT-FACTORY", "-AllowEdits"], text=True, capture_output=True, env=env)
+        assert read_product.returncode == 0 and "RATIO_FAKE_LANE" in read_product.stdout, read_product.stdout + read_product.stderr
+        assert read_factory.returncode == 6 and "REFUSED ratio-guard-red kind=factory" in read_factory.stdout
+        assert edit_product.returncode == 0 and "SHIM: lane=sonnet card=RATIO-EDIT-PRODUCT" in edit_product.stdout, edit_product.stdout + edit_product.stderr
+        assert edit_factory.returncode == 6 and "REFUSED ratio-guard-red kind=factory" in edit_factory.stdout, edit_factory.stdout + edit_factory.stderr
+        assert queue.read_bytes() == queue_before
+        reserved = [json.loads(line) for line in (dual / "receipts" / "dispatch-reservations.jsonl").read_text().splitlines() if json.loads(line)["state"] == "reserved"]
+        assert {row["card"] for row in reserved} == {"RATIO-READ-PRODUCT", "RATIO-EDIT-PRODUCT"}
+        assert len(reserved) == 2
+    finally:
+        cleanup_lane_worktree(tmp_path, "RATIO-EDIT-PRODUCT")
+        cleanup_lane_worktree(tmp_path, "RATIO-EDIT-FACTORY")
+
+
+def test_ratio_actual_loop_foreach_body_skips_factory_exit_six_then_counts_product_zero(tmp_path):
+    extractor = tmp_path / "extract-ratio-loop.ps1"
+    extractor.write_text("param($Source)\n$tokens=$null;$errors=$null\n"
+        "$ast=[System.Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)\n"
+        "if($errors.Count){throw 'loop parse failed'}\n"
+        "$loops=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.ForEachStatementAst] -and $node.Variable.VariablePath.UserPath -eq 'track'},$true))\n"
+        "if($loops.Count -ne 1){throw 'expected one track loop'}\n$loops[0].Extent.Text\n", encoding="utf-8")
+    extracted = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(extractor), "-Source", str(RATIO_LOOP)], text=True, capture_output=True)
+    assert extracted.returncode == 0, extracted.stderr
+    body = extracted.stdout
+    dispatcher = tmp_path / "ratio-fake-dispatcher.ps1"
+    dispatcher.write_text("param($Track)\nif($Track -eq 'factory'){ Write-Output 'WORKSTREAM: REFUSED ratio-guard-red kind=factory'; exit 6 }; Write-Output ('WORKSTREAM: track=' + $Track + ' card=RATIO-NEXT'); exit 0\n", encoding="ascii")
+    harness = tmp_path / "ratio-loop-body.ps1"
+    harness.write_text("$Tracks=@('factory','product')\n$dispatched=@()\n$skipped=@()\n$MaxDispatchesPerCycle=1\n$DailyBudget=9\n$spentToday=0\n$Dispatcher='" + str(dispatcher).replace("'", "''") + "'\n$TimeoutSec=1\n$StaleHours=1\n$Lane=''\n$AllowEdits=$false\n$DryRun=$false\n" + body + "\n[ordered]@{dispatched=$dispatched;skipped=$skipped}|ConvertTo-Json -Depth 6 -Compress\n", encoding="utf-8")
+    result = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(harness)], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout.splitlines()[-1])
+    assert [row["track"] for row in payload["dispatched"]] == ["product"]
+    assert payload["skipped"][0]["track"] == "factory"
+    assert payload["skipped"][0]["reason"] == "exit-6"

@@ -613,14 +613,36 @@ every non-terminal `factory`-kind card (`state: frozen-factory-20260906`). Idemp
 `$D\receipts\0.5-factory-frozen.json` = `{recordedUtc, queueSha256, frozenCount, dryRunDiffSha256, scopelessIds}`. Accept: 0 dispatchable
 factory-kind cards and the receipt.
 
-**0.6 Ratio guard with a named caller (S64).** `tools/coordination/Test-ProductRatioGuard.ps1` computes `product_share_7d` and
-`dispatches_per_landed_product_pr_7d` over `fork/master`, `%ct`-bucketed; RED under 50% / above 4. **Caller:** `Invoke-Workstream.ps1`
-invokes it immediately before every dispatch and refuses any dispatch whose `kind` is not `product`/`playback` while RED, and
-`freeze-factory-cards.py` refuses to unfreeze while RED. Deterministic pytest cases in `test_coordination_guardrails.py` (synthetic 60%
-→ GREEN; synthetic 5% → RED), run with `python -m pytest`. Landed by reviewed PR; `$D\receipts\0.6-ratio-guard.json` = `{recordedUtc, mergeSha, firstReading, solVerdictPath}`, **then
-`$D\receipts\execution-control-0.6.json` — this PR changes `Invoke-Workstream.ps1`, a file every execution-control receipt hashes, so
-0.35's receipt is invalidated by §1.3's own rule and 0.6's supersedes it (S81).**
-The heartbeat prints the same two numbers FIRST for humans. Accept: the receipt's `firstReading` is RED (5.5% at DIAGNOSIS_BASE).
+**0.6 Ratio guard with a named caller (S64).** `tools/coordination/Test-ProductRatioGuard.ps1` resolves `fork/master` once
+and computes both metrics against that pinned SHA using committer epochs `%ct` in the inclusive interval
+`[asOfEpoch - 604800, asOfEpoch]`. `product_share_7d` counts every reachable non-merge commit in that interval in its denominator;
+a commit is product when its parent diff touches `src/` or `platform/`, counted once even when mixed. This is distinct from
+`landed_product_prs_7d`: unique recognized GitHub PR numbers on the first-parent walk, classified by the landing's net diff
+against parent 1. Recognize two-parent `Merge pull request #N` commits and one-parent squash subjects ending `(#N)`;
+a batch PR counts once. Unrecognized product landing provenance makes the dispatch ratio unavailable, never a commit-based substitute.
+
+Dispatch reservations, or the legacy log when reservations are absent, provide observed launches only; current manual/direct
+launches make coverage PARTIAL. Do not combine non-deduplicable sources. Report an observed dispatch-per-product-PR lower bound
+only when its denominator and provenance are valid; otherwise report null with a reason. Valid history with PARTIAL or unavailable
+dispatch evidence is RED. GREEN requires at least 50% product commit share, COMPLETE dispatch coverage and product PR provenance,
+and at most 4 dispatches per landed product PR. Missing/invalid Git history is ERROR and refuses all kinds. No current evidence
+source establishes COMPLETE coverage. Empty populations are unavailable/RED, not invalid-Git ERROR.
+
+**Caller:** `Invoke-Workstream.ps1` consults the guard immediately before every dispatch. RED refuses every kind except explicit
+`product` and `playback`; those two kinds remain allowed so missing historical launch accounting cannot block the first product
+work. ERROR refuses all kinds. Existing kill switch, selection, reservation and dry-run contracts remain intact. The freeze tool
+stays one-way with no unfreeze operation. Before any future factory unfreeze is implemented, require seven days of complete,
+version-enforced all-venue dispatch accounting and an authoritative GREEN result; PARTIAL, RED or ERROR refuses unfreeze.
+
+Deterministic cases in `test_coordination_guardrails.py`, run with `python -m pytest`, cover time boundaries, both distinct
+populations, merge/squash/batch PR provenance, partial and malformed evidence, and both actual caller seams. Synthetic 60% with
+COMPLETE evidence and ratio at most 4 is GREEN; 5% is RED; partial evidence remains RED even at 60%.
+Land by reviewed PR; `$D\receipts\0.6-ratio-guard.json` = `{recordedUtc, mergeSha, firstReading, solVerdictPath}`, then
+`$D\receipts\execution-control-0.6.json` with the unchanged fixed eleven-path schema and carried 0.35 provenance. Changing
+`Invoke-Workstream.ps1` invalidates the prior control receipt and this receipt supersedes it (S81). The heartbeat prints the same
+metrics first, including coverage and unavailable reasons. Acceptance records the actual rolling-seven-day firstReading at the
+landed merge SHA, with current dispatch coverage PARTIAL and RED for non-product work, plus evidence that product/playback still
+proceed with valid Git. Historical 3-of-55 (5.5%) diagnosis remains its original August29 interval, never a hardcoded firstReading.
 
 **0.7 Land or close the open fork PRs — a RECEIPT-WRITING step when it lands a hashed file (O102).** Derived live 2026-09-06 (`gh api
 repos/layibabalola/MLV-App/pulls/<n>/files --jq '.[].filename'`; re-derive at execution): **#71** ("refund a dispatch that failed and spent
