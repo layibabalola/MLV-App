@@ -102,13 +102,15 @@ def validate_spec(spec: Any) -> dict[str, Any]:
         raise ContractError("profiles must be a nonempty array")
     profile_ids: set[str] = set()
     for index, profile_value in enumerate(root["profiles"]):
-        profile = exact_keys(profile_value, {"id", "disableLookAssist", "playbackProcessing", "qualityMode", "expectedQualityMode", "scaleFactor", "expectedScaleRequest", "selectionAuthority"}, f"profiles[{index}]")
+        profile = exact_keys(profile_value, {"id", "disableLookAssist", "useReceipt", "playbackProcessing", "qualityMode", "expectedQualityMode", "scaleFactor", "expectedScaleRequest", "selectionAuthority"}, f"profiles[{index}]")
         if type(profile["id"]) is not str or not profile["id"] or profile["id"] in profile_ids:
             raise ContractError(f"profiles[{index}].id must be unique")
         profile_ids.add(profile["id"])
         if type(profile["disableLookAssist"]) is not bool:
             raise ContractError(f"profiles[{index}].disableLookAssist must be boolean")
-        if profile["playbackProcessing"] not in ("receipt", "none"):
+        if type(profile["useReceipt"]) is not bool:
+            raise ContractError(f"profiles[{index}].useReceipt must be boolean")
+        if profile["playbackProcessing"] != "receipt":
             raise ContractError(f"profiles[{index}].playbackProcessing is unsupported")
         if profile["qualityMode"] != "1" or profile["expectedQualityMode"] != 1 or profile["scaleFactor"] != "" or profile["expectedScaleRequest"] != 4 or profile["selectionAuthority"] != "shipping-default-controlled":
             raise ContractError(f"profiles[{index}] must use the pinned High Quality shipping selection and derived scale")
@@ -430,7 +432,7 @@ def _smoke_binding(result_path: Path, expected_exe: dict[str, Any], expected_cli
         if type(observed) is not dict or str(Path(observed.get("path", "")).resolve()).casefold() != str(Path(expected["path"]).resolve()).casefold() or observed.get("length") != expected["length"] or str(observed.get("sha256", "")).upper() != expected["sha256"].upper():
             raise ContractError(f"smoke multipart clip binding mismatch: {result_path}")
     receipt_binding = bindings.get("receipt")
-    if expected_profile["playbackProcessing"] == "receipt":
+    if expected_profile["useReceipt"]:
         expected_receipt = spec["receipt"]
         if type(receipt_binding) is not dict or str(Path(receipt_binding.get("path", "")).resolve()).casefold() != str(Path(expected_receipt["path"]).resolve()).casefold() or receipt_binding.get("length") != expected_receipt["length"] or str(receipt_binding.get("sha256", "")).upper() != expected_receipt["sha256"].upper():
             raise ContractError(f"smoke receipt binding mismatch: {result_path}")
