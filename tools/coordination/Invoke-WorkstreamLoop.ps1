@@ -93,6 +93,110 @@ $DriverRoot   = 'C:\mlvtmp\ws-driver'
 $TargetRef    = 'fork/master'
 $Dispatcher   = Join-Path $DriverRoot 'tools\coordination\Invoke-Workstream.ps1'
 
+function Get-ReservationBudget {
+    param([string]$LedgerPath, [datetime]$TodayUtc, [string]$BoardRoot)
+    $ErrorActionPreference = 'Stop'
+    function Field($Object, [string]$Name) {
+        if ($null -eq $Object) { return $null }
+        $property = $Object.PSObject.Properties[$Name]
+        if ($property) { return $property.Value }
+        return $null
+    }
+    function Utc($Value) {
+        if ($null -eq $Value) { throw 'reservation timestamp missing' }
+        # Preserve DateTimeKind: reparsing an already-UTC DateTime as a string
+        # applies the local offset twice (the measured September 4 regression).
+        $v = $Value
+        $rowStamp = if ($v -is [datetime]) {
+            if ($v.Kind -eq [System.DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($v, [System.DateTimeKind]::Utc) } else { $v }
+        } else {
+            [datetime]::Parse([string]$v, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+        }
+        return $rowStamp.ToUniversalTime()
+    }
+    function FullPath([string]$Path) {
+        if ([string]::IsNullOrWhiteSpace($Path)) { throw 'reservation path missing' }
+        if (-not [IO.Path]::IsPathRooted($Path)) { $Path = Join-Path $BoardRoot $Path }
+        return [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    }
+    function RefundMatches($Reservation, $Terminal) {
+        try {
+            if ((Field $Terminal.row 'state') -cne 'refunded' -or $Terminal.utc -lt $Reservation.utc) { return $false }
+            foreach ($key in @('lane','card','runDir')) {
+                $value = Field $Reservation.row $key
+                if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value) -or $value -cne (Field $Terminal.row $key)) { return $false }
+            }
+            $run = FullPath (Field $Reservation.row 'runDir')
+            $fleet = (FullPath '.claude-state/fleet-runs') + [IO.Path]::DirectorySeparatorChar
+            if (-not $run.StartsWith($fleet, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+            $path = FullPath (Field $Terminal.row 'receiptPath')
+            if ([IO.Path]::GetDirectoryName($path) -ine $run -or [IO.Path]::GetFileName($path) -notlike '*.receipt.json') { return $false }
+            $info = Get-Item -LiteralPath $path -ErrorAction Stop
+            if ($info.Length -gt 1MB -or $info.Length -eq 0 -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+            if ((Get-Item -LiteralPath $run).Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+            $bytes = [IO.File]::ReadAllBytes($path)
+            $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+            $expected = Field $Terminal.row 'receiptSha256'
+            if ($expected -isnot [string] -or $expected -cnotmatch '^[0-9a-f]{64}$' -or $hash -cne $expected) { return $false }
+            $receipt = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xfeff) | ConvertFrom-Json -ErrorAction Stop
+            if ((Field $receipt 'schema') -cne 'mlv-app/fleet-lane-receipt/v1') { return $false }
+            foreach ($key in @('lane','card')) {
+                if ((Field $receipt $key) -cne (Field $Reservation.row $key)) { return $false }
+            }
+            foreach ($key in @('promptPath','outputPath')) {
+                if ([IO.Path]::GetDirectoryName((FullPath (Field $receipt $key))) -ine $run) { return $false }
+            }
+            $start = Utc (Field $receipt 'startedUtc'); $end = Utc (Field $receipt 'endedUtc')
+            if ($start -lt $Reservation.utc -or $end -lt $start -or $end -gt $Terminal.utc) { return $false }
+            $exit = Field $receipt 'exitCode'; $spend = Field $receipt 'spend'
+            $reported = Field $spend 'costReported'; $cost = Field $spend 'costUsd'
+            $integerExit = $exit -is [int] -or $exit -is [long]
+            $numericCost = $cost -is [int] -or $cost -is [long] -or $cost -is [double] -or $cost -is [decimal]
+            if (-not $integerExit -or $exit -eq 0 -or $reported -isnot [bool] -or -not $reported -or -not $numericCost -or $cost -ne 0) { return $false }
+            $copiedExit = Field $Terminal.row 'laneExitCode'; $copiedCost = Field $Terminal.row 'laneCostUsd'
+            $copiedReported = Field $Terminal.row 'laneCostReported'
+            return (($copiedExit -is [int] -or $copiedExit -is [long]) -and $copiedExit -eq $exit -and
+                $copiedReported -is [bool] -and $copiedReported -and
+                ($copiedCost -is [int] -or $copiedCost -is [long] -or $copiedCost -is [double] -or $copiedCost -is [decimal]) -and $copiedCost -eq $cost)
+        } catch { return $false }
+    }
+    $today = (Utc $TodayUtc).ToString('yyyy-MM-dd')
+    $reservations = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    $terminals = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    $spent = 0
+    if (-not (Test-Path -LiteralPath $LedgerPath)) { return 0 }
+    foreach ($line in [IO.File]::ReadLines($LedgerPath)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $row = $line | ConvertFrom-Json -ErrorAction Stop
+        if ($row -isnot [pscustomobject]) { throw 'reservation ledger row must be an object' }
+        $state = Field $row 'state'
+        if ($state -cnotin @('reserved','charged','refunded')) { throw 'unknown reservation state' }
+        $utc = Utc (Field $row 'recordedUtc')
+        $entry = [pscustomobject]@{ row=$row; utc=$utc }
+        $id = Field $row 'reservationId'
+        if ($id -isnot [string] -or [string]::IsNullOrWhiteSpace($id)) {
+            if ($state -ceq 'reserved' -and $utc.ToString('yyyy-MM-dd') -eq $today) { $spent++ }
+            continue
+        }
+        $map = if ($state -ceq 'reserved') { $reservations } else { $terminals }
+        if (-not $map.ContainsKey($id)) { $map[$id] = [Collections.Generic.List[object]]::new() }
+        $map[$id].Add($entry)
+    }
+    foreach ($id in $reservations.Keys) {
+        $reserved = $reservations[$id]
+        if (-not @($reserved | Where-Object { $_.utc.ToString('yyyy-MM-dd') -eq $today }).Count) { continue }
+        $spent++
+        if ($reserved.Count -ne 1 -or -not $terminals.ContainsKey($id)) { continue }
+        $terminal = $terminals[$id]
+        if ($terminal.Count -ne 1 -or $terminal[0].utc.ToString('yyyy-MM-dd') -ne $today) { continue }
+        if (RefundMatches $reserved[0] $terminal[0]) {
+            $spent--
+            Write-Information -InformationAction Continue "LOOP: refunded dispatch reservation=$id (verified zero spend)"
+        }
+    }
+    return $spent
+}
+
 function Invoke-GitFetchFork {
     # A single TRANSIENT failure must not cost a whole cycle.
     # Observed 2026-09-04T18:01:22Z: the loop halted on "git fetch fork failed (exit 128)"
@@ -244,49 +348,21 @@ if ($halted) {
     $halted = "dispatcher missing at $Dispatcher even after syncing to $TargetRef - it is not on the target branch yet"
     Write-Output "LOOP: CANNOT-DETERMINE - $halted"
 } else {
-    # Budget is DERIVED from the reservations file's own records for today, so it cannot drift
-    # from what actually happened the way a stored counter can. Reads dispatch-reservations.jsonl
-    # (S76), not workstream-dispatch-log.jsonl: every lane start - editing or read-only - now
-    # appends a 'reserved' row there BEFORE the lane runs, which is the earliest point a slot is
-    # actually spent regardless of how the lane later exits.
+    # Count reservations, then refund only verified zero-spend terminal evidence.
+    # A malformed ledger halts this cycle before any dispatcher can run.
     $ReservationsPath = Join-Path $DualLane 'receipts\dispatch-reservations.jsonl'
     $todayUtc = $cycleStart.ToString('yyyy-MM-dd')
-    $spentToday = 0
-    if (Test-Path -LiteralPath $ReservationsPath) {
-        foreach ($line in (Get-Content -LiteralPath $ReservationsPath)) {
-            if (-not $line.Trim()) { continue }
-            try {
-                $row = $line | ConvertFrom-Json
-                if ([string]$row.state -ne 'reserved') { continue }
-                $t = $row.PSObject.Properties['recordedUtc']
-                # ConvertFrom-Json already materialises an ISO-8601 'Z' timestamp as a
-                # [datetime] with Kind=Utc. Passing THAT to [datetime]::Parse() stringifies it in
-                # LOCAL format first, losing the Kind, so it re-parses as Local and
-                # ToUniversalTime() applies the offset A SECOND TIME. Every dispatch in the
-                # previous UTC day's final offset-hours then counts toward today, over-reporting
-                # the budget and halting the loop early. Measured 2026-09-04: 5 real dispatches
-                # reported as 12/12, autonomy idle 4.5 h.
-                # NAME-SCOPED DELIBERATELY: $stamp at the top of this script names the cycle receipt file.
-                # Reusing that name here overwrote it with a [datetime], and the receipt path
-                # became "cycle-09/04/2026 09:05:02.json" -- illegal on Windows.
-                $rowStamp = $null
-                if ($t -and $t.Value) {
-                    $v = $t.Value
-                    $rowStamp = if ($v -is [datetime]) {
-                        if ($v.Kind -eq [System.DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($v, [System.DateTimeKind]::Utc) } else { $v }
-                    } else {
-                        [datetime]::Parse([string]$v, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
-                    }
-                }
-                if ($rowStamp -and $rowStamp.ToUniversalTime().ToString('yyyy-MM-dd') -eq $todayUtc) {
-                    $spentToday++
-                }
-            } catch { }
-        }
+    $spentToday = $null
+    try { $spentToday = Get-ReservationBudget -LedgerPath $ReservationsPath -TodayUtc $cycleStart -BoardRoot $RepoRoot }
+    catch {
+        $halted = 'reservation budget cannot be determined'
+        Write-Output "LOOP: CANNOT-DETERMINE - $halted"
     }
     Write-Output "LOOP: budget $spentToday/$DailyBudget used today (UTC $todayUtc); cycle cap $MaxDispatchesPerCycle"
 
-    if ($spentToday -ge $DailyBudget) {
+    if ($halted) {
+        # The budget reducer failed closed; retain the diagnostic above.
+    } elseif ($spentToday -ge $DailyBudget) {
         $halted = "daily budget exhausted ($spentToday/$DailyBudget)"
         Write-Output "LOOP: HALTED - $halted"
     } else {

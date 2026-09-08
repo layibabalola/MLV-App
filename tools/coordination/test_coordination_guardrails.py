@@ -2701,3 +2701,219 @@ def test_ratio_actual_loop_foreach_body_skips_factory_exit_six_then_counts_produ
     assert [row["track"] for row in payload["dispatched"]] == ["product"]
     assert payload["skipped"][0]["track"] == "factory"
     assert payload["skipped"][0]["reason"] == "exit-6"
+
+
+# --- the refund rule: a dispatch that FAILED and spent NOTHING is refunded ------------------
+# Measured 2026-09-05: two of twelve dispatches hit HTTP 429 "You've hit your session limit",
+# and the loop then halted the rest of the UTC day at "daily budget exhausted (12/12)" having
+# done ten units of work. The budget caps CONSUMPTION, not success -- so the test is
+# costUsd == 0, NOT "it failed": CITE-TXN-1 failed after burning USD 2.24 and must still be
+# charged, or the loop gets to spend the same money twice. And costReported must be TRUE,
+# because an unreported cost read as free is the permissive branch of a fail-open.
+
+LOOP_SCRIPT = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
+
+
+def test_the_dispatch_log_records_the_lane_spend_beside_its_exit_code():
+    # Keep operator-visible spend in the legacy log. Budget authority is the
+    # reservation ledger plus the bound receipt, not these copied log fields.
+    body = WORKSTREAM.read_text(encoding="utf-8")
+    assert "laneCostUsd" in body, "dispatch-log row does not carry the lane cost"
+    assert "laneCostReported" in body, "dispatch-log row does not carry cost reportedness"
+
+
+def test_an_unreadable_receipt_leaves_the_cost_UNREPORTED_not_zero():
+    # Failing to read a cost must never look like a zero cost.
+    body = WORKSTREAM.read_text(encoding="utf-8")
+    assert "$laneCostReported = $false" in body, "cost reportedness does not default to false"
+
+
+def test_the_refund_requires_all_three_conditions(tmp_path):
+    rows = [_row('ZERO', 1, 0), _row('SUCCESS', 0, 0),
+            _row('UNKNOWN', 1, 0, reported=False), _row('PAID', 1, 0.01)]
+    assert _budget_of(tmp_path, rows) == 3
+
+
+def test_the_refund_is_announced_rather_than_silent():
+    # A budget that silently un-spends itself is indistinguishable from a miscount.
+    assert "LOOP: refunded dispatch" in LOOP_SCRIPT.read_text(encoding="utf-8")
+
+
+def _run_reservation_budget(tmp_path, rows):
+    ledger = tmp_path / 'dispatch-reservations.jsonl'
+    ledger.write_text('\n'.join(json.dumps(row) for row in rows) + '\n', encoding='utf-8')
+    harness = tmp_path / 'run-budget.ps1'
+    harness.write_text('''param($Source,$Ledger,$Board)
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'source parse failed'}
+$functions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ReservationBudget'},$true))
+if($functions.Count -ne 1){throw 'shipped budget function missing or ambiguous'}
+$calls=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-ReservationBudget'},$true))
+if($calls.Count -ne 1){throw 'loop must call the shipped reducer'}
+Invoke-Expression $functions[0].Extent.Text
+$spent=Get-ReservationBudget -LedgerPath $Ledger -TodayUtc ([datetime]'2026-09-05T12:00:00Z') -BoardRoot $Board
+Write-Output ('SPENT=' + $spent)
+''', encoding='utf-8')
+    result = subprocess.run(['pwsh', '-NoProfile', '-NonInteractive', '-File', str(harness),
+        '-Source', str(LOOP_SCRIPT), '-Ledger', str(ledger), '-Board', str(tmp_path)], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return int(result.stdout.split('SPENT=')[-1].strip())
+
+
+def _reservation_fixture(tmp_path, index=0, exit_code=1, cost=0.0, reported=True):
+    # Disposable actual-schema evidence. These are fixtures, never live lane receipts.
+    run = tmp_path / '.claude-state' / 'fleet-runs' / f'fixture-{index}'
+    run.mkdir(parents=True, exist_ok=True)
+    receipt_path = run / 'sonnet-001.receipt.json'
+    receipt = {'schema': 'mlv-app/fleet-lane-receipt/v1', 'lane': 'sonnet', 'card': f'CARD-{index}',
+        'startedUtc': '2026-09-05T09:00:01Z', 'endedUtc': '2026-09-05T09:00:02Z',
+        'exitCode': exit_code, 'spend': {'costReported': reported, 'costUsd': cost},
+        'promptPath': str(run / 'sonnet-001.prompt.txt'), 'outputPath': str(run / 'sonnet-001.last.txt')}
+    receipt_path.write_text(json.dumps(receipt), encoding='utf-8')
+    reserved = {'reservationId': f'ID-{index}', 'state': 'reserved', 'lane': 'sonnet', 'card': f'CARD-{index}',
+        'runDir': str(run), 'recordedUtc': '2026-09-05T09:00:00Z'}
+    terminal = {**reserved, 'state': 'refunded', 'recordedUtc': '2026-09-05T09:00:03Z',
+        'receiptPath': str(receipt_path), 'receiptSha256': sha256_of(receipt_path),
+        'laneExitCode': exit_code, 'laneCostReported': reported, 'laneCostUsd': cost}
+    return reserved, terminal, receipt, receipt_path
+
+
+def _budget_of(tmp_path, rows):
+    # Exercise the production reservation reducer using the historical cases'
+    # exit/cost facts, translated into the new receipt-bound ledger contract.
+    ledger = []
+    for index, row in enumerate(rows):
+        reserved, terminal, _, _ = _reservation_fixture(tmp_path, index, row['laneExitCode'],
+            row['laneCostUsd'], row['laneCostReported'])
+        ledger.extend([reserved, terminal])
+    return _run_reservation_budget(tmp_path, ledger)
+
+
+
+def _row(card, exit_code, cost, reported=True):
+    return {
+        "cardId": card, "dispatchedUtc": "2026-09-05T03:49:26.0000000Z",
+        "laneExitCode": exit_code, "laneCostUsd": cost, "laneCostReported": reported,
+    }
+
+
+def test_the_three_real_receipts_from_20260905_score_correctly(tmp_path):
+    rows = [
+        _row("GATE-FAMILY-BOOKED", 1, 0.0),        # 429 in 2.8s, bought nothing -> REFUND
+        _row("CITE-TXN-1", 1, 2.244599),           # failed, but USD 2.24 is gone -> CHARGE
+        _row("CLEANUP-1", 0, 2.048145),            # succeeded                    -> CHARGE
+    ]
+    assert _budget_of(tmp_path, rows) == 2
+
+
+def test_a_failed_but_EXPENSIVE_lane_is_still_charged(tmp_path):
+    assert _budget_of(tmp_path, [_row("X", 1, 2.24)]) == 1
+
+
+def test_an_unreported_cost_is_never_treated_as_free(tmp_path):
+    assert _budget_of(tmp_path, [_row("X", 1, None, reported=False)]) == 1
+
+
+def test_a_successful_free_lane_is_still_charged(tmp_path):
+    # exit 0 means work happened, whatever it cost.
+    assert _budget_of(tmp_path, [_row("X", 0, 0.0)]) == 1
+
+
+@pytest.mark.parametrize('mutation', [
+    'charged', 'duplicate_terminal', 'duplicate_reserved', 'cross_day_terminal',
+    'missing_receipt', 'wrong_hash', 'changed_receipt', 'foreign_lane', 'foreign_card',
+    'foreign_prompt', 'foreign_output', 'missing_run', 'foreign_terminal_run',
+    'bool_exit', 'string_cost', 'bool_cost', 'null_cost', 'string_reported',
+    'receipt_before_reservation', 'receipt_after_terminal', 'copied_cost_mismatch',
+])
+def test_reservation_refund_rejects_ambiguous_or_unbound_evidence(tmp_path, mutation):
+    reserved, terminal, receipt, path = _reservation_fixture(tmp_path)
+    rows = [reserved, terminal]
+    if mutation == 'charged': terminal['state'] = 'charged'
+    elif mutation == 'duplicate_terminal': rows.append(dict(terminal))
+    elif mutation == 'duplicate_reserved': rows.append(dict(reserved))
+    elif mutation == 'cross_day_terminal': rows.append({**terminal, 'recordedUtc': '2026-09-06T01:00:00Z'})
+    elif mutation == 'missing_receipt': path.unlink()
+    elif mutation == 'wrong_hash': terminal['receiptSha256'] = '0' * 64
+    elif mutation == 'changed_receipt': path.write_text('{}')
+    elif mutation == 'foreign_lane': receipt['lane'] = 'opus'
+    elif mutation == 'foreign_card': receipt['card'] = 'FOREIGN'
+    elif mutation == 'foreign_prompt': receipt['promptPath'] = str(tmp_path / 'foreign.prompt.txt')
+    elif mutation == 'foreign_output': receipt['outputPath'] = str(tmp_path / 'foreign.last.txt')
+    elif mutation == 'missing_run': reserved.pop('runDir')
+    elif mutation == 'foreign_terminal_run': terminal['runDir'] = str(tmp_path / 'foreign')
+    elif mutation == 'bool_exit': receipt['exitCode'] = True
+    elif mutation == 'string_cost': receipt['spend']['costUsd'] = '0'
+    elif mutation == 'bool_cost': receipt['spend']['costUsd'] = False
+    elif mutation == 'null_cost': receipt['spend']['costUsd'] = None
+    elif mutation == 'string_reported': receipt['spend']['costReported'] = 'true'
+    elif mutation == 'receipt_before_reservation': receipt['startedUtc'] = '2026-09-05T08:00:00Z'
+    elif mutation == 'receipt_after_terminal': receipt['endedUtc'] = '2026-09-05T10:00:00Z'
+    elif mutation == 'copied_cost_mismatch': terminal['laneCostUsd'] = 1
+    if mutation.startswith(('foreign_lane', 'foreign_card', 'foreign_prompt', 'foreign_output',
+                            'bool_', 'string_', 'null_', 'receipt_')):
+        path.write_text(json.dumps(receipt), encoding='utf-8')
+        terminal['receiptSha256'] = sha256_of(path)
+    assert _run_reservation_budget(tmp_path, rows) == 1
+
+
+def test_malformed_reservation_ids_each_count_without_sentinel_collision(tmp_path):
+    reserved, _, _, _ = _reservation_fixture(tmp_path)
+    rows = [{**reserved, 'reservationId': value} for value in (None, '', 23, '__malformed__0')]
+    assert _run_reservation_budget(tmp_path, rows) == 4
+
+
+def test_reservation_budget_preserves_utc_boundary_and_counts_unresolved_once(tmp_path):
+    reserved, _, _, _ = _reservation_fixture(tmp_path)
+    rows = [reserved, dict(reserved),
+        {**reserved, 'reservationId': 'PREVIOUS', 'recordedUtc': '2026-09-04T23:59:59Z'},
+        {**reserved, 'reservationId': 'OFFSET', 'recordedUtc': '2026-09-04T20:00:00-05:00'}]
+    assert _run_reservation_budget(tmp_path, rows) == 2
+
+
+@pytest.mark.parametrize('bad_row', [None, [], {'state': 'mystery', 'recordedUtc': '2026-09-05T09:00:00Z'},
+    {'state': 'reserved', 'recordedUtc': 'not-a-date'}])
+def test_malformed_ledger_cannot_create_budget(tmp_path, bad_row):
+    with pytest.raises(AssertionError):
+        _run_reservation_budget(tmp_path, [bad_row])
+
+
+@pytest.mark.parametrize('exit_code,cost,reported,expected', [
+    (1, 0, True, 'refunded'), (0, 0, True, 'charged'), (1, 2.24, True, 'charged'),
+    (1, None, False, 'charged'), (1, '0', True, 'charged'), (1, False, True, 'charged'),
+    (1, 0, 'true', 'charged'),
+])
+def test_dispatch_terminal_uses_actual_typed_receipt_bytes(tmp_path, exit_code, cost, reported, expected):
+    reserved, _, _, path = _reservation_fixture(tmp_path, exit_code=exit_code, cost=cost, reported=reported)
+    harness = tmp_path / 'terminal-writer.ps1'
+    harness.write_text('''param($Source,$Board,$Run,$ExitCode)
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+$RepoRoot=$Board
+$ReservationsPath=Join-Path $Board 'writer-ledger.jsonl'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'source parse failed'}
+foreach($name in @('Get-DispatchSpendEvidence','Write-DispatchReservation')) {
+    $found=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true))
+    if($found.Count -ne 1){throw 'writer function missing or ambiguous'}
+    Invoke-Expression $found[0].Extent.Text
+}
+$row=Write-DispatchReservation -ReservationId 'TEST-ID' -State charged -Card 'CARD-0' -Kind product -Lane sonnet -RunDir $Run -ObservedExit ([int]$ExitCode)
+$row|ConvertTo-Json -Depth 6 -Compress
+''', encoding='utf-8')
+    result = subprocess.run(['pwsh', '-NoProfile', '-NonInteractive', '-File', str(harness),
+        '-Source', str(WORKSTREAM), '-Board', str(tmp_path), '-Run', reserved['runDir'],
+        '-ExitCode', str(exit_code)], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    terminal = json.loads(result.stdout.strip().splitlines()[-1])
+    assert terminal['state'] == expected
+    assert terminal['runDir'] == reserved['runDir']
+    assert json.loads((tmp_path / 'writer-ledger.jsonl').read_text(encoding='utf-8-sig')) == terminal
+    if expected == 'refunded':
+        assert terminal['receiptSha256'] == sha256_of(path)
+        assert (tmp_path / terminal['receiptPath']).resolve() == path.resolve()
+        assert terminal['laneCostReported'] is True and terminal['laneCostUsd'] == 0

@@ -838,3 +838,49 @@ Rounds 1-26: no contested finding except S45/O46 and S99/O118 (premises rejected
 No lane, seat, chip, heartbeat, pen, or doctrine entry is added. The global hook, the content-review gate, `closeout.config.json`
 and the finalize path are untouched. The bus gets ONE `specs/mlv-app.md` update at week 3. Nothing asks Fable to work, and
 nothing waits on the owner.
+
+
+### Clarification 0.7-c1: evidence-backed zero-spend refunds (September 8, 2026)
+
+This resolves the contradiction between 0.7's explicit refund-on-zero-spend intent,
+1.5's charged-reservation budget, and 0.35's S76 regardless-of-exit comments.
+It supersedes only that accounting predicate and those comments. All other 0.35
+deliverables, the normal-merge ancestry rule, the union of existing test names,
+the eleven-path control receipt set, and the Phase 0.2 activation gates remain.
+
+Count each nonempty reservationId once on the UTC calendar day of its reserved
+event, preserving the existing DateTimeKind normalization. A reservation counts
+as spent unless exactly one well-formed terminal event for that ID qualifies for
+a refund. Missing, malformed, duplicate or conflicting terminal events are spent;
+charged followed by refunded is spent. Duplicate conflicting reservations are
+ambiguous and cannot be refunded. Malformed ledger data must never manufacture
+available budget. A reserved event whose reservationId is missing, empty or
+non-string counts as its own distinct spent reservation and can never be refunded;
+use an internal row-ordinal identity so malformed IDs never collapse together.
+Refunds cannot restore another UTC day's budget.
+
+An ordinary refund requires terminal state refunded, same-day provenance, and
+the exact lane receipt for that invocation: a bounded run receipt path, SHA-256
+of its bytes, integer nonzero exitCode, spend.costReported exactly true, and
+numeric non-boolean spend.costUsd exactly zero. The dispatcher copies facts from
+the same receipt bytes it hashes; the reducer verifies the receipt binding and
+predicate before refunding. Successful zero-cost runs, unavailable/missing cost,
+strings, booleans, positive cost, missing receipts, hash or identity mismatches,
+provider refusal without explicit reported zero cost, and ambiguous launch errors
+remain spent. Receipt state complete is only process lifecycle evidence, never
+delivery success. No signed or adversarially tamper-proof accounting is claimed.
+
+The dispatcher is the writer of launch-failure evidence in the terminal event
+in dispatch-reservations.jsonl; no separate launch-failure file is introduced.
+A failure-to-launch refund requires affirmative evidence that no child provider
+process started, with a typed launch-failure record bound to that reservation.
+A missing receipt or catch block alone is not proof; uncertain launch failures
+remain spent. Implement only cases for which the dispatcher can establish that
+evidence, preserving the append-only reserved/terminal event design.
+
+Regression coverage must exercise the shipped reducer and preserve every test
+name from either parent. Include nonzero reported-zero refund, successful zero
+spent, all unknown/malformed cost types, stale/hash/identity-mismatched receipts,
+duplicate/conflicting events, cross-day timestamps and unresolved launch cases.
+Product-ratio accounting still counts dispatch attempts independently. No loop,
+editing provider, Desktop configuration, or frozen factory card is enabled here.

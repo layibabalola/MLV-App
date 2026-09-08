@@ -269,17 +269,41 @@ function Get-LastDispatchAgeHours([string]$id) {
 # the pure logic directly rather than shelling out to Compose-LanePrompt.ps1.
 . (Join-Path $PSScriptRoot 'compose-lane-prompt-core.ps1')
 
+function Get-DispatchSpendEvidence {
+    param([string]$RunDir, [string]$Lane, [string]$Card, $ObservedExit)
+    $laneCostReported = $false
+    $evidence = [ordered]@{ receiptPath=$null; receiptSha256=$null; laneExitCode=$ObservedExit; laneCostUsd=$null; laneCostReported=$laneCostReported }
+    try {
+        $files = @(Get-ChildItem -LiteralPath $RunDir -Filter "$Lane-*.receipt.json" -File -ErrorAction Stop)
+        if ($files.Count -ne 1 -or $files[0].Length -gt 1MB -or $files[0].Length -eq 0) { return $evidence }
+        $bytes = [IO.File]::ReadAllBytes($files[0].FullName)
+        $receipt = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xfeff) | ConvertFrom-Json -ErrorAction Stop
+        if ($receipt.schema -cne 'mlv-app/fleet-lane-receipt/v1' -or $receipt.lane -cne $Lane -or $receipt.card -cne $Card) { return $evidence }
+        if (($receipt.exitCode -isnot [int] -and $receipt.exitCode -isnot [long]) -or $receipt.exitCode -ne $ObservedExit) { return $evidence }
+        $cost = $receipt.spend.costUsd
+        if ($receipt.spend.costReported -isnot [bool] -or -not $receipt.spend.costReported -or
+            ($cost -isnot [int] -and $cost -isnot [long] -and $cost -isnot [double] -and $cost -isnot [decimal])) { return $evidence }
+        $evidence.receiptPath = [IO.Path]::GetRelativePath($RepoRoot, $files[0].FullName)
+        $evidence.receiptSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        $evidence.laneCostUsd = $cost
+        $evidence.laneCostReported = $true
+    } catch { }
+    return $evidence
+}
+
 function Write-DispatchReservation {
     # APPENDED, never updated in place - a reservation is a fact about a point in time, not
     # a mutable record. Two rows per lane start: 'reserved' immediately before the process
     # launches, then 'charged' or 'refunded' once the outcome of actually launching it is
-    # known. Invoke-WorkstreamLoop.ps1 reads only the 'reserved' rows for today's spend.
+    # known. The loop refunds only terminal events with verified zero-spend evidence.
     param(
         [Parameter(Mandatory)][string]$ReservationId,
         [Parameter(Mandatory)][ValidateSet('reserved','charged','refunded')][string]$State,
         [string]$Card = '',
         [string]$Kind = '',
-        [string]$Lane = ''
+        [string]$Lane = '',
+        [string]$RunDir = '',
+        $ObservedExit = $null
     )
     $dir = Split-Path -Parent $ReservationsPath
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -289,9 +313,18 @@ function Write-DispatchReservation {
         card          = $Card
         kind          = $Kind
         lane          = $Lane
+        runDir        = $RunDir
         recordedUtc   = (Get-Date).ToUniversalTime().ToString('o')
     }
-    Add-Content -LiteralPath $ReservationsPath -Value ($row | ConvertTo-Json -Compress) -Encoding UTF8
+    if ($State -ne 'reserved') {
+        $evidence = Get-DispatchSpendEvidence -RunDir $RunDir -Lane $Lane -Card $Card -ObservedExit $ObservedExit
+        foreach ($key in $evidence.Keys) { $row[$key] = $evidence[$key] }
+        # A catch or missing receipt cannot establish that no provider started.
+        # Unknown spend remains charged; success at zero cost remains charged.
+        $row.state = if ($evidence.laneCostReported -and $evidence.laneCostUsd -eq 0 -and $null -ne $ObservedExit -and $ObservedExit -ne 0) { 'refunded' } else { 'charged' }
+    }
+    Add-Content -LiteralPath $ReservationsPath -Value ($row | ConvertTo-Json -Compress -Depth 6) -Encoding UTF8
+    return [pscustomobject]$row
 }
 
 function Test-KillSwitchArmed { return (Test-Path -LiteralPath $KillSwitch) }
@@ -906,20 +939,20 @@ $fence
     if ($ratioExit -ne 0) { exit $ratioExit }
 
     # Reservation events (deliverable 7, S76): APPENDED, never updated in place. 'reserved' is
-    # written the instant before the process launches, and the loop counts ONLY these rows for
-    # today's budget - never workstream-dispatch-log.jsonl below, which a lane could in principle
-    # never reach if it dies before this script resumes.
+    # written before launch. The budget counts reservations and refunds only verified
+    # zero-spend terminal events; absent/ambiguous outcomes stay spent.
     $reservationId = [guid]::NewGuid().ToString()
-    Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane
+    $null = Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir
 
-    $reservationOutcome = 'refunded'
+    $laneExit = $null
+    $reservationOutcome = 'charged'
     try {
         & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $LaneRunner `
             -Lane $Lane -PromptFile $promptPath -Card $cardId -RunDir $runDir -TimeoutSec $TimeoutSec
         $laneExit = $LASTEXITCODE
         $reservationOutcome = 'charged'
     } finally {
-        Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane
+        $reservationRecord = Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir -ObservedExit $laneExit
     }
 
     $record = [ordered]@{
@@ -937,6 +970,8 @@ $fence
         ghEvidence      = if ($needsHostedEvidence) { @($ghRows | ForEach-Object { "$($_.Name)=$($_.Result)" }) } else { @() }
         dispatchedUtc   = (Get-Date).ToUniversalTime().ToString('o')
         laneExitCode    = $laneExit
+        laneCostUsd     = $reservationRecord.laneCostUsd
+        laneCostReported = $reservationRecord.laneCostReported
     }
     Add-Content -LiteralPath $LogPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
 
@@ -1075,24 +1110,22 @@ $fence
     }
 
     # Reservation events (deliverable 7, S76): APPENDED, never updated in place. 'reserved' is
-    # written the instant before the process launches - the earliest point a slot is actually
-    # spent, regardless of how the lane later exits - and the loop counts ONLY these rows for
-    # today's budget.
+    # written before launch. Zero-spend refunds require a bound terminal receipt;
+    # uncertain launch failures cannot create budget.
     $reservationId = [guid]::NewGuid().ToString()
-    Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane
+    $null = Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir
 
     $laneExit = $null
-    $reservationOutcome = 'refunded'
+    $reservationOutcome = 'charged'
     try {
         & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $StartEditingLane `
             -Lane $Lane -PromptFile $promptPath -WorkDir $laneWorkDir -Card $cardId -RunDir $runDir `
             -ExtraReadDir $runDir -TimeoutSec $TimeoutSec
         $laneExit = $LASTEXITCODE
-        # Charged once the process has actually run, regardless of ITS OWN exit code: the model
-        # turn was spent either way. Only a failure to even launch the wrapper is a refund.
+        # The terminal writer derives any refund from the actual receipt bytes.
         $reservationOutcome = 'charged'
     } finally {
-        Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane
+        $reservationRecord = Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir -ObservedExit $laneExit
     }
 
     $cleanRemoved = Remove-LaneWorktreeIfClean $laneWorkDir
@@ -1114,6 +1147,8 @@ $fence
         worktreeRemoved = $cleanRemoved
         dispatchedUtc   = (Get-Date).ToUniversalTime().ToString('o')
         laneExitCode    = $laneExit
+        laneCostUsd     = $reservationRecord.laneCostUsd
+        laneCostReported = $reservationRecord.laneCostReported
     }
     Add-Content -LiteralPath $LogPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
 
