@@ -40,60 +40,84 @@
 ****************************************************************************/
 
 #include "DownloadManager.h"
+#include "AtomicFileReplace.h"
+#include "FpmNameValidator.h"
 
-DownloadManager::DownloadManager()
+DownloadManager::DownloadManager(QNetworkAccessManager *externalManager, QObject *parent)
+    : QObject(parent)
 {
+    if (externalManager) {
+        manager = externalManager;
+        m_ownsManager = false;
+    } else {
+        manager = new QNetworkAccessManager(this);
+        m_ownsManager = true;
+    }
     m_downloadSucess = false;
-    connect(&manager, SIGNAL(finished(QNetworkReply*)),
+    m_operationFailed = false;
+    connect(manager, SIGNAL(finished(QNetworkReply*)),
             SLOT(downloadFinished(QNetworkReply*)));
 }
 
 void DownloadManager::doDownload(const QUrl &url)
 {
+    if (currentDownloads.isEmpty()) {
+        // Idle -> starting a fresh operation: reset the sticky failure flag.
+        m_operationFailed = false;
+    }
+    m_downloadSucess = false;
     QNetworkRequest request(url);
 
-    QSslConfiguration conf = request.sslConfiguration();
-    conf.setPeerVerifyMode(QSslSocket::VerifyNone);
-    request.setSslConfiguration(conf);
-
-    QNetworkReply *reply = manager.get(request);
+    QNetworkReply *reply = manager->get(request);
 
     currentDownloads.append(reply);
+
+    if (reply->isFinished()) {
+        // Edge case: the fake/real reply was already finished at the moment
+        // we registered it (e.g. a synchronous fake in tests). Handle it now
+        // rather than waiting for the manager's aggregate finished() signal.
+        // downloadFinished() removes the reply from currentDownloads, so if
+        // the manager's finished(reply) signal also fires later for the same
+        // reply, its membership guard makes that a no-op -- no double
+        // dispatch.
+        downloadFinished(reply);
+    }
+}
+
+void DownloadManager::abortDownloads()
+{
+    const QList<QNetworkReply *> snapshot = currentDownloads;
+    if (snapshot.isEmpty()) {
+        // Idle, or an operation already aborted/finished: nothing active to
+        // tear down. Completion must emit exactly once per active operation,
+        // so a repeated or idle abort() call is a silent no-op.
+        return;
+    }
+    currentDownloads.clear();
+    m_operationFailed = true;
+    // Aggregate failure sticks even if an earlier reply in this operation
+    // had already succeeded -- do not leave a stale success getter behind.
+    m_downloadSucess = false;
+
+    for (QNetworkReply *reply : snapshot) {
+        reply->abort();
+        reply->deleteLater();
+    }
+
+    emit downloadsFinished(false);
 }
 
 QString DownloadManager::saveFileName(const QUrl &url)
 {
-    QString path = url.path();
-    QString basename = QFileInfo(path).fileName();
-
-    if (basename.isEmpty())
-        basename = "download";
-
-    /*if (QFile::exists(basename)) {
-        // already exists, don't overwrite
-        int i = 0;
-        basename += '.';
-        while (QFile::exists(basename + QString::number(i)))
-            ++i;
-
-        basename += QString::number(i);
-    }*/
-
-    return basename;
+    return allowedDownloadBasenameForUrl(url);
 }
 
 bool DownloadManager::saveToDisk(const QString &filename, QIODevice *data)
 {
-    QFile file(filename);
-    if (!file.open(QIODevice::WriteOnly)) {
-        fprintf(stderr, "Could not open %s for writing: %s\n",
-                qPrintable(filename),
-                qPrintable(file.errorString()));
+    if (!writeAtomically(filename, data->readAll())) {
+        fprintf(stderr, "Could not atomically save %s\n", qPrintable(filename));
         return false;
     }
-
-    file.write(data->readAll());
-    file.close();
 
     return true;
 }
@@ -105,7 +129,11 @@ bool DownloadManager::isDownloadReady()
 
 bool DownloadManager::downloadSuccess()
 {
-    return m_downloadSucess;
+    // Must agree with the downloadsFinished(bool) signal's aggregate: a
+    // fail-first/succeed-last sequence within one operation is still an
+    // overall failure, so this cannot simply reflect the last reply's
+    // individual outcome (m_downloadSucess).
+    return m_downloadSucess && !m_operationFailed;
 }
 
 void DownloadManager::execute()
@@ -131,6 +159,17 @@ void DownloadManager::execute()
 
 void DownloadManager::downloadFinished(QNetworkReply *reply)
 {
+    if (!currentDownloads.contains(reply)) {
+        // Already finalized: either a late queued finished() arriving after
+        // abort()/timeout already removed this reply, or a duplicate
+        // dispatch for a reply that was already-finished at registration
+        // time. Ignore it -- do NOT resurrect finalized state or write a
+        // stale file.
+        return;
+    }
+    currentDownloads.removeAll(reply);
+
+    m_downloadSucess = false;
     QUrl url = reply->url();
     if (reply->error()) {
         fprintf(stderr, "Download of %s failed: %s\n",
@@ -139,18 +178,23 @@ void DownloadManager::downloadFinished(QNetworkReply *reply)
         m_downloadSucess = false;
     } else {
         QString filename = saveFileName(url);
-        if (saveToDisk(filename, reply))
-        {
-            /*printf("Download of %s succeded (saved to %s)\n",
-                   url.toEncoded().constData(), qPrintable(filename));*/
-            m_downloadSucess = true;
+        if (filename.isEmpty()) {
+            fprintf(stderr, "Rejected invalid pixel-map filename from %s\n",
+                    url.toEncoded().constData());
+        } else {
+            m_downloadSucess = saveToDisk(filename, reply);
         }
     }
 
-    currentDownloads.removeAll(reply);
+    if (!m_downloadSucess) {
+        m_operationFailed = true;
+    }
+
     reply->deleteLater();
 
-    //if (currentDownloads.isEmpty())
-        // all downloads finished
-        //QCoreApplication::instance()->quit();
+    if (currentDownloads.isEmpty()) {
+        // Operation idle: emit exactly once, aggregate failure sticks even
+        // if this particular reply succeeded.
+        emit downloadsFinished(!m_operationFailed);
+    }
 }

@@ -131,7 +131,7 @@ class BufferOutputStream:
             return bytes(self._buffer)
 
     def wait_for(self, needle: bytes, timeout: float = 2.0) -> bytes:
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         with self._condition:
             while needle not in self._buffer:
                 remaining = deadline - time.time()
@@ -141,10 +141,44 @@ class BufferOutputStream:
             return bytes(self._buffer)
 
 
+# --- venue-scaled wait budgets -----------------------------------------------------------
+# Every wait_* helper below had a 2-3 second budget, calibrated on a developer machine. That
+# is a VENUE parameter, not a correctness property: a correct implementation still passes at
+# the same speed, it just needs longer to get there on a loaded runner.
+#
+# Measured on this repo's Windows CI: an identical pipeline_tests job ran every shard ~2x
+# slower than a passing run of the same job, and degraded progressively across the job. At
+# 3 seconds, spawning a Python subprocess and observing two launches is tight there. Three
+# distinct symptom shapes have blocked unrelated PRs from this one harness --
+# wait_for_launch_count timeouts, an mtime read (#74), and a lock race (#75) -- all passing
+# locally every time.
+#
+# So the budgets scale on CI rather than each call site being hand-tuned. GitHub Actions
+# sets CI=true; AGENT_BRIDGE_TEST_TIMEOUT_SCALE overrides explicitly for a slow local box or
+# for reproducing a CI timing failure by hand.
+def _timeout_scale() -> float:
+    explicit = os.environ.get("AGENT_BRIDGE_TEST_TIMEOUT_SCALE")
+    if explicit:
+        try:
+            value = float(explicit)
+        except ValueError:
+            return 1.0
+        return value if value > 0 else 1.0
+    return 4.0 if os.environ.get("CI") else 1.0
+
+
+TIMEOUT_SCALE = _timeout_scale()
+
+
+def scaled(seconds: float) -> float:
+    """Wait budgets are venue-dependent; correctness is not."""
+    return seconds * TIMEOUT_SCALE
+
+
 def write_and_wait_new_mtime(path: Path, content: str, timeout: float = 2.0) -> None:
     before_mtime = path.stat().st_mtime_ns if path.exists() else None
     path.write_text(content, encoding="utf-8")
-    deadline = time.time() + timeout
+    deadline = time.time() + scaled(timeout)
     while time.time() < deadline:
         after_mtime = path.stat().st_mtime_ns if path.exists() else None
         if after_mtime != before_mtime:
@@ -242,7 +276,7 @@ class SupervisorHarness:
         self.thread.join(timeout=3.0)
 
     def wait_for_launch_count(self, expected: int, timeout: float = 3.0) -> List[int]:
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             launches = self.launch_pids()
             if len(launches) >= expected:
@@ -251,7 +285,7 @@ class SupervisorHarness:
         raise AssertionError("timed out waiting for %s launch(es); saw %s" % (expected, self.launch_pids()))
 
     def wait_for_exit(self, timeout: float = 3.0) -> int:
-        self.thread.join(timeout=timeout)
+        self.thread.join(timeout=scaled(timeout))
         if self.thread.is_alive():
             raise AssertionError("supervisor thread did not exit")
         error = self.result.get("error")
@@ -276,7 +310,7 @@ class SupervisorHarness:
         return self.storage.read_jsonl(self.state_dir / "messages.jsonl")
 
     def wait_for_audit_events(self, action: str, expected: int = 1, timeout: float = 3.0) -> List[dict]:
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             events = [event for event in self.audit_events() if event.get("action") == action]
             if len(events) >= expected:
@@ -292,7 +326,7 @@ class SupervisorHarness:
     def wait_for_snapshot(self, timeout: float = 3.0) -> Path:
         """Wait until the code-watcher-snapshot.json file appears in state_dir."""
         snapshot_path = self.state_dir / "code-watcher-snapshot.json"
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             if snapshot_path.exists():
                 return snapshot_path
@@ -317,7 +351,7 @@ class SupervisorHarness:
         every write_json call.
         """
         snapshot_path = self.state_dir / "code-watcher-snapshot.json"
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             try:
                 mtime_ns = snapshot_path.stat().st_mtime_ns
@@ -397,6 +431,50 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         self.assertIn(payload, output)
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)
+
+    def test_initial_snapshot_precedes_child_and_retains_startup_change(self) -> None:
+        # Force a change in the startup interval; READY alone cannot prove the
+        # watcher has sampled its baseline. No scheduler timing or sleeps needed.
+        sampled = threading.Event()
+        before_spawn = []
+        real_load = _sw.ServerSupervisor._load_and_apply_persisted_snapshot
+        real_spawn = _sw.ServerSupervisor._spawn_child
+
+        def load(supervisor):
+            result = real_load(supervisor)
+            sampled.set()
+            return result
+
+        def spawn(supervisor):
+            if not before_spawn:
+                before_spawn.append(sampled.is_set())
+                path = supervisor.watch_paths[0]
+                prior = path.stat().st_mtime_ns
+                path.write_text("# changed before first child launch\n", encoding="utf-8")
+                os.utime(path, ns=(prior + 1_000_000_000, prior + 1_000_000_000))
+            return real_spawn(supervisor)
+
+        with mock.patch.object(_sw.ServerSupervisor, "_load_and_apply_persisted_snapshot", load), \
+                mock.patch.object(_sw.ServerSupervisor, "_spawn_child", spawn):
+            harness = self._start_harness()
+            self.assertEqual(before_spawn, [True])
+            harness.wait_for_launch_count(2)
+            harness.wait_for_audit_events("mcp_server_refresh_required")
+            harness.stdin_stream.close()
+            self.assertEqual(harness.wait_for_exit(), 0)
+
+    def test_initial_snapshot_failure_reports_error_without_child(self) -> None:
+        with mock.patch.object(_sw.ServerSupervisor, "_load_and_apply_persisted_snapshot",
+                               side_effect=OSError("fixture snapshot unavailable")), \
+                mock.patch.object(_sw.ServerSupervisor, "_report_error") as report, \
+                mock.patch.object(_sw.ServerSupervisor, "_spawn_child") as spawn:
+            harness = SupervisorHarness(self.tempdir / "snapshot-failure", storage=self.storage)
+            self._harnesses.append(harness)
+            self.assertEqual(harness.wait_for_exit(), 1)
+            self.assertEqual(harness.launch_pids(), [])
+            spawn.assert_not_called()
+            report.assert_called_once()
+            self.assertIn("fixture snapshot unavailable", report.call_args.args[0])
 
     def test_wrapper_phase2_restarts_in_place_on_mtime_change(self) -> None:
         harness = self._start_harness()
@@ -725,8 +803,13 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="[]", stderr="")
         with mock.patch.object(_sw.sys, "platform", "win32"), mock.patch.object(_psrt.shutil, "which", side_effect=lambda name: "C:/Program Files/PowerShell/7/pwsh.exe" if name == "pwsh.exe" else None), mock.patch.object(_sw.subprocess, "run", return_value=completed) as run:
             table = _sw._process_table_from_system()
+            # _process_table_from_system() returns a lazy view on win32 so that
+            # looking up a handful of known pids never pays for a full CIM
+            # enumeration; force materialization here to exercise the CIM
+            # fallback this test actually targets.
+            materialized = dict(table)
 
-        self.assertEqual(table, {})
+        self.assertEqual(materialized, {})
         argv = run.call_args.args[0]
         self.assertPowerShellCimCommand(argv, "pwsh.exe")
         self.assertIn("Get-CimInstance Win32_Process", argv[-1])
@@ -748,7 +831,9 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
             return "C:/Program Files/PowerShell/7/pwsh" if name == "pwsh" else None
 
         with mock.patch.object(_sw.sys, "platform", "win32"), mock.patch.object(_psrt.shutil, "which", side_effect=which), mock.patch.object(_sw.subprocess, "run", return_value=completed) as run:
-            _sw._process_table_from_system()
+            # Force materialization: see the comment in
+            # test_windows_process_table_queries_prefer_pwsh_for_cim above.
+            dict(_sw._process_table_from_system())
 
         argv = run.call_args.args[0]
         self.assertPowerShellCimCommand(argv, "pwsh")
@@ -1621,6 +1706,53 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
             _sw._process_table_from_system = original_table
             _sw._wrapper_identity_for_pid = original_wrapper_identity
 
+    @unittest.skipUnless(sys.platform == "win32", "native probe is Windows-only")
+    def test_owning_host_exited_uses_native_probe_without_spawning(self) -> None:
+        """The host-liveness check runs on a 2s timer; it must never shell out.
+
+        Exercises the real (unmocked) ``_process_entry_from_system`` against a
+        genuinely live pid -- this test process's parent -- so the native
+        kernel32/ntdll probe is what actually answers, not a stub standing in
+        for it. Before core/win_process.py this call spawned
+        pwsh + conhost + a WMI round trip on every poll.
+        """
+        state_dir = self.tempdir / "host-identity-no-spawn" / "state"
+        state_dir.mkdir(parents=True)
+        host_pid = os.getppid()
+        self.assertNotEqual(host_pid, os.getpid())
+
+        real_run, real_popen = _sw.subprocess.run, _sw.subprocess.Popen
+
+        def explode(*args, **kwargs):
+            raise AssertionError("host-exit liveness check spawned a subprocess")
+
+        _sw.subprocess.run = explode
+        _sw.subprocess.Popen = explode
+        try:
+            supervisor = _sw.ServerSupervisor(
+                command=[sys.executable, "-c", "import time; time.sleep(60)"],
+                state_dir=state_dir,
+                watch_paths=[],
+                config=SupervisorConfig(host_exit_check_interval_seconds=5.0),
+                host_identity={
+                    "host_key": "pid:%d" % host_pid,
+                    "host_pid": host_pid,
+                    "host_process_name": "test-parent",
+                    # Deliberately wrong: forces the code past the cheap
+                    # is_process_alive short-circuit and into
+                    # _process_entry_from_system, which is the call that must
+                    # not spawn anything.
+                    "host_creation_date": "not-a-real-timestamp",
+                },
+                storage=self.storage,
+                now_fn=lambda: 0.0,
+            )
+            # Must not raise -- if it does, something shelled out.
+            supervisor._owning_host_exited()
+        finally:
+            _sw.subprocess.run = real_run
+            _sw.subprocess.Popen = real_popen
+
 
 class ServerWrapperTrampolineTests(unittest.TestCase):
     def test_trampoline_relaunches_on_exit_77_and_returns_final_code(self) -> None:
@@ -1780,7 +1912,7 @@ class ServerWrapperTrampolineMcpSmokeTests(unittest.TestCase):
         *,
         timeout: float = 10.0,
     ) -> dict:
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         line = bytearray()
         while time.time() < deadline:
             try:
@@ -1797,7 +1929,7 @@ class ServerWrapperTrampolineMcpSmokeTests(unittest.TestCase):
         raise AssertionError("timed out waiting for MCP response; stderr=%r" % "".join(stderr_lines))
 
     def _wait_for_audit_count(self, audit_path: Path, action: str, expected: int, timeout: float = 12.0) -> List[dict]:
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             rows = self.storage.read_jsonl(audit_path) if audit_path.exists() else []
             matches = [row for row in rows if row.get("action") == action]
@@ -1944,7 +2076,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         """
         before_mtime = path.stat().st_mtime_ns if path.exists() else None
         path.write_text(content, encoding="utf-8")
-        deadline = time.time() + timeout
+        deadline = time.time() + scaled(timeout)
         while time.time() < deadline:
             after_mtime = path.stat().st_mtime_ns if path.exists() else None
             if after_mtime != before_mtime:

@@ -8,6 +8,9 @@ maintained in this format.
 
 ### Added
 
+- Fork README guidance for headless `--batch` export, separate `--trim-mlv`
+  trimming, `.marxml` settings supplied through `--receipt`, and the Windows
+  Qt 6.10.2 / MinGW 13.1 toolchain.
 - Contributor and support routes for the protected-branch workflow, product
   evidence, dependency locks, release payload readiness, and private security
   reporting.

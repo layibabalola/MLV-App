@@ -40,6 +40,8 @@ platform/build-*
 # build-provenance TOOLING (source scripts, not build output) -- re-include despite *build* above
 !tools/build-release.ps1
 !tools/gen-buildinfo.ps1
+!tools/release/build_stamp.py
+!tools/repo_hygiene/test_build_stamp.py
 .qtcreator
 
 # Docs tree is the canonical documentation set; track it even if filenames
@@ -53,6 +55,11 @@ platform/build-*
 
 # Local nested agent worktrees are load-bearing but not repo content.
 .claude/worktrees/
+
+# Profiling scratch DNGs are large, disposable, and reproducible; the
+# metadata/evidence files that accompany them stay tracked. Goldens under
+# tests/fixtures/ are unaffected.
+.claude/**/*.dng
 
 # Local property-test cache.
 .hypothesis/
