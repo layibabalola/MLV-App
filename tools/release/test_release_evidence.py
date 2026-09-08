@@ -4,8 +4,10 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -31,7 +33,7 @@ from .release_evidence import (
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _pe(machine: int = 0x8664) -> bytes:
+def _pe(machine: int = 0x8664, *, dll: bool = False) -> bytes:
     value = bytearray(256)
     value[:2] = b"MZ"
     value[0x3C:0x40] = (128).to_bytes(4, "little")
@@ -39,7 +41,8 @@ def _pe(machine: int = 0x8664) -> bytes:
     value[132:134] = machine.to_bytes(2, "little")
     value[134:136] = (1).to_bytes(2, "little")
     value[148:150] = (2).to_bytes(2, "little")
-    value[150:152] = (0x0002).to_bytes(2, "little")
+    characteristics = 0x0002 | (0x2000 if dll else 0)
+    value[150:152] = characteristics.to_bytes(2, "little")
     value[152:154] = (0x20B).to_bytes(2, "little")
     return bytes(value)
 
@@ -409,6 +412,268 @@ class ReleaseEvidenceTests(unittest.TestCase):
             native["Contents/MacOS/ffmpeg"]["architectures"],
             ["arm64", "x86_64"],
         )
+
+    def _windows_compat_fixture(self, *, launcher_name: str = "raw2mlv.exe") -> tuple[bytes, bytes]:
+        """Write a fully valid raw2mlv-windows-x86-compat payload into ``self.repo``.
+
+        This is exercised through the real production validator (``enable_compatibility_admission``
+        reruns ``tools.repo_hygiene.vendored_native_payloads.validate``), so it must be a
+        complete, self-consistent manifest -- not a stub -- and it is git-tracked BEFORE any
+        release product is staged, so the product never becomes a spurious "tracked artifact".
+        """
+        launcher = _pe(0x14C, dll=False)
+        library = _pe(0x14C, dll=True)
+        archive_path = self.repo / "platform" / "qt" / "raw2mlv" / "raw2mlvWin64.zip"
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            for name, content in ((launcher_name, launcher), ("libraw.dll", library)):
+                member = zipfile.ZipInfo(name)
+                member.create_system = 3
+                member.external_attr = 0o100755 << 16
+                archive.writestr(member, content)
+        archive_bytes = archive_path.read_bytes()
+
+        extract_command = (
+            "python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root . "
+            "--payload-id raw2mlv-windows-x86-compat --archive-reference raw2mlvWin64.zip "
+            "--output-dir build/release --verify-installed"
+        )
+        verify_command = (
+            "python -m tools.repo_hygiene.vendored_native_payloads --repo-root . "
+            "--require-target-compatible windows-x86_64"
+        )
+        workflow_path = self.repo / ".github" / "workflows" / "Windows.yml"
+        workflow_path.parent.mkdir(parents=True, exist_ok=True)
+        workflow_path.write_text(
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "    - name: Verify\n"
+            f"      run: {verify_command}\n"
+            "    - name: Extract\n"
+            f"      run: |\n        {extract_command}\n",
+            encoding="utf-8",
+        )
+
+        manifest = {
+            "schema_version": 1,
+            "integrity_policy": {
+                "tracked_artifact_suffixes": [".zip"],
+                "max_archive_bytes": 100000000,
+                "max_members": 500,
+                "max_single_member_bytes": 120000000,
+                "max_total_uncompressed_bytes": 200000000,
+                "max_member_expansion_ratio": 25,
+                "max_archive_expansion_ratio": 10,
+                "binary_kind_policy": {
+                    "pe": "IMAGE_FILE_DLL (0x2000) set means shared-library; clear means executable.",
+                    "macho": (
+                        "MH_EXECUTE (2) means executable; MH_DYLIB (6) means shared-library; "
+                        "every fat slice must agree."
+                    ),
+                    "elf": (
+                        "ET_EXEC (2) means executable; ET_DYN (3) with PT_INTERP means dynamic PIE "
+                        "executable; ET_DYN without PT_INTERP means shared-library. Static PIE "
+                        "without PT_INTERP is intentionally unsupported and fails an executable "
+                        "kind claim."
+                    ),
+                },
+            },
+            "redistribution_readiness": {
+                "status": "blocked",
+                "enforcement": "advisory",
+                "blockers": ["provenance unknown"],
+                "promotion_receipts": [],
+            },
+            "inactive_artifacts": [],
+            "payloads": [
+                {
+                    "id": "raw2mlv-windows-x86-compat",
+                    "path": "platform/qt/raw2mlv/raw2mlvWin64.zip",
+                    "archive_format": "zip",
+                    "bytes": len(archive_bytes),
+                    "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+                    "member_summary": {
+                        "entries": 2,
+                        "file_entries": 2,
+                        "directory_entries": 0,
+                        "total_uncompressed_bytes": len(launcher) + len(library),
+                    },
+                    "selected_members": [
+                        {
+                            "path": launcher_name,
+                            "output_name": launcher_name,
+                            "kind": "executable",
+                            "bytes": len(launcher),
+                            "sha256": hashlib.sha256(launcher).hexdigest(),
+                            "binary": {"format": "pe", "machine": "x86"},
+                        },
+                        {
+                            "path": "libraw.dll",
+                            "output_name": "libraw.dll",
+                            "kind": "shared-library",
+                            "bytes": len(library),
+                            "sha256": hashlib.sha256(library).hexdigest(),
+                            "binary": {"format": "pe", "machine": "x86"},
+                        },
+                    ],
+                    "consumers": [
+                        {
+                            "target": "windows-x86_64",
+                            "path": ".github/workflows/Windows.yml",
+                            "status": "active-release-workflow-wow64-compat",
+                            "reference_marker": "raw2mlvWin64.zip",
+                            "operation_marker": extract_command,
+                            "integrity_gate": {
+                                "path": ".github/workflows/Windows.yml",
+                                "marker": verify_command,
+                                "must_precede": extract_command,
+                            },
+                            "compatibility": {
+                                "mode": "wow64-child-process",
+                                "payload_id": "raw2mlv-windows-x86-compat",
+                                "launcher": launcher_name,
+                                "dependencies": ["libraw.dll"],
+                            },
+                        }
+                    ],
+                    "provenance": {
+                        "status": "unknown",
+                        "version": "unknown",
+                        "source": "unknown",
+                        "build_recipe": "unknown",
+                        "upstream_checksum_verified": False,
+                        "license": "unknown",
+                        "license_notice_in_archive": False,
+                    },
+                    "redistribution_readiness": "blocked-missing-provenance",
+                }
+            ],
+        }
+        manifest_path = self.repo / "tools" / "gates" / "vendored-native-payloads.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        claims_path = self.repo / "tools" / "gates" / "payload-provenance-promotion-claims.json"
+        claims_path.write_text('{"schema_version":1,"claims":[]}\n', encoding="utf-8")
+
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        return launcher, library
+
+    def test_windows_release_evidence_admits_validated_wow64_compat_pair(self) -> None:
+        launcher, library = self._windows_compat_fixture()
+        product = self._directory_product()
+        (product / "raw2mlv.exe").write_bytes(launcher)
+        (product / "libraw.dll").write_bytes(library)
+        _, build_info_path = self._generate(
+            product=product,
+            output_dir=self.root / "windows-compat-evidence",
+            enable_compatibility_admission=True,
+        )
+        build_info = json.loads(build_info_path.read_text(encoding="utf-8"))
+        native = {row["path"]: row for row in build_info["contents"]["native_binaries"]}
+        self.assertEqual(set(native), {"MLVApp.exe", "raw2mlv.exe", "libraw.dll"})
+        self.assertEqual(native["MLVApp.exe"]["architectures"], ["x86_64"])
+        self.assertNotIn("compatibility_mode", native["MLVApp.exe"])
+        self.assertEqual(native["raw2mlv.exe"]["architectures"], ["x86"])
+        self.assertEqual(native["raw2mlv.exe"]["compatibility_mode"], "wow64-child-process")
+        self.assertEqual(native["raw2mlv.exe"]["payload_id"], "raw2mlv-windows-x86-compat")
+        self.assertEqual(native["libraw.dll"]["architectures"], ["x86"])
+        self.assertEqual(native["libraw.dll"]["compatibility_mode"], "wow64-child-process")
+
+    def test_windows_release_evidence_rejects_x86_helpers_without_opt_in(self) -> None:
+        self._windows_compat_fixture()
+        product = self._directory_product()
+        (product / "raw2mlv.exe").write_bytes(_pe(0x14C))
+        (product / "libraw.dll").write_bytes(_pe(0x14C, dll=True))
+        with self.assertRaisesRegex(EvidenceError, "native inventory member architecture mismatch"):
+            self._generate(product=product, output_dir=self.root / "no-opt-in")
+
+    def test_windows_release_evidence_rejects_mutated_compat_member(self) -> None:
+        launcher, library = self._windows_compat_fixture()
+        product = self._directory_product()
+        (product / "raw2mlv.exe").write_bytes(launcher)
+        (product / "libraw.dll").write_bytes(library + b"\0")
+        with self.assertRaisesRegex(EvidenceError, "compatibility admission byte/hash mismatch"):
+            self._generate(
+                product=product,
+                output_dir=self.root / "mutated-compat",
+                enable_compatibility_admission=True,
+            )
+
+    def test_windows_release_evidence_rejects_incomplete_compat_group(self) -> None:
+        launcher, _library = self._windows_compat_fixture()
+        product = self._directory_product()
+        (product / "raw2mlv.exe").write_bytes(launcher)
+        with self.assertRaisesRegex(EvidenceError, "compatibility admission group is incomplete"):
+            self._generate(
+                product=product,
+                output_dir=self.root / "incomplete-compat",
+                enable_compatibility_admission=True,
+            )
+
+    def test_windows_release_evidence_rejects_renamed_compat_member(self) -> None:
+        launcher, library = self._windows_compat_fixture()
+        product = self._directory_product()
+        (product / "raw2mlv.exe").write_bytes(launcher)
+        (product / "libraw-renamed.dll").write_bytes(library)
+        with self.assertRaisesRegex(EvidenceError, "native inventory member architecture mismatch"):
+            self._generate(
+                product=product,
+                output_dir=self.root / "renamed-compat",
+                enable_compatibility_admission=True,
+            )
+
+    def test_windows_release_evidence_rejects_undeclared_third_x86_binary(self) -> None:
+        launcher, library = self._windows_compat_fixture()
+        product = self._directory_product()
+        (product / "raw2mlv.exe").write_bytes(launcher)
+        (product / "libraw.dll").write_bytes(library)
+        (product / "extra.dll").write_bytes(_pe(0x14C, dll=True))
+        with self.assertRaisesRegex(EvidenceError, "native inventory member architecture mismatch"):
+            self._generate(
+                product=product,
+                output_dir=self.root / "undeclared-third",
+                enable_compatibility_admission=True,
+            )
+
+    def test_windows_release_evidence_rejects_main_executable_via_compat_exception(self) -> None:
+        self._windows_compat_fixture(launcher_name="MLVApp.exe")
+        product = self._directory_product()
+        with self.assertRaisesRegex(
+            EvidenceError,
+            "compatibility launcher must be raw2mlv.exe",
+        ):
+            self._generate(
+                product=product,
+                output_dir=self.root / "main-exception-attempt",
+                enable_compatibility_admission=True,
+            )
+
+    def test_windows_release_evidence_rejects_nested_and_duplicate_compat_members(self) -> None:
+        launcher, library = self._windows_compat_fixture()
+        product = self._directory_product()
+        nested = product / "nested"
+        nested.mkdir()
+        (nested / "raw2mlv.exe").write_bytes(launcher)
+        (nested / "libraw.dll").write_bytes(library)
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                if duplicate:
+                    (product / "raw2mlv.exe").write_bytes(launcher)
+                    (product / "libraw.dll").write_bytes(library)
+                with self.assertRaisesRegex(EvidenceError, "native inventory member architecture mismatch"):
+                    self._generate(product=product, output_dir=self.root / f"nested-{duplicate}",
+                                   enable_compatibility_admission=True)
+
+    def test_windows_release_evidence_compatibility_never_admits_x86_main(self) -> None:
+        launcher, library = self._windows_compat_fixture()
+        product = self._directory_product()
+        (product / "MLVApp.exe").write_bytes(launcher)
+        (product / "raw2mlv.exe").write_bytes(launcher)
+        (product / "libraw.dll").write_bytes(library)
+        with self.assertRaisesRegex(EvidenceError, "expected main executable architecture mismatch"):
+            self._generate(product=product, output_dir=self.root / "x86-main",
+                           enable_compatibility_admission=True)
 
     def test_same_tool_version_with_different_bytes_changes_identity_hash(self) -> None:
         product = self._directory_product()
