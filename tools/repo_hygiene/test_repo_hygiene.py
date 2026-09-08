@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from collections import Counter
@@ -659,22 +660,28 @@ class RepoHygieneTests(unittest.TestCase):
 
     def test_ci_product_oracles_are_isolated_from_factory_bridge_failures(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
-        bridge_start = workflow.index("\n  factory-bridge-regressions:")
+        bridge_workflow = (ROOT / ".github" / "workflows" / "factory-bridge.yml").read_text(
+            encoding="utf-8"
+        )
         product_start = workflow.index("\n  windows-product-oracles:")
         gui_start = workflow.index("\n  windows-gui-pilot:")
-        bridge_job = workflow[bridge_start:product_start]
+        bridge_start = bridge_workflow.index("\n  factory-bridge-regressions:")
+        bridge_job = bridge_workflow[bridge_start:]
         product_job = workflow[product_start:gui_start]
 
         self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertIn("permissions:\n  contents: read", bridge_workflow)
         self.assertIn("Run agent bridge PowerShell launcher regressions", bridge_job)
         self.assertIn("Verify compatible MCP runtime", bridge_job)
+        self.assertNotIn("factory-bridge-regressions:", workflow)
         self.assertNotIn("Run agent bridge PowerShell launcher regressions", product_job)
         self.assertIn("    needs: protected-check-route", product_job)
         self.assertIn("Run console_tests --check-golden", product_job)
         self.assertIn("Run pipeline_tests --check-golden (bounded shards)", product_job)
         self.assertIn("Record explicit product-oracle N/A", product_job)
         self.assertIn("outputs.product == 'true'", product_job)
-        self.assertIn("    if: ${{ always() }}", product_job)
+        self.assertIn("    if: ${{ always() && !cancelled() }}", product_job)
+        self.assertNotRegex(product_job, r"\n    if: \$\{\{ always\(\) \}\}")
         self.assertIn("needs.protected-check-route.result != 'success'", product_job)
         self.assertIn("outputs.product != 'true'", product_job)
         self.assertIn("outputs.product != 'false'", product_job)
@@ -744,7 +751,7 @@ class RepoHygieneTests(unittest.TestCase):
         required_checks = (
             "Repo Hygiene Python (windows-latest)",
             "Repo Hygiene Python (ubuntu-latest)",
-            "Factory Bridge Regressions",
+            "Batch Compile",
             "Windows GUI Pilot",
             "Windows Product Oracles",
         )
@@ -841,7 +848,14 @@ class RepoHygieneTests(unittest.TestCase):
             self.assertIn(lf_contract, attributes)
 
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        bridge_workflow = (ROOT / ".github" / "workflows" / "factory-bridge.yml").read_text(
+            encoding="utf-8"
+        )
         self.assertEqual(workflow.count('python-version-file: ".python-version"'), 5)
+        self.assertEqual(bridge_workflow.count('python-version-file: ".python-version"'), 1)
+        # The moved job retains the same locked dependency policy; count both
+        # reviewed workflow surfaces so relocation cannot weaken its checks.
+        workflow += "\n" + bridge_workflow
         self.assertNotRegex(workflow, r"(?m)^\s+python-version:\s*")
         self.assertNotIn("pip install --upgrade", workflow)
         self.assertNotRegex(
@@ -856,7 +870,7 @@ class RepoHygieneTests(unittest.TestCase):
             for line in workflow.splitlines()
             if "-m pip install " in line
         ]
-        self.assertEqual(len(install_lines), 9)
+        self.assertEqual(len(install_lines), 11)
         for line in install_lines:
             for required_flag in (
                 "--disable-pip-version-check",
@@ -868,7 +882,7 @@ class RepoHygieneTests(unittest.TestCase):
                 self.assertIn(required_flag, line, f"unsafe Python install command: {line}")
             lock_path = line.rsplit(" -r ", 1)[1].strip()
             self.assertIn(lock_path, allowed_locks, f"unapproved Python lock: {lock_path}")
-        self.assertEqual(workflow.count("python -m pip check"), 4)
+        self.assertEqual(workflow.count("python -m pip check"), 5)
 
         observed_locks: dict[str, dict[str, str]] = {}
         for relative_path, roots in PYTHON_LOCK_ROOTS.items():
@@ -941,6 +955,9 @@ class RepoHygieneTests(unittest.TestCase):
 
     def test_ci_workflow_hardening_is_fail_closed_and_coordination_aware(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        bridge_workflow = (ROOT / ".github" / "workflows" / "factory-bridge.yml").read_text(
+            encoding="utf-8"
+        )
         trigger_section = workflow[: workflow.index("\npermissions:")]
 
         self.assertIn(
@@ -961,9 +978,9 @@ class RepoHygieneTests(unittest.TestCase):
         expected_timeouts = {
             "protected-check-route": 10,
             "repo-hygiene-python": 45,
-            "factory-bridge-regressions": 45,
             "windows-product-oracles": 120,
             "windows-gui-pilot": 60,
+            "batch-compile": 30,
         }
         jobs_text = workflow[workflow.index("\njobs:") :]
         job_matches = list(re.finditer(r"(?m)^  ([a-z0-9-]+):\r?$", jobs_text))
@@ -1081,18 +1098,20 @@ class RepoHygieneTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 assert_aqt_install_is_bounded_and_fail_closed(falsified_step)
 
-        bridge_start = workflow.index("\n  factory-bridge-regressions:")
+        repo_start = workflow.index("\n  repo-hygiene-python:")
         product_start = workflow.index("\n  windows-product-oracles:")
-        bridge_job = workflow[bridge_start:product_start]
-        self.assertIn("Run coordination and self-healing guardrails", bridge_job)
-        self.assertIn("tools\\coordination\\test_coordination_guardrails.py", bridge_job)
-        self.assertIn("tests\\coordination", bridge_job)
+        repo_job = workflow[repo_start:product_start]
+        bridge_job = bridge_workflow[bridge_workflow.index("\n  factory-bridge-regressions:") :]
+        self.assertIn("Run coordination and self-healing guardrails", repo_job)
+        self.assertIn("tools\\coordination\\test_coordination_guardrails.py", repo_job)
+        self.assertIn("tests\\coordination", repo_job)
         self.assertIn("tools\\agent-bridge\\requirements-test.txt", bridge_job)
         self.assertNotRegex(bridge_job, r"pip install [\"']pytest")
 
         product_job = workflow[product_start : workflow.index("\n  windows-gui-pilot:")]
         self.assertIn("    needs: protected-check-route", product_job)
-        self.assertIn("    if: ${{ always() }}", product_job)
+        self.assertIn("    if: ${{ always() && !cancelled() }}", product_job)
+        self.assertNotRegex(product_job, r"\n    if: \$\{\{ always\(\) \}\}")
         self.assertIn("needs.protected-check-route.result != 'success'", product_job)
         self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", product_job)
         self.assertIn("ref: ${{ env.EXPECTED_ROUTE_HEAD }}", product_job)
@@ -1116,7 +1135,6 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("${{ runner.temp }}\\pipeline-golden-actual.json", artifact_step)
 
         route_start = workflow.index("\n  protected-check-route:")
-        repo_start = workflow.index("\n  repo-hygiene-python:")
         route_job = workflow[route_start:repo_start]
         self.assertIn("tools/repo_hygiene/protected_check_router.py", route_job)
         self.assertIn("fetch-depth: 0", route_job)
@@ -1128,7 +1146,8 @@ class RepoHygieneTests(unittest.TestCase):
         gui_start = workflow.index("\n  windows-gui-pilot:")
         gui_job = workflow[gui_start:]
         self.assertIn("    needs: protected-check-route", gui_job)
-        self.assertIn("    if: ${{ always() }}", gui_job)
+        self.assertIn("    if: ${{ always() && !cancelled() }}", gui_job)
+        self.assertNotRegex(gui_job, r"\n    if: \$\{\{ always\(\) \}\}")
         self.assertIn("needs.protected-check-route.result != 'success'", gui_job)
         self.assertIn("outputs.gui != 'true'", gui_job)
         self.assertIn("outputs.gui != 'false'", gui_job)
@@ -1145,12 +1164,21 @@ class RepoHygieneTests(unittest.TestCase):
 
         required_display_names = {
             "Repo Hygiene Python (${{ matrix.os }})",
-            "Factory Bridge Regressions",
+            "Batch Compile",
             "Windows Product Oracles",
             "Windows GUI Pilot",
         }
         observed_names = set(re.findall(r"(?m)^    name: (.+)$", jobs_text))
         self.assertTrue(required_display_names.issubset(observed_names))
+        self.assertNotIn("Factory Bridge Regressions", observed_names)
+
+        bridge_jobs_text = bridge_workflow[bridge_workflow.index("\njobs:") :]
+        bridge_job_matches = list(re.finditer(r"(?m)^  ([a-z0-9-]+):\r?$", bridge_jobs_text))
+        self.assertEqual({match.group(1) for match in bridge_job_matches}, {"factory-bridge-regressions"})
+        self.assertIn("    timeout-minutes: 45", bridge_jobs_text)
+        self.assertIn("Factory Bridge Regressions", bridge_jobs_text)
+        self.assertNotRegex(bridge_workflow, r"(?im)^\s*continue-on-error\s*:")
+        self.assertIn("  pull_request:\n", bridge_workflow[: bridge_workflow.index("\npermissions:")])
 
     def test_protected_check_router_is_conservative_and_provider_specific(self) -> None:
         provider = classify_paths(
@@ -1663,9 +1691,9 @@ class RepoHygieneTests(unittest.TestCase):
 
         expected_remote_inventory = Counter(
             {
-                ("actions/checkout", "v5"): 9,
-                ("actions/setup-python", "v6"): 9,
-                ("actions/upload-artifact", "v7"): 11,
+                ("actions/checkout", "v5"): 10,
+                ("actions/setup-python", "v6"): 10,
+                ("actions/upload-artifact", "v7"): 13,
                 ("ConorMacBride/install-package", "v1"): 2,
             }
         )
@@ -1893,8 +1921,64 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertEqual(linux_workflow.count("curl --fail --location --retry 5 --retry-all-errors"), 3)
         self.assertIn("sha256sum -c SHA256SUMS", linux_workflow)
         self.assertIn('printf \'%s\\n\' "${tools_dir}" >> "${GITHUB_PATH}"', linux_workflow)
-        self.assertLess(linux_workflow.index("sha256sum -c"), linux_workflow.index("chmod +x"))
-        self.assertLess(linux_workflow.index("chmod +x"), linux_workflow.index('"${GITHUB_PATH}"'))
+        self.assertLess(install_step.index("sha256sum -c"), install_step.index("chmod +x"))
+        self.assertLess(install_step.index("chmod +x"), install_step.index('"${GITHUB_PATH}"'))
+
+    def test_linux_qt_dependency_preflight_executes_and_fails_closed(self) -> None:
+        workflow = (ROOT / ".github/workflows/Linux.yml").read_text(encoding="utf-8")
+        match = re.search(
+            r"(?ms)^    - name: Verify Qt Linux runtime dependencies\n      run: \|\n(.*?)(?=^    - name:)",
+            workflow,
+        )
+        self.assertIsNotNone(match)
+        body = textwrap.dedent(match.group(1))
+        self.assertLess(workflow.index("- name: Install Qt 6.10.2"), match.start())
+        self.assertLess(match.start(), workflow.index("- name: Build\n"))
+        bash = shutil.which("bash")
+        if os.name == "nt":
+            git_exe = shutil.which("git")
+            git_bash = Path(git_exe).resolve().parents[1] / "bin/bash.exe" if git_exe else None
+            if git_bash and git_bash.is_file():
+                bash = str(git_bash)
+            else:
+                self.skipTest("Git Bash is required for the Windows shell fixture")
+        if not bash:
+            self.fail("bash is required for the Linux workflow fixture")
+        with tempfile.TemporaryDirectory(prefix="mlv-qt-deps-") as td:
+            root = Path(td)
+            qt = root / "qt"
+            for name in ("lib/libQt6Multimedia.so", "plugins/multimedia/libffmpegmediaplugin.so"):
+                library = qt / name
+                library.parent.mkdir(parents=True, exist_ok=True)
+                library.write_bytes(b"inert fixture")
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_ldd = fake_bin / "ldd"
+            fake_ldd.write_text(
+                "#!/bin/sh\n"
+                "case \"$MLV_TEST_LDD_MODE\" in\n"
+                "  good) printf 'libpulse.so.0 => /usr/lib/libpulse.so.0\\n' ;;\n"
+                "  missing) printf 'libpulse.so.0 => not found\\n' ;;\n"
+                "  error) exit 2 ;;\n"
+                "esac\n", encoding="utf-8",
+            )
+            fake_ldd.chmod(0o755)
+            prelude = 'export PATH="${MLV_TEST_BIN}:${PATH}"\n'
+            if os.name == "nt":
+                prelude = 'export PATH="$(cygpath -u "$MLV_TEST_BIN"):${PATH}"\n'
+            script = root / "preflight.sh"
+            script.write_text(prelude + body, encoding="utf-8")
+            env = dict(os.environ, QT_ROOT_DIR=qt.as_posix(), RUNNER_TEMP=root.as_posix(),
+                       MLV_TEST_BIN=fake_bin.as_posix())
+            for mode, expected in (("good", 0), ("missing", 1), ("error", 2)):
+                with self.subTest(mode=mode):
+                    env["MLV_TEST_LDD_MODE"] = mode
+                    result = subprocess.run([bash, script.as_posix()], env=env, text=True,
+                                            capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                    if mode == "missing":
+                        self.assertIn("libpulse.so.0 => not found", result.stdout)
+                        self.assertIn("Qt Linux runtime dependencies are missing", result.stderr)
 
     def test_windows_and_linux_release_toolchains_are_fail_closed(self) -> None:
         workflow_dir = ROOT / ".github" / "workflows"
@@ -1947,37 +2031,41 @@ class RepoHygieneTests(unittest.TestCase):
             blocks = assert_unique_order(
                 text,
                 (
+                    "Install hash-locked Python dependencies",
                     "Install OpenSSL",
-                    "Install MinGW 8.1",
-                    "Install Qt",
+                    "Install Qt 6.10.2 + MinGW 13.1",
                     "Verify Windows build toolchain",
                     "Build",
+                    "Print toolchain",
+                    "Upload toolchain receipt",
                     "Generate single-build release evidence",
                     "Save build artifact",
                 ),
             )
             self.assertIn("timeout-minutes: 15", blocks["Install OpenSSL"])
-            self.assertIn("timeout-minutes: 15", blocks["Install MinGW 8.1"])
-            self.assertIn("timeout-minutes: 20", blocks["Install Qt"])
-            for install_step, command, timeout in (
-                ("Install OpenSSL", "choco install openssl", "600"),
-                (
-                    "Install MinGW 8.1",
-                    "choco install mingw --version=8.1.0 --exact --allow-downgrade",
-                    "600",
-                ),
-                (
-                    "Install Qt",
-                    "choco install qt5-default --version=5.15.2.20240623 --exact",
-                    "900",
-                ),
+            self.assertIn("timeout-minutes: 15", blocks["Install hash-locked Python dependencies"])
+            self.assertIn("timeout-minutes: 20", blocks["Install Qt 6.10.2 + MinGW 13.1"])
+            self.assertIn(
+                "choco install openssl --yes --no-progress --limit-output --execution-timeout=600",
+                blocks["Install OpenSSL"],
+            )
+            self.assertIn("if ($LASTEXITCODE -ne 0) { throw", blocks["Install OpenSSL"])
+            self.assertIn("--require-hashes -r .github/requirements/aqtinstall.txt", blocks["Install hash-locked Python dependencies"])
+
+            install_block = blocks["Install Qt 6.10.2 + MinGW 13.1"]
+            for required_token in (
+                'python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw -m qtmultimedia',
+                "for ($attempt = 1; $attempt -le 3; $attempt++)",
+                'if (-not $qtReady) { throw "aqt Qt install failed or qmake.exe is missing after 3 attempts (exit=$qtExit)" }',
+                'python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310',
+                'if (-not $mingwReady) { throw "aqt MinGW install failed or required tools are missing after 3 attempts (exit=$mingwExit)" }',
+                '"QMAKE_EXE=$qtQmake" >> $env:GITHUB_ENV',
+                '"WINDEPLOYQT_EXE=$(Join-Path $qtRoot \'bin\\windeployqt.exe\')" >> $env:GITHUB_ENV',
+                '"MAKE_EXE=$mingwMake" >> $env:GITHUB_ENV',
+                '"GXX_EXE=$mingwGxx" >> $env:GITHUB_ENV',
+                '"MINGW_BIN=$(Join-Path $mingwRoot \'bin\')" >> $env:GITHUB_ENV',
             ):
-                block = blocks[install_step]
-                self.assertIn(
-                    f"{command} --yes --no-progress --limit-output --execution-timeout={timeout}",
-                    block,
-                )
-                self.assertIn("if ($LASTEXITCODE -ne 0) { throw", block)
+                self.assertIn(required_token, install_block)
 
             verify_block = blocks["Verify Windows build toolchain"]
             required_executables_match = re.search(
@@ -1995,15 +2083,7 @@ class RepoHygieneTests(unittest.TestCase):
             ):
                 self.assertEqual(required_executables.count(executable_token), 1)
             for required_token in (
-                '$mingwRoot = Join-Path $env:ChocolateyInstall "lib\\mingw\\tools\\install"',
-                'Get-ChildItem -LiteralPath $mingwRoot -Filter "mingw32-make.exe" -File -Recurse',
-                "if ($makeCandidates.Count -ne 1)",
-                "$env:MINGW_BIN = [IO.Path]::GetFullPath($makeCandidates[0].DirectoryName)",
-                "$env:MAKE_EXE = [IO.Path]::GetFullPath($makeCandidates[0].FullName)",
-                '$env:GXX_EXE = [IO.Path]::GetFullPath((Join-Path $env:MINGW_BIN "g++.exe"))',
-                '$env:LIBGOMP_DLL = [IO.Path]::GetFullPath((Join-Path $env:MINGW_BIN "libgomp-1.dll"))',
                 "Test-Path -LiteralPath $executable -PathType Leaf",
-                "Test-Path -LiteralPath $env:LIBGOMP_DLL -PathType Leaf",
                 'Get-ChildItem -LiteralPath $env:OPENSSL_BIN -Filter "libcrypto*.dll" -File',
                 'Get-ChildItem -LiteralPath $env:OPENSSL_BIN -Filter "libssl*.dll" -File',
                 "if ($cryptoDlls.Count -eq 0) { throw",
@@ -2016,11 +2096,11 @@ class RepoHygieneTests(unittest.TestCase):
                 "& $env:GXX_EXE --version",
                 'if ($LASTEXITCODE -ne 0) { throw "exact MinGW g++ executable probe failed" }',
                 "$compilerVersion = (& $env:GXX_EXE -dumpfullversion -dumpversion).Trim()",
-                '$compilerVersion -ne "8.1.0"',
+                '$compilerVersion -ne "13.1.0"',
                 "$compilerTarget = (& $env:GXX_EXE -dumpmachine).Trim()",
                 '$compilerTarget -ne "x86_64-w64-mingw32"',
                 "$qtVersion = (& $env:QMAKE_EXE -query QT_VERSION).Trim()",
-                '$qtVersion -ne "5.15.2"',
+                '$qtVersion -ne "6.10.2"',
                 "$makeBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:MAKE_EXE))",
                 "$configuredMingwBin = [IO.Path]::GetFullPath($env:MINGW_BIN)",
                 "if ($makeBin -ne $configuredMingwBin)",
@@ -2036,9 +2116,6 @@ class RepoHygieneTests(unittest.TestCase):
                 'if (@($canonicalCompilers | Where-Object { $_ -eq $expectedCompiler }).Count -ne 1)',
                 "& g++.exe --version",
                 'if ($LASTEXITCODE -ne 0) { throw "PATH-resolved MinGW g++ executable probe failed" }',
-                '"MAKE_EXE=$env:MAKE_EXE" >> $env:GITHUB_ENV',
-                '"GXX_EXE=$env:GXX_EXE" >> $env:GITHUB_ENV',
-                '"LIBGOMP_DLL=$env:LIBGOMP_DLL" >> $env:GITHUB_ENV',
                 "$makeBin >> $env:GITHUB_PATH",
             ):
                 self.assertIn(required_token, verify_block)
@@ -2048,7 +2125,10 @@ class RepoHygieneTests(unittest.TestCase):
                 "& $env:QMAKE_EXE",
                 "& $env:MAKE_EXE",
                 "& $env:WINDEPLOYQT_EXE",
-                "Copy-Item -LiteralPath $env:LIBGOMP_DLL",
+                'Copy-Item -LiteralPath (Join-Path $env:MINGW_BIN "libgomp-1.dll") -Destination .',
+                'Copy-Item -LiteralPath (Join-Path $env:MINGW_BIN "libstdc++-6.dll") -Destination .',
+                'Copy-Item -LiteralPath (Join-Path $env:MINGW_BIN "libwinpthread-1.dll") -Destination .',
+                'Copy-Item -LiteralPath (Join-Path $env:MINGW_BIN "libgcc_s_seh-1.dll") -Destination .',
                 "$env:OPENSSL_CRYPTO_DLLS -split ';'",
                 "$env:OPENSSL_SSL_DLLS -split ';'",
                 "Copy-Item -LiteralPath $dll -Destination .",
@@ -2056,6 +2136,21 @@ class RepoHygieneTests(unittest.TestCase):
                 self.assertIn(required_token, build_block)
             self.assertNotRegex(build_block, r"(?i)Copy-Item.*lib(?:crypto|ssl)\*")
             self.assertNotIn("WINDEPLOYQT_EXE --version", verify_block)
+
+            print_block = blocks["Print toolchain"]
+            for required_token in (
+                "$qtVersion = (& $env:QMAKE_EXE -query QT_VERSION).Trim()",
+                "$compilerVersion = (& $env:GXX_EXE -dumpfullversion -dumpversion).Trim()",
+                'if ($qtVersion -ne "6.10.2") { throw "Print toolchain: expected Qt 6.10.2, observed \'$qtVersion\'" }',
+                'if ($compilerVersion -ne "13.1.0") { throw "Print toolchain: expected MinGW 13.1.0, observed \'$compilerVersion\'" }',
+                '"TOOLCHAIN_LOG=$toolchainLog" >> $env:GITHUB_ENV',
+            ):
+                self.assertIn(required_token, print_block)
+
+            upload_block = blocks["Upload toolchain receipt"]
+            self.assertIn("name: toolchain-receipt-${{ github.run_id }}", upload_block)
+            self.assertIn("if-no-files-found: error", upload_block)
+
             evidence_block = blocks["Generate single-build release evidence"]
             for required_token in (
                 "$CompilerPath = (Get-Command $env:GXX_EXE -CommandType Application -ErrorAction Stop).Source",
@@ -2071,23 +2166,37 @@ class RepoHygieneTests(unittest.TestCase):
             blocks = assert_unique_order(
                 text,
                 (
+                    "Install hash-locked Python dependencies",
                     "Install compiler & Qt",
+                    "Install Qt 6.10.2",
                     "Verify required Qt multimedia plugins",
                     "Build",
                     "Copy Qt multimedia plugins",
                     "Create Appimage",
+                    "Print toolchain",
+                    "Upload toolchain receipt",
                     "Save build artifact",
                 ),
             )
-            required_directories = "required_directories=(audio mediaservice playlistformats)"
-            required_plugins = (
-                "audio/libqtaudio_alsa.so",
-                "audio/libqtmedia_pulse.so",
-                "mediaservice/libgstmediaplayer.so",
-                "playlistformats/libqtmultimedia_m3u.so",
-            )
+            required_directories = "required_directories=(multimedia)"
+            required_plugins = ("multimedia/libffmpegmediaplugin.so",)
             verify_block = blocks["Verify required Qt multimedia plugins"]
             copy_block = blocks["Copy Qt multimedia plugins"]
+            install_qt_block = blocks["Install Qt 6.10.2"]
+            build_block = blocks["Build"]
+            generated_flag_contract = (
+                "qmake ${{ env.SOURCE_DIR }}/qt/MLVApp.pro",
+                "generated_cxxflags=\"$(sed -n 's/^CXXFLAGS[[:space:]]*=[[:space:]]*//p' Makefile | head -n 1)\"",
+                '*" -std=c++17 "*) ;;',
+                '*) echo "qmake did not generate -std=c++17 for Linux Qt ${QT_VERSION}" >&2; exit 1 ;;',
+                '*" -std=c++11 "*) echo "qmake retained conflicting -std=c++11 for Linux Qt ${QT_VERSION}" >&2; exit 1 ;;',
+                "make -j8",
+            )
+            positions = []
+            for token in generated_flag_contract:
+                self.assertEqual(build_block.count(token), 1)
+                positions.append(build_block.index(token))
+            self.assertEqual(positions, sorted(positions))
             expected_tool_probes = (
                 "command -v qmake",
                 "qmake -v",
@@ -2105,9 +2214,33 @@ class RepoHygieneTests(unittest.TestCase):
                     self.assertIn(plugin, block)
             self.assertIn('test -d "${plugin_root}/${directory}"', verify_block)
             self.assertIn('test -f "${plugin_root}/${plugin}"', verify_block)
+            self.assertIn('compiler_major="$(g++ -dumpversion | cut -d. -f1)"', verify_block)
+            self.assertIn('if [ "${compiler_major}" != "13" ]; then', verify_block)
             self.assertIn('test -d "${source_directory}"', copy_block)
             self.assertIn('cp -a "${source_directory}/." "${destination_directory}/"', copy_block)
             self.assertIn('test -f "image/usr/plugins/${plugin}"', copy_block)
+            self.assertIn(
+                'python -m aqt install-qt --outputdir "${QT_OUTPUT_DIR}" linux desktop "${QT_VERSION}" linux_gcc_64 -m qtmultimedia',
+                install_qt_block,
+            )
+            self.assertIn(
+                'if [ "${qt_ready}" -ne 1 ]; then echo "aqt Qt install failed or qmake is missing after 3 attempts" >&2; exit 1; fi',
+                install_qt_block,
+            )
+
+            print_block = blocks["Print toolchain"]
+            for required_token in (
+                'qt_version="$(qmake -query QT_VERSION)"',
+                'compiler_version="$(g++ -dumpfullversion -dumpversion)"',
+                'if [ "${qt_version}" != "6.10.2" ]; then',
+                'if [ "${compiler_major}" != "13" ]; then',
+                'echo "TOOLCHAIN_LOG=${toolchain_log}" >> "${GITHUB_ENV}"',
+            ):
+                self.assertIn(required_token, print_block)
+
+            upload_block = blocks["Upload toolchain receipt"]
+            self.assertIn("name: toolchain-receipt-${{ github.run_id }}", upload_block)
+            self.assertIn("if-no-files-found: error", upload_block)
             self.assertEqual(blocks["Save build artifact"].count("if-no-files-found: error"), 1)
 
         windows = (workflow_dir / "Windows.yml").read_text(encoding="utf-8")
@@ -2143,17 +2276,21 @@ class RepoHygieneTests(unittest.TestCase):
             (
                 "Windows floats MinGW toolchain",
                 assert_windows_policy,
-                windows.replace(" --version=8.1.0 --exact --allow-downgrade", "", 1),
+                windows.replace(" qt.tools.win64_mingw1310", "", 1),
             ),
             (
-                "Windows hard-codes stale make name",
+                "Windows drops MinGW readiness bound",
                 assert_windows_policy,
-                windows.replace(' -Filter "mingw32-make.exe"', ' -Filter "make.exe"', 1),
+                windows.replace(
+                    'if (-not $mingwReady) { throw "aqt MinGW install failed or required tools are missing after 3 attempts (exit=$mingwExit)" }',
+                    "",
+                    1,
+                ),
             ),
             (
                 "Windows skips compiler version binding",
                 assert_windows_policy,
-                windows.replace('$compilerVersion -ne "8.1.0"', '$compilerVersion -ne ""', 1),
+                windows.replace('$compilerVersion -ne "13.1.0"', '$compilerVersion -ne ""', 1),
             ),
             (
                 "Windows skips compiler target binding",
@@ -2207,6 +2344,25 @@ class RepoHygieneTests(unittest.TestCase):
                 ),
             ),
             (
+                "Windows print toolchain skips Qt version assertion",
+                assert_windows_policy,
+                windows.replace(
+                    'if ($qtVersion -ne "6.10.2") { throw "Print toolchain: expected Qt 6.10.2, observed \'$qtVersion\'" }',
+                    "",
+                    1,
+                ),
+            ),
+            (
+                "Windows permits missing toolchain receipt",
+                assert_windows_policy,
+                replace_in_named_step(
+                    windows,
+                    "Upload toolchain receipt",
+                    "        if-no-files-found: error\n",
+                    "",
+                ),
+            ),
+            (
                 "Linux disables errexit",
                 assert_linux_policy,
                 linux.replace("           set -euo pipefail", "           set +e", 1),
@@ -2241,6 +2397,25 @@ class RepoHygieneTests(unittest.TestCase):
                 replace_in_named_step(
                     linux,
                     "Save build artifact",
+                    "        if-no-files-found: error\n",
+                    "",
+                ),
+            ),
+            (
+                "Linux print toolchain skips Qt version assertion",
+                assert_linux_policy,
+                linux.replace(
+                    'if [ "${qt_version}" != "6.10.2" ]; then',
+                    "if false; then",
+                    1,
+                ),
+            ),
+            (
+                "Linux permits missing toolchain receipt",
+                assert_linux_policy,
+                replace_in_named_step(
+                    linux,
+                    "Upload toolchain receipt",
                     "        if-no-files-found: error\n",
                     "",
                 ),

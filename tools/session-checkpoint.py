@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """session-checkpoint v3. SessionStart: detect account rotation, list dirty
 or ahead worktrees, print newest checkpoints, re-seed runbook, snapshot dirt,
-and generate autonomous resumption script for in-flight lane work.
+and retain resumption pointers for explicitly session-owned lane work.
 Stop: write pointer-only checkpoint for THIS session to
 Home/.claude/session-checkpoints/<repo-slug>/ with lane resumption metadata.
-Never blocks, never exits non-zero, never runs a git write (Stop hook only
-stages/commits, doesn't push). Owned dirt = files dirty now that were not
-dirty at SessionStart."""
+Never runs a git write or generates commands that mutate a checkout or relaunch
+a provider. Receipts without an explicit full sessionId cannot establish lane
+ownership and are omitted. Process completion is not delivery acceptance.
+Owned dirt = files dirty now that were not dirty at SessionStart."""
 import json, os, shutil, subprocess, sys, time
 from pathlib import Path
 
@@ -46,22 +47,25 @@ def worktree_scan(repo):
 
 
 def scan_fleet_runs(repo, session_id):
-    """PHASE 1: Scan fleet-runs directory for this session's lane invocations.
-    Return (lane_identity, invocation_command, status, prompt_path)."""
+    """Read pointers only from receipts naming this exact, nonempty session."""
     fleet_runs = repo / ".claude-state" / "fleet-runs"
-    if not fleet_runs.exists():
+    if not session_id or not fleet_runs.exists():
         return None
 
     # Look for receipts from this session
-    for receipt_file in sorted(fleet_runs.glob("*-*.receipt.json"), reverse=True):
+    for receipt_file in sorted(fleet_runs.rglob("*-*.receipt.json"), reverse=True):
         try:
             receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
-            if not receipt.get("sessionId", "").startswith(session_id[:8]):
+            if not isinstance(receipt, dict) or receipt.get("sessionId") != session_id:
                 continue
 
             lane = receipt.get("lane", "unknown")
             card = receipt.get("card", "")
-            prompt_path = receipt_file.parent / receipt_file.stem.rsplit(".", 1)[0] + ".prompt"
+            explicit_prompt = receipt.get("promptPath")
+            if explicit_prompt is not None and not isinstance(explicit_prompt, str):
+                continue
+            prompt_path = (Path(explicit_prompt) if explicit_prompt else
+                           receipt_file.with_name(receipt_file.name.removesuffix(".receipt.json") + ".prompt.txt"))
 
             # Status: in_progress (no exitCode), completed (exitCode 0), or failed
             exit_code = receipt.get("exitCode")
@@ -72,13 +76,18 @@ def scan_fleet_runs(repo, session_id):
             else:
                 status = f"FAILED (exit {exit_code})"
 
-            # Reconstruct invocation (simplified; real version reads from receipt metadata)
+            # Preserve metadata; these pointers do not authorize resuming a provider.
             invocation = {
                 "lane": lane,
                 "card": card,
                 "prompt_path": str(prompt_path),
                 "status": status,
                 "receipt": str(receipt_file),
+                "output_path": receipt.get("outputPath"),
+                "worktree": receipt.get("workDir"),
+                "state": receipt.get("state"),
+                "complete": receipt.get("complete"),
+                "exit_code": exit_code,
             }
             return invocation
         except Exception:
@@ -88,33 +97,16 @@ def scan_fleet_runs(repo, session_id):
 
 
 def generate_resume_script(repo, branch, session_id, dirty_files, invocation):
-    """PHASE 2 + 3: Generate autonomous resumption script.
-    Returns script lines that checkout, commit, and re-invoke the lane."""
-    lines = []
-
+    """Retain the historical helper name, but return descriptive pointers only."""
     if not invocation or invocation["status"] == "COMPLETED":
-        return lines
-
-    # Checkout branch
-    lines.append(f"git -C \"{repo}\" checkout {branch}")
-
-    # Stage and commit dirty files
-    if dirty_files:
-        for f in dirty_files:
-            lines.append(f"git -C \"{repo}\" add -- \"{f}\"")
-        lines.append(f"git -C \"{repo}\" commit -m \"checkpoint: auto-resume from account rotation (session {session_id[:8]})\"")
-
-    # Re-invoke the lane
-    lane = invocation.get("lane")
-    prompt_path = invocation.get("prompt_path")
-    card = invocation.get("card", "")
-
-    if lane and prompt_path and Path(prompt_path).exists():
-        cmd = f"pwsh -NoProfile -File \"{repo}\\tools\\coordination\\Invoke-Lane.ps1\" -Lane {lane} -PromptFile \"{prompt_path}\""
-        if card:
-            cmd += f" -Card {card}"
-        lines.append(cmd)
-
+        return []
+    lines = [f"- repository: {repo}", f"- branch: {branch}", f"- session: {session_id}"]
+    for key in ("worktree", "lane", "card", "receipt", "prompt_path", "output_path", "status", "state"):
+        value = invocation.get(key)
+        if value is not None:
+            lines.append(f"- {key}: {value}")
+    lines.extend(f"- pending file: {path}" for path in dirty_files)
+    lines.append("- Next action: inspect the receipt and worktree ownership before deciding how to continue.")
     return lines
 
 
@@ -125,7 +117,8 @@ def main():
         payload = {}
 
     cwd = Path(payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
-    sid = str(payload.get("session_id") or "unknown")[:8]
+    session_id = str(payload.get("session_id") or "")
+    sid = session_id[:8] or "unknown"
     event = payload.get("hook_event_name") or (sys.argv[1] if len(sys.argv) > 1 else "")
     common = git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if not common:
@@ -180,10 +173,10 @@ def main():
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     # PHASE 1: Scan for in-flight lane work
-    invocation = scan_fleet_runs(repo, sid)
+    invocation = scan_fleet_runs(repo, session_id)
 
-    # PHASE 2+3: Generate resumption script
-    resume_script = generate_resume_script(repo, branch, sid, owned, invocation)
+    # PHASE 2+3: Retain resumption pointers without executable instructions.
+    resume_script = generate_resume_script(repo, branch, session_id, owned, invocation)
 
     # Write checkpoint
     out = base / f"SESSION-{sid}.md"
@@ -202,10 +195,8 @@ def main():
             lines += [f"- card: {invocation.get('card')}"]
 
     if resume_script:
-        lines += ["", "## AUTO-RESUME SCRIPT (PHASE 2-3)", ""]
-        lines += ["```powershell"]
+        lines += ["", "## RESUMPTION POINTERS (PHASE 2-3)", ""]
         lines += resume_script
-        lines += ["```"]
 
     lines += ["", "Resume: read the repo entry file, then `git log -5 <branch>`; the list above is what a rotation would lose."]
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -214,7 +205,7 @@ def main():
         if owned:
             print(f"checkpoint: {len(owned)} uncommitted file(s) from this session recorded at {out}")
         if invocation:
-            print(f"checkpoint: lane {invocation.get('lane')} resumption script recorded")
+            print(f"checkpoint: lane {invocation.get('lane')} resumption pointers recorded")
 
     return 0
 

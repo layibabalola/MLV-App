@@ -105,6 +105,26 @@ jobs:
           python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
 
+      - name: Check pinned instruction tokens
+        run: python tools/docs/check_pinned_tokens.py
+
+      - name: Run coordination and self-healing guardrails
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pytest `
+            tools\coordination\test_coordination_guardrails.py `
+            tests\coordination `
+            -q
+
+      - name: Run demote-factory-bridge refusal-path tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pytest `
+            tools\coordination\test_demote_factory_bridge.py `
+            -q
+
       - name: Verify generated Python dependency locks
         if: runner.os == 'Windows'
         run: |
@@ -112,101 +132,10 @@ jobs:
           & "$env:RUNNER_TEMP\python-lock-tools\Scripts\python.exe" -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/lock-tools.txt
           & tools\dependencies\update-python-locks.ps1 -RepoRoot . -Python "$env:RUNNER_TEMP\python-lock-tools\Scripts\python.exe" -Check
 
-  # Factory-control regressions must stay independent from product oracles.
-  # A bridge failure is blocking, but it must never suppress product evidence.
-  factory-bridge-regressions:
-    name: Factory Bridge Regressions
-    runs-on: windows-latest
-    timeout-minutes: 45
-
-    defaults:
-      run:
-        shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
-
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-          # tests/coordination/test_process_hygiene_contract.py verifies the sealed A/B
-          # receipts against the historical commit each one names. At the default depth of
-          # 1 that commit is absent and the check cannot run. The two jobs above already
-          # check out at full depth.
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version-file: ".python-version"
-
-      - name: Install factory bridge dependencies
-        run: |
-          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
-          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r tools\agent-bridge\requirements-test.txt
-          python -m pip check
-
-      - name: Verify compatible MCP runtime
-        run: |
-          python -c "import importlib.metadata as m; version=m.version('mcp'); major=int(version.split('.')[0]); assert major == 1, f'expected MCP 1.x, got {version}'; from mcp.server.fastmcp import FastMCP; print(f'MCP runtime verified: {version}')"
-
-      - name: Run agent bridge PowerShell launcher regressions
-        run: |
-          python -m unittest `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_mcp_server_watchdog_throttles_wrapper_identity_checks `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_codex_hooks_assert_bridge_cli_contract `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_wake_codex_input_size_smoke_runs_under_powershell `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_configure_watcher_targeted_sendkeys_provider_writes_delivery_priority_helper_template `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_bootstrap_watcher_enumeration_prefers_pwsh_for_cim `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_windows_toast_uses_expiry_and_tray_cap_settings `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_windows_toast_tag_sanitizes_ps_line_breaks `
-            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_windows_balloon_fallback_uses_encoded_command `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_queries_prefer_pwsh_for_cim `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_uses_pwsh_alias_when_exe_probe_is_absent `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_queries_fall_back_to_windows_powershell `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_trampoline_host_env_queries_prefer_pwsh_for_cim `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_server_wrapper_process_entry_prefers_pwsh_for_cim `
-            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation `
-            -v
-
-      - name: Run full agent-bridge test suite
-        run: |
-          # Directory target: also collects tools/agent-bridge/test_phase0_contract.py
-          # and the full tools/agent-bridge/test_server_wrapper_phase2.py suite, neither
-          # of which the prior single-file invocation covered.
-          python -m pytest `
-            tools\agent-bridge `
-            -q
-
-      - name: Run coordination and self-healing guardrails
-        run: |
-          python -m pytest `
-            tools\coordination\test_coordination_guardrails.py `
-            tests\coordination `
-            -q
-
-      - name: Run profiling test suite
-        run: |
-          python -m pytest `
-            tests\profiling `
-            -q
-
-      - name: Run tools/profiling test suite
-        run: |
-          # Directory target, minus ONE file. test_frame_colour_spatial_metrics.py imports
-          # numpy and Pillow, which are pinned in neither .github/requirements/pip.txt nor
-          # repo-hygiene.txt, and this repo installs under --require-hashes -- so collecting
-          # it fails immediately. Covering the other two now is worth more than covering
-          # none: test_perf_field_log_playback_rollup.py arrived with PR #64 and was already
-          # CI-invisible hours later, which is the recurrence this whole conversion exists
-          # to stop. Follow-up: pin numpy+Pillow, then drop the --ignore.
-          python -m pytest `
-            tools\profiling `
-            --ignore=tools\profiling\test_frame_colour_spatial_metrics.py `
-            -q
-
   windows-product-oracles:
     name: Windows Product Oracles
     needs: protected-check-route
-    if: ${{ always() }}
+    if: ${{ always() && !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 120
 
@@ -577,7 +506,7 @@ jobs:
   windows-gui-pilot:
     name: Windows GUI Pilot
     needs: protected-check-route
-    if: ${{ always() }}
+    if: ${{ always() && !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 60
 
@@ -713,3 +642,76 @@ jobs:
           name: gui_tests_output
           path: gui_tests_output.txt
           if-no-files-found: ignore
+
+  batch-compile:
+    name: Batch Compile
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
+
+    env:
+      QT_VERSION: 6.10.2
+      QT_OUTPUT_DIR: ${{ github.workspace }}\qt
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install aqtinstall
+        run: |
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/aqtinstall.txt
+          python -m pip check
+
+      - name: Install Qt 6.10.2 + MinGW 13.1
+        run: |
+          $ErrorActionPreference = "Stop"
+          $qtInstallRoot = Join-Path $env:QT_OUTPUT_DIR $env:QT_VERSION
+          $qtRoot = Join-Path $qtInstallRoot "mingw_64"
+          $qtQmake = Join-Path $qtRoot "bin\qmake.exe"
+          $qtReady = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if (Test-Path -LiteralPath $qtInstallRoot) { Remove-Item -LiteralPath $qtInstallRoot -Recurse -Force -ErrorAction Stop }
+            if (Test-Path -LiteralPath $qtInstallRoot) { throw "Qt retry cleanup did not remove $qtInstallRoot" }
+            python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw -m qtmultimedia
+            $qtExit = $LASTEXITCODE
+            if ($qtExit -eq 0 -and (Test-Path -LiteralPath $qtQmake -PathType Leaf)) { $qtReady = $true; break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+          }
+          if (-not $qtReady) { throw "aqt Qt install failed or qmake.exe is missing after 3 attempts (exit=$qtExit)" }
+
+          $mingwRoot = Join-Path $env:QT_OUTPUT_DIR "Tools\mingw1310_64"
+          $mingwMake = Join-Path $mingwRoot "bin\mingw32-make.exe"
+          $mingwGxx = Join-Path $mingwRoot "bin\g++.exe"
+          $mingwReady = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if (Test-Path -LiteralPath $mingwRoot) { Remove-Item -LiteralPath $mingwRoot -Recurse -Force -ErrorAction Stop }
+            if (Test-Path -LiteralPath $mingwRoot) { throw "MinGW retry cleanup did not remove $mingwRoot" }
+            python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
+            $mingwExit = $LASTEXITCODE
+            if ($mingwExit -eq 0 -and (Test-Path -LiteralPath $mingwMake -PathType Leaf) -and (Test-Path -LiteralPath $mingwGxx -PathType Leaf)) { $mingwReady = $true; break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+          }
+          if (-not $mingwReady) { throw "aqt MinGW install failed or required tools are missing after 3 attempts (exit=$mingwExit)" }
+          Add-Content -Path $env:GITHUB_ENV -Value "QT_ROOT_DIR=$qtRoot"
+          Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$mingwRoot"
+
+      - name: Build MLVApp
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
+          New-Item -ItemType Directory -Force platform\qt\build-ci-batch | Out-Null
+          Push-Location platform\qt\build-ci-batch
+          & "$env:QT_ROOT_DIR\bin\qmake.exe" "..\MLVApp.pro"
+          if ($LASTEXITCODE -ne 0) { Pop-Location; throw "qmake failed for MLVApp.pro (exit=$LASTEXITCODE)" }
+          & "$env:MINGW_ROOT\bin\mingw32-make.exe" -j2
+          Pop-Location

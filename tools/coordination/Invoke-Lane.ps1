@@ -74,6 +74,10 @@ param(
     # runaway guard, NOT the spend control - that is -DenyBulkReads below.
     [int]$MaxTurns = 40,
 
+    # Optional per-process override; never changes the user's provider settings.
+    [ValidateSet('', 'low', 'medium', 'high')]
+    [string]$ReasoningEffort = '',
+
     # Let the lane read the bulk coordination files. OFF by default.
     # MEASURED 2026-09-03: three unattended fable lanes cost USD 22-25 EACH, every one
     # burning ~970,000 cache-creation tokens - almost exactly the 1.6 MB coordination
@@ -81,7 +85,17 @@ param(
     # the facts into a 4-7 KB brief, so a lane re-reading it pays full price for context
     # it was already given. A compact brief bounds the PROMPT; it does not bound the
     # READING, and nothing here did until now.
-    [switch]$AllowBulkReads
+    [switch]$AllowBulkReads,
+
+    # 0.1: the explicit tool allowlist an editing lane is granted. REQUIRED with
+    # -AllowEdits; 'ALL' is never accepted (allowlist-required). Comma-separated,
+    # passed straight through to claude's --allowedTools.
+    [string]$AllowedTools = '',
+
+    # 0.1: an extra directory the lane may read beyond -WorkDir (e.g. board
+    # coordination paths an editing lane needs without a full -AllowBulkReads
+    # grant). Optional; claude engine only (--add-dir).
+    [string]$ExtraReadDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -117,6 +131,69 @@ function Write-Utf8NoBom([string]$Path, [string]$Content) {
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Write-Utf8NoBomAtomic([string]$Path, [string]$Content) {
+    $tmp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($tmp, $Content, [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($tmp, $Path, $true)
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+    }
+}
+
+# Windows job ownership is established around an inert PowerShell host before that
+# host receives any provider configuration. Descendants then inherit kill-on-close.
+if (-not ('MlvLaneJob' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class MlvLaneJob {
+  [StructLayout(LayoutKind.Sequential)] struct IO_COUNTERS { public UInt64 a,b,c,d,e,f; }
+  [StructLayout(LayoutKind.Sequential)] struct BASIC_LIMIT {
+    public Int64 PerProcessUserTimeLimit, PerJobUserTimeLimit;
+    public UInt32 LimitFlags;
+    public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+    public UInt32 ActiveProcessLimit;
+    public UIntPtr Affinity;
+    public UInt32 PriorityClass, SchedulingClass;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct EXTENDED_LIMIT {
+    public BASIC_LIMIT BasicLimitInformation;
+    public IO_COUNTERS IoInfo;
+    public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+  }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool CloseHandle(IntPtr handle);
+  public static IntPtr CreateKillOnClose() {
+    IntPtr job=CreateJobObject(IntPtr.Zero, null);
+    if(job==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject");
+    EXTENDED_LIMIT value=new EXTENDED_LIMIT();
+    value.BasicLimitInformation.LimitFlags=0x2000;
+    int size=Marshal.SizeOf(value); IntPtr mem=Marshal.AllocHGlobal(size);
+    try {
+      Marshal.StructureToPtr(value,mem,false);
+      if(!SetInformationJobObject(job,9,mem,(uint)size)) {
+        int error=Marshal.GetLastWin32Error(); CloseHandle(job);
+        throw new Win32Exception(error,"SetInformationJobObject");
+      }
+    } finally { Marshal.FreeHGlobal(mem); }
+    return job;
+  }
+  public static void AssignOrThrow(IntPtr job, IntPtr process) {
+    if(!AssignProcessToJobObject(job,process))
+      throw new Win32Exception(Marshal.GetLastWin32Error(),"AssignProcessToJobObject");
+  }
+}
+'@
+}
+
 # ---------------------------------------------------------------- resolve inputs
 if (-not $Prompt -and -not $PromptFile) { throw 'Supply -Prompt or -PromptFile.' }
 if ($PromptFile) {
@@ -127,6 +204,58 @@ if ($PromptFile) {
 if (-not $WorkDir) { $WorkDir = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path }
 $WorkDir = (Resolve-Path -LiteralPath $WorkDir).Path
 
+# ---------------------------------------------------------------- 0.1 pre-flight (before any process, before any run dir)
+# (a) A codex lane (sol, luna) can never be granted write access: no Claude hook is
+# visible to codex exec, so nothing here could enforce NA-1..NA-10 against it.
+if ($AllowEdits -and ($Lane -eq 'sol' -or $Lane -eq 'luna')) {
+    throw "codex-lane-never-edits: -Lane $Lane with -AllowEdits (no Claude hook is visible to codex exec)"
+}
+# (b) An editing lane's tool grant must be an explicit, auditable list. 'ALL' is
+# never accepted - that is the exact grant this whole patch exists to narrow.
+if ($AllowEdits -and ([string]::IsNullOrWhiteSpace($AllowedTools) -or $AllowedTools -eq 'ALL')) {
+    throw "allowlist-required: -AllowEdits requires -AllowedTools <comma-separated list>; 'ALL' is never granted"
+}
+# Nested agent dispatch is forbidden even when embedded in a caller-supplied editing
+# allowlist. Normalize comma tokens for the decision; preserve the original argv text.
+if ($AllowEdits) {
+    $forbiddenTools = @($AllowedTools -split ',' | ForEach-Object { $_.Trim().ToLowerInvariant() } |
+        Where-Object { $_ -eq 'agent' -or $_ -eq 'task' })
+    if ($forbiddenTools.Count -gt 0) {
+        throw "nested-agent-tool-forbidden: -AllowedTools cannot contain Agent or Task"
+    }
+}
+# MLV_BOARD_ROOT: only a test sets it (a tmp-dir board fixture); the default is the
+# real board (mirrors Start-EditingLane.ps1's own resolution, O107).
+$RepoRoot = if ($env:MLV_BOARD_ROOT) { $env:MLV_BOARD_ROOT } else { 'C:\!Layi Wkspc\MLV-App' }
+$HookEnforcedReceipt = Join-Path $RepoRoot '.claude-state\coordination\dual-lane\receipts\0.05-hook-enforced.json'
+$WorkDirHookPath     = Join-Path $WorkDir 'tools\hooks\mlv-never-authorized.py'
+# hookSha256 is computed unconditionally (when the file exists) so the receipt can
+# always carry it, per 0.1's receipt-fields requirement - not only on editing lanes.
+$WorkDirHookSha256 = if (Test-Path -LiteralPath $WorkDirHookPath) {
+    (Get-FileHash -LiteralPath $WorkDirHookPath -Algorithm SHA256).Hash.ToLowerInvariant()
+} else { $null }
+# (e) The worktree's OWN hook copy is what actually governs an editing lane's
+# session (Claude Code loads it from -WorkDir), so this checks THAT copy against
+# the board's receipt of what the ratified hook hashes to - never the board root's
+# own copy, which the lane never runs against.
+if ($AllowEdits) {
+    if (-not (Test-Path -LiteralPath $HookEnforcedReceipt)) {
+        throw "hook-not-enforced: receipt missing at $HookEnforcedReceipt"
+    }
+    if ($null -eq $WorkDirHookSha256) {
+        throw "hook-not-enforced: hook script missing in worktree: $WorkDirHookPath"
+    }
+    $hookEnforcedRec = Get-Content -LiteralPath $HookEnforcedReceipt -Raw | ConvertFrom-Json
+    $receiptHookSha256 = ([string]$hookEnforcedRec.hookSha256).ToLowerInvariant()
+    if ($WorkDirHookSha256 -ne $receiptHookSha256) {
+        throw ("hook-not-enforced: worktree hook sha256={0} != receipt hookSha256={1}" -f $WorkDirHookSha256, $receiptHookSha256)
+    }
+}
+$BaseSha = try {
+    (& git -C $WorkDir rev-parse HEAD 2>$null | Select-Object -First 1)
+} catch { $null }
+if ([string]::IsNullOrWhiteSpace($BaseSha)) { $BaseSha = $null }
+
 if (-not $RunDir) {
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
     $RunDir = Join-Path $WorkDir ".claude-state\fleet-runs\$stamp"
@@ -134,7 +263,8 @@ if (-not $RunDir) {
 if (-not (Test-Path -LiteralPath $RunDir)) { New-Item -ItemType Directory -Path $RunDir -Force | Out-Null }
 $RunDir = (Resolve-Path -LiteralPath $RunDir).Path
 
-$cfg = $LANES[$Lane]
+$cfg = $LANES[$Lane].Clone()
+if ($ReasoningEffort) { $cfg.effort = $ReasoningEffort }
 
 # ATOMIC SLOT RESERVATION. The previous form was
 #     while (Test-Path <candidate>) { $n++ }
@@ -195,13 +325,25 @@ $exitCode   = -999
 $timedOut   = $false
 $final      = ''
 $failure    = $null
+# A PROVIDER REFUSAL is a third outcome beside ran/threw: the child exited cleanly and
+# the provider did no work. Detected from raw output after harvest; see lane-provider-refusal.ps1.
+$providerRefusal = $null
 $authority  = [ordered]@{ permissionMode = 'unset'; allowedTools = 'unset'; sandbox = 'unset'; writableRoot = $null }
 $denyRules  = @()
+$jobHandle = [IntPtr]::Zero
+$jobAssigned = $false
+$promptDelivered = $false
+$containedHost = $null
+$childIdentity = $null
+$deadlineUtc = $startedUtc.AddSeconds($TimeoutSec)
+$containment = $null
+$proc = $null
 # $null, never 0. An engine that does not REPORT cost and a run that cost nothing are
 # different facts and this receipt will not merge them - the same rule the dispatcher's
 # malformed-row counter follows.
 $costUsd = $null; $numTurns = $null
 $cacheCreateTokens = $null; $cacheReadTokens = $null; $outputTokens = $null
+. (Join-Path $PSScriptRoot 'lane-provider-refusal.ps1')
 
 try {
 
@@ -213,6 +355,7 @@ Write-Utf8NoBom $promptPath $Prompt
 if ($cfg.engine -eq 'claude') {
     $exe  = $CLAUDE_EXE
     $argv = @('-p', '--model', $cfg.model, '--output-format', 'json', '--add-dir', $WorkDir)
+    if ($ExtraReadDir) { $argv += @('--add-dir', $ExtraReadDir) }
     if ($MaxTurns -gt 0) { $argv += @('--max-turns', [string]$MaxTurns) }
     # Deny-list written to the RUN DIR so the grant is auditable beside the receipt that
     # it produced, rather than being an invisible property of the invocation.
@@ -229,7 +372,10 @@ if ($cfg.engine -eq 'claude') {
         $argv += @('--settings', $settingsPath)
     }
     if ($AllowEdits) {
-        $argv += @('--permission-mode', 'acceptEdits')
+        # 0.1: acceptEdits still takes an explicit --allowedTools list - the mode
+        # decides HOW an allowed tool behaves (auto-accept vs prompt), the list
+        # decides WHICH tools are allowed at all. 'ALL' was refused above.
+        $argv += @('--permission-mode', 'acceptEdits', '--allowedTools', $AllowedTools)
     } else {
         # No read-only permission mode exists, so restrict the TOOLS instead.
         # COMMA-SEPARATED, ONE TOKEN: --allowedTools is VARIADIC, so passing the
@@ -237,7 +383,14 @@ if ($cfg.engine -eq 'claude') {
         # follows and the CLI dies with "Input must be provided...".
         $argv += @('--permission-mode', 'dontAsk',
                    '--allowedTools', 'Read,Grep,Glob')
+        # A permission allowlist does not hide other tools from the model. A
+        # readonly review previously burned its turn cap retrying denied shells.
+        $capabilityNotice = 'This read-only lane has permission to use only Read, Grep, and Glob. Bash, PowerShell, editing tools, Agent, and Task are unavailable: do not call or retry them. Inspect hub-exported diffs and evidence with the available read tools. If a required export is missing, name that missing evidence and return an unmeasured finding; do not claim you ran shell commands or tests.'
+        $argv += @('--append-system-prompt', $capabilityNotice)
     }
+    # Prevent nested provider fan-out through the CLI's supported deny surface.
+    # One comma-separated token avoids the same variadic swallowing hazard as allowedTools.
+    $argv += @('--disallowedTools', 'Agent,Task')
     # PROMPT GOES VIA STDIN, NOT AS A POSITIONAL ARGUMENT. Several claude flags
     # (--allowedTools, --add-dir) are VARIADIC and keep consuming every following
     # token that does not start with '-', so a trailing positional prompt is
@@ -250,12 +403,14 @@ if ($cfg.engine -eq 'claude') {
     # authority so a receipt can be audited against the policy that produced it.
     $authority = [ordered]@{
         permissionMode = if ($AllowEdits) { 'acceptEdits' } else { 'dontAsk' }
-        allowedTools   = if ($AllowEdits) { 'ALL' } else { 'Read,Grep,Glob' }
+        allowedTools   = if ($AllowEdits) { $AllowedTools } else { 'Read,Grep,Glob' }
         sandbox        = 'n/a (claude)'
         writableRoot   = if ($AllowEdits) { $WorkDir } else { $null }
         maxTurns       = if ($MaxTurns -gt 0) { $MaxTurns } else { 'unset' }
         bulkReads      = if ($AllowBulkReads) { 'ALLOWED' } else { 'DENIED' }
         denyRules      = if ($AllowBulkReads) { @() } else { $denyRules }
+        disallowedTools = @('Agent', 'Task')
+        capabilityNotice = if ($AllowEdits) { $null } else { $capabilityNotice }
     }
 } else {
     $exe  = $CODEX_EXE
@@ -290,8 +445,8 @@ if ($cfg.engine -eq 'claude') {
 }
 
 # ---------------------------------------------------------------- run, bounded
-$startedUtc = (Get-Date).ToUniversalTime()
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
+# Keep the stopwatch started at reservation: setup and child startup consume the
+# same wall budget as provider execution.
 
 # LAUNCH VIA ProcessStartInfo.ArgumentList, NOT Start-Process -ArgumentList.
 # Start-Process joins an array into ONE command-line string without quoting the
@@ -300,17 +455,59 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 # ArgumentList is a real collection and .NET applies correct per-argument
 # escaping (including the special .cmd rules), so a path with spaces survives.
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
-$psi.FileName               = $exe
-foreach ($a in $argv) { [void]$psi.ArgumentList.Add($a) }
 $psi.WorkingDirectory       = $WorkDir
 $psi.UseShellExecute        = $false
+$psi.CreateNoWindow         = $true
+if ($cfg.engine -eq 'claude' -and $ReasoningEffort) {
+    $psi.Environment['CLAUDE_CODE_EFFORT_LEVEL'] = $ReasoningEffort
+}
 $psi.RedirectStandardInput  = $true
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError  = $true
 $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $psi.StandardErrorEncoding  = [System.Text.UTF8Encoding]::new($false)
 
-$proc = [System.Diagnostics.Process]::Start($psi)
+if ($sw.Elapsed.TotalMilliseconds -ge ($TimeoutSec * 1000.0)) {
+    throw [TimeoutException]::new('launch-budget-exhausted')
+}
+
+if ($cfg.engine -eq 'claude') {
+    # This trusted host is inert until it reads frame one. It is assigned to the job
+    # before frame one is sent, so the provider and every descendant inherit the job.
+    $hostSource = @'
+$ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
+$line=[Console]::In.ReadLine(); if([string]::IsNullOrWhiteSpace($line)){throw 'launch-frame-missing'}
+$launch=$line|ConvertFrom-Json; if([string]$launch.schema -ne 'mlv-lane-launch/v1'){throw 'launch-frame-schema'}
+$p=[Diagnostics.ProcessStartInfo]::new(); $p.FileName=[string]$launch.exe
+foreach($a in @($launch.argv)){[void]$p.ArgumentList.Add([string]$a)}
+$p.WorkingDirectory=[string]$launch.cwd; $p.UseShellExecute=$false
+$p.RedirectStandardInput=$true; $p.RedirectStandardOutput=$true; $p.RedirectStandardError=$true
+$p.StandardOutputEncoding=[Text.UTF8Encoding]::new($false); $p.StandardErrorEncoding=[Text.UTF8Encoding]::new($false)
+$child=[Diagnostics.Process]::Start($p); $ot=$child.StandardOutput.ReadToEndAsync(); $et=$child.StandardError.ReadToEndAsync()
+$control=[ordered]@{schema='mlv-lane-child/v1';pid=$child.Id;createdUtc=$child.StartTime.ToUniversalTime().ToString('o')}|ConvertTo-Json -Compress
+$tmp=[string]$launch.controlPath+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+[IO.File]::WriteAllText($tmp,$control,[Text.UTF8Encoding]::new($false)); [IO.File]::Move($tmp,[string]$launch.controlPath)
+$line=[Console]::In.ReadLine(); if([string]::IsNullOrWhiteSpace($line)){throw 'prompt-frame-missing'}
+$frame=$line|ConvertFrom-Json; if([string]$frame.schema -ne 'mlv-lane-prompt/v1'){throw 'prompt-frame-schema'}
+$prompt=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$frame.promptBase64))
+$child.StandardInput.Write($prompt); $child.StandardInput.Close(); $child.WaitForExit()
+[Console]::Out.Write($ot.GetAwaiter().GetResult()); [Console]::Error.Write($et.GetAwaiter().GetResult()); exit $child.ExitCode
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hostSource))
+    $psi.FileName = (Get-Command pwsh.exe -ErrorAction Stop).Source
+    foreach ($a in @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded)) {
+        [void]$psi.ArgumentList.Add($a)
+    }
+    $jobHandle = [MlvLaneJob]::CreateKillOnClose()
+    $proc = [Diagnostics.Process]::Start($psi)
+    $containedHost = [ordered]@{ pid=$proc.Id; createdUtc=$proc.StartTime.ToUniversalTime().ToString('o') }
+    [MlvLaneJob]::AssignOrThrow($jobHandle, $proc.Handle)
+    $jobAssigned = $true
+} else {
+    $psi.FileName = $exe
+    foreach ($a in $argv) { [void]$psi.ArgumentList.Add($a) }
+    $proc = [Diagnostics.Process]::Start($psi)
+}
 
 # Start the async reads BEFORE waiting: a child that fills a redirected pipe
 # buffer blocks forever if nobody is draining it, and the timeout below would
@@ -320,12 +517,64 @@ $errTask = $proc.StandardError.ReadToEndAsync()
 
 # The prompt reaches claude this way; codex gets an empty stdin that is CLOSED,
 # which is what stops it waiting on "Reading additional input from stdin...".
-$proc.StandardInput.Write($stdinContent)
-$proc.StandardInput.Close()
+if ($cfg.engine -eq 'claude') {
+    $controlPath = "$base.child.json"
+    if (Test-Path -LiteralPath $controlPath) { throw "control-path-exists: $controlPath" }
+    $launchFrame = [ordered]@{ schema='mlv-lane-launch/v1'; exe=$exe; argv=$argv; cwd=$WorkDir; controlPath=$controlPath } | ConvertTo-Json -Compress -Depth 5
+    $proc.StandardInput.WriteLine($launchFrame); $proc.StandardInput.Flush()
+    $controlDeadlineMs = [math]::Min($sw.Elapsed.TotalMilliseconds + 10000.0, $TimeoutSec * 1000.0)
+    while (-not (Test-Path -LiteralPath $controlPath)) {
+        if ($proc.HasExited) { throw "contained-host-exited-before-child: $($proc.ExitCode)" }
+        if ($sw.Elapsed.TotalMilliseconds -ge $controlDeadlineMs) { throw [TimeoutException]::new('contained-child-start-timeout') }
+        Start-Sleep -Milliseconds 25
+    }
+    # ConvertFrom-Json can turn ISO strings into DateTime values on newer pwsh;
+    # casting back to string then loses precision and uses the current culture.
+    # Keep the exact UTC creation identity emitted by the contained host.
+    $controlJson = [System.Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($controlPath))
+    try {
+        $childIdentity = [pscustomobject]@{
+            schema = $controlJson.RootElement.GetProperty('schema').GetString()
+            pid = $controlJson.RootElement.GetProperty('pid').GetInt32()
+            createdUtc = $controlJson.RootElement.GetProperty('createdUtc').GetString()
+        }
+    } finally { $controlJson.Dispose() }
+    if ([string]$childIdentity.schema -ne 'mlv-lane-child/v1') { throw 'contained-child-schema' }
+    $containment = [ordered]@{
+        kind='windows-job-kill-on-close'; jobAssigned=$jobAssigned
+        runnerPid=$PID; runnerCreatedUtc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
+        ownerPid=$containedHost.pid; ownerCreatedUtc=$containedHost.createdUtc
+        childPid=[int]$childIdentity.pid; childCreatedUtc=[string]$childIdentity.createdUtc
+        deadlineUtc=$deadlineUtc.ToString('o'); promptDelivered=$false; assignmentErrorCode=$null
+    }
+    $runningReceipt = [ordered]@{
+        schema='mlv-app/fleet-lane-receipt/v1'; state='running'; complete=$false
+        lane=$Lane; card=$Card; startedUtc=$startedUtc.ToString('o'); timeoutSec=$TimeoutSec
+        promptSha256=(Get-Sha256 $Prompt); promptBytes=[Text.Encoding]::UTF8.GetByteCount($Prompt)
+        containment=$containment
+    }
+    Write-Utf8NoBomAtomic $rcptPath ($runningReceipt | ConvertTo-Json -Depth 6)
+    if ($sw.Elapsed.TotalMilliseconds -ge ($TimeoutSec * 1000.0)) { throw [TimeoutException]::new('contained-prompt-deadline-exhausted') }
+    $promptFrame = [ordered]@{schema='mlv-lane-prompt/v1';promptBase64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($stdinContent))}|ConvertTo-Json -Compress
+    $proc.StandardInput.WriteLine($promptFrame); $proc.StandardInput.Flush()
+    $promptDelivered = $true; $containment.promptDelivered = $true
+    Write-Utf8NoBomAtomic $rcptPath ($runningReceipt | ConvertTo-Json -Depth 6)
+    $proc.StandardInput.Close()
+} else {
+    $proc.StandardInput.Write($stdinContent)
+    $proc.StandardInput.Close()
+}
 
 $timedOut = $false
-if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+$remainingMs = [math]::Max(0, [math]::Floor(($TimeoutSec * 1000.0) - $sw.Elapsed.TotalMilliseconds))
+if ($remainingMs -eq 0 -or -not $proc.WaitForExit([int]$remainingMs)) {
     $timedOut = $true
+    # Closing the job is the authoritative descendant cleanup. Do it before
+    # harvesting pipes, which descendants could otherwise keep open indefinitely.
+    if ($jobHandle -ne [IntPtr]::Zero) {
+        [void][MlvLaneJob]::CloseHandle($jobHandle)
+        $jobHandle = [IntPtr]::Zero
+    }
     try { $proc.Kill($true) } catch { }
     try { [void]$proc.WaitForExit(15000) } catch { }
 }
@@ -339,6 +588,11 @@ $stderrText = try { $errTask.Result } catch { '' }
 if ($null -eq $stderrText) { $stderrText = '' }
 Write-Utf8NoBom $outPath $stdout
 Write-Utf8NoBom $errPath $stderrText
+# Classify BEFORE parsing the answer: a refused run has no answer, and the 2026-09-07 sol
+# receipt proved that exitCode alone cannot tell "refused in 7 s" from "reviewed and objected".
+# Structurally, never by scanning the transcript (sol PR #80 R1+R2, both BLOCKER): the
+# transcript legitimately CONTAINS the refusal vocabulary even when the run answered.
+$providerRefusal = Get-ProviderRefusal -Text $stderrText -Answer $stdout -Engine $cfg.engine -Prompt $Prompt
 
 $final = ''
 if ($cfg.engine -eq 'claude') {
@@ -386,16 +640,49 @@ if ($cfg.engine -eq 'claude') {
 
 }
 catch {
-    $failure = $_.Exception.Message
-    throw
+    if ($_.Exception -is [TimeoutException]) {
+        $timedOut = $true
+        $exitCode = -1
+        $failure = $null
+    } else {
+        $failure = $_.Exception.Message
+    }
+    # Before assignment the inert host is outside the job. Terminate only the exact
+    # Process object created by this invocation; it has received no launch frame.
+    if ($cfg.engine -eq 'claude' -and -not $jobAssigned -and $null -ne $proc) {
+        try { if (-not $proc.HasExited) { $proc.Kill($true); [void]$proc.WaitForExit(5000) } } catch { }
+    }
+    if ($cfg.engine -eq 'claude' -and $null -eq $containment) {
+        $native = if ($_.Exception.PSObject.Properties.Name -contains 'NativeErrorCode') { [int]$_.Exception.NativeErrorCode } else { $null }
+        $containment = [ordered]@{
+            kind='windows-job-kill-on-close'; jobAssigned=$jobAssigned
+            runnerPid=$PID; runnerCreatedUtc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
+            ownerPid=if($null-ne $containedHost){$containedHost.pid}else{$null}
+            ownerCreatedUtc=if($null-ne $containedHost){$containedHost.createdUtc}else{$null}
+            childPid=$null; childCreatedUtc=$null; deadlineUtc=$deadlineUtc.ToString('o')
+            promptDelivered=$promptDelivered; assignmentErrorCode=$native
+        }
+    }
+    # Convert managed failures into the receipt/exit taxonomy below. Rethrowing here
+    # bypasses the final `exit $propagated` and turns the documented 127 into shell 1.
 }
 finally {
 
+# Cleanup must precede all receipt construction and I/O, including exceptional
+# startup paths. Failure to write evidence cannot keep a provider running.
+if ($jobHandle -ne [IntPtr]::Zero) {
+    [void][MlvLaneJob]::CloseHandle($jobHandle)
+    $jobHandle = [IntPtr]::Zero
+}
+$sw.Stop()
 $receipt = [ordered]@{
     schema       = 'mlv-app/fleet-lane-receipt/v1'
     # SAME KEY AT EVERY STAGE. A reader checks `state` once - reserved, complete or
     # failed - instead of inferring liveness from which fields happen to be present.
-    state        = if ($null -ne $failure) { 'failed' } elseif ($exitCode -ne -999) { 'complete' } else { 'incomplete' }
+    state        = if ($null -ne $failure) { 'failed' }
+                   elseif ($null -ne $providerRefusal) { 'refused' }
+                   elseif ($exitCode -ne -999) { 'complete' }
+                   else { 'incomplete' }
     lane         = $Lane
     role         = $cfg.role
     engine       = $cfg.engine
@@ -404,6 +691,9 @@ $receipt = [ordered]@{
     card         = $Card
     workDir      = $WorkDir
     allowEdits   = [bool]$AllowEdits
+    allowedTools = if ($AllowEdits) { $AllowedTools } else { $authority.allowedTools }
+    baseSha      = $BaseSha
+    hookSha256   = $WorkDirHookSha256
     authority    = $authority
     startedUtc   = $startedUtc.ToString('o')
     endedUtc     = (Get-Date).ToUniversalTime().ToString('o')
@@ -420,7 +710,12 @@ $receipt = [ordered]@{
     stdoutPath   = $outPath
     stderrPath   = $errPath
     failure      = $failure
-    complete     = ($null -eq $failure -and $exitCode -ne -999)
+    # null when the provider did the work. Otherwise {kind, engine, match, retryAfter, remedy};
+    # `complete` is false in that case even though `failure` is null -- the lane script did not
+    # fail, the provider declined, and a reader must never mistake that for a verdict.
+    providerRefusal = $providerRefusal
+    containment  = $containment
+    complete     = ($null -eq $failure -and $null -eq $providerRefusal -and $exitCode -ne -999)
     spend        = [ordered]@{
         costUsd            = $costUsd
         costReported       = ($null -ne $costUsd)
@@ -435,7 +730,15 @@ $receipt = [ordered]@{
         outputTokens       = $outputTokens
     }
 }
-Write-Utf8NoBom $rcptPath (($receipt | ConvertTo-Json -Depth 6))
+try {
+    Write-Utf8NoBomAtomic $rcptPath (($receipt | ConvertTo-Json -Depth 6))
+} finally {
+    # Receipt I/O failure must not retain the job handle and its provider tree.
+    if ($jobHandle -ne [IntPtr]::Zero) {
+        [void][MlvLaneJob]::CloseHandle($jobHandle)
+        $jobHandle = [IntPtr]::Zero
+    }
+}
 
 }   # end finally - the receipt is now written on EVERY exit path
 
@@ -445,6 +748,10 @@ Write-Host ("[{0}] {1}/{2} effort={3} exit={4} {5}s cost={6} -> {7}" -f `
     $rcptPath)
 
 if ($timedOut) { Write-Host "  TIMED OUT after ${TimeoutSec}s - output is partial." }
+if ($null -ne $providerRefusal) {
+    Write-Host ("  PROVIDER REFUSED ({0}): {1}" -f $providerRefusal.kind, $providerRefusal.match)
+    Write-Host ("  remedy: {0}" -f $providerRefusal.remedy)
+}
 
 # Emit the receipt so a caller can pipeline on it.
 [pscustomobject]$receipt
@@ -466,7 +773,12 @@ if ($timedOut) { Write-Host "  TIMED OUT after ${TimeoutSec}s - output is partia
 # exit code intact, and -1 would surface as 255. 124 for a timeout matches the taxonomy the repo
 # already uses in boundedRunnerExitCodes; 127 marks "reserved but never completed", which the
 # receipt also records as complete=false with the failure carried.
+# 125 = the provider refused (usage limit, 429, auth). Chosen beside 124/127 so a dispatcher
+# reading laneExitCode can tell "nobody did the work" from "the work was done and objected".
 $propagated = switch ($exitCode) {
+    # First and with `break`: PowerShell evaluates EVERY matching clause, and a refusal can
+    # arrive with any child exit code. "Nobody did the work" outranks how the child coded it.
+    { $null -ne $providerRefusal } { 125; break }   # provider refused; see receipt.providerRefusal
     -1      { 124 }   # timed out
     -999    { 127 }   # slot reserved, no completion recorded
     default { if ($exitCode -ge 0 -and $exitCode -le 255) { $exitCode } else { 1 } }

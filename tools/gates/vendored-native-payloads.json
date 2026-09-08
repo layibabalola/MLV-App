@@ -301,7 +301,7 @@
           "operation_marker": "python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-windows-x86_64 --archive-reference ffmpegWin64.zip --output-dir \"${{ env.SOURCE_DIR }}\\build\\release\" --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/Windows.yml",
-            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root . --require-target-compatible windows-x86_64",
             "must_precede": "python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-windows-x86_64 --archive-reference ffmpegWin64.zip --output-dir \"${{ env.SOURCE_DIR }}\\build\\release\" --verify-installed"
           }
         }
@@ -624,13 +624,19 @@
         {
           "target": "windows-x86_64",
           "path": ".github/workflows/Windows.yml",
-          "status": "active-release-workflow-requires-wow64",
+          "status": "active-release-workflow-wow64-compat",
           "reference_marker": "raw2mlvWin64.zip",
           "operation_marker": "python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-windows-x86-compat --archive-reference raw2mlvWin64.zip --output-dir \"${{ env.SOURCE_DIR }}\\build\\release\" --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/Windows.yml",
-            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root . --require-target-compatible windows-x86_64",
             "must_precede": "python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-windows-x86-compat --archive-reference raw2mlvWin64.zip --output-dir \"${{ env.SOURCE_DIR }}\\build\\release\" --verify-installed"
+          },
+          "compatibility": {
+            "mode": "wow64-child-process",
+            "payload_id": "raw2mlv-windows-x86-compat",
+            "launcher": "raw2mlv.exe",
+            "dependencies": ["libraw.dll"]
           }
         }
       ],

@@ -1,6 +1,10 @@
+import glob
+import hashlib
 import os
 import re
 import json
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -356,10 +360,14 @@ def test_the_export_fails_open_and_says_why_rather_than_only_that_it_failed():
     assert "CANNOT-DETERMINE: gh not on PATH" in text, "a missing gh must not be fatal"
     assert "$why" in text and "no stderr" in text, "the failure reason is not preserved"
 
-    # nothing between the export block and the dispatch may exit: a failed export must still
-    # dispatch, with the lane told plainly that those facts are UNVERIFIED.
+    # nothing between the export block and the READ-ONLY dispatch's own -DryRun check may exit:
+    # a failed export must still dispatch, with the lane told plainly that those facts are
+    # UNVERIFIED. Scoped to AFTER "the brief" marker (rather than the first "if ($DryRun)" in the
+    # file) because TOOL-LOOP-PLUMBING-1 added a second, earlier dispatch path (-AllowEdits) with
+    # its own unrelated -DryRun check.
     start = text.index("$needsHostedEvidence =")
-    end = text.index("if ($DryRun)")
+    brief = text.index("# ------------------------------------------------------------------ the brief")
+    end = text.index("if ($DryRun)", brief)
     assert not re.search(r"(?m)^\s*exit\s+\d", text[start:end]), (
         "the hosted-evidence export can halt dispatch; it must fail open"
     )
@@ -369,11 +377,13 @@ def test_the_export_fails_open_and_says_why_rather_than_only_that_it_failed():
 def test_dry_run_admits_the_export_already_happened():
     """-DryRun really does write the export -- that is the point, it is how you inspect what a
     lane would receive. Printing a bare 'nothing dispatched' would be a lie by omission about a
-    directory this command just created."""
+    directory this command just created. TOOL-LOOP-PLUMBING-1 added a second dry-run notice for
+    the -AllowEdits path (about its own real-then-removed worktree) -- checking ANY line here,
+    not just the first, keeps this test about the read-only path's own disclosure."""
     text = WORKSTREAM.read_text(encoding="utf-8")
     dry = [ln for ln in text.splitlines() if "DRY RUN" in ln and "Write-Output" in ln]
     assert dry, "no dry-run notice"
-    assert "on disk" in dry[0], "dry run does not disclose that the export is real"
+    assert any("on disk" in ln for ln in dry), "dry run does not disclose that the export is real"
 
 
 
@@ -940,3 +950,1273 @@ def test_the_refusal_suggests_the_refspec_fetch_when_the_ref_is_NOT_checked_out(
     assert r.returncode == 14
     assert "fetch origin main:main" in r.stderr, r.stderr
     assert "is CHECKED OUT at that path" not in r.stderr, r.stderr
+
+
+# --- Invoke-Lane: a PROVIDER REFUSAL is a third outcome, never a completed run ----------
+# Incident 2026-09-07T01:28Z (fleet-runs\20260907T012821Z): sol was dispatched for round 3 of
+# the PR #79 review and codex refused it in 7.7 s with "You've hit your usage limit ... try
+# again at Sep 10th". The receipt said exitCode=1, failure=null, complete=true, state=complete.
+# Nothing downstream could tell "refused before any work" from "reviewed and objected", and the
+# hub idled for an hour on what was actually an owner-side account rotation.
+#
+# Round 1 BLOCKER: codex echoes the prompt into stderr, and a text scan over the WHOLE
+# transcript misclassified a review that merely quoted the incident. Round 2: BLOCKER x2 --
+# (1) a completed review that READS this repo prints "api_error_status 429" into stderr via
+# tool output and was classified refused even though it answered; (2) removing the echoed
+# prompt line-by-line hid a genuine refusal identical to an echoed line. The fix (see
+# lane-provider-refusal.ps1) is structural, never a phrase scan: codex is refused iff stdout
+# is EMPTY and, after removing the echoed prompt as ONE BLOCK, a framed `ERROR:` line remains;
+# claude is decided by its own JSON envelope fields (is_error / api_error_status), never text.
+
+REFUSAL_HELPER = ROOT / "tools" / "coordination" / "lane-provider-refusal.ps1"
+
+REAL_CODEX_USAGE_LIMIT_STDERR = (
+    "2026-09-07T01:28:22.710128Z ERROR codex_models_manager::manager: failed to load models cache\n"
+    "OpenAI Codex v0.147.0\n--------\nworkdir: C:\\!Layi Wkspc\\MLV-App\nmodel: gpt-5.6-sol\n"
+    "--------\nuser\n# CROSS-FAMILY REVIEW: PR #79 at head 22483b33\n...\n"
+    "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to "
+    "purchase more credits or try again at Sep 10th, 2026 8:09 PM.\n"
+    "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to "
+    "purchase more credits or try again at Sep 10th, 2026 8:09 PM.\n"
+)
+
+REAL_CODEX_KNOWN_GOOD_STDERR = (
+    "OpenAI Codex v0.147.0\n--------\nworkdir: C:\\!Layi Wkspc\\MLV-App\nmodel: gpt-5.6-sol\n"
+    "provider: openai\napproval: never\nsandbox: read-only\nreasoning effort: high\n--------\n"
+    "user\nReply with exactly: PROBE-OK\ncodex\nPROBE-OK\ntokens used\n22,014\nPROBE-OK\n"
+)
+
+# Measured 2026-09-05 on the claude engine, two dispatches of twelve (see Invoke-Lane's exit
+# code comment): the JSON envelope carried this and exitCode 1.
+REAL_CLAUDE_429_ENVELOPE = (
+    '{"type":"result","subtype":"error","is_error":true,"api_error_status":429,'
+    '"result":"You\'ve hit your session limit. Try again in 3 hours.","num_turns":0}\n'
+)
+
+CLAUDE_SUCCESS_QUOTING_ENVELOPE = (
+    '{"type":"result","subtype":"success","is_error":false,'
+    '"result":"ERROR: You\'ve hit your usage limit and api_error_status 429 in the quoted text",'
+    '"num_turns":3}\n'
+)
+
+
+def _classify(tmp_path, text, engine, prompt="", answer=""):
+    src = tmp_path / "lane-stderr.txt"
+    src.write_text(text, encoding="utf-8")
+    psrc = tmp_path / "lane-prompt.txt"
+    psrc.write_text(prompt, encoding="utf-8")
+    asrc = tmp_path / "lane-answer.txt"
+    asrc.write_text(answer, encoding="utf-8")
+    cmd = (
+        f". '{REFUSAL_HELPER}'; "
+        f"$t = [IO.File]::ReadAllText('{src}'); "
+        f"$p = [IO.File]::ReadAllText('{psrc}'); "
+        f"$a = [IO.File]::ReadAllText('{asrc}'); "
+        f"$r = Get-ProviderRefusal -Text $t -Engine '{engine}' -Prompt $p -Answer $a; "
+        "if ($null -eq $r) { 'NULL' } else { $r | ConvertTo-Json -Compress }"
+    )
+    out = subprocess.run(
+        ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmd],
+        text=True, capture_output=True,
+    )
+    assert out.returncode == 0, out.stderr
+    line = out.stdout.strip().splitlines()[-1]
+    return None if line == "NULL" else json.loads(line)
+
+
+def test_provider_refusal_classifies_the_real_codex_usage_limit_stderr(tmp_path):
+    r = _classify(tmp_path, REAL_CODEX_USAGE_LIMIT_STDERR, "codex", answer="")
+    assert r is not None, "the 2026-09-07 refusal must not read as a completed run"
+    assert r["kind"] == "provider-usage-limit"
+    assert r["engine"] == "codex"
+    assert r["retryAfter"] == "Sep 10th, 2026 8:09 PM"
+    assert "usage limit" in r["match"]
+    assert "rotates" in r["remedy"], "a usage limit is an owner-side rotation, and the receipt says so"
+
+
+def test_provider_refusal_is_null_on_a_real_known_good_transcript(tmp_path):
+    # The falsifier beside its subject: the probe that proved the rotated account worked.
+    # It answered ("PROBE-OK" on stdout), so nothing in stderr is even inspected.
+    assert _classify(tmp_path, REAL_CODEX_KNOWN_GOOD_STDERR, "codex", answer="PROBE-OK") is None
+
+
+def test_provider_refusal_classifies_the_claude_429_session_limit(tmp_path):
+    r = _classify(tmp_path, "", "claude", answer=REAL_CLAUDE_429_ENVELOPE)
+    assert r is not None
+    assert r["kind"] == "provider-usage-limit"
+    assert r["retryAfter"] == "3 hours"
+
+
+def test_provider_refusal_claude_success_envelope_quoting_the_phrase_is_null(tmp_path):
+    # sol PR #80 R2 BLOCKER (1): a completed run that merely QUOTES the vocabulary -- in its own
+    # result text, and with stderr full of the same phrase -- must not classify as refused. Only
+    # the envelope's own is_error / api_error_status fields decide for claude; text is never
+    # evidence.
+    stderr_full_of_phrase = (
+        "api_error_status 429\nYou've hit your usage limit\nERROR: You've hit your usage limit\n"
+    ) * 3
+    r = _classify(tmp_path, stderr_full_of_phrase, "claude", answer=CLAUDE_SUCCESS_QUOTING_ENVELOPE)
+    assert r is None
+
+
+def test_provider_refusal_claude_survives_diagnostic_noise_around_the_envelope(tmp_path):
+    # sol PR #80 R3 MAJOR: whole-string ConvertFrom-Json fails OPEN -- the instant stdout carries
+    # ANY non-whitespace diagnostic line before or after the envelope, the old code's single
+    # try/catch swallowed a REAL refusal as null. Invoke-Lane harvests raw, unfiltered stdout, so
+    # this is reachable whenever anything else writes to stdout alongside --output-format json.
+    # sol's own repro, verbatim in shape: a "diagnostic" line before the envelope. The envelope
+    # carries "type":"result" -- the real --output-format json shape (sol PR #80 R4 MAJOR below).
+    envelope = (
+        '{"type":"result","subtype":"error","is_error":true,"api_error_status":429,'
+        '"result":"You\'ve hit your session limit"}'
+    )
+    r = _classify(tmp_path, "", "claude", answer="diagnostic\n" + envelope)
+    assert r is not None, "a diagnostic line before the envelope must not hide a real refusal"
+    assert r["kind"] == "provider-usage-limit"
+    # Noise AFTER the envelope must not hide it either.
+    r2 = _classify(tmp_path, "", "claude", answer=envelope + "\ntrailing diagnostic noise")
+    assert r2 is not None
+    assert r2["kind"] == "provider-usage-limit"
+
+
+def test_provider_refusal_claude_requires_the_result_envelope_shape_not_any_json_line(tmp_path):
+    # sol PR #80 R4 MAJOR (sol's own repro, verbatim in shape): the R3 fix trusted the FIRST
+    # parseable JSON-object line, so a JSON-shaped diagnostic carrying its own is_error /
+    # api_error_status fields -- printed BEFORE the real envelope -- was picked instead, producing
+    # a FALSE refusal even though the run completed successfully. Only a line shaped like the real
+    # --output-format json envelope (carries "type":"result") may be treated as the envelope.
+    fake_diagnostic = (
+        '{"is_error":true,"api_error_status":429,"result":"You have hit your usage limit"}'
+    )
+    real_envelope = (
+        '{"type":"result","subtype":"success","is_error":false,'
+        '"result":"ordinary completed answer","num_turns":2}'
+    )
+    r = _classify(tmp_path, "", "claude", answer=fake_diagnostic + "\n" + real_envelope)
+    assert r is None, "a JSON-shaped diagnostic without type:result must never be mistaken for the envelope"
+    # Mirror: a benign JSON diagnostic must not hide a later GENUINE refusal envelope either.
+    benign_diagnostic = '{"note":"some other tool wrote this JSON line"}'
+    real_refusal = (
+        '{"type":"result","subtype":"error","is_error":true,"api_error_status":429,'
+        '"result":"You\'ve hit your session limit"}'
+    )
+    r2 = _classify(tmp_path, "", "claude", answer=benign_diagnostic + "\n" + real_refusal)
+    assert r2 is not None
+    assert r2["kind"] == "provider-usage-limit"
+
+
+# sol PR #80 round 1 BLOCKER (2026-09-07): codex echoes the prompt into stderr, and the first
+# version scanned every line, so a review whose PROMPT quoted the incident classified itself as
+# refused. sol PR #80 round 2 BLOCKER (finding 1): a completed review that READS this repo prints
+# "api_error_status 429" into stderr via tool-output/citation lines and was classified refused
+# even though it answered. Both repros are sol's own, verbatim in shape.
+def test_provider_refusal_ignores_prose_that_merely_quotes_a_refusal(tmp_path):
+    prompt = (
+        "# CROSS-FAMILY REVIEW: PR #80\n"
+        "The incident: ERROR: You've hit your usage limit. Visit ... try again at Sep 10th, 2026 8:09 PM.\n"
+        "Verify it.\n"
+    )
+    answer = "Successful review quotes: You've hit your usage limit. Verdict APPROVE.\n"
+    stderr = (
+        prompt
+        + "#   CITE-TXN-1 the receipt recorded api_error_status 429 \"You've hit your session limit\"\n"
+        + "ERROR: this line is a reviewer quoting: You've hit your usage limit\n"
+    )
+    # It answered: the classifier never even reaches the text below, which is exactly why a
+    # reviewer's citations and quotations cannot self-classify as a refusal.
+    assert _classify(tmp_path, stderr, "codex", prompt=prompt, answer=answer) is None
+
+
+def test_provider_refusal_ignores_the_echoed_prompt_but_still_sees_a_real_error_line(tmp_path):
+    prompt = (
+        "# CROSS-FAMILY REVIEW: PR #80\n"
+        "The incident: ERROR: You've hit your usage limit. Visit ... try again at Sep 10th, 2026 8:09 PM.\n"
+        "Verify it.\n"
+    )
+    # Echo only: the prompt's ERROR line appears in stderr because codex printed the prompt back.
+    # No answer: a genuine refusal never produces stdout.
+    echoed = "OpenAI Codex v0.147.0\n--------\nuser\n" + prompt + "codex\n"
+    assert _classify(tmp_path, echoed, "codex", prompt=prompt, answer="") is None
+    # Echo PLUS a genuine refusal line that is not in the prompt: still a refusal.
+    refused = echoed + "ERROR: You've hit your usage limit. Visit x to purchase more credits or try again at Sep 11th, 2026 1:00 AM.\n"
+    r = _classify(tmp_path, refused, "codex", prompt=prompt, answer="")
+    assert r is not None and r["retryAfter"] == "Sep 11th, 2026 1:00 AM"
+
+
+def test_provider_refusal_removes_the_echoed_prompt_as_one_block_not_line_by_line(tmp_path):
+    # sol PR #80 R2 BLOCKER (finding 2): a genuine refusal line IDENTICAL to an echoed prompt
+    # line must still be seen. Removing the prompt line-by-line would delete every occurrence,
+    # including the provider's own, real, second one. Removing it as one verbatim block only
+    # deletes the FIRST occurrence, leaving a later identical line intact.
+    x = "ERROR: You've hit your usage limit. Visit x or try again at Sep 10th, 2026 8:09 PM.\n"
+    prompt = x
+    stderr_with_second_error = "user\n" + x + "\ncodex\n" + x + "\n"
+    r = _classify(tmp_path, stderr_with_second_error, "codex", prompt=prompt, answer="")
+    assert r is not None
+    assert r["retryAfter"] == "Sep 10th, 2026 8:09 PM"
+    # Only the echoed occurrence, once: nothing left after the block is removed.
+    stderr_echo_only = "user\n" + x + "\n"
+    assert _classify(tmp_path, stderr_echo_only, "codex", prompt=prompt, answer="") is None
+
+
+def test_provider_refusal_requires_the_provider_frame_not_just_the_phrase(tmp_path):
+    # Same words, no ERROR: frame -> not a refusal. With the frame -> refusal. Empty answer
+    # required in both cases: a real answer means it ran.
+    assert _classify(tmp_path, "you've hit your usage limit\n", "codex", answer="") is None
+    assert _classify(tmp_path, "ERROR: you've hit your usage limit\n", "codex", answer="") is not None
+
+
+def test_provider_refusal_requires_an_empty_answer_even_with_a_framed_line(tmp_path):
+    # A non-empty answer means the lane ran and produced something: never a refusal, no matter
+    # what the (irrelevant, historical) stderr says.
+    assert _classify(tmp_path, "ERROR: you've hit your usage limit\n", "codex", answer="APPROVE") is None
+
+
+def test_provider_refusal_treats_empty_output_as_no_refusal(tmp_path):
+    # Silence is not a refusal; it is the -999/incomplete path, which the receipt already names.
+    assert _classify(tmp_path, "", "codex", answer="") is None
+    assert _classify(tmp_path, "", "claude", answer="") is None
+
+
+def test_invoke_lane_records_a_provider_refusal_as_refused_not_complete():
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "lane-provider-refusal.ps1" in body, "Invoke-Lane must dot-source the one classifier"
+    assert "Get-ProviderRefusal -Text $stderrText -Answer $stdout" in body, (
+        "classification must read the harvested stderr and the harvested answer separately, "
+        "never a blended blob (sol PR #80 R1+R2 BLOCKERs)"
+    )
+    assert "-Prompt $Prompt" in body, "the echoed prompt must be excluded from classification (sol PR #80 R1 BLOCKER)"
+    assert "providerRefusal = $providerRefusal" in body, "the receipt must carry the refusal verbatim"
+    assert "elseif ($null -ne $providerRefusal) { 'refused' }" in body, "state must have a third value"
+    assert "$null -eq $providerRefusal -and $exitCode -ne -999" in body, "complete must be false on refusal"
+
+
+def test_invoke_lane_propagates_a_refusal_as_125_ahead_of_the_child_code():
+    # 124 timeout, 127 never-completed, 125 provider refused: three sentinels, three meanings.
+    # The refusal clause must come FIRST and break, because PowerShell's switch runs every
+    # matching clause and a refusal can arrive with any child exit code.
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    i_refused = body.index("{ $null -ne $providerRefusal } { 125; break }")
+    i_timeout = body.index("-1      { 124 }")
+    assert i_refused < i_timeout
+# =============================================================================================
+# TOOL-LOOP-PLUMBING-1: install-arg forwarding, kind-based lane resolution, the editing dispatch
+# (worktree + composer + reservations + kill-switch recheck), and the pre-dispatch PR-review
+# evidence exporter.
+# =============================================================================================
+
+LOOP_INSTALL_ARGS = ROOT / "tools" / "coordination" / "loop-install-args.ps1"
+COMPOSE_CLI = ROOT / "tools" / "coordination" / "Compose-LanePrompt.ps1"
+EXPORT_PR_EVIDENCE = ROOT / "tools" / "coordination" / "Export-PrReviewEvidence.ps1"
+TEMPLATE_TEXT = (ROOT / "docs" / "lane-prompts" / "v2" / "product-card-TEMPLATE.md").read_text(encoding="utf-8")
+
+
+def run_pwsh_command(cmd):
+    return subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+        text=True, capture_output=True,
+    )
+
+
+# --- loop-install-args.ps1: -Install must persist EVERY schedulable parameter --------------
+# UNTIL THIS CARD -Install persisted only four of the loop's own parameters (DailyBudget,
+# MaxDispatchesPerCycle, TimeoutSec, StaleHours) and silently dropped -Tracks/-Lane/-AllowEdits,
+# so a reinstall reset every one of them to its default -- the same class of defect that made the
+# 2026-09-03 budget-flag omission an emergency. Get-InstallArgLine/Resolve-Tracks are pure and
+# dot-sourced precisely so they can be tested without running the loop itself.
+
+def call_get_install_arg_line(tracks, lane="", allow_edits=False):
+    tracks_literal = "@(" + ",".join("'%s'" % t for t in tracks) + ")"
+    cmd = (
+        ". '%s'; Get-InstallArgLine -ScriptPath 'X:\\loop.ps1' -DailyBudget 12 "
+        "-MaxDispatchesPerCycle 2 -TimeoutSec 1500 -StaleHours 12 -Tracks %s%s%s"
+        % (
+            LOOP_INSTALL_ARGS.as_posix(),
+            tracks_literal,
+            " -Lane %s" % lane if lane else "",
+            " -AllowEdits" if allow_edits else "",
+        )
+    )
+    return run_pwsh_command(cmd)
+
+
+def test_install_arg_line_forwards_tracks_lane_and_allowedits():
+    result = call_get_install_arg_line(["product", "playback"], lane="sonnet", allow_edits=True)
+    assert result.returncode == 0, result.stderr
+    line = result.stdout.strip()
+    assert '-Tracks "product,playback"' in line, line
+    assert "-Lane sonnet" in line, line
+    assert "-AllowEdits" in line, line
+
+
+def test_install_arg_line_omits_lane_and_allowedits_when_unset():
+    result = call_get_install_arg_line(["playback"])
+    assert result.returncode == 0, result.stderr
+    line = result.stdout.strip()
+    assert '-Tracks "playback"' in line, line
+    assert "-Lane" not in line, line
+    assert "-AllowEdits" not in line, line
+
+
+def test_resolve_tracks_splits_a_comma_joined_single_string():
+    """A pwsh -File scheduled-task action hands -Tracks back as ONE literal string; Resolve-Tracks
+    is what the loop calls immediately after binding $Tracks to undo that."""
+    cmd = ". '%s'; (Resolve-Tracks -Tracks @('product,playback')) -join '|'" % LOOP_INSTALL_ARGS.as_posix()
+    result = run_pwsh_command(cmd)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "product|playback"
+
+
+def test_resolve_tracks_leaves_a_genuine_multi_element_array_alone():
+    cmd = ". '%s'; (Resolve-Tracks -Tracks @('product','playback')) -join '|'" % LOOP_INSTALL_ARGS.as_posix()
+    result = run_pwsh_command(cmd)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "product|playback"
+
+
+def test_resolve_tracks_does_not_split_a_single_track_that_has_no_comma():
+    cmd = ". '%s'; (Resolve-Tracks -Tracks @('UNSET')) -join '|'" % LOOP_INSTALL_ARGS.as_posix()
+    result = run_pwsh_command(cmd)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "UNSET"
+
+
+def test_a_dry_run_cycle_started_from_the_persisted_arg_line_reports_the_resolved_tracks():
+    """Proves the round trip through REAL pwsh -File argument binding, not just the pure
+    Resolve-Tracks function in isolation: -Tracks "product,playback" arrives at the loop as a
+    single-element array and must still resolve and print as two comma-separated tracks.
+    -MaxDispatchesPerCycle 0 means no dispatch is attempted regardless of the real board's queue
+    state, and the kill switch (armed or not) is checked only AFTER this line is printed.
+
+    MINOR 4 (sol round-1 review): this used to hand-reconstruct the scheduled-task argument list
+    directly as a Python literal (-Tracks "product,playback" -Lane sonnet -AllowEdits), never
+    actually calling Get-InstallArgLine -- so a regression in the arg-line BUILDER itself (a
+    dropped flag, wrong quoting, wrong flag spelling) would not show up here even though this
+    test's whole point is the exact-line install/reinstall contract. Now it calls
+    Get-InstallArgLine for real, takes its ACTUAL returned string, and parses THAT string into an
+    argv list -- exactly what a `pwsh -File` scheduled-task action does with a persisted
+    Arguments string -- before starting the -DryRun cycle from it."""
+    # -MaxDispatchesPerCycle 0 goes INTO the persisted line itself (not appended afterwards): the
+    # loop's own param binder throws "specified more than once" if the same flag appears twice in
+    # argv, and 0 makes the per-track dispatch loop break before attempting a single real
+    # dispatch against the live board, which -DryRun alone would not prevent (it would still
+    # forward -DryRun to up to MaxDispatchesPerCycle real dispatcher invocations).
+    get_line_cmd = (
+        ". '%s'; Get-InstallArgLine -ScriptPath '%s' -DailyBudget 12 -MaxDispatchesPerCycle 0 "
+        "-TimeoutSec 1500 -StaleHours 12 -Tracks @('product','playback') -Lane sonnet -AllowEdits"
+        % (LOOP_INSTALL_ARGS.as_posix(), LOOP.as_posix())
+    )
+    line_result = run_pwsh_command(get_line_cmd)
+    assert line_result.returncode == 0, line_result.stdout + line_result.stderr
+    arg_line = line_result.stdout.strip()
+    assert '-Tracks "product,playback"' in arg_line, arg_line
+    assert '-Lane sonnet' in arg_line, arg_line
+    assert '-AllowEdits' in arg_line, arg_line
+
+    # shlex with posix=False keeps Windows-style backslash paths intact (no backslash-escape
+    # processing) while still respecting quotes for word-splitting; the quote characters
+    # themselves are left attached and must be stripped before use as a real argv element,
+    # since subprocess.run's list form passes each element through literally (no shell requoting).
+    raw_tokens = shlex.split(arg_line, posix=False)
+    argv = [t[1:-1] if len(t) >= 2 and t[0] == '"' and t[-1] == '"' else t for t in raw_tokens]
+
+    result = subprocess.run(
+        ["pwsh.exe", *argv, "-DryRun"],
+        text=True, capture_output=True, timeout=120,
+    )
+    assert "LOOP: tracks=product, playback" in result.stdout, (
+        "argLine=%r argv=%r\n%s%s" % (arg_line, argv, result.stdout, result.stderr)
+    )
+
+
+# --- kind/owner/scope-based lane resolution (deliverable 2) ---------------------------------
+
+def test_kind_and_owner_resolve_the_lane_to_sonnet():
+    """0.18 seeds every product/playback card with kind and owner=sonnet; the dispatcher must
+    route it to the sonnet lane with no explicit -Lane, replacing the old needsShell-only
+    heuristic for any card that names both fields."""
+    with_tmp_result = run_dispatcher_lane_test(
+        {"id": "TEST-KIND-1", "state": "queued", "track": "product", "kind": "product",
+         "owner": "sonnet", "priority": 1},
+        "-Track", "product",
+    )
+    assert "lane=sonnet" in with_tmp_result.stdout, with_tmp_result.stdout + with_tmp_result.stderr
+
+
+def test_a_kind_only_card_is_not_selected_by_track_filtering():
+    """S82: track SELECTION stays keyed on the queue's own `track` field, never on `kind` -- a
+    card that carries kind=product but no track field is UNSET on track (Get-Track only reads
+    `track`) and must not be picked by an explicit -Track product, even though its kind matches.
+    An explicit non-auto -Track that matches nothing reports NO-LIVE-CARDS on that track (a
+    distinct, pre-existing diagnostic from the auto-pool's own no-board-track-set) -- what this
+    test actually pins is that the card is never selected, whichever diagnostic explains why."""
+    result = run_dispatcher_lane_test(
+        {"id": "TEST-KIND-ONLY-1", "state": "queued", "kind": "product", "owner": "sonnet", "priority": 1},
+        "-Track", "product",
+    )
+    assert "WORKSTREAM: track=product card=TEST-KIND-ONLY-1" not in result.stdout, result.stdout + result.stderr
+    assert result.returncode != 0
+
+
+def test_a_recon_scope_prefix_routes_to_luna():
+    result = run_dispatcher_lane_test(
+        {"id": "TEST-RECON-1", "state": "queued", "track": "factory", "priority": 1,
+         "scope": "RECON: survey the CI queue"},
+        "-Track", "factory",
+    )
+    assert "lane=luna" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_review_scope_prefix_routes_to_fable():
+    result = run_dispatcher_lane_test(
+        {"id": "TEST-REVIEW-1", "state": "queued", "track": "factory", "priority": 1,
+         "scope": "REVIEW: read the plan"},
+        "-Track", "factory",
+    )
+    assert "lane=fable" in result.stdout, result.stdout + result.stderr
+
+
+def test_explicit_lane_wins_over_kind_based_resolution():
+    result = run_dispatcher_lane_test(
+        {"id": "TEST-EXPLICIT-1", "state": "queued", "track": "product", "kind": "product",
+         "owner": "sonnet", "priority": 1},
+        "-Track", "product", "-Lane", "fable",
+    )
+    assert "lane=fable" in result.stdout, result.stdout + result.stderr
+
+
+def run_dispatcher_lane_test(item, *extra):
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        return run_dispatcher(Path(td), [item], *extra)
+
+
+# --- deliverable 9 wiring: the dispatcher itself must call the pre-dispatch PR-review evidence
+# exporter before a review-lane starts (MAJOR 1, sol round-1 review). The exporter script has its
+# own standalone tests further down; these three exercise the DISPATCHER's wiring specifically,
+# with a fake exporter shim standing in for the real one -- matching the existing fake-gh shim
+# pattern rather than re-testing the exporter in isolation, which is exactly what sol's finding
+# says the previous suite was missing (the only reference to the exporter outside its own test
+# was in this file, never in a production caller).
+
+FAKE_EXPORTER_SHIM = (
+    "param([int]$PrNumber,[string]$RunDir,[string]$RepoRoot,[string]$GhExe)\n"
+    "if (-not (Test-Path -LiteralPath $RunDir)) { New-Item -ItemType Directory -Path $RunDir -Force | Out-Null }\n"
+    "Set-Content -LiteralPath (Join-Path $RunDir 'exporter-called.txt') "
+    "-Value ($PrNumber.ToString() + '|' + $RunDir)\n"
+    "exit 0\n"
+)
+
+FAKE_EXPORTER_SHIM_REFUSES = (
+    "param([int]$PrNumber,[string]$RunDir,[string]$RepoRoot,[string]$GhExe)\n"
+    "Write-Output \"REFUSED: pr-head-drift before=a after=b pr=$PrNumber\"\n"
+    "exit 3\n"
+)
+
+
+def test_a_review_lane_dispatch_calls_the_pr_evidence_exporter_before_the_lane_starts(tmp_path):
+    """The dispatcher must call Export-PrReviewEvidence.ps1 itself before a review-lane (routed
+    here by the REVIEW: scope rule to fable) starts, rather than leaving the lane to call `gh`
+    and hit the read-only sandbox's Access-is-denied wall. Run under -DryRun (via
+    run_dispatcher_lane_test), so the exporter call must happen BEFORE the dry-run exit -- exactly
+    like the generic hosted-evidence export it sits beside."""
+    fake_exporter = tmp_path / "fake-exporter.ps1"
+    fake_exporter.write_text(FAKE_EXPORTER_SHIM, encoding="ascii")
+    result = run_dispatcher_lane_test(
+        {"id": "TEST-REVIEW-EVIDENCE-1", "state": "queued", "track": "factory", "priority": 1,
+         "scope": "REVIEW: read the plan", "prNumber": 81},
+        "-Track", "factory", "-ExporterPath", str(fake_exporter),
+    )
+    assert "lane=fable" in result.stdout, result.stdout + result.stderr
+    # NOT \S+: the real board root is "C:\!Layi Wkspc\MLV-App", which contains a space, and
+    # runDir is the last field on its line -- capture to end-of-line, not to the first whitespace.
+    export_line = next(
+        (l for l in result.stdout.splitlines() if "pre-dispatch review-evidence export" in l), None
+    )
+    assert export_line, "no export line reported: %s" % result.stdout
+    run_dir = Path(export_line.split("runDir=", 1)[1].strip())
+    marker = run_dir / "exporter-called.txt"
+    try:
+        assert marker.exists(), "the dispatcher never invoked the exporter: %s" % result.stdout
+        assert marker.read_text(encoding="utf-8").startswith("81|"), marker.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def test_a_review_lane_dispatch_is_refused_when_the_exporter_refuses(tmp_path):
+    """Fail CLOSED, the opposite polarity of the generic hosted-evidence export: unverified PR
+    evidence is worse than no review at all, so an exporter refusal must stop the dispatch."""
+    fake_exporter = tmp_path / "fake-exporter-fail.ps1"
+    fake_exporter.write_text(FAKE_EXPORTER_SHIM_REFUSES, encoding="ascii")
+    result = run_dispatcher_lane_test(
+        {"id": "TEST-REVIEW-EVIDENCE-2", "state": "queued", "track": "factory", "priority": 1,
+         "scope": "REVIEW: read the plan", "prNumber": 81},
+        "-Track", "factory", "-ExporterPath", str(fake_exporter),
+    )
+    assert "REFUSED review-evidence-export-failed" in result.stdout, result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "WORKSTREAM: track=factory card=TEST-REVIEW-EVIDENCE-2" not in result.stdout
+
+
+def test_a_review_lane_dispatch_with_no_pr_number_does_not_call_the_exporter(tmp_path):
+    """Scoped to cards that actually name a PR: a review-lane card with nothing to bind the
+    exporter's mandatory -PrNumber to must not attempt the call at all."""
+    fake_exporter = tmp_path / "fake-exporter-unused.ps1"
+    fake_exporter.write_text(FAKE_EXPORTER_SHIM, encoding="ascii")
+    result = run_dispatcher_lane_test(
+        {"id": "TEST-REVIEW-EVIDENCE-3", "state": "queued", "track": "factory", "priority": 1,
+         "scope": "REVIEW: read the plan"},
+        "-Track", "factory", "-ExporterPath", str(fake_exporter),
+    )
+    assert "lane=fable" in result.stdout, result.stdout + result.stderr
+    assert "pre-dispatch review-evidence export" not in result.stdout, result.stdout
+
+
+# --- editing dispatch: procedure/worktree/composition/reservations (deliverables 2,3,5,6,7) -
+
+def sha256_of(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def write_fields_text(card_id, extra_lines=""):
+    return (
+        "# FIELDS for %s\n"
+        "CARD_ID: %s\n"
+        "PRIORITY: 1\n"
+        "CLIP_OR_NONE: none\n"
+        "ALLOWED_PATHS: some/path.cpp\n"
+        "DELIVERABLE: do the thing\n"
+        "ACCEPTANCE: run the test\n"
+        "VERIFY_FIRST: check first\n"
+        "%s" % (card_id, card_id, extra_lines)
+    )
+
+
+def write_fields_card(dir_path, card_id, extra_lines=""):
+    path = Path(dir_path) / ("fields-%s.md" % card_id)
+    path.write_text(write_fields_text(card_id, extra_lines), encoding="ascii")
+    return path
+
+
+def editing_board(tmp_path, with_lane_shim=True):
+    """A throwaway git repo playing the board root: a 'fork/master' ref for baseSha resolution
+    and worktree-add, and the dual-lane coordination tree an editing dispatch reads from (the
+    composer template, and by default a fake Start-EditingLane.ps1 shim so no real lane is ever
+    started by a test)."""
+    init_repo(tmp_path)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
+    (tmp_path / "seed.txt").write_text("seed\n")
+    subprocess.run(["git", "add", "seed.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=tmp_path, check=True)
+    head = git(tmp_path, "rev-parse", "HEAD")
+    subprocess.run(["git", "update-ref", "refs/remotes/fork/master", head], cwd=tmp_path, check=True)
+
+    dual = tmp_path / ".claude-state" / "coordination" / "dual-lane"
+    (dual / "prompts" / "v2").mkdir(parents=True)
+    (dual / "prompts" / "v2" / "product-card-TEMPLATE.md").write_text(TEMPLATE_TEXT, encoding="utf-8")
+    (dual / "receipts").mkdir(parents=True, exist_ok=True)
+
+    if with_lane_shim:
+        shim = dual / "Start-EditingLane.ps1"
+        shim.write_text(
+            "param([string]$Lane,[string]$PromptFile,[string]$WorkDir,[string]$Card,"
+            "[string]$RunDir,[string]$ExtraReadDir,[int]$TimeoutSec)\n"
+            "Write-Output ('SHIM: lane=' + $Lane + ' card=' + $Card + ' workDir=' + $WorkDir)\n"
+            "exit 0\n",
+            encoding="ascii",
+        )
+    return dual, head
+
+
+def editing_dispatch_env(tmp_path):
+    e = dict(os.environ)
+    e["MLV_BOARD_ROOT"] = str(tmp_path)
+    return e
+
+
+def cleanup_lane_worktree(board_root, card_id):
+    """Best-effort cleanup: a real -DryRun (or shimmed real) editing dispatch creates then
+    removes its own C:\\mlvtmp\\lane-<card>-<ts> worktree, but a failed assertion must not leak
+    one if a bug ever leaves it behind."""
+    for p in glob.glob(str(Path("C:/mlvtmp") / ("lane-%s-*" % card_id))):
+        subprocess.run(["git", "-C", str(board_root), "worktree", "remove", p, "--force"],
+                        capture_output=True)
+        shutil.rmtree(p, ignore_errors=True)
+    subprocess.run(["git", "-C", str(board_root), "worktree", "prune"], capture_output=True)
+
+
+def run_editing_dispatch(tmp_path, queue_items, card_id, extra=(), dry_run=True):
+    queue_path = tmp_path / "queue.json"
+    queue_path.write_text(json.dumps({"schema": "test", "items": queue_items}))
+    args = [
+        "pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(WORKSTREAM), "-QueuePath", str(queue_path), "-CardId", card_id,
+        "-AllowEdits", "-NoLandingProbe", *extra,
+    ]
+    if dry_run:
+        args.append("-DryRun")
+    return subprocess.run(args, text=True, capture_output=True, env=editing_dispatch_env(tmp_path))
+
+
+def test_editing_dispatch_prints_workdir_lane_and_a_full_basesha(tmp_path):
+    """Acceptance: a -DryRun dispatch of an eligible product card prints workDir=, lane=sonnet,
+    and baseSha=<40 hex> -- baseSha is fork/master resolved at dispatch time in the board repo."""
+    dual, head = editing_board(tmp_path)
+    proc = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-A")
+    item = {"id": "TEST-EDIT-A", "state": "queued", "track": "product", "kind": "product",
+            "owner": "sonnet", "priority": 1,
+            "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-A.md",
+            "procedureSha256": sha256_of(proc)}
+    try:
+        result = run_editing_dispatch(tmp_path, [item], "TEST-EDIT-A")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "lane=sonnet" in result.stdout, result.stdout
+        m = re.search(r"WORKSTREAM: workDir=(\S+)", result.stdout)
+        assert m, result.stdout
+        m2 = re.search(r"WORKSTREAM: baseSha=([0-9a-f]{40})\b", result.stdout)
+        assert m2, result.stdout
+        assert m2.group(1) == head
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-A")
+
+
+def test_two_editing_dispatches_get_two_distinct_worktree_paths(tmp_path):
+    dual, head = editing_board(tmp_path)
+    proc_a = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-B1")
+    proc_b = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-B2")
+    items = [
+        {"id": "TEST-EDIT-B1", "state": "queued", "track": "product", "kind": "product",
+         "owner": "sonnet", "priority": 1,
+         "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-B1.md",
+         "procedureSha256": sha256_of(proc_a)},
+        {"id": "TEST-EDIT-B2", "state": "queued", "track": "product", "kind": "product",
+         "owner": "sonnet", "priority": 1,
+         "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-B2.md",
+         "procedureSha256": sha256_of(proc_b)},
+    ]
+    workdirs = []
+    try:
+        for card_id in ("TEST-EDIT-B1", "TEST-EDIT-B2"):
+            result = run_editing_dispatch(tmp_path, items, card_id)
+            assert result.returncode == 0, result.stdout + result.stderr
+            m = re.search(r"WORKSTREAM: workDir=(\S+)", result.stdout)
+            assert m, result.stdout
+            workdirs.append(m.group(1))
+        assert workdirs[0] != workdirs[1]
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-B1")
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-B2")
+
+
+def test_editing_dispatch_refuses_a_codex_lane(tmp_path):
+    editing_board(tmp_path)
+    item = {"id": "TEST-EDIT-CODEX-1", "state": "queued", "track": "product", "priority": 1}
+    result = run_editing_dispatch(tmp_path, [item], "TEST-EDIT-CODEX-1", extra=("-Lane", "luna"))
+    assert result.returncode == 6, result.stdout + result.stderr
+    assert "REFUSED codex-lane-never-edits" in result.stdout
+
+
+def test_editing_dispatch_refuses_a_card_with_no_procedure(tmp_path):
+    editing_board(tmp_path)
+    item = {"id": "TEST-EDIT-NOPROC-1", "state": "queued", "track": "product", "priority": 1}
+    result = run_editing_dispatch(tmp_path, [item], "TEST-EDIT-NOPROC-1")
+    assert result.returncode == 6, result.stdout + result.stderr
+    assert "REFUSED procedure-missing-or-drifted" in result.stdout
+
+
+def test_editing_dispatch_refuses_a_drifted_procedure_sha(tmp_path):
+    dual, head = editing_board(tmp_path)
+    proc = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-DRIFT-1")
+    item = {"id": "TEST-EDIT-DRIFT-1", "state": "queued", "track": "product", "priority": 1,
+            "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-DRIFT-1.md",
+            "procedureSha256": "0" * 64}
+    result = run_editing_dispatch(tmp_path, [item], "TEST-EDIT-DRIFT-1")
+    assert result.returncode == 6, result.stdout + result.stderr
+    assert "REFUSED procedure-missing-or-drifted" in result.stdout
+    assert sha256_of(proc) != "0" * 64
+
+
+def test_editing_dispatch_refuses_an_unknown_field(tmp_path):
+    dual, head = editing_board(tmp_path)
+    proc = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-UNK-1", extra_lines="FOO: a stray field\n")
+    item = {"id": "TEST-EDIT-UNK-1", "state": "queued", "track": "product", "priority": 1,
+            "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-UNK-1.md",
+            "procedureSha256": sha256_of(proc)}
+    result = run_editing_dispatch(tmp_path, [item], "TEST-EDIT-UNK-1")
+    assert result.returncode == 6, result.stdout + result.stderr
+    assert "REFUSED unknown-field" in result.stdout
+
+
+def read_reservation_rows(dual):
+    path = dual / "receipts" / "dispatch-reservations.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def test_a_real_editing_dispatch_reserves_before_it_starts_and_charges_after(tmp_path):
+    """S76: a 'reserved' row is written BEFORE the process launches and a 'charged' row after,
+    sharing one reservationId -- the loop counts only 'reserved' rows for today's spend."""
+    dual, head = editing_board(tmp_path)
+    proc = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-RES-1")
+    item = {"id": "TEST-EDIT-RES-1", "state": "queued", "track": "product", "kind": "product",
+            "owner": "sonnet", "priority": 1,
+            "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-RES-1.md",
+            "procedureSha256": sha256_of(proc)}
+    try:
+        result = run_editing_dispatch(tmp_path, [item], "TEST-EDIT-RES-1", dry_run=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "SHIM: lane=sonnet card=TEST-EDIT-RES-1" in result.stdout, result.stdout
+        rows = [r for r in read_reservation_rows(dual) if r["card"] == "TEST-EDIT-RES-1"]
+        assert len(rows) == 2, rows
+        assert rows[0]["state"] == "reserved", rows
+        assert rows[1]["state"] == "charged", rows
+        assert rows[0]["reservationId"] == rows[1]["reservationId"]
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-RES-1")
+
+
+def test_a_real_dispatch_refuses_when_the_kill_switch_is_armed_immediately_before_start(tmp_path):
+    """The kill switch is re-checked immediately before this lane starts, not only once at the
+    top of the loop's own cycle -- a long cycle can dispatch several lanes, and the switch may be
+    armed between the cycle's check and this particular start."""
+    dual, head = editing_board(tmp_path)
+    proc = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-KILL-1")
+    (dual / "WORKSTREAM-LOOP-DISABLED").write_text("armed for test\n", encoding="utf-8")
+    item = {"id": "TEST-EDIT-KILL-1", "state": "queued", "track": "product", "priority": 1,
+            "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-KILL-1.md",
+            "procedureSha256": sha256_of(proc)}
+    try:
+        result = run_editing_dispatch(tmp_path, [item], "TEST-EDIT-KILL-1", dry_run=False)
+        assert result.returncode == 6, result.stdout + result.stderr
+        assert "REFUSED kill-switch-armed" in result.stdout
+        assert "SHIM:" not in result.stdout
+        assert not [r for r in read_reservation_rows(dual) if r["card"] == "TEST-EDIT-KILL-1"]
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-KILL-1")
+
+
+def test_kill_switch_armed_mid_run_by_the_lane_itself_blocks_the_next_dispatch(tmp_path):
+    """MINOR 3 (sol round-1 review): the test above pre-arms the switch from Python BEFORE either
+    dispatch runs, which an early one-time check (e.g. only at the top of a cycle, not
+    immediately before each lane's own start) could also satisfy. Here the fake lane shim arms
+    the switch itself, from inside what a real lane's own process would be, so only a check that
+    re-reads the file at THIS dispatch's own start -- not a cached or once-per-cycle value -- can
+    catch it before the second, separate dispatch."""
+    dual, head = editing_board(tmp_path, with_lane_shim=False)
+    proc_a = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-MIDRUN-A")
+    proc_b = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-MIDRUN-B")
+    kill_switch = dual / "WORKSTREAM-LOOP-DISABLED"
+    shim = dual / "Start-EditingLane.ps1"
+    shim.write_text(
+        "param([string]$Lane,[string]$PromptFile,[string]$WorkDir,[string]$Card,"
+        "[string]$RunDir,[string]$ExtraReadDir,[int]$TimeoutSec)\n"
+        "Set-Content -LiteralPath '%s' -Value 'armed mid-run by the lane'\n"
+        "Write-Output ('SHIM: lane=' + $Lane + ' card=' + $Card + ' workDir=' + $WorkDir)\n"
+        "exit 0\n" % kill_switch.as_posix(),
+        encoding="ascii",
+    )
+    items = [
+        {"id": "TEST-EDIT-MIDRUN-A", "state": "queued", "track": "product", "kind": "product",
+         "owner": "sonnet", "priority": 1,
+         "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-MIDRUN-A.md",
+         "procedureSha256": sha256_of(proc_a)},
+        {"id": "TEST-EDIT-MIDRUN-B", "state": "queued", "track": "product", "kind": "product",
+         "owner": "sonnet", "priority": 1,
+         "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-MIDRUN-B.md",
+         "procedureSha256": sha256_of(proc_b)},
+    ]
+    try:
+        first = run_editing_dispatch(tmp_path, items, "TEST-EDIT-MIDRUN-A", dry_run=False)
+        assert first.returncode == 0, first.stdout + first.stderr
+        assert "SHIM: lane=sonnet card=TEST-EDIT-MIDRUN-A" in first.stdout, first.stdout
+        assert kill_switch.exists(), "the shim did not arm the switch it was given"
+
+        second = run_editing_dispatch(tmp_path, items, "TEST-EDIT-MIDRUN-B", dry_run=False)
+        assert second.returncode == 6, second.stdout + second.stderr
+        assert "REFUSED kill-switch-armed" in second.stdout
+        assert "SHIM: lane=sonnet card=TEST-EDIT-MIDRUN-B" not in second.stdout
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-MIDRUN-A")
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-MIDRUN-B")
+
+
+def test_the_reservation_row_exists_before_the_lane_itself_finishes(tmp_path):
+    """MINOR 3 (sol round-1 review): appending a 'reserved' row before start and a 'charged' row
+    after would also pass a check that only inspects the file once the whole dispatcher process
+    has already returned. Here the fake lane shim reads the reservation file FROM INSIDE its own
+    run and asserts its 'reserved' row for THIS card is already on disk -- proving the row lands
+    before the lane's own process even finishes, not merely before the dispatcher's return."""
+    dual, head = editing_board(tmp_path, with_lane_shim=False)
+    proc = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-RESORDER-1")
+    reservations = dual / "receipts" / "dispatch-reservations.jsonl"
+    shim = dual / "Start-EditingLane.ps1"
+    shim.write_text(
+        "param([string]$Lane,[string]$PromptFile,[string]$WorkDir,[string]$Card,"
+        "[string]$RunDir,[string]$ExtraReadDir,[int]$TimeoutSec)\n"
+        "$rows = @()\n"
+        "if (Test-Path -LiteralPath '%s') {\n"
+        "    $rows = @(Get-Content -LiteralPath '%s' | ForEach-Object { $_ | ConvertFrom-Json })\n"
+        "}\n"
+        "$mine = @($rows | Where-Object { $_.card -eq $Card -and $_.state -eq 'reserved' })\n"
+        "if ($mine.Count -eq 0) { Write-Output 'SHIM: NO-RESERVED-ROW-YET'; exit 1 }\n"
+        "Write-Output ('SHIM: lane=' + $Lane + ' card=' + $Card + ' sawReservedRow=' + $mine[0].reservationId)\n"
+        "exit 0\n" % (reservations.as_posix(), reservations.as_posix()),
+        encoding="ascii",
+    )
+    item = {"id": "TEST-EDIT-RESORDER-1", "state": "queued", "track": "product", "kind": "product",
+            "owner": "sonnet", "priority": 1,
+            "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-RESORDER-1.md",
+            "procedureSha256": sha256_of(proc)}
+    try:
+        result = run_editing_dispatch(tmp_path, [item], "TEST-EDIT-RESORDER-1", dry_run=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "sawReservedRow=" in result.stdout, result.stdout
+        assert "NO-RESERVED-ROW-YET" not in result.stdout
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-RESORDER-1")
+
+
+# --- Invoke-Lane.ps1's own allowlist-required refusal, reachable only if something calls it
+# directly instead of going through Start-EditingLane.ps1 -- which is exactly why deliverable 3
+# requires EVERY editing dispatch to go through the wrapper.
+
+def test_invoke_lane_refuses_allowedtools_all(tmp_path):
+    cmd = (
+        "try { & '%s' -Lane sonnet -Prompt 'x' -WorkDir '%s' -AllowEdits -AllowedTools 'ALL' } "
+        "catch { $_.Exception.Message }" % (LANE_RUNNER.as_posix(), tmp_path.as_posix())
+    )
+    result = run_pwsh_command(cmd)
+    assert "allowlist-required" in (result.stdout + result.stderr)
+
+
+def test_invoke_lane_refuses_editing_with_allowedtools_entirely_absent(tmp_path):
+    """MINOR 2 (sol round-1 review): the existing test above only covers -AllowedTools 'ALL'.
+    The implementation's guard is `IsNullOrWhiteSpace($AllowedTools) -or $AllowedTools -eq 'ALL'`
+    -- an `-or` with two independently reachable branches -- and the absent-argument branch
+    (which binds $AllowedTools to its default '') had no test of its own until now."""
+    cmd = (
+        "try { & '%s' -Lane sonnet -Prompt 'x' -WorkDir '%s' -AllowEdits } "
+        "catch { $_.Exception.Message }" % (LANE_RUNNER.as_posix(), tmp_path.as_posix())
+    )
+    result = run_pwsh_command(cmd)
+    assert "allowlist-required" in (result.stdout + result.stderr)
+
+
+# --- Compose-LanePrompt.ps1 / compose-lane-prompt-core.ps1: determinism, PR_STEP literals, ---
+# field echo, unknown-field refusal (deliverable 6)
+
+PR_STEP_LANE_CAN_OPEN_PR = (
+    'gh pr create -R layibabalola/MLV-App --head {branch} --title "<card id>: <subject>" '
+    '--body "<what, why, red run, green run>"; then print PR-OPENED: <number> as your last line.'
+)
+PR_STEP_OTHERWISE = (
+    'Do NOT call gh. Print PUSHED: {branch} <head sha> as your last line; the dispatcher opens the PR.'
+)
+
+
+def compose(procedure_path, gh_capability, work_dir="C:\\mlvtmp\\lane-x", base_sha="a" * 40,
+            run_dir=None, ts="20260101T000000Z"):
+    run_dir = run_dir or (Path(procedure_path).parent / "run")
+    args = [
+        "pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(COMPOSE_CLI), "-ProcedurePath", str(procedure_path),
+        "-WorkDir", work_dir, "-BaseSha", base_sha, "-RunDir", str(run_dir), "-Ts", ts,
+        "-GhCapability", gh_capability,
+    ]
+    return subprocess.run(args, text=True, capture_output=True)
+
+
+def test_composition_is_deterministic_byte_for_byte(tmp_path):
+    proc = write_fields_card(tmp_path, "DET-1")
+    r1 = compose(proc, "lane-can-open-pr")
+    r2 = compose(proc, "lane-can-open-pr")
+    assert r1.returncode == 0, r1.stdout + r1.stderr
+    assert r1.stdout == r2.stdout
+
+
+def test_composed_fields_prompt_carries_the_lane_can_open_pr_literal_exactly(tmp_path):
+    proc = write_fields_card(tmp_path, "PR-STEP-A")
+    result = compose(proc, "lane-can-open-pr")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert PR_STEP_LANE_CAN_OPEN_PR.format(branch="product/PR-STEP-A") in result.stdout
+
+
+def test_composed_fields_prompt_carries_the_otherwise_literal_exactly(tmp_path):
+    proc = write_fields_card(tmp_path, "PR-STEP-B")
+    result = compose(proc, "no-pr-capability")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert PR_STEP_OTHERWISE.format(branch="product/PR-STEP-B") in result.stdout
+
+
+def test_composed_full_card_prompt_carries_the_lane_can_open_pr_literal_exactly(tmp_path):
+    card = tmp_path / "card-PR-STEP-C.md"
+    card.write_text("# CARD: PR-STEP-C\nSomething.\n{{PR_STEP}}\n", encoding="utf-8")
+    result = compose(card, "lane-can-open-pr")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert PR_STEP_LANE_CAN_OPEN_PR.format(branch="product/PR-STEP-C") in result.stdout
+
+
+def test_composed_full_card_prompt_carries_the_otherwise_literal_exactly(tmp_path):
+    card = tmp_path / "card-PR-STEP-D.md"
+    card.write_text("# CARD: PR-STEP-D\nSomething.\n{{PR_STEP}}\n", encoding="utf-8")
+    result = compose(card, "no-pr-capability")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert PR_STEP_OTHERWISE.format(branch="product/PR-STEP-D") in result.stdout
+
+
+def test_every_parsed_field_appears_byte_for_byte_in_the_composed_prompt(tmp_path):
+    proc = write_fields_card(tmp_path, "FIELD-ECHO-1")
+    text = proc.read_text(encoding="ascii")
+    fields = {}
+    for line in text.splitlines():
+        m = re.match(r"^([A-Z][A-Z0-9_]*):\s?(.*)$", line)
+        if m:
+            fields[m.group(1)] = m.group(2)
+    result = compose(proc, "lane-can-open-pr")
+    assert result.returncode == 0, result.stdout + result.stderr
+    for label, value in fields.items():
+        if label == "CARD_ID":
+            continue  # substituted in multiple places; covered implicitly by the branch/title
+        assert value in result.stdout, "field %s=%r missing byte-for-byte from composed prompt" % (label, value)
+
+
+def test_compose_cli_refuses_an_unknown_field(tmp_path):
+    proc = write_fields_card(tmp_path, "UNK-CLI-1", extra_lines="ZORP: not a real field\n")
+    result = compose(proc, "lane-can-open-pr")
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert result.stdout.startswith("REFUSED: unknown-field")
+
+
+# --- Export-PrReviewEvidence.ps1: pinned repo, byte-exact exports, drift refusal, missing --
+# required context reported as a failure (deliverable 9)
+
+FAKE_GH_REPO_STRING = "layibabalola/MLV-App"
+
+FAKE_GH_SCRIPT = (
+    "$stateDir = $env:FAKE_GH_STATE_DIR\n"
+    "Add-Content -LiteralPath (Join-Path $stateDir 'call_log.txt') -Value ($args -join '|')\n"
+    "function Get-NextLine([string]$Path, [string]$CounterPath) {\n"
+    "    $n = 0\n"
+    "    if (Test-Path -LiteralPath $CounterPath) { $n = [int](Get-Content -LiteralPath $CounterPath -Raw) }\n"
+    "    $n = $n + 1\n"
+    "    Set-Content -LiteralPath $CounterPath -Value $n\n"
+    "    $lines = @(Get-Content -LiteralPath $Path)\n"
+    "    return $lines[$n - 1]\n"
+    "}\n"
+    "if ($args.Count -ge 2 -and $args[0] -eq 'pr' -and $args[1] -eq 'view') {\n"
+    "    Write-Output (Get-NextLine (Join-Path $stateDir 'pr_view.jsonl') (Join-Path $stateDir 'pr_view.count'))\n"
+    "    exit 0\n"
+    "}\n"
+    "if ($args.Count -ge 1 -and $args[0] -eq 'api' -and (($args -join ' ') -match 'branches/master/protection')) {\n"
+    "    Write-Output (Get-NextLine (Join-Path $stateDir 'protection.jsonl') (Join-Path $stateDir 'protection.count'))\n"
+    "    exit 0\n"
+    "}\n"
+    "if ($args.Count -ge 2 -and $args[0] -eq 'pr' -and $args[1] -eq 'checks') {\n"
+    "    Get-Content -LiteralPath (Join-Path $stateDir 'checks.json') -Raw\n"
+    "    exit 0\n"
+    "}\n"
+    "Write-Error ('fake-gh: unrecognized args: ' + ($args -join ' '))\n"
+    "exit 1\n"
+)
+
+
+def make_fake_gh(dir_path, pr_view_sequence, protection_sequence, checks_payload):
+    state = dir_path / "fake-gh-state"
+    state.mkdir()
+    (state / "pr_view.jsonl").write_text("\n".join(json.dumps(x) for x in pr_view_sequence), encoding="utf-8")
+    (state / "protection.jsonl").write_text("\n".join(json.dumps(x) for x in protection_sequence), encoding="utf-8")
+    (state / "checks.json").write_text(json.dumps(checks_payload), encoding="utf-8")
+    (state / "call_log.txt").write_text("", encoding="utf-8")
+    shim = dir_path / "fake-gh.ps1"
+    shim.write_text(FAKE_GH_SCRIPT, encoding="ascii")
+    return shim, state
+
+
+def pr_evidence_repo(tmp_path, with_fork_remote=True):
+    """A repo with base/head commits and (by default) a REAL `fork` remote pinned at the base
+    commit, so a genuine `git fetch fork` (MAJOR 2, sol round-1 review) succeeds instead of
+    silently no-op'ing against a remote that was never more than a manually poked ref.
+
+    The remote is a bare snapshot taken right after the base commit, not an alias to `repo`
+    itself: `repo`'s own branch keeps moving (the head commit below), and if `fork` pointed at
+    that same path, fetching AFTER the head commit would walk the live branch forward and
+    silently repoint `fork/master` at head_sha instead of base_sha.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    # Named explicitly, not left to `init.defaultBranch`: the exporter hardcodes `fork/master`,
+    # so the fork remote's default branch must actually be called `master` for a real fetch to
+    # populate `refs/remotes/fork/master`.
+    subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/master"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("base\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    base_sha = git(repo, "rev-parse", "HEAD")
+
+    if with_fork_remote:
+        fork_remote = tmp_path / "fork_remote.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(fork_remote)], check=True)
+        subprocess.run(["git", "remote", "add", "fork", str(fork_remote)], cwd=repo, check=True)
+    # else: no remote named 'fork' at all -- `git fetch fork` fails deterministically (exit 128,
+    # "'fork' does not appear to be a git repository"), the fetch-failure case MAJOR 2 covers.
+
+    (repo / "f.txt").write_text("head\n")
+    subprocess.run(["git", "commit", "-qam", "head commit"], cwd=repo, check=True)
+    head_sha = git(repo, "rev-parse", "HEAD")
+    return repo, base_sha, head_sha
+
+
+def run_exporter(repo, run_dir, gh_shim, state_dir, pr_number=99):
+    env = dict(os.environ)
+    env["FAKE_GH_STATE_DIR"] = str(state_dir)
+    args = [
+        "pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(EXPORT_PR_EVIDENCE), "-PrNumber", str(pr_number), "-RunDir", str(run_dir),
+        "-RepoRoot", str(repo), "-GhExe", str(gh_shim),
+    ]
+    return subprocess.run(args, text=True, capture_output=True, env=env)
+
+
+def test_exporter_pins_the_repository_on_every_gh_call(tmp_path):
+    """MAJOR 3 (sol round-1 review): the old assertion only checked that the repository STRING
+    occurred SOMEWHERE in the joined argv line, which a repo name appearing in the wrong place
+    (or coincidentally inside the API endpoint's path) would also satisfy -- it could false-green
+    a `-R` flag that carried the wrong value, or a `gh api` call with no repo pin at all. This
+    checks the actual argv TOKEN immediately after `-R` on every `pr view`/`pr checks` call, and
+    the exact `repos/<repo>/branches/master/protection` endpoint string on the `gh api` call --
+    not a substring hit against the whole line."""
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[
+            {"number": 99, "headRefOid": head_sha, "body": "b", "state": "OPEN"},
+            {"number": 99, "headRefOid": head_sha, "body": "b", "state": "OPEN"},
+        ],
+        protection_sequence=[["build"], ["build"]],
+        checks_payload=[{"name": "build", "state": "SUCCESS", "link": "x"}],
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (state / "call_log.txt").read_text(encoding="utf-8").splitlines()
+    assert calls, "gh was never invoked"
+    saw_pr_call = False
+    saw_api_call = False
+    for line in calls:
+        tokens = line.split("|")
+        if tokens[:2] in (["pr", "view"], ["pr", "checks"]):
+            saw_pr_call = True
+            assert "-R" in tokens, "no -R flag on a pr view/checks call: %s" % line
+            idx = tokens.index("-R")
+            assert tokens[idx + 1] == FAKE_GH_REPO_STRING, (
+                "the -R flag does not carry the exact pinned repo (got %r): %s" % (tokens[idx + 1], line)
+            )
+        if tokens[0] == "api":
+            saw_api_call = True
+            endpoint = tokens[1]
+            assert endpoint == "repos/%s/branches/master/protection" % FAKE_GH_REPO_STRING, (
+                "the gh api endpoint is not the exact pinned repo path: %s" % endpoint
+            )
+    assert saw_pr_call, "no pr view/checks call was observed"
+    assert saw_api_call, "no gh api call was observed"
+
+
+def test_exporter_repo_is_a_hardcoded_pin_not_a_caller_supplied_parameter(tmp_path):
+    """MAJOR 3 (sol round-1 review): '-Repo is caller-overridable' was the actual defect behind
+    the weak test above -- a parameter with a safe-looking default is still an argv path that can
+    carry a different value in. The fix removes the parameter entirely rather than merely
+    validating it, so this asserts on the source that no such parameter exists."""
+    text = EXPORT_PR_EVIDENCE.read_text(encoding="utf-8")
+    # Scoped to the SCRIPT's own param() block, not the internal Get-PrView/Get-RequiredContexts
+    # helper functions further down, which legitimately take a $Repo parameter fed from the one
+    # pinned script-scope value below -- that is an implementation detail, not a caller-facing
+    # argv path. \b so this also does not false-positive on the unrelated [string]$RepoRoot.
+    script_param_block = text[text.index("[CmdletBinding()]"):text.index("$ErrorActionPreference")]
+    assert not re.search(r"\[string\]\$Repo\b", script_param_block), (
+        "the repository is still a caller-settable parameter: %r" % script_param_block
+    )
+    assert "'layibabalola/MLV-App'" in text, "the pinned repo is no longer a literal in the source"
+
+
+def extract_json_array_bytes(raw, key):
+    """Slice out the raw bytes of a top-level JSON array value for `key` (e.g. b'"checks":
+    [...]'), by bracket-balancing rather than reparsing -- so the comparison below is a real
+    byte comparison of what was WRITTEN, not a reparse-and-recompare of what was MEANT."""
+    marker = ('"%s":' % key).encode("ascii")
+    idx = raw.index(marker)
+    start = raw.index(b"[", idx)
+    depth = 0
+    i = start
+    while i < len(raw):
+        c = raw[i:i + 1]
+        if c == b"[":
+            depth += 1
+        elif c == b"]":
+            depth -= 1
+            if depth == 0:
+                return raw[start:i + 1]
+        i += 1
+    raise AssertionError("unbalanced [ ] while extracting %r from JSON" % key)
+
+
+def test_exporter_writes_both_exports_byte_exact(tmp_path):
+    """MINOR 1 (sol round-1 review): a test named 'byte exact' that only reparses both files with
+    json.loads and compares fields never actually compares a single byte -- BOM, whitespace,
+    key ordering or any other byte-level change would still pass. The exporter writes the SAME
+    `checks` array into both pr-99-checks.json and pr-99-review.json from the same $checks value,
+    so their serialized `checks` bytes must be IDENTICAL; that is asserted here as a real
+    raw-bytes comparison, on top of (not instead of) the existing semantic checks."""
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    checks_payload = [{"name": "build", "state": "SUCCESS", "link": "x"}]
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[
+            {"number": 99, "headRefOid": head_sha, "body": "the body", "state": "OPEN"},
+            {"number": 99, "headRefOid": head_sha, "body": "the body", "state": "OPEN"},
+        ],
+        protection_sequence=[["build"], ["build"]],
+        checks_payload=checks_payload,
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode == 0, result.stdout + result.stderr
+    checks_raw = (run_dir / "pr-99-checks.json").read_bytes()
+    review_raw = (run_dir / "pr-99-review.json").read_bytes()
+
+    # the actual byte comparison the test's name claims
+    checks_bytes = extract_json_array_bytes(checks_raw, "checks")
+    review_checks_bytes = extract_json_array_bytes(review_raw, "checks")
+    assert checks_bytes == review_checks_bytes, (
+        "the 'checks' array is not byte-identical between pr-99-checks.json and "
+        "pr-99-review.json: %r != %r" % (checks_bytes, review_checks_bytes)
+    )
+
+    checks_doc = json.loads(checks_raw.decode("utf-8"))
+    review_doc = json.loads(review_raw.decode("utf-8"))
+    assert checks_doc["checks"] == checks_payload
+    assert review_doc["headRefOidBefore"] == head_sha
+    assert review_doc["headRefOidAfter"] == head_sha
+    assert review_doc["requiredContextsBefore"] == ["build"]
+    assert review_doc["requiredContextsAfter"] == ["build"]
+    assert review_doc["body"] == "the body"
+    assert review_doc["checks"] == checks_payload
+    assert review_doc["missingRequiredContexts"] == []
+
+
+def test_exporter_refuses_when_git_fetch_fails(tmp_path):
+    """MAJOR 2 (sol round-1 review): `git fetch fork` used to be piped to Out-Null with its exit
+    code never checked, so a fetch failure was indistinguishable from success and the exporter
+    proceeded to review whatever objects happened to already be local. `with_fork_remote=False`
+    means no remote named 'fork' exists at all, so the fetch fails deterministically."""
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path, with_fork_remote=False)
+    run_dir = tmp_path / "run"
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[{"number": 99, "headRefOid": head_sha, "body": "b", "state": "OPEN"}],
+        protection_sequence=[["build"]],
+        checks_payload=[{"name": "build", "state": "SUCCESS", "link": "x"}],
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode != 0
+    assert "REFUSED: git-fetch-failed" in result.stdout, result.stdout + result.stderr
+    assert not (state / "call_log.txt").read_text(encoding="utf-8").strip(), (
+        "gh must never be called after a failed fetch"
+    )
+    assert not run_dir.exists() or not any(run_dir.iterdir())
+
+
+def test_exporter_refuses_on_an_empty_head_sha(tmp_path):
+    """MAJOR 2 (sol round-1 review): the old `if ($sha) { cat-file -e ... }` SKIPPED the
+    commit-existence check entirely for a falsy value, so an empty headRefOid silently passed
+    with no object ever verified. An empty or short sha must be a REFUSAL, not a skipped check."""
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[{"number": 99, "headRefOid": "", "body": "b", "state": "OPEN"}],
+        protection_sequence=[["build"]],
+        checks_payload=[{"name": "build", "state": "SUCCESS", "link": "x"}],
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode != 0
+    assert "REFUSED: pr-sha-invalid field=head" in result.stdout, result.stdout + result.stderr
+    assert not (run_dir / "pr-99-checks.json").exists()
+    assert not (run_dir / "pr-99-review.json").exists()
+
+
+def test_exporter_refuses_on_a_non_40_hex_head_sha(tmp_path):
+    """MAJOR 2 (sol round-1 review): a short or otherwise malformed value is just as unbindable
+    as an empty one -- both must fail the same explicit shape check before any cat-file call."""
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[{"number": 99, "headRefOid": "not-a-sha", "body": "b", "state": "OPEN"}],
+        protection_sequence=[["build"]],
+        checks_payload=[{"name": "build", "state": "SUCCESS", "link": "x"}],
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode != 0
+    assert "REFUSED: pr-sha-invalid field=head value=not-a-sha" in result.stdout, result.stdout + result.stderr
+
+
+def test_exporter_refuses_on_head_drift(tmp_path):
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[
+            {"number": 99, "headRefOid": head_sha, "body": "b", "state": "OPEN"},
+            {"number": 99, "headRefOid": "f" * 40, "body": "b", "state": "OPEN"},
+        ],
+        protection_sequence=[["build"], ["build"]],
+        checks_payload=[{"name": "build", "state": "SUCCESS", "link": "x"}],
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode != 0
+    assert "REFUSED: pr-head-drift" in result.stdout
+    assert not (run_dir / "pr-99-checks.json").exists()
+    assert not (run_dir / "pr-99-review.json").exists()
+
+
+def test_exporter_refuses_on_required_context_drift(tmp_path):
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[
+            {"number": 99, "headRefOid": head_sha, "body": "b", "state": "OPEN"},
+            {"number": 99, "headRefOid": head_sha, "body": "b", "state": "OPEN"},
+        ],
+        protection_sequence=[["build"], ["build", "extra-check"]],
+        checks_payload=[{"name": "build", "state": "SUCCESS", "link": "x"}],
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode != 0
+    assert "REFUSED: required-context-drift" in result.stdout
+
+
+def test_exporter_reports_a_missing_required_context_as_a_failure(tmp_path):
+    """'lint' is required but never ran (absent from checks entirely, not merely non-SUCCESS)
+    -- it must be reported, never silently folded into either verdict."""
+    repo, base_sha, head_sha = pr_evidence_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    shim, state = make_fake_gh(
+        tmp_path,
+        pr_view_sequence=[
+            {"number": 99, "headRefOid": head_sha, "body": "b", "state": "OPEN"},
+            {"number": 99, "headRefOid": head_sha, "body": "b", "state": "OPEN"},
+        ],
+        protection_sequence=[["build", "lint"], ["build", "lint"]],
+        checks_payload=[{"name": "build", "state": "SUCCESS", "link": "x"}],
+    )
+    result = run_exporter(repo, run_dir, shim, state)
+    assert result.returncode == 0, result.stdout + result.stderr
+    review_doc = json.loads((run_dir / "pr-99-review.json").read_text(encoding="utf-8"))
+    assert review_doc["missingRequiredContexts"] == ["lint"]
+    assert "EXPORT: missing-required-context lint" in result.stdout
