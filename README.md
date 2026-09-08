@@ -1,3 +1,19 @@
+## Fork and headless tooling
+
+This is [layibabalola/MLV-App](https://github.com/layibabalola/MLV-App), a fork of MLV App with headless export and playback tooling. The Windows builds use Qt 6.10.2 and MinGW 13.1.
+
+Use `--batch` for headless export, with `--input` and `--output` paths. The optional `--receipt` reads processing settings from a `.marxml` file:
+
+```text
+MLVApp.exe --batch --input "C:/footage/clip.mlv" --output "C:/exports" --receipt "settings.marxml" --skip-errors
+```
+
+`--trim-mlv` is a separate lossless trimming mode; specify `--input`, `--output`, and either `--cut-out` or `--frame-count`. See the [batch CLI reference](claude/batch-cli-spec.md) and `MLVApp.exe --trim-mlv --help` for details.
+
+Report problems using [SUPPORT.md](SUPPORT.md), including this fork's exact commit and reproduction steps. Issues are disabled on this fork; the current public reporting route is the upstream tracker linked in that guide. Use [SECURITY.md](SECURITY.md) for private vulnerability reports.
+
+The badges and links below describe upstream. Its feature list follows under **Inherited from ilia3101/MLV-App**.
+
 # :fire::fire::fire: MLV App :fire::fire::fire:
 What is MLV App? Lightroom, but for Magic Lantern MLV Video (and open source and cross platform)
 
@@ -26,11 +42,11 @@ What is MLV App? Lightroom, but for Magic Lantern MLV Video (and open source and
 - Find Arch Linux image [here](https://aur.archlinux.org/packages/mlv.app/) (thanks to davvore33)
 - Find NixOS package [here](https://search.nixos.org/packages?show=mlv-app)
 - Ask questions on the [Magic Lantern forum thread](https://www.magiclantern.fm/forum/index.php?topic=20025.0)
-- Report bugs on the [issues page](https://github.com/ilia3101/MLV-App/issues)
+- Upstream bug reports use the [upstream issues page](https://github.com/ilia3101/MLV-App/issues); see [SUPPORT.md](SUPPORT.md) for this fork's reporting guidance.
 - A user manual can be found [here](https://github.com/ilia3101/MLV-App/wiki) and in-app
 - A nice tutorial video with subtitles can be found [here](https://www.youtube.com/watch?v=X17jzHjuHOo) in Russian and [here](https://www.youtube.com/watch?v=-mmnG5uBJok) in English (thanks to Maksim Danilov)
 
-## Features :collision:
+## Inherited from ilia3101/MLV-App :collision:
 - Import MLV files
 - Support for spanned mlv (.m00, .m01, ...)
 - Support for lossless mlv

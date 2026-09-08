@@ -41,15 +41,20 @@
     ASCII-only by project convention. The lane/model table lives in
     Invoke-Lane.ps1 and is deliberately NOT duplicated here.
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName='Dispatch')]
 param(
+    [Parameter(ParameterSetName='Dispatch')]
     [ValidateSet('factory','playback','product','continuity','fleet','gate','UNSET','auto')]
     [string]$Track = 'auto',
 
+    [Parameter(ParameterSetName='Dispatch')]
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
     [string]$CardId,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$DryRun,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [ValidateSet('opus','sonnet','fable','sol','luna')]
     [string]$Lane,
 
@@ -57,20 +62,26 @@ param(
     # Invoke-Lane.ps1 -AllowEdits directly - the wrapper is the only sanctioned
     # entry point for write access, and this script adds its own refusals on top
     # of the wrapper's). OFF by default: a read-only analysis lane is the norm.
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$AllowEdits,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [int]$TimeoutSec = 1800,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$Force,
+    [Parameter(ParameterSetName='Dispatch')]
     [int]$StaleHours = 12,
 
     # Skip the merged-PR landing probe entirely (offline, or gh deliberately not consulted).
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$NoLandingProbe,
 
     # Read the queue from somewhere other than the canonical path. EXISTS FOR FALSIFICATION:
     # the landed-card guard below can only be proven by a queue in which a landed card is the
     # TOP pick, and the real queue must never be mutated to manufacture that. Never used in
     # production; the default is the canonical queue.
+    [Parameter(ParameterSetName='Dispatch')]
     [string]$QueuePath = '',
 
     # Path to the pre-dispatch PR-review evidence exporter (deliverable 9, S126). EXISTS FOR
@@ -79,11 +90,42 @@ param(
     # exporter refuses - can be proven without a real PR or a network call, matching the
     # existing fake-gh shim pattern. Never overridden in production; the default is the real
     # exporter beside this script.
-    [string]$ExporterPath = ''
+    [Parameter(ParameterSetName='Dispatch')]
+    [string]$ExporterPath = '',
+
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [switch]$RecordCompletion,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionLaneReceipt,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionReviewVerdictPath,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionWorktree,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string[]]$CompletionAllowedPath,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string[]]$CompletionTestReceiptPath,
+    [Parameter(ParameterSetName='Completion')]
+    [string[]]$CompletionArtifactPath = @(),
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionOutputReceipt
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Completion is an explicit hub operation after independent review. Parameter
+# sets prohibit dispatch flags; no queue, reservation, provider or board setup
+# is reachable through this mode. The sibling adapter owns evidence validation.
+if ($PSCmdlet.ParameterSetName -eq 'Completion') {
+    if (-not $RecordCompletion) { throw 'completion-mode-requires-record-completion' }
+    & (Join-Path $PSScriptRoot 'Record-WorkstreamCompletion.ps1') `
+        -CardId $CardId -LaneReceipt $CompletionLaneReceipt `
+        -ReviewVerdictPath $CompletionReviewVerdictPath -Worktree $CompletionWorktree `
+        -AllowedPath $CompletionAllowedPath -TestReceiptPath $CompletionTestReceiptPath `
+        -ArtifactPath $CompletionArtifactPath -OutputReceipt $CompletionOutputReceipt
+    exit $LASTEXITCODE
+}
 
 # MLV_BOARD_ROOT: only a test sets it (a tmp-dir board fixture, mirroring Invoke-Lane.ps1's own
 # resolution); the default is the real board. Needed so a test can point -AllowEdits worktree
@@ -112,6 +154,7 @@ $StartEditingLane  = Join-Path $DualLane 'Start-EditingLane.ps1'
 # $PSScriptRoot is the pinned sibling when driven by the loop, and the local sibling when run by
 # hand: correct in both cases, and it can never silently cross into another branch's checkout.
 $LaneRunner = Join-Path $PSScriptRoot 'Invoke-Lane.ps1'
+$ProductRatioGuard = Join-Path $PSScriptRoot 'Test-ProductRatioGuard.ps1'
 if (-not $ExporterPath) { $ExporterPath = Join-Path $PSScriptRoot 'Export-PrReviewEvidence.ps1' }
 
 foreach ($p in @($QueuePath, $LaneRunner, $ExporterPath)) {
@@ -252,6 +295,124 @@ function Write-DispatchReservation {
 }
 
 function Test-KillSwitchArmed { return (Test-Path -LiteralPath $KillSwitch) }
+
+function Test-RatioDispatchPermission {
+    param([AllowEmptyString()][string]$Kind = '')
+
+    if (-not (Test-Path -LiteralPath $ProductRatioGuard -PathType Leaf)) {
+        Write-Information -InformationAction Continue "WORKSTREAM: CANNOT-DETERMINE ratio-guard-missing path=$ProductRatioGuard"
+        return 3
+    }
+
+    $guardText = @(& pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ProductRatioGuard -RepoRoot $RepoRoot)
+    $guardExit = $LASTEXITCODE
+    $guard = $null
+    try {
+        if ($guardText.Count -ne 1) { throw 'guard emitted other than one line' }
+        $raw = [string]$guardText[0]
+        $document = [System.Text.Json.JsonDocument]::Parse($raw)
+        try {
+            $root = $document.RootElement
+            if ($root.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) { throw 'guard root is not an object' }
+            $required = @('schema','asOfUtc','windowStartUtc','windowEndUtc','sourceRef','sourceSha','commitPopulation','productCommitCount','productShare7d','productShareThreshold','recognizedProductPrCount','recognizedProductPrIds','unrecognizedProductLandings','landingProvenanceComplete','hasProductLandings','dispatchEvidenceSource','dispatchCoverage','dispatchEvidenceAvailable','dispatchesObserved','malformedDispatchRows','dispatchesPerLandedProductPr7dLowerBound','dispatchRateThreshold','verdict','reasons','errorCode')
+            $actual = @($root.EnumerateObject() | ForEach-Object { $_.Name })
+            if (@($actual | Select-Object -Unique).Count -ne $actual.Count) { throw 'duplicate guard fields' }
+            if (@($actual | Where-Object { $required -notcontains $_ }).Count -ne 0 -or @($required | Where-Object { $actual -notcontains $_ }).Count -ne 0) { throw 'guard schema fields differ' }
+            foreach ($name in @('schema','asOfUtc','windowStartUtc','windowEndUtc','sourceRef','sourceSha','dispatchEvidenceSource','dispatchCoverage','verdict')) {
+                if ($root.GetProperty($name).ValueKind -ne [System.Text.Json.JsonValueKind]::String) { throw "invalid string field $name" }
+            }
+            foreach ($name in @('commitPopulation','productCommitCount','recognizedProductPrCount','dispatchesObserved','malformedDispatchRows')) {
+                $value = 0L
+                if (-not $root.GetProperty($name).TryGetInt64([ref]$value) -or $value -lt 0) { throw "invalid count $name" }
+            }
+            foreach ($name in @('landingProvenanceComplete','hasProductLandings','dispatchEvidenceAvailable')) {
+                if (@([System.Text.Json.JsonValueKind]::True,[System.Text.Json.JsonValueKind]::False) -notcontains $root.GetProperty($name).ValueKind) { throw "invalid bool $name" }
+            }
+            foreach ($name in @('productShare7d','dispatchesPerLandedProductPr7dLowerBound','productShareThreshold','dispatchRateThreshold')) {
+                $number = $root.GetProperty($name)
+                if ($number.ValueKind -eq [System.Text.Json.JsonValueKind]::Null -and $name -in @('productShare7d','dispatchesPerLandedProductPr7dLowerBound')) { continue }
+                if ($number.ValueKind -ne [System.Text.Json.JsonValueKind]::Number) { throw "invalid numeric field $name" }
+                $value = $number.GetDouble()
+                if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) { throw "nonfinite field $name" }
+            }
+            foreach ($name in @('recognizedProductPrIds','unrecognizedProductLandings','reasons')) {
+                if ($root.GetProperty($name).ValueKind -ne [System.Text.Json.JsonValueKind]::Array) { throw "invalid array $name" }
+            }
+        } finally { $document.Dispose() }
+
+        $guard = $raw | ConvertFrom-Json -ErrorAction Stop
+        if ($guard.schema -ne 'mlv-app/product-ratio-guard/v1') { throw 'invalid schema' }
+        if (@('GREEN','RED','ERROR') -notcontains [string]$guard.verdict) { throw 'invalid verdict' }
+        if ($guard.sourceSha -notmatch '^[0-9a-f]{40}$' -and -not ($guard.verdict -eq 'ERROR' -and $guard.sourceSha -eq '')) { throw 'invalid source sha' }
+        if (@('PARTIAL','COMPLETE') -notcontains [string]$guard.dispatchCoverage) { throw 'invalid coverage' }
+        if (@('none','dispatch-reservations','legacy-dispatch-log','unavailable') -notcontains [string]$guard.dispatchEvidenceSource) { throw 'invalid evidence source' }
+        if ([double]$guard.productShareThreshold -ne 0.50 -or [double]$guard.dispatchRateThreshold -ne 4.0) { throw 'invalid thresholds' }
+
+        $population = [long]$guard.commitPopulation
+        $productCount = [long]$guard.productCommitCount
+        $recognizedCount = [long]$guard.recognizedProductPrCount
+        $observed = [long]$guard.dispatchesObserved
+        $malformed = [long]$guard.malformedDispatchRows
+        if ($productCount -gt $population) { throw 'product count exceeds population' }
+        if (@($guard.recognizedProductPrIds).Count -ne $recognizedCount) { throw 'recognized count mismatch' }
+        if (@($guard.recognizedProductPrIds | Select-Object -Unique).Count -ne $recognizedCount) { throw 'duplicate recognized PR id' }
+        if (@($guard.recognizedProductPrIds | Where-Object { $_ -isnot [int] -and $_ -isnot [long] -or [long]$_ -le 0 }).Count -ne 0) { throw 'invalid recognized PR id' }
+        if (@($guard.unrecognizedProductLandings | Where-Object { $_ -isnot [string] -or $_ -notmatch '^[0-9a-f]{40}$' }).Count -ne 0) { throw 'invalid unrecognized landing' }
+        if (@($guard.unrecognizedProductLandings | Select-Object -Unique).Count -ne @($guard.unrecognizedProductLandings).Count) { throw 'duplicate unrecognized landing' }
+        if (@($guard.reasons | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) { throw 'invalid reasons' }
+
+        $expectedProvenance = @($guard.unrecognizedProductLandings).Count -eq 0
+        $expectedLandings = ($recognizedCount + @($guard.unrecognizedProductLandings).Count) -gt 0
+        if ($guard.verdict -ne 'ERROR' -and [bool]$guard.landingProvenanceComplete -ne $expectedProvenance) { throw 'provenance contradiction' }
+        if ([bool]$guard.hasProductLandings -ne $expectedLandings) { throw 'landing contradiction' }
+        if ([bool]$guard.dispatchEvidenceAvailable -ne ([string]$guard.dispatchEvidenceSource -notin @('none','unavailable'))) { throw 'evidence availability contradiction' }
+
+        if ($population -eq 0) {
+            if ($null -ne $guard.productShare7d -or $productCount -ne 0) { throw 'empty population contradiction' }
+        } else {
+            if ($null -eq $guard.productShare7d) { throw 'missing product share for populated history' }
+            $share = [double]$guard.productShare7d
+            if ([double]::IsNaN($share) -or [double]::IsInfinity($share) -or $share -lt 0 -or $share -gt 1) { throw 'invalid product share' }
+            if ([math]::Abs($share - ([double]$productCount / [double]$population)) -gt 1e-12) { throw 'product share mismatch' }
+        }
+
+        if ($null -ne $guard.dispatchesPerLandedProductPr7dLowerBound) {
+            $rateValue = [double]$guard.dispatchesPerLandedProductPr7dLowerBound
+            if ([double]::IsNaN($rateValue) -or [double]::IsInfinity($rateValue) -or $rateValue -lt 0 -or -not [bool]$guard.dispatchEvidenceAvailable -or -not $expectedProvenance -or $recognizedCount -eq 0) { throw 'invalid dispatch rate' }
+            if ([math]::Abs($rateValue - ([double]$observed / [double]$recognizedCount)) -gt 1e-12) { throw 'dispatch rate mismatch' }
+        } elseif ([bool]$guard.dispatchEvidenceAvailable -and $expectedProvenance -and $recognizedCount -gt 0) { throw 'missing dispatch rate' }
+
+        if ([string]$guard.verdict -eq 'GREEN') {
+            if ($guardExit -ne 0 -or $guard.dispatchCoverage -ne 'COMPLETE' -or -not [bool]$guard.dispatchEvidenceAvailable -or -not $expectedProvenance -or -not $expectedLandings -or $malformed -ne 0 -or $null -eq $guard.productShare7d -or [double]$guard.productShare7d -lt [double]$guard.productShareThreshold -or $null -eq $guard.dispatchesPerLandedProductPr7dLowerBound -or [double]$guard.dispatchesPerLandedProductPr7dLowerBound -gt [double]$guard.dispatchRateThreshold) { throw 'contradictory GREEN' }
+        } elseif ([string]$guard.verdict -eq 'ERROR') {
+            if ($guardExit -ne 3 -or [string]::IsNullOrWhiteSpace([string]$guard.errorCode)) { throw 'invalid ERROR contract' }
+        } elseif ($guardExit -ne 0 -or $null -ne $guard.errorCode) { throw 'invalid RED contract' }
+    } catch {
+        Write-Information -InformationAction Continue 'WORKSTREAM: CANNOT-DETERMINE ratio-guard-output-missing-or-malformed'
+        return 3
+    }
+
+    $share = if ($null -eq $guard.productShare7d) { 'unavailable' } else { ([double]$guard.productShare7d).ToString('0.####', [Globalization.CultureInfo]::InvariantCulture) }
+    $rate = if ($null -eq $guard.dispatchesPerLandedProductPr7dLowerBound) { 'unavailable' } else { ([double]$guard.dispatchesPerLandedProductPr7dLowerBound).ToString('0.####', [Globalization.CultureInfo]::InvariantCulture) }
+    $reasons = @($guard.reasons) -join ','
+    Write-Information -InformationAction Continue "WORKSTREAM: product_share_7d=$share"
+    Write-Information -InformationAction Continue "WORKSTREAM: dispatches_per_landed_product_pr_7d_lower_bound=$rate coverage=$($guard.dispatchCoverage)"
+    Write-Information -InformationAction Continue "WORKSTREAM: ratio-guard verdict=$($guard.verdict) reasons=$reasons"
+
+    if ($guardExit -ne 0 -or [string]$guard.verdict -eq 'ERROR') {
+        Write-Information -InformationAction Continue 'WORKSTREAM: CANNOT-DETERMINE ratio-guard-error'
+        return 3
+    }
+    if ([string]$guard.verdict -eq 'RED') {
+        if (@('product','playback') -contains $Kind) {
+            Write-Information -InformationAction Continue "WORKSTREAM: ratio-guard allowed-under-red kind=$Kind"
+            return 0
+        }
+        Write-Information -InformationAction Continue "WORKSTREAM: REFUSED ratio-guard-red kind=$Kind"
+        return 6
+    }
+    return 0
+}
 
 # Lane resolution: the card's own `kind`/`owner` fields win (0.18 seeds them for every
 # product/playback card), then a RECON:/REVIEW: scope prefix routes to the breadth-recon or
@@ -741,6 +902,9 @@ $fence
         exit 6
     }
 
+    $ratioExit = Test-RatioDispatchPermission -Kind $cardKind
+    if ($ratioExit -ne 0) { exit $ratioExit }
+
     # Reservation events (deliverable 7, S76): APPENDED, never updated in place. 'reserved' is
     # written the instant before the process launches, and the loop counts ONLY these rows for
     # today's budget - never workstream-dispatch-log.jsonl below, which a lane could in principle
@@ -902,6 +1066,12 @@ $fence
         Write-Output "WORKSTREAM: REFUSED kill-switch-armed card=$cardId"
         Remove-LaneWorktreeIfClean $laneWorkDir | Out-Null
         exit 6
+    }
+
+    $ratioExit = Test-RatioDispatchPermission -Kind $cardKind
+    if ($ratioExit -ne 0) {
+        Remove-LaneWorktreeIfClean $laneWorkDir | Out-Null
+        exit $ratioExit
     }
 
     # Reservation events (deliverable 7, S76): APPENDED, never updated in place. 'reserved' is
