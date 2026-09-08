@@ -41,15 +41,20 @@
     ASCII-only by project convention. The lane/model table lives in
     Invoke-Lane.ps1 and is deliberately NOT duplicated here.
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName='Dispatch')]
 param(
+    [Parameter(ParameterSetName='Dispatch')]
     [ValidateSet('factory','playback','product','continuity','fleet','gate','UNSET','auto')]
     [string]$Track = 'auto',
 
+    [Parameter(ParameterSetName='Dispatch')]
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
     [string]$CardId,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$DryRun,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [ValidateSet('opus','sonnet','fable','sol','luna')]
     [string]$Lane,
 
@@ -57,20 +62,26 @@ param(
     # Invoke-Lane.ps1 -AllowEdits directly - the wrapper is the only sanctioned
     # entry point for write access, and this script adds its own refusals on top
     # of the wrapper's). OFF by default: a read-only analysis lane is the norm.
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$AllowEdits,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [int]$TimeoutSec = 1800,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$Force,
+    [Parameter(ParameterSetName='Dispatch')]
     [int]$StaleHours = 12,
 
     # Skip the merged-PR landing probe entirely (offline, or gh deliberately not consulted).
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$NoLandingProbe,
 
     # Read the queue from somewhere other than the canonical path. EXISTS FOR FALSIFICATION:
     # the landed-card guard below can only be proven by a queue in which a landed card is the
     # TOP pick, and the real queue must never be mutated to manufacture that. Never used in
     # production; the default is the canonical queue.
+    [Parameter(ParameterSetName='Dispatch')]
     [string]$QueuePath = '',
 
     # Path to the pre-dispatch PR-review evidence exporter (deliverable 9, S126). EXISTS FOR
@@ -79,11 +90,42 @@ param(
     # exporter refuses - can be proven without a real PR or a network call, matching the
     # existing fake-gh shim pattern. Never overridden in production; the default is the real
     # exporter beside this script.
-    [string]$ExporterPath = ''
+    [Parameter(ParameterSetName='Dispatch')]
+    [string]$ExporterPath = '',
+
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [switch]$RecordCompletion,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionLaneReceipt,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionReviewVerdictPath,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionWorktree,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string[]]$CompletionAllowedPath,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string[]]$CompletionTestReceiptPath,
+    [Parameter(ParameterSetName='Completion')]
+    [string[]]$CompletionArtifactPath = @(),
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionOutputReceipt
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Completion is an explicit hub operation after independent review. Parameter
+# sets prohibit dispatch flags; no queue, reservation, provider or board setup
+# is reachable through this mode. The sibling adapter owns evidence validation.
+if ($PSCmdlet.ParameterSetName -eq 'Completion') {
+    if (-not $RecordCompletion) { throw 'completion-mode-requires-record-completion' }
+    & (Join-Path $PSScriptRoot 'Record-WorkstreamCompletion.ps1') `
+        -CardId $CardId -LaneReceipt $CompletionLaneReceipt `
+        -ReviewVerdictPath $CompletionReviewVerdictPath -Worktree $CompletionWorktree `
+        -AllowedPath $CompletionAllowedPath -TestReceiptPath $CompletionTestReceiptPath `
+        -ArtifactPath $CompletionArtifactPath -OutputReceipt $CompletionOutputReceipt
+    exit $LASTEXITCODE
+}
 
 # MLV_BOARD_ROOT: only a test sets it (a tmp-dir board fixture, mirroring Invoke-Lane.ps1's own
 # resolution); the default is the real board. Needed so a test can point -AllowEdits worktree
