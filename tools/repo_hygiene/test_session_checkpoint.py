@@ -1,9 +1,11 @@
 """Offline regression fixtures; importing the checkpoint never invokes its hooks."""
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("session_checkpoint", ROOT / "tools/session-checkpoint.py")
@@ -79,7 +81,37 @@ class SessionCheckpointTests(unittest.TestCase):
                 self.assertIn(pointer, text)
         self.assertEqual([], CHECKPOINT.generate_resume_script(self.repo, "b", SESSION, [], None))
         invocation["status"] = "COMPLETED"
-        self.assertEqual([], CHECKPOINT.generate_resume_script(self.repo, "b", SESSION, [], invocation))
+        self.assertIn(f"- receipt: {receipt}",
+                      CHECKPOINT.generate_resume_script(self.repo, "b", SESSION, [], invocation))
+
+    def test_successful_process_keeps_pointers_in_rendered_stop_checkpoint(self):
+        receipt, prompt = self.receipt(nested=True, exitCode=0, state="complete", complete=True)
+        invocation = CHECKPOINT.scan_fleet_runs(self.repo, SESSION)
+        self.assertEqual("PROCESS_EXITED", invocation["status"])
+        self.assertEqual(0, invocation["exit_code"])
+        self.assertTrue(invocation["complete"])
+        fake_home = self.repo / "fixture-home"
+        def fake_git(cwd, *args):
+            if "--git-common-dir" in args:
+                return str(self.repo / ".git")
+            if "symbolic-ref" in args:
+                return "codex/fixture"
+            return ""
+        payload = json.dumps(dict(cwd=str(self.repo), session_id=SESSION, hook_event_name="Stop"))
+        with patch.object(CHECKPOINT, "git", side_effect=fake_git), \
+             patch.object(CHECKPOINT, "account_id", return_value=""), \
+             patch.object(Path, "home", return_value=fake_home), \
+             patch.object(CHECKPOINT.sys, "stdin", io.StringIO(payload)), \
+             patch.object(CHECKPOINT.sys, "stdout", io.StringIO()):
+            self.assertEqual(0, CHECKPOINT.main())
+        checkpoint = fake_home / ".claude/session-checkpoints" / self.repo.name.replace(" ", "-") / f"SESSION-{SESSION[:8]}.md"
+        text = checkpoint.read_text(encoding="utf-8")
+        for value in (str(receipt), str(prompt), str(self.fleet / "owned-run/luna-001.last.txt"),
+                      f"- worktree: {self.repo}", "PROCESS_EXITED", "- state: complete"):
+            with self.subTest(value=value):
+                self.assertIn(value, text)
+        self.assertNotIn("COMPLETED", text)
+        self.assertNotIn("delivery accepted", text.lower())
 
     def test_main_passes_full_session_identity_to_scan(self):
         import ast

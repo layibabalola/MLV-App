@@ -67,12 +67,12 @@ def scan_fleet_runs(repo, session_id):
             prompt_path = (Path(explicit_prompt) if explicit_prompt else
                            receipt_file.with_name(receipt_file.name.removesuffix(".receipt.json") + ".prompt.txt"))
 
-            # Status: in_progress (no exitCode), completed (exitCode 0), or failed
+            # Process lifecycle only; exit zero does not accept the delivery.
             exit_code = receipt.get("exitCode")
             if exit_code is None:
                 status = "IN_PROGRESS"
             elif exit_code == 0:
-                status = "COMPLETED"
+                status = "PROCESS_EXITED"
             else:
                 status = f"FAILED (exit {exit_code})"
 
@@ -98,7 +98,7 @@ def scan_fleet_runs(repo, session_id):
 
 def generate_resume_script(repo, branch, session_id, dirty_files, invocation):
     """Retain the historical helper name, but return descriptive pointers only."""
-    if not invocation or invocation["status"] == "COMPLETED":
+    if not invocation:
         return []
     lines = [f"- repository: {repo}", f"- branch: {branch}", f"- session: {session_id}"]
     for key in ("worktree", "lane", "card", "receipt", "prompt_path", "output_path", "status", "state"):
