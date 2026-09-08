@@ -335,7 +335,7 @@ $jobAssigned = $false
 $promptDelivered = $false
 $containedHost = $null
 $childIdentity = $null
-$deadlineUtc = $null
+$deadlineUtc = $startedUtc.AddSeconds($TimeoutSec)
 $containment = $null
 $proc = $null
 # $null, never 0. An engine that does not REPORT cost and a run that cost nothing are
@@ -445,7 +445,6 @@ if ($cfg.engine -eq 'claude') {
 }
 
 # ---------------------------------------------------------------- run, bounded
-$startedUtc = (Get-Date).ToUniversalTime()
 # Keep the stopwatch started at reservation: setup and child startup consume the
 # same wall budget as provider execution.
 
@@ -467,6 +466,10 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError  = $true
 $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $psi.StandardErrorEncoding  = [System.Text.UTF8Encoding]::new($false)
+
+if ($sw.Elapsed.TotalMilliseconds -ge ($TimeoutSec * 1000.0)) {
+    throw [TimeoutException]::new('launch-budget-exhausted')
+}
 
 if ($cfg.engine -eq 'claude') {
     # This trusted host is inert until it reads frame one. It is assigned to the job
@@ -519,7 +522,6 @@ if ($cfg.engine -eq 'claude') {
     if (Test-Path -LiteralPath $controlPath) { throw "control-path-exists: $controlPath" }
     $launchFrame = [ordered]@{ schema='mlv-lane-launch/v1'; exe=$exe; argv=$argv; cwd=$WorkDir; controlPath=$controlPath } | ConvertTo-Json -Compress -Depth 5
     $proc.StandardInput.WriteLine($launchFrame); $proc.StandardInput.Flush()
-    $deadlineUtc = $startedUtc.AddSeconds($TimeoutSec)
     $controlDeadlineMs = [math]::Min($sw.Elapsed.TotalMilliseconds + 10000.0, $TimeoutSec * 1000.0)
     while (-not (Test-Path -LiteralPath $controlPath)) {
         if ($proc.HasExited) { throw "contained-host-exited-before-child: $($proc.ExitCode)" }
@@ -657,7 +659,7 @@ catch {
             runnerPid=$PID; runnerCreatedUtc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
             ownerPid=if($null-ne $containedHost){$containedHost.pid}else{$null}
             ownerCreatedUtc=if($null-ne $containedHost){$containedHost.createdUtc}else{$null}
-            childPid=$null; childCreatedUtc=$null; deadlineUtc=$null
+            childPid=$null; childCreatedUtc=$null; deadlineUtc=$deadlineUtc.ToString('o')
             promptDelivered=$promptDelivered; assignmentErrorCode=$native
         }
     }

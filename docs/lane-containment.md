@@ -11,8 +11,9 @@ The launcher writes a `running`, incomplete receipt with process identities
 before delivering the prompt. Normal completion replaces it atomically. If
 the launcher is forcibly terminated, the receipt remains incomplete; it cannot
 prove delivery or zero spend. Receipt I/O failures do not retain the job.
-Startup and provider execution share one monotonic timeout budget. The UTC
-deadline is explanatory metadata, not the clock used to enforce that budget.
+Setup, startup and provider execution share one monotonic timeout budget. The
+UTC deadline projects that budget from the same initial start time; the stopwatch
+enforces it. An exhausted setup budget prevents the host or provider from starting.
 
 Every Claude lane receives `--disallowedTools Agent,Task`. An editing allowlist
 containing either tool is rejected before reservation. Existing editing grants,

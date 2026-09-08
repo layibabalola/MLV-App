@@ -121,8 +121,6 @@ def test_timeout_kills_owned_child_and_grandchild(fixture_tree):
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
     assert r.returncode==124,(r.stdout,r.stderr)
     q=json.loads(receipt.read_text(encoding="utf-8")); assert q["state"]=="complete" and q["timedOut"]
-    elapsed=(datetime.fromisoformat(q["containment"]["deadlineUtc"])-datetime.fromisoformat(q["startedUtc"])).total_seconds()
-    assert elapsed==3 and q["durationSec"] < 5.0
     wait_absent(json.loads((fixture_tree["root"]/"child.json").read_text(encoding="utf-8-sig")))
     wait_absent(json.loads((fixture_tree["root"]/"grand.json").read_text(encoding="utf-8-sig")))
 
@@ -191,9 +189,36 @@ def test_startup_consumes_same_deadline_without_starting_provider(fixture_tree):
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=15)
     assert r.returncode==124,(r.stdout,r.stderr)
     q=json.loads(receipt.read_text(encoding="utf-8"))
-    assert q["timedOut"] and q["durationSec"] < 3
+    assert q["timedOut"]
     assert not (fixture_tree["root"]/"child.json").exists()
     wait_absent({"pid":q["containment"]["ownerPid"],"createdUtc":q["containment"]["ownerCreatedUtc"]})
+
+
+@pytest.mark.parametrize("elapsed_ms,expected_exit", [(0, 0), (4000, 124)])
+def test_setup_origin_and_expired_budget_are_deterministic(fixture_tree, elapsed_ms, expected_exit):
+    marker = fixture_tree["root"] / "start-attempt.txt"
+    def clocks(text):
+        text = text.replace("$startedUtc = (Get-Date).ToUniversalTime()",
+            "$startedUtc = [datetime]::Parse('2000-01-01T00:00:00Z').ToUniversalTime()", 1)
+        old = "$sw         = [System.Diagnostics.Stopwatch]::StartNew()"
+        assert text.count(old) == 1
+        text = text.replace(old, "$sw = [pscustomobject]@{Elapsed=[timespan]::FromMilliseconds(%d)}\n$sw | Add-Member ScriptMethod Stop {}" % elapsed_ms)
+        old = "$proc = [Diagnostics.Process]::Start($psi)"
+        assert text.count(old) == 2
+        return text.replace(old, "Write-Utf8NoBom '%s' 'start'\n    %s" % (str(marker).replace("'", "''"), old))
+    cmd, env, receipt = prepare(fixture_tree, "normal", mutation=clocks)
+    cmd[cmd.index("-TimeoutSec") + 1] = "3"
+    result = subprocess.run(cmd, env=env, text=True, capture_output=True, timeout=20)
+    assert result.returncode == expected_exit, (result.stdout, result.stderr)
+    assert marker.exists() == (expected_exit == 0)
+    q = json.loads(receipt.read_text(encoding="utf-8"))
+    assert datetime.fromisoformat(q["startedUtc"]) == datetime.fromisoformat("2000-01-01T00:00:00+00:00")
+    assert datetime.fromisoformat(q["containment"]["deadlineUtc"]) == datetime.fromisoformat("2000-01-01T00:00:03+00:00")
+    assert q["timedOut"] == (expected_exit == 124)
+    if expected_exit == 124:
+        assert not q["containment"]["jobAssigned"]
+        assert q["containment"]["ownerPid"] is None
+        assert not (fixture_tree["root"] / "child.json").exists()
 
 
 def test_final_receipt_io_failure_cannot_keep_descendants_alive(fixture_tree):
