@@ -36,6 +36,7 @@ extern "C" {
 #include <QTime>
 #include <QByteArray>
 #include <QSignalBlocker>
+#include <QScopedValueRollback>
 #include <QSettings>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -5964,14 +5965,28 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
      * processed8 prefetch froze the picture (2026-06-10); this hash is the
      * trace-level ground truth that the displayed CONTENT changes. Parsed by
      * tools/profiling/detect-playback-artifacts.ps1 (frozen-content check).
-     * The experimental gpu16 viewport path has no displayImage and is not
-     * hashed. */
-    if( interactiveTraceEnabled() && !displayImage.isNull() )
+     * Explicit GUI screenshot smokes also sample the actual GPU viewport.
+     * That readback is instrumentation, so these runs are not speed evidence.
+     * Ordinary no-readback playback never enters the capture branch. Keep the
+     * framebuffer stream separate from CPU-image and raw-Bayer probe hashes. */
+    QImage presentedContentImage = displayImage;
+    bool capturedGpuViewport = false;
+    if( interactiveTraceEnabled()
+     && m_guiSmokeCapturePresentedContent
+     && framePresentedByViewport
+     && !GpuDisplayWindow::isActive()
+     && ui->graphicsView && ui->graphicsView->viewport() )
     {
-        const uchar *contentBits = displayImage.constBits();
+        presentedContentImage = ui->graphicsView->viewport()->grab().toImage()
+            .convertToFormat( QImage::Format_RGBA8888 );
+        capturedGpuViewport = !presentedContentImage.isNull();
+    }
+    if( interactiveTraceEnabled() && !presentedContentImage.isNull() )
+    {
+        const uchar *contentBits = presentedContentImage.constBits();
         const size_t contentBytes =
-            static_cast<size_t>( displayImage.bytesPerLine() )
-            * static_cast<size_t>( displayImage.height() );
+            static_cast<size_t>( presentedContentImage.bytesPerLine() )
+            * static_cast<size_t>( presentedContentImage.height() );
         uint64_t contentHash = 1469598103934665603ull;
         if( contentBits && contentBytes > 0 )
         {
@@ -5984,12 +5999,20 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             }
         }
         logInteractionEvent(
-            QStringLiteral("draw_frame_ready.present_content"),
-            QStringLiteral("display_frame=%1 play_checked=%2 position=%3 hash=%4")
+            capturedGpuViewport
+                ? QStringLiteral("draw_frame_ready.gpu_present_content")
+                : QStringLiteral("draw_frame_ready.present_content"),
+            QStringLiteral("display_frame=%1 play_checked=%2 position=%3 hash=%4 serial=%5 generation=%6 source=%7 width=%8 height=%9")
                 .arg( static_cast<qulonglong>( display_frame ) )
                 .arg( bool01( ui->actionPlay->isChecked() ) )
                 .arg( ui->horizontalSliderPosition->value() )
-                .arg( QString::number( contentHash, 16 ) ),
+                .arg( QString::number( contentHash, 16 ) )
+                .arg( static_cast<qulonglong>( task.requestSerial ) )
+                .arg( static_cast<qulonglong>( task.requestContext.presentationGeneration ) )
+                .arg( capturedGpuViewport ? QStringLiteral("gl_viewport_grab")
+                                          : QStringLiteral("cpu_display_image") )
+                .arg( presentedContentImage.width() )
+                .arg( presentedContentImage.height() ),
             true );
     }
 
@@ -8423,6 +8446,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
 
 int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 {
+    const QScopedValueRollback<bool> capturePresentedContent(
+        m_guiSmokeCapturePresentedContent, !options.screenshotOutputPath.isEmpty() );
     QTextStream out(stdout);
     QTextStream err(stderr);
     m_lookAssistAutoWarmupDeferralCount = 0;
@@ -9293,6 +9318,12 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
     if( !options.screenshotOutputPath.isEmpty() )
     {
+        if( GpuDisplayWindow::isActive() )
+        {
+            err << "[GUI-SMOKE] ERROR: fresh screenshot provenance is unsupported "
+                   "for the separate GPU display window.\n";
+            return 10;
+        }
         qApp->processEvents( QEventLoop::AllEvents );
         if( ui->graphicsView && ui->graphicsView->viewport() )
         {

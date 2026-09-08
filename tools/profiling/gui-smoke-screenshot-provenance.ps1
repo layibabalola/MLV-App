@@ -262,7 +262,7 @@ function Get-GuiSmokeScreenshotProvenanceV2 {
             -Lines $OrderedLogLines -StartIndex 0 -EndIndex ($frameIndex - 1) `
             -Reverse -Predicate {
                 param($line)
-                if ($line -notlike '*draw_frame_ready.present_content*') { return $false }
+                if ($line -notmatch 'draw_frame_ready\.(?:gpu_)?present_content\s') { return $false }
                 $candidate = Convert-GuiSmokeProvenanceLogLineToObject $line
                 return (Get-GuiSmokeObjectPropertyValue $candidate 'display_frame') -eq $displayFrame
             }
@@ -355,6 +355,22 @@ function Get-GuiSmokeScreenshotProvenanceV2 {
         $failures.Add('request-ready-generation-mismatch')
     }
 
+    # A GPU source-buffer hash cannot prove displayed content. This separate
+    # event is emitted only after a real viewport grab in screenshot smokes.
+    if ($presentIndex -ge 0 -and $OrderedLogLines[$presentIndex] -like '*draw_frame_ready.gpu_present_content*') {
+        $gpuSerial = Get-GuiSmokeObjectPropertyValue $present 'serial'
+        $gpuGeneration = Get-GuiSmokeObjectPropertyValue $present 'generation'
+        $gpuSource = Get-GuiSmokeObjectPropertyValue $present 'source'
+        $gpuWidth = Get-GuiSmokeObjectPropertyValue $present 'width'
+        $gpuHeight = Get-GuiSmokeObjectPropertyValue $present 'height'
+        if ($null -eq $gpuSerial -or $gpuSerial -ne $requestSerial) { $failures.Add('gpu-present-serial-mismatch') }
+        if ($null -eq $gpuGeneration -or $gpuGeneration -ne $requestGeneration) { $failures.Add('gpu-present-generation-mismatch') }
+        if ($gpuSource -cne 'gl_viewport_grab') { $failures.Add('gpu-present-source-invalid') }
+        if ($null -eq $gpuWidth -or $null -eq $gpuHeight -or [long]$gpuWidth -le 0 -or [long]$gpuHeight -le 0) {
+            $failures.Add('gpu-present-dimensions-invalid')
+        }
+    }
+
     if ($readyBeginIndex -ge 0 -and $presentIndex -ge 0 -and $frameIndex -ge 0 -and
         $manifestIndex -ge 0 -and $readyEndIndex -ge 0 -and $screenshotIndex -ge 0 -and
         -not ($requestIndex -lt $readyBeginIndex -and $readyBeginIndex -lt $presentIndex -and
@@ -366,7 +382,7 @@ function Get-GuiSmokeScreenshotProvenanceV2 {
     if ($frameIndex -ge 0 -and $screenshotIndex -gt $frameIndex) {
         $laterPresentIndex = Find-GuiSmokeLogEventIndex `
             -Lines $OrderedLogLines -StartIndex ($frameIndex + 1) -EndIndex ($screenshotIndex - 1) `
-            -Predicate { param($line) $line -like '*draw_frame_ready.present_content*' }
+            -Predicate { param($line) $line -match 'draw_frame_ready\.(?:gpu_)?present_content\s' }
         if ($laterPresentIndex -ge 0) { $failures.Add('later-unassociated-present-content') }
     }
 
