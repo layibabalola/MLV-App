@@ -135,13 +135,15 @@ cards newly transitioned this run — so repeated runs don't reset it),
   that is not a bool, `scopelessIds` a list of unique strings). A malformed
   existing receipt refuses the run **before** any queue mutation.
 - If a valid receipt already exists at `--receipt` and its `queueSha256`,
-  `frozenCount`, and `scopelessIds` match what this run computes, the queue
+  `frozenCount` match what this run computes, the queue
   is re-read immediately before declaring success and its hash is checked
   against the receipt's `queueSha256` one more time — closing the window
   where a concurrent writer changed the queue after the initial read but
   the (now stale) receipt still looked like a match. Only then is it a
   no-op: queue and receipt are left byte-identical, exit 0. (A matching
-  receipt's own `dryRunDiffSha256` may legitimately differ from the diff
+  receipt's historical `scopelessIds` are preserved: once kinds are derived,
+  those cards do not require derivation on replay. The receipt's own
+  `dryRunDiffSha256` may legitimately differ from the diff
   this run computes — an already-applied queue computes an empty diff —
   so that field is never compared for the match.)
 - If an existing (valid) receipt disagrees, the run refuses **before**
