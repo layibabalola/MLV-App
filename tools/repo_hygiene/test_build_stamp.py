@@ -1,4 +1,4 @@
-import subprocess, sys, tempfile, unittest
+import re, subprocess, sys, tempfile, unittest
 from unittest.mock import patch
 from pathlib import Path
 from tools.release import build_stamp
@@ -58,13 +58,22 @@ class BuildStampTests(unittest.TestCase):
         self.assertEqual(h.read_text(), "previous header")
 
     def test_installer_working_directory_keeps_logs_out_of_source(self):
-        import yaml
         for filename, step_name in (("Windows.yml", "Install Qt 6.10.2 + MinGW 13.1"),
                                     ("Linux.yml", "Install Qt 6.10.2")):
             with self.subTest(workflow=filename), tempfile.TemporaryDirectory() as runner_temp:
-                workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
-                step = next(s for s in workflow["jobs"]["build"]["steps"] if s.get("name") == step_name)
-                cwd = step.get("working-directory", str(self.root)).replace("${{ runner.temp }}", runner_temp)
+                # Read the exact curated build-step surface without adding a
+                # third-party YAML dependency to the stdlib hygiene suite.
+                workflow = (ROOT / ".github/workflows" / filename).read_text()
+                jobs = workflow.split("\njobs:\n"); self.assertEqual(len(jobs), 2)
+                build = re.findall(r"(?ms)^  build:\n(.*?)(?=^  \S|\Z)", jobs[1])
+                self.assertEqual(len(build), 1)
+                steps = re.findall(r"(?ms)^    steps:\n(.*?)(?=^    [^\s-]|\Z)", build[0])
+                self.assertEqual(len(steps), 1)
+                selected = re.findall(r"(?ms)^    - name: " + re.escape(step_name) + r"\n(.*?)(?=^    -|\Z)", steps[0])
+                self.assertEqual(len(selected), 1)
+                directories = re.findall(r"(?m)^      working-directory:[ \t]*([^\n]+)$", selected[0])
+                self.assertLessEqual(len(directories), 1)
+                cwd = (directories[0].strip() if directories else str(self.root)).replace("${{ runner.temp }}", runner_temp)
                 # AQT's file handler creates a relative aqtinstall.log. Exercise
                 # the workflow-selected cwd with that behavior and the real gate.
                 subprocess.run([sys.executable, "-c", "from pathlib import Path; Path('aqtinstall.log').write_text('installer log')"], cwd=cwd, check=True)

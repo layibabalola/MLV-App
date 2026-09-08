@@ -19,6 +19,7 @@ This closes the observed hosted-build gap where the package inventory was valid
 but the application carried `sha=unknown`. Earlier artifacts retain that finding;
 only newly generated and verified artifacts can claim the embedded source SHA.
 
-Validate the CLI behavior with
-`python -m pytest tools/repo_hygiene/test_build_stamp.py`; both hosted release
-workflows must also pass at the reviewed candidate commit.
+Validate the CLI and workflow-cwd fixture without installed site packages using
+`python -S -m unittest tools.repo_hygiene.test_build_stamp`. This catches accidental
+test dependencies that a developer's global environment can hide. Both hosted
+release workflows must also pass at the reviewed candidate commit.
