@@ -126,6 +126,7 @@ public:
                                     QGraphicsPixmapItem *fallbackItem = nullptr);
 
 protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
     void initializeGL() override;
     void paintGL() override;
     void resizeGL(int w, int h) override;
