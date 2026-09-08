@@ -241,6 +241,14 @@ $allowedStatePair = Test-GuiSmokeScreenshotPair `
 Assert-True $allowedStatePair.validComparable `
     'An explicit effective-state allowlist should admit only its named difference.'
 
+# Input prefetch is diagnostic; the same fresh render and history remain comparable.
+$differentRawPrefetchLines = @(New-V2ProvenanceFixture -StartFrame 90 -Frames @(91, 92, 93) -TargetRawPrefetch 0)
+$differentRawPrefetchProof = Get-GuiSmokeScreenshotProvenance -OrderedLogLines $differentRawPrefetchLines -RequestedStartFrame 90
+$differentRawPrefetchPair = Test-GuiSmokeScreenshotPair -Left $controlledParentProof -Right $differentRawPrefetchProof
+Assert-True $differentRawPrefetchProof.validFresh 'Input prefetch must not invalidate a fresh render.'
+Assert-True ($controlledParentProof.rawPrefetch -eq 1 -and $differentRawPrefetchProof.rawPrefetch -eq 0) 'Retain both observed prefetch values.'
+Assert-True $differentRawPrefetchPair.validComparable 'Different input prefetch must not veto identical visual state and history.'
+
 # A state/policy line emitted after the selected playback transaction cannot
 # retroactively describe the screenshot. The old latest-before-screenshot scan
 # admitted this shape and could make differently rendered legs look equal.

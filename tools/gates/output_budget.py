@@ -577,7 +577,15 @@ def evaluate(spec: dict[str, Any], evidence: Any, spec_path: Path) -> tuple[dict
             if comparison["sameDimensions"] and comparison["pixels"][metric] > float(spec["budgets"]["pixels"][budget_name]):
                 pair_failures.append(f"{metric} exceeds {budget_name}")
         failures.extend(f"{key}: {item}" for item in pair_failures)
-        results.append({"clipId": key[0], "profileId": key[1], "baselineBinding": baseline_binding, "candidateBinding": candidate_binding, "comparison": comparison, "verdict": "PASS" if not pair_failures else "FAIL", "failures": pair_failures})
+        route_keys = {"processed8_cache_hit": "processed8CacheHit", "raw_prefetch": "rawPrefetch", "path_source": "pathSource"}
+        left_route = {name: left_provenance.get(source) for name, source in route_keys.items()}
+        right_route = {name: right_provenance.get(source) for name, source in route_keys.items()}
+        route_diagnostics = {
+            "baseline": left_route,
+            "candidate": right_route,
+            "differences": {name: [left_route[name], right_route[name]] for name in route_keys if left_route[name] != right_route[name]},
+        }
+        results.append({"clipId": key[0], "profileId": key[1], "baselineBinding": baseline_binding, "candidateBinding": candidate_binding, "comparison": comparison, "effectiveRoute": route_diagnostics, "verdict": "PASS" if not pair_failures else "FAIL", "failures": pair_failures})
     missing = sorted(expected - observed)
     failures.extend(f"missing required evidence pair {key}" for key in missing)
     cadence_verdict = "INDETERMINATE"

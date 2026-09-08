@@ -500,7 +500,11 @@ function Get-GuiSmokeScreenshotProvenanceV2 {
                 openmp_threads = Get-GuiSmokeObjectPropertyValue $frame 'openmp_threads'
                 openmp_thread_cap_active = Get-GuiSmokeObjectPropertyValue $frame 'openmp_thread_cap_active'
             }
-            renderManifest = Copy-GuiSmokeStableProperties $manifest @('session', 'index')
+            # Keep execution-route observations in the provenance above. Freshness
+            # is still checked independently; input prefetch is not visual state.
+            renderManifest = Copy-GuiSmokeStableProperties $manifest @(
+                'session', 'index', 'processed8_cache_hit', 'raw_prefetch', 'path_source'
+            )
         }
         eventIndices = [pscustomobject]@{
             playbackStart = $startIndex

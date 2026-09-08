@@ -118,6 +118,20 @@ class OutputBudgetTests(unittest.TestCase):
         self.assertEqual("PASS", report["blockingVerdict"])
         self.assertEqual("INDETERMINATE", report["cadenceVerdict"])
         self.assertTrue(report["authorizing"])
+        route = report["pairs"][0]["effectiveRoute"]
+        self.assertEqual({"processed8_cache_hit": 0, "raw_prefetch": None, "path_source": "render_thread"}, route["baseline"])
+        self.assertEqual({}, route["differences"])
+
+    def test_input_prefetch_difference_is_reported_without_vetoing_fresh_pixels(self):
+        for path, value in ((self.base_result, 1), (self.cand_result, 0)):
+            result = json.loads(path.read_text())
+            result["validation"]["screenshotProvenance"]["rawPrefetch"] = value
+            path.write_text(json.dumps(result))
+        with mock.patch.object(output_budget, "validate_exe", return_value={}):
+            report, code = output_budget.evaluate(output_budget.validate_spec(self.spec), self.evidence(), self.spec_path)
+        self.assertEqual(0, code)
+        self.assertTrue(report["authorizing"])
+        self.assertEqual({"raw_prefetch": [1, 0]}, report["pairs"][0]["effectiveRoute"]["differences"])
 
     def test_last_pixel_change_is_not_hidden_by_sampling(self):
         original_validate_exe = output_budget.validate_exe
