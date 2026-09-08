@@ -20,3 +20,12 @@ Output-validation mode deliberately disables prepare-only; prove application
 async-H2D acceptance/use/exact-match in a separate configuration. A DLL harness
 pass alone does not establish application frame-ID plumbing, and the async leg
 does not replace the output-parity leg.
+
+Frame IDs remain zero-based in application state. Both upload and reconstruction
+convert them with llrpGpuPlaybackReconFrameToken; frame zero is valid, and the
+unrepresentable UINT64_MAX value falls back to synchronous work. Both display
+adapters use llrpGpuPlaybackReconCombineTiming so reconstruction status survives
+independently of scalar timer availability. Retained-device presentation that
+does not reconstruct in that call reports no new preupload status. Check every
+frame in the async leg for positive accepted/used/exact-match counts; a successful
+smoke or zero counters alone cannot establish async operation.
