@@ -52,8 +52,19 @@ worktree value, or empty -- ABSENT is never "unknown, assume the hub":
     venue: this hook is re-read on every tool call, so a lane's edit of its registration or
     of this script would take effect on its next call.  Hook evolution stays hub-authored.
 
-Environment inputs (all optional; every default keeps the rule fail-closed on the real
-machine, and only the test supplies overrides, so the falsifier table is host-independent)
+Environment inputs -- ALL SIX, none omitted (S133)
+-------------------------------------------------------------------------------------
+All optional, and only the test supplies overrides, so the falsifier table is
+host-independent.  Read the fail-closed claim per input rather than as a blanket: five of
+these NARROW what is allowed when they are unset (an absent prompt denies every clip, an
+absent snapshot denies every protection mutation), while ``MLV_FLEET_BUS_ROOT`` WIDENS
+NA-7's roots at ITS default, which is why it is listed here and NA-3-protected below rather
+than left as an implementation detail -- sol found it missing from BOTH on PR #104.
+EVERY root/prefix comparison in this hook is made on the CANONICAL form of the path:
+``norm`` collapses ``.`` and ``..`` (``canonical``, below) before ``under``/``has_seg``
+compare anything, so ``<root>/../escaped.txt`` does NOT count as under ``<root>``.  Without
+that collapse a bus-rooted prefix admitted a write anywhere on the drive -- measured ALLOW
+on ``f888bcfd`` and closed here.
 -------------------------------------------------------------------------------------
 MLV_LANE_PROMPT             path to the lane's prompt file; NA-4 reads its
                             ``CLIP_OR_NONE:`` line, matched ``^(- )?CLIP_OR_NONE:``
@@ -63,6 +74,14 @@ MLV_LANE_PROMPT             path to the lane's prompt file; NA-4 reads its
 MLV_BOARD_ROOT              default ``C:\\!Layi Wkspc\\MLV-App``.  The venue is compared
                             against THIS.
 MLV_CLIP_CACHE_ROOT         default ``\\\\bachelor\\mlv-agent\\cache``.
+MLV_FLEET_BUS_ROOT          default ``C:\\!Layi Wkspc\\softwarefactory-fleet-doctrine``, the
+                            FLEET DOCTRINE BUS.  It is the THIRD root NA-7 admits writes
+                            under (RESUME.md STEP 0.5 publishes ``specs/mlv-app.md`` there),
+                            so it WIDENS an allow-list rather than narrowing one, and it is
+                            NA-3-PROTECTED exactly like the other five: ``setx`` or a
+                            User/Machine-scope ``SetEnvironmentVariable`` of this name is
+                            DENIED (S133).  Deletes and moves under it are denied at every
+                            value -- a publish is additive.
 MLV_REQUIRED_CHECKS_SNAPSHOT
                             default ``<board>\\.claude-state\\coordination\\dual-lane\\
                             receipts\\required-checks-live.jsonl``.  NA-9 reads the LAST
@@ -375,6 +394,7 @@ import datetime
 import hashlib
 import json
 import os
+import posixpath
 import re
 import sys
 
@@ -721,8 +741,48 @@ class Deny(Exception):
 # --------------------------------------------------------------------------- paths
 
 
+_DRIVE_RX = re.compile(r"^([a-z]:)(/.*)?$")
+
+
+def canonical(text):
+    """Collapse ``.`` and ``..`` segments so ONE path has ONE comparable form (S133).
+
+    THE DEFECT THIS CLOSES, measured by sol on PR #104 against
+    ``f888bcfd``: ``norm`` folded case and separators but never collapsed ``..``, so
+    ``<bus>/../escaped.txt`` still carried the bus root as a literal PREFIX and
+    ``under(path, ctx.fleet_bus_root)`` returned True for a path that resolves OUTSIDE the
+    bus.  A ``Write`` there was ALLOWED.  Every prefix test in this hook -- NA-7's three
+    roots, NA-2's protected tails and carve-outs, NA-10's gate tails -- is a comparison of
+    STRINGS, so the collapse has to happen before any of them, and the one place that is
+    true of all of them is ``norm`` itself, which is the hook's ONE path comparison.
+
+    ``posixpath.normpath``, not ``os.path.normpath``, and the difference is load-bearing:
+    this suite runs on windows-latest AND ubuntu-latest, ``ntpath.normpath`` returns
+    backslashes while ``posixpath.normpath`` does not, and ``ntpath`` alone knows ``c:`` is
+    a drive -- so ``os.path.normpath`` would give ONE input TWO canonical forms depending on
+    the runner.  The drive is split off here instead and the remainder is normalised as an
+    absolute POSIX path, which makes the answer identical on both legs AND clamps at the
+    root: ``c:/../escaped.txt`` is ``c:/escaped.txt``, never the drive-less ``escaped.txt``
+    that ``posixpath`` alone would return and that ``is_absolute`` would then wave past
+    NA-7's early return.  The filesystem is still not consulted and links are still not
+    followed -- this is string algebra, and a ``..`` through a symlink is a limit recorded
+    here rather than a stat call in the latency budget.
+    """
+    if not text or "." not in text:
+        return text  # no dot, no `.`/`..` segment -- nothing to collapse
+    drive = ""
+    match = _DRIVE_RX.match(text)
+    if match:
+        drive = match.group(1)
+        text = match.group(2) or "/"
+    return drive + posixpath.normpath(text)
+
+
 def norm(path):
     """Normalise for comparison: backslashes to slashes, lowercased, no trailing slash.
+
+    ``.`` and ``..`` are COLLAPSED (``canonical`` above), so a path that walks out of a
+    root cannot keep that root as a prefix.
 
     Links are NOT followed and the filesystem is NOT consulted -- NA-4 requires the
     comparison to be made without following links, and a hook that stats every token is a
@@ -734,6 +794,7 @@ def norm(path):
     if unc:
         text = "/" + text
     text = text.lower()
+    text = canonical(text)
     while len(text) > 1 and text.endswith("/"):
         text = text[:-1]
     return text
@@ -2885,11 +2946,18 @@ _NA3_RULES = (
 # The prefix rule above is about CREDENTIALS.  This one is about the hook's own inputs, and
 # the act it denies is narrower and sharper: a PERSISTENT write (`setx`, or
 # `[Environment]::SetEnvironmentVariable(..., 'User'|'Machine')`) of `CLAUDE_PROJECT_DIR`,
-# `MLV_BOARD_ROOT`, `MLV_LANE_PROMPT`, `MLV_REQUIRED_CHECKS_SNAPSHOT` or
-# `MLV_CLIP_CACHE_ROOT`.  Those five decide, respectively, the registered venue argument's
+# `MLV_BOARD_ROOT`, `MLV_LANE_PROMPT`, `MLV_REQUIRED_CHECKS_SNAPSHOT`,
+# `MLV_CLIP_CACHE_ROOT` or `MLV_FLEET_BUS_ROOT`.  Those six decide, respectively, the
+# registered venue argument's
 # source, the board root every path in NA-2/NA-7/NA-10 is judged against, the clip
-# authorization NA-4 reads, the required-checks snapshot NA-9 fails closed without, and the
-# cache prefix NA-4 guards.  A persistent write is INHERITED BY EVERY LATER HOOK PROCESS on
+# authorization NA-4 reads, the required-checks snapshot NA-9 fails closed without, the
+# cache prefix NA-4 guards, and -- since HOOK-FALSE-POSITIVE-1 -- the THIRD root NA-7 admits
+# writes under.  `MLV_FLEET_BUS_ROOT` joined this list at S133, measured by sol on PR #104:
+# it shipped as a steering input that WIDENS an allow-list and was not on it, so
+# `setx MLV_FLEET_BUS_ROOT C:\` was ALLOWED and would have made every later hook process on
+# this machine treat the whole drive as a publish surface.  THE RULE IS THE LIST: a new
+# input that any rule reads is added here in the same commit that introduces it.
+# A persistent write is INHERITED BY EVERY LATER HOOK PROCESS on
 # this machine: it does not break a rule, it MOVES the ground the rules stand on, and it
 # survives the session that made it.  A plain in-process `$env:MLV_BOARD_ROOT = ...` is NOT
 # this act -- it dies with its shell, reaches no hook process, and the test carries an
@@ -2908,7 +2976,7 @@ _NA3_RULES = (
 #     alone is enough there.
 _NA3_PERSISTENT_NAMES = (
     r"(?:CLAUDE_PROJECT_DIR|MLV_BOARD_ROOT|MLV_LANE_PROMPT|MLV_REQUIRED_CHECKS_SNAPSHOT"
-    r"|MLV_CLIP_CACHE_ROOT)"
+    r"|MLV_CLIP_CACHE_ROOT|MLV_FLEET_BUS_ROOT)"
 )
 _NA3_PERSISTENT_SCOPE = (
     r"(?:['\"](?:User|Machine)['\"]|\[(?:System\.)?EnvironmentVariableTarget\]\s*::\s*(?:User|Machine))"
@@ -3198,6 +3266,15 @@ def _na7_check_path(ctx, path_norm, how):
     if has_seg(path_norm, FACTORY_TAIL):
         raise Deny("NA-7", "%s into .factory/ is never authorized (%s)" % (how, path_norm))
     if not is_absolute(path_norm):
+        # S133: "resolves inside the worktree by construction" is true only while the
+        # relative path stays inside it.  `norm` has already collapsed `..`, so a canonical
+        # form that STILL begins `..` is one that walks out of whatever it is relative to --
+        # the same escape the absolute rows below refuse, spelled without a root.
+        if path_norm == ".." or path_norm.startswith("../"):
+            raise Deny(
+                "NA-7",
+                "%s walks out of the worktree with `..` (%s)" % (how, path_norm),
+            )
         return  # a relative destination resolves inside the worktree by construction
     if under(path_norm, ctx.worktree_root) or under(path_norm, ctx.board_root):
         return
