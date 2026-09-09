@@ -21,20 +21,24 @@ POST_START_UNRECORDED = "post-start-unrecorded"
 
 
 def assert_owner_absence_is_legitimate(containment, context):
-    # The one place both round-3 and round-4 tests funnel through: ownerPid is None
-    # only ever means one of three things now, and everything outside that closed
-    # set is a bug, loud. See Invoke-Lane.ps1's catch block (~line 679-711) for the
-    # producer side of this contract.
+    # The one place round-3, round-4, and round-5 tests all funnel through. Since
+    # PR #105 round 5, a POST_START_UNRECORDED receipt carries a NON-NULL ownerPid
+    # (captured on its own non-throwing line before the construction that failed),
+    # so ownerPid presence/absence no longer distinguishes the states -- only
+    # ownerAbsentReason does. See Invoke-Lane.ps1's catch block (~line 679-711, and
+    # the pre-assignment kill block around ~line 674-696) for the producer side.
     assert containment is not None, f"ambiguous containment receipt: containment itself is None: {context}"
-    assert containment.get("ownerPid") is None
     reason = containment.get("ownerAbsentReason")
     if reason in NO_HOST_TOKENS:
+        assert containment.get("ownerPid") is None, (
+            f"a no-host token must never carry a pid -- no host ever existed: {context}"
+        )
         return  # legitimate: no host was ever created
-    pytest.fail(f"ambiguous or unrecognised containment receipt: ownerPid is None and "
-                f"ownerAbsentReason is {reason!r}, which is not one of the closed-set "
-                f"no-host tokens {NO_HOST_TOKENS!r} -- either it is {POST_START_UNRECORDED!r} "
-                f"(a host EXISTED and its record was lost, never a legitimate absence) or it "
-                f"is unrecognised entirely: {context}")
+    pytest.fail(f"ambiguous or unrecognised containment receipt: ownerAbsentReason is {reason!r}, which is "
+                f"not one of the closed-set no-host tokens {NO_HOST_TOKENS!r} -- either it is "
+                f"{POST_START_UNRECORDED!r} (a host EXISTED; its pid is recorded so the orphan is never "
+                f"invisible, but the receipt is still ambiguous and must never be treated as a legitimate "
+                f"absence) or it is unrecognised entirely: {context}")
 
 
 def wait_json(path, pred=lambda x: True, seconds=12):
@@ -309,23 +313,72 @@ def test_post_start_unrecorded_is_named_not_hidden(fixture_tree):
     # POST_START_UNRECORDED instead -- and the test below must FAIL LOUD on that
     # receipt if a caller naively treated it as legitimate (proven by calling the
     # shared assertion helper and expecting it to raise).
+    #
+    # PR #105 round 5 (this packet): $hostPid is now captured on its own
+    # non-throwing line BEFORE the $containedHost build that this fixture breaks,
+    # so a post-start-unrecorded receipt must carry the REAL host pid, not null --
+    # a null ownerPid here would itself be the round-5 regression, since the pid
+    # is the only channel by which anyone later learns the orphan existed. The
+    # mutation also drops a marker file with $hostPid's value (via the same
+    # Write-Utf8NoBom helper the production code already uses) so the test can
+    # assert the receipt's ownerPid equals the REAL pid, not merely "non-null".
+    marker = fixture_tree["root"] / "host-pid.txt"
     def break_containedHost_build(text):
-        old = "$containedHost = [ordered]@{ pid=$proc.Id; createdUtc=$null }"
+        old = "$containedHost = [ordered]@{ pid=$hostPid; createdUtc=$null }"
         assert text.count(old) == 1
-        return text.replace(old, "throw 'fixture-post-start-unrecorded'")
+        marker_literal = str(marker).replace("'", "''")
+        return text.replace(old, "Write-Utf8NoBom '%s' ([string]$hostPid)\n    throw 'fixture-post-start-unrecorded'" % marker_literal)
     cmd,env,receipt=prepare(fixture_tree,"normal",mutation=break_containedHost_build)
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=15)
     assert r.returncode==127,(r.stdout,r.stderr)
     assert not (fixture_tree["root"]/"child.json").exists()
     q=json.loads(receipt.read_text(encoding="utf-8"))
     containment=q["containment"]
-    assert containment["ownerPid"] is None
+    real_pid = int(marker.read_text(encoding="utf-8-sig").strip())
+    assert containment["ownerPid"] == real_pid
     assert containment["ownerAbsentReason"]==POST_START_UNRECORDED
     assert containment["ownerAbsentDetail"]=="fixture-post-start-unrecorded"
     assert containment["ownerAbsentReason"] not in NO_HOST_TOKENS
-    # The whole point: this receipt must NOT be accepted as a legitimate absence.
+    # The whole point: this receipt must NOT be accepted as a legitimate absence,
+    # even though a pid is now present.
     with pytest.raises(pytest.fail.Exception):
         assert_owner_absence_is_legitimate(containment, q)
+
+
+def test_pre_assignment_kill_failure_is_recorded_not_swallowed(fixture_tree):
+    # Falsifier for the OTHER half of this packet (PR #105 round 5, sol PR #105
+    # blocker): at the pre-assignment site (Invoke-Lane.ps1 ~line 674-696), the
+    # host is still OUTSIDE the job, so a swallowed Kill failure there leaves a
+    # GENUINE orphan -- unlike the post-timeout kill at ~line 602, where the job
+    # is kill-on-close and the tree is already terminated. Combine the same
+    # post-start-unrecorded trigger (so the pre-assignment kill path is reached
+    # at all: $jobAssigned is still false) with a forced Kill failure, and prove
+    # the receipt records ownerKillAttempted/ownerKillOutcome instead of the bare
+    # `catch { }` this repo used to have there silently discarding it.
+    def break_kill(text):
+        old_throw = "$containedHost = [ordered]@{ pid=$hostPid; createdUtc=$null }"
+        assert text.count(old_throw) == 1
+        text = text.replace(old_throw, "throw 'fixture-post-start-unrecorded'")
+        old_kill = "$proc.Kill($true); [void]$proc.WaitForExit(5000)"
+        assert text.count(old_kill) == 1
+        return text.replace(old_kill, "throw 'fixture-kill-failed'")
+    cmd,env,receipt=prepare(fixture_tree,"normal",mutation=break_kill)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=15)
+    assert r.returncode==127,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    containment=q["containment"]
+    # The whole point: the failed kill is VISIBLE, never silent.
+    assert containment["ownerKillAttempted"] is True
+    assert containment["ownerKillOutcome"]=="kill-threw"
+    assert containment["ownerKillDetail"]=="fixture-kill-failed"
+    # Forcing the kill to throw means the real kill never ran -- this test, not
+    # production code, is responsible for reaping the host it just orphaned.
+    # ownerPid is guaranteed non-null by this same packet's other remedy.
+    owner_pid = containment["ownerPid"]
+    assert owner_pid is not None
+    subprocess.run([PWSH,"-NoProfile","-NonInteractive","-Command",
+                     f"Stop-Process -Id {int(owner_pid)} -Force -ErrorAction SilentlyContinue"],
+                    timeout=5, check=False)
 
 
 def test_owner_absence_helper_fails_loud_on_post_start_or_unrecognised_tokens():

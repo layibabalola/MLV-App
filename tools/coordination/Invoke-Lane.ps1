@@ -341,6 +341,13 @@ $containedHost = $null
 # but the record of it never got built"; $hostStarted can, because it is set
 # unconditionally the moment a host process exists.
 $hostStarted = $false
+# Captured on its OWN line the instant Start returns (PR #105 round 5, this
+# packet): a bare property read on a live Process, which the .NET contract
+# binds before Start returns and which therefore cannot throw. Kept separate
+# from $containedHost (whose own dictionary/build CAN still throw) so the
+# post-start-unrecorded fallback always has a pid to report -- the pid is the
+# only channel by which anyone later learns an orphan existed.
+$hostPid = $null
 # Fixed tokens for containment.ownerAbsentReason, chosen by WHERE the failure
 # happened rather than by what its exception message said -- free text is not
 # admissible evidence about a safety property (PR #105 round 4). Kept in one
@@ -349,6 +356,18 @@ $hostStarted = $false
 $OWNER_ABSENT_NO_HOST_BUDGET = 'launch-budget-exhausted'  # unchanged text: line ~471's throw message, asserted verbatim since PR #105 round 3
 $OWNER_ABSENT_NO_HOST_START_THREW = 'start-threw'         # Process::Start itself threw; no host was ever created
 $OWNER_ABSENT_POST_START_UNRECORDED = 'post-start-unrecorded'  # Start returned (a host EXISTS) but $containedHost's own construction threw -- the genuinely ambiguous state
+# Outcome of the PRE-ASSIGNMENT kill at line ~677 (host started but never
+# joined the job, so a swallowed kill failure there is a genuine orphan, unlike
+# the post-timeout kill at line ~602 where the job is kill-on-close and the
+# tree is already terminated). A kill cannot be made infallible, but its
+# failure can be made visible instead of vanishing into a bare `catch { }`
+# (PR #105 round 5, sol PR #105 blocker).
+$ownerKillAttempted = $false
+$ownerKillOutcome = $null
+$ownerKillDetail = $null
+$OWNER_KILL_OUTCOME_ALREADY_EXITED = 'already-exited'  # host had already exited before the pre-assignment kill was attempted
+$OWNER_KILL_OUTCOME_KILLED = 'killed'                  # Kill() and the subsequent WaitForExit both completed without throwing
+$OWNER_KILL_OUTCOME_KILL_THREW = 'kill-threw'          # Kill() or WaitForExit itself threw -- see ownerKillDetail for the raw message
 $childIdentity = $null
 $deadlineUtc = $startedUtc.AddSeconds($TimeoutSec)
 $containment = $null
@@ -519,11 +538,15 @@ $child.StandardInput.Write($prompt); $child.StandardInput.Close(); $child.WaitFo
     # Record the pid the instant Start returns, before anything that can throw:
     # once Start succeeds a host EXISTS, and a receipt that omits its pid is
     # indistinguishable from "no host was started" (PR #105 round 2 blocker).
+    # $hostPid is a bare property read on a live Process -- it cannot throw,
+    # unlike $containedHost's own ordered-map build below (PR #105 round 4
+    # blocker), so it survives even when that build itself throws (PR #105
+    # round 5): the post-start-unrecorded fallback reports $hostPid instead of
+    # null, so a host that exists is never reported as if it did not.
     # createdUtc is read defensively in its own try -- a StartTime failure must
-    # not erase the pid we already have. $proc.Id / the ordered-map build below
-    # CAN still throw with the host already alive (PR #105 round 4 blocker) --
-    # that is exactly why $hostStarted was set on its own line, above, first.
-    $containedHost = [ordered]@{ pid=$proc.Id; createdUtc=$null }
+    # not erase the pid we already have.
+    $hostPid = $proc.Id
+    $containedHost = [ordered]@{ pid=$hostPid; createdUtc=$null }
     try { $containedHost.createdUtc = $proc.StartTime.ToUniversalTime().ToString('o') } catch { }
     [MlvLaneJob]::AssignOrThrow($jobHandle, $proc.Handle)
     $jobAssigned = $true
@@ -673,8 +696,28 @@ catch {
     }
     # Before assignment the inert host is outside the job. Terminate only the exact
     # Process object created by this invocation; it has received no launch frame.
+    # UNLIKE the post-timeout kill at line ~602 -- where the job handle has just
+    # been closed and the job is kill-on-close, so the tree is already terminated
+    # and that catch is belt-and-braces -- this host was NEVER inside the job, so
+    # a swallowed failure here is a GENUINE orphan (PR #105 round 5, sol PR #105
+    # blocker). The kill call itself still must not throw out of this catch (this
+    # is already a failure path; a second exception would only mask the first),
+    # but its OUTCOME is recorded into the containment record below instead of
+    # vanishing silently -- the honest fix for a swallow is not to make the kill
+    # infallible (it cannot be), but to make its failure visible.
     if ($cfg.engine -eq 'claude' -and -not $jobAssigned -and $null -ne $proc) {
-        try { if (-not $proc.HasExited) { $proc.Kill($true); [void]$proc.WaitForExit(5000) } } catch { }
+        $ownerKillAttempted = $true
+        try {
+            if ($proc.HasExited) {
+                $ownerKillOutcome = $OWNER_KILL_OUTCOME_ALREADY_EXITED
+            } else {
+                $proc.Kill($true); [void]$proc.WaitForExit(5000)
+                $ownerKillOutcome = $OWNER_KILL_OUTCOME_KILLED
+            }
+        } catch {
+            $ownerKillOutcome = $OWNER_KILL_OUTCOME_KILL_THREW
+            $ownerKillDetail = $_.Exception.Message
+        }
     }
     if ($cfg.engine -eq 'claude' -and $null -eq $containment) {
         $native = if ($_.Exception.PSObject.Properties.Name -contains 'NativeErrorCode') { [int]$_.Exception.NativeErrorCode } else { $null }
@@ -690,10 +733,13 @@ catch {
         #     launch budget was already gone (line ~470, throws before Start is reached) or
         #     Start itself threw. Distinguish cheaply by exception type/message where we can;
         #     otherwise fall back to the generic "start threw" token. Both are legitimate
-        #     no-host reasons.
+        #     no-host reasons, and $hostPid is still null in both (no host ever existed).
         #   - $containedHost null, $hostStarted true -> Start returned (a host EXISTS) but
         #     the record of it was never built. This is the genuinely ambiguous state and it
         #     is named as such, never hidden behind a message that merely looks legitimate.
+        #     $hostPid (captured on its own non-throwing line before this build) is used for
+        #     ownerPid below, so this state is never reported as if no host existed (PR #105
+        #     round 5): the pid is the only channel by which anyone learns the orphan existed.
         # The raw message is kept for humans in ownerAbsentDetail, a field no decision reads.
         $ownerAbsentReason = $null
         $ownerAbsentDetail = $null
@@ -712,10 +758,13 @@ catch {
         $containment = [ordered]@{
             kind='windows-job-kill-on-close'; jobAssigned=$jobAssigned
             runnerPid=$PID; runnerCreatedUtc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
-            ownerPid=if($null-ne $containedHost){$containedHost.pid}else{$null}
+            ownerPid=if($null-ne $containedHost){$containedHost.pid}else{$hostPid}
             ownerCreatedUtc=if($null-ne $containedHost){$containedHost.createdUtc}else{$null}
             ownerAbsentReason=$ownerAbsentReason
             ownerAbsentDetail=$ownerAbsentDetail
+            ownerKillAttempted=$ownerKillAttempted
+            ownerKillOutcome=$ownerKillOutcome
+            ownerKillDetail=$ownerKillDetail
             childPid=$null; childCreatedUtc=$null; deadlineUtc=$deadlineUtc.ToString('o')
             promptDelivered=$promptDelivered; assignmentErrorCode=$native
         }
