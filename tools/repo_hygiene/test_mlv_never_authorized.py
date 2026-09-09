@@ -138,22 +138,20 @@ the O159 cascade preserves each rewritten receipt's ORIGINAL ``recordedUtc``: th
 commit's cascade fixture already did, now asserted structurally, and ONE new row restamps
 0.6 and 0.7 at the rewrite's instant -- a tie, undecidable.
 
-THE FALSE-POSITIVE PAIRS (HOOK-FALSE-POSITIVE-1, rows i-viii; ``falsepositive1``, 29 rows).
+THE FALSE-POSITIVE PAIRS (HOOK-FALSE-POSITIVE-1, rows i-x; ``falsepositive1``, 30 rows).
 Each pair is an ALLOW SUBJECT beside a DENY CONTROL, so a hook that simply stopped
 enforcing goes RED on the control rather than looking fixed.
 
 PAIR DISCIPLINE, STATED HONESTLY (round 2, sol's MAJOR on PR #104).  Round 1 claimed every
 pair differed in exactly one load-bearing token and only pair vi actually did -- the rest
 moved command, tool, path and payload at once, which is a comparison of two situations, not
-of one token.  The rows below are rewritten so that (i), (ii), (iv), (v-b), (vi), (vii) and
+of one token.  The rows below are rewritten so that (i), (ii), (iv), (v), (vi), (vii) and
 (viii) each vary EXACTLY ONE token -- a redirect target, a basename, a directory segment, a
-payload, a verb, a root -- with everything else byte-identical.  TWO rows are NOT one-token
-pairs and say so in their own comment rather than claiming otherwise: (iii), where the
+payload, a verb, a root -- with everything else byte-identical.  ONE row is NOT a one-token
+pair and says so in its own comment rather than claiming otherwise: (iii), where the
 subject is an interpreter heredoc and the control must be a shell truncation verb BECAUSE
 the claim is precisely that those are different classes and no single token turns one into
-the other; and (v-a), where the subject is a bus-rooted publish and the control is the same
-publish under a different ROOT (one token) but the delete control (v-b) needed a verb of its
-own.  Do not restore the one-token claim over a pair that does not meet it.
+the other.  Do not restore the one-token claim over a pair that does not meet it.
 
 What each pair isolates.  (i)/(ii) a redirect truncates only its TARGET, so
 ``cat <ledger> 2>/dev/null`` READS while the same command with the ledger as the redirect's

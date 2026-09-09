@@ -28,8 +28,8 @@ call can set it.  The environment variable of that name was MEASURED ABSENT from
 processes on this machine (``.hook-invocations.log``: null in 17/17), which is why the
 previous revision's venue test -- which read it from ``os.environ`` -- silently never
 fired.  This hook therefore NEVER reads ``CLAUDE_PROJECT_DIR`` from its environment; the
-name appears below as one of the SIX NA-3 O129 names whose PERSISTENT assignment is denied,
-and as the one of those six held OUT of ``HOOK_READ_ENV_NAMES`` -- a name this hook never
+name appears below as one of the FIVE NA-3 O129 names whose PERSISTENT assignment is denied,
+and as the one of those five held OUT of ``HOOK_READ_ENV_NAMES`` -- a name this hook never
 reads has no value here to substitute into a command's text, and inventing one would be the
 fabrication S134's residual limit refuses.  Three rules key on the venue, and all three
 fail closed when it is missing, a worktree value, or empty -- ABSENT is never "unknown,
@@ -71,10 +71,12 @@ root to this gate.
 Environment inputs -- ALL FIVE, none omitted (S133)
 -------------------------------------------------------------------------------------
 All optional, and only the test supplies overrides, so the falsifier table is
-host-independent.  Every one of them NARROWS what is allowed when it is unset (an absent
-prompt denies every clip, an absent snapshot denies every protection mutation); not one of
-them WIDENS an allow-list, which is the property the removed bus root did not have and the
-reason its absence is now the invariant.
+host-independent.  Four of the five NARROW what is allowed when it is unset (an absent
+prompt denies every clip, an absent snapshot denies every protection mutation); the
+exception is ``MLV_HOOK_DRYRUN``, which gates no allow/deny decision at all -- unset, it
+only leaves the decision unprinted on stdout, and the exit code is unchanged either way.
+Not one of the four narrowing inputs WIDENS an allow-list, which is the property the
+removed bus root did not have and the reason its absence is now the invariant.
 EVERY root/prefix comparison in this hook is made on the CANONICAL form of the path:
 ``norm`` collapses ``.`` and ``..`` (``canonical``, below) before ``under``/``has_seg``
 compare anything, so ``<root>/../escaped.txt`` does NOT count as under ``<root>``.  Without
