@@ -28,9 +28,12 @@ call can set it.  The environment variable of that name was MEASURED ABSENT from
 processes on this machine (``.hook-invocations.log``: null in 17/17), which is why the
 previous revision's venue test -- which read it from ``os.environ`` -- silently never
 fired.  This hook therefore NEVER reads ``CLAUDE_PROJECT_DIR`` from its environment; the
-name appears below only as one of the five NA-3 O129 names whose PERSISTENT assignment is
-denied.  Three rules key on the venue, and all three fail closed when it is missing, a
-worktree value, or empty -- ABSENT is never "unknown, assume the hub":
+name appears below as one of the SIX NA-3 O129 names whose PERSISTENT assignment is denied,
+and as the one of those six held OUT of ``HOOK_READ_ENV_NAMES`` -- a name this hook never
+reads has no value here to substitute into a command's text, and inventing one would be the
+fabrication S134's residual limit refuses.  Three rules key on the venue, and all three
+fail closed when it is missing, a worktree value, or empty -- ABSENT is never "unknown,
+assume the hub":
 
   * NA-2 exception (iv), O124 -- writes (create, extend or amend, ANY length, by
     ``Write``/``Edit``/``NotebookEdit`` or by a shell truncating write) to the four

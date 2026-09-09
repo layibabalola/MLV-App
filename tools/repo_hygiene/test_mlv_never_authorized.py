@@ -6484,23 +6484,85 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self.assertFalse(is_absolute(norm("outside/stray.txt")), "relative path")
         self.assertFalse(is_absolute(norm("../outside/stray.txt")), "relative parent path")
 
+    def _hook_read_env_names(self):
+        """The env names the HOOK ITSELF reads, derived from its OWN `env.get(...)` sites.
+
+        The SAME derivation `test_every_environment_input_the_hook_reads_is_na3_protected`
+        and `test_every_environment_input_the_hook_reads_is_expanded_in_a_path` perform, and
+        for the same reason: a name list spelled out twice is a list that goes stale once, so
+        the next input added to `Ctx.__init__` must reach every gate that keys on it without
+        anyone remembering to widen a literal tuple.  `MLV_HOOK_DRYRUN` is the one exemption
+        and it is named rather than pattern-matched: it is not a ROOT, it selects whether the
+        decision is PRINTED, and it can change no decision.
+        """
+        with open(HOOK, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        names = set(re.findall(r"env(?:iron)?\.get\(\s*[\"'](\w+)[\"']", source))
+        self.assertTrue(names, "the hook reads no environment input at all?")
+        return sorted(names - {"MLV_HOOK_DRYRUN"})
+
+    def _assert_no_fixture_binds_a_hook_read_root_outside_tmp(self, cases, fixtures):
+        """ROUND 4 (sol, PR #104): the guard must check the OVERRIDES, not just the base bind.
+
+        Round 3 admitted `$env:MLV_BOARD_ROOT` / `{BOARD_NORM}` as fixture anchors and
+        justified it by asserting that `_invoke` binds `MLV_BOARD_ROOT` to the TMP board.
+        That justification was incomplete, and sol showed why: `_invoke` applies
+        `env.update(overrides)` AFTER that binding, so a row's OWN fixture wins.  A case
+        whose fixture re-bound `MLV_BOARD_ROOT` to the REAL board would then have spelled the
+        real board through an APPROVED anchor and passed the very guard whose entire purpose
+        is to catch a fixture pointing at the real board.  The base binding is a default, not
+        an invariant, so the invariant is asserted directly here instead: for every name the
+        hook READS, no case's fixture may bind it anywhere but inside this test's tmp tree.
+
+        The name list is DERIVED from the hook's own call sites (`_hook_read_env_names`), so
+        a new steering root is covered the day it is read -- `MLV_FLEET_BUS_ROOT` is the
+        recorded case of a root that shipped ahead of the gates that should have known it.
+        The venue is not among them by construction: it arrives on argv under `VENUE_KEY`,
+        never through the environment (O126), and NA-10's `venue_at_worktree` row legitimately
+        names the real checkout root there.
+        """
+        names = self._hook_read_env_names()
+        tmp = os.path.normcase(os.path.abspath(self.tmp))
+        for fixture_name in sorted(set(case.get("fixture", "default") for case in cases)):
+            overrides = fixtures[fixture_name](self.paths)
+            for name in names:
+                if name not in overrides:
+                    continue
+                value = overrides[name]
+                resolved = os.path.normcase(os.path.abspath(value))
+                self.assertTrue(
+                    resolved == tmp or resolved.startswith(tmp + os.sep),
+                    "fixture %r binds %s to %r, which is OUTSIDE this test's tmp tree (%s) "
+                    "-- a fixture's overrides are applied after `_invoke`'s base binding, so "
+                    "this would aim the hook at a root on this machine"
+                    % (fixture_name, name, value, self.tmp),
+                )
+
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""
         blob = json.dumps(CASES)
         self.assertNotIn("Layi Wkspc", blob)
         self.assertNotIn("bachelor", blob)
         # ROUND 3 (S134): `$env:MLV_BOARD_ROOT` is an ANCHOR beside `{BOARD}`, and ONLY
-        # because `_invoke` binds that name to `paths["BOARD"]` -- the tmp board -- on every
-        # row.  The gate's claim is unchanged: no case may depend on the REAL board root, and
-        # the two literal guards above are what enforce that and are untouched.  What changed
-        # is that a row may now spell the fixture's board through the very variable whose
-        # expansion it is testing.  The binding is asserted here rather than remembered, so
-        # this anchor cannot outlive the harness line that makes it true.
+        # because the name resolves to `paths["BOARD"]` -- the tmp board -- on every row.
+        # The gate's claim is unchanged: no case may depend on the REAL board root, and the
+        # two literal guards above are what enforce that and are untouched.  What changed is
+        # that a row may now spell the fixture's board through the very variable whose
+        # expansion it is testing.
+        #
+        # ROUND 4: the resolution is asserted, not remembered, and in BOTH halves -- the base
+        # binding in `_invoke`, asserted against `HARNESS_SOURCE` just below, and the fixture
+        # overrides applied after it, which round 3 did not check at all.  The second half is
+        # `_assert_no_fixture_binds_a_hook_read_root_
+        # outside_tmp` is the second half and covers every root the hook reads, not just this
+        # one; `test_the_real_board_guard_catches_a_fixture_that_rebinds_a_read_root` is its
+        # falsifier.
         self.assertIn(
             'env["MLV_BOARD_ROOT"] = self.paths["BOARD"]',
             HARNESS_SOURCE,
             "the env anchor below is only safe while `_invoke` binds it to the tmp board",
         )
+        self._assert_no_fixture_binds_a_hook_read_root_outside_tmp(CASES, FIXTURES)
         # `{BOARD_NORM}` is the same tmp board as the hook PRINTS it, bound in `setUp` from
         # `paths["BOARD"]` -- a fixture placeholder like `{BOARD}`, never a machine path.
         anchors = (
@@ -6516,6 +6578,32 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
                 "a `.claude-state` path must come from the fixture, not this machine: %r"
                 % window,
             )
+
+    def test_the_real_board_guard_catches_a_fixture_that_rebinds_a_read_root(self):
+        """ROUND 4: sol's OWN construction, run as a falsifier -- it must make the guard FAIL.
+
+        A guard nobody has ever seen fail is a guard nobody has evidence about, and this one
+        passed a whole round while blind to exactly this shape.  So the shape is built here:
+        a synthetic case whose fixture binds a hook-read root to the REAL board root --
+        `REPO_ROOT`, derived from this file's own location, so the falsifier carries no
+        machine literal and names the real checkout on either matrix leg.  Measured against
+        the round-3 guard before this delta: with that fixture appended to `CASES` the guard
+        returned OK, because it read the case TEXT and never the fixture's overrides.
+
+        One synthetic row PER NAME the hook reads, so coverage is proved for the whole
+        derived list rather than for `MLV_BOARD_ROOT` alone -- the bus root joining that list
+        a round late is why the distinction is not academic here.
+        """
+        for name in self._hook_read_env_names():
+            with self.subTest(name=name):
+                fixtures = {"fp1_rebinds_a_real_root": lambda paths, n=name: {n: REPO_ROOT}}
+                cases = [{"name": "synthetic rebind", "fixture": "fp1_rebinds_a_real_root"}]
+                with self.assertRaises(AssertionError) as caught:
+                    self._assert_no_fixture_binds_a_hook_read_root_outside_tmp(cases, fixtures)
+                self.assertIn(name, str(caught.exception))
+        # And the REAL table passes the same check, so the failures above are attributable to
+        # the synthetic rows and not to a guard that refuses everything put in front of it.
+        self._assert_no_fixture_binds_a_hook_read_root_outside_tmp(CASES, FIXTURES)
 
     def test_the_hook_never_reads_the_venue_from_the_environment(self):
         """O126, asserted on the SOURCE as well as on the behaviour.
