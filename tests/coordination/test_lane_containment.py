@@ -404,34 +404,52 @@ def test_pre_assignment_kill_wait_timeout_is_recorded_not_killed(fixture_tree):
     # make visible -- was therefore reported as killed: manufactured evidence, worse
     # than the bare `catch { }` this whole packet replaced.
     #
-    # Constructing a process that genuinely SURVIVES Process.Kill(entireProcessTree:
-    # true) is not achievable on this platform -- TerminateProcess cannot be caught,
-    # ignored, or slowed by the target, so "make the host ignore termination" is not
-    # reachable on Windows. This falsifier instead takes the packet's other allowed
-    # construction: shrink the bounded wait itself (5000ms -> 0ms in a fixture
-    # mutation) so the check happens before the OS has necessarily finished tearing
-    # the process down, reaching the timeout branch deterministically. This proves the
-    # CODE correctly captures WaitForExit's observed return value and reports the new
-    # token when it is false; it does NOT prove a real host that is merely slow to die
-    # is always caught inside a realistic multi-second window -- that remains a timing
-    # property of the OS, not a property of this code path.
-    def shrink_wait(text):
+    # PR #105 round 6 (falsifier hardening, 2026-09-09): the prior construction shrank
+    # the real wait to WaitForExit(0), racing a real WaitForExit call against real OS
+    # process teardown on the bet that 0ms wouldn't be enough time for the process to
+    # actually exit. It was not reliable: reproduced 3 of 3 in isolation on this host
+    # (36 processes, 27% CPU -- well below saturation) as an ASSERTION failure, not a
+    # timeout, because WaitForExit(0) sometimes observed the process as already gone.
+    # A falsifier for "false observations are classified correctly" that can itself
+    # observe true is not a proof.
+    #
+    # Constructing a real process that genuinely SURVIVES Process.Kill(entireProcessTree:
+    # true) plus a real bounded wait is not achievable on demand on this platform --
+    # TerminateProcess cannot be caught, ignored, or reliably outlasted by the target,
+    # so there is no cheap, reliable way to make a real teardown race land on the false
+    # branch every time. Per this packet's own instructions, an unreliable variant is
+    # worse than no variant (a 3-of-3-failing test teaches a reader to ignore red), so
+    # instead of shrinking the wait, this test now mutates the runner's own source to
+    # force the OBSERVED boolean itself to $false -- the same fixture-mutation
+    # discipline every other test in this file already uses to reach its own branch
+    # (see test_start_threw_is_classified_as_no_host,
+    # test_post_start_unrecorded_is_named_not_hidden). The real Kill($true) call is
+    # left untouched; only the captured WaitForExit result is forced.
+    #
+    # WHAT THIS PROVES: the CLASSIFICATION LOGIC -- that a false WaitForExit observation
+    # is recorded as 'kill-wait-timeout' and is never silently upgraded to 'killed'.
+    # WHAT THIS DOES NOT PROVE: that a real process can outlive a real Kill($true) plus
+    # a real five-second WaitForExit on this platform. Whether a genuinely slow-to-die
+    # host is always caught inside a realistic multi-second window is a timing property
+    # of the OS, not a property of this code path, and is not exercised here.
+    def force_wait_false(text):
         old = "$exitedWithinWait = $proc.WaitForExit(5000)"
         assert text.count(old) == 1
-        return text.replace(old, "$exitedWithinWait = $proc.WaitForExit(0)")
-    cmd,env,receipt=prepare(fixture_tree,"normal",assignment_failure=True,mutation=shrink_wait)
+        return text.replace(old, "$exitedWithinWait = $false")
+    cmd,env,receipt=prepare(fixture_tree,"normal",assignment_failure=True,mutation=force_wait_false)
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=15)
     assert r.returncode==127,(r.stdout,r.stderr)
     q=json.loads(receipt.read_text(encoding="utf-8"))
     containment=q["containment"]
-    # The whole point: a wait that expired must never be reported as a completed kill.
+    # The whole point: an observed-not-exited result must never be reported as killed.
     assert containment["ownerKillAttempted"] is True
     assert containment["ownerKillOutcome"]=="kill-wait-timeout", (
         f"expected the observed-timeout token, got {containment['ownerKillOutcome']!r} -- "
         "this is the exact false-evidence defect this test exists to catch"
     )
-    # Kill() itself was real (only the wait window was shortened), so the host is
-    # gone or about to be -- reap defensively like the sibling kill-threw test does.
+    # Kill() itself was real and unmodified (only the captured wait result is forced),
+    # so the host is gone or about to be -- reap defensively like the sibling
+    # kill-threw test does.
     owner_pid = containment["ownerPid"]
     assert owner_pid is not None
     subprocess.run([PWSH,"-NoProfile","-NonInteractive","-Command",
