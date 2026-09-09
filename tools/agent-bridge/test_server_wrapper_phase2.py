@@ -847,26 +847,11 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
             "CreationDate": "20260510123456.000000-000",
         }
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(row), stderr="")
-        with mock.patch.object(_trampoline.sys, "platform", "win32"), mock.patch.object(_trampoline, "native_process_entry", return_value=None), mock.patch.object(_psrt.shutil, "which", side_effect=lambda name: "C:/Program Files/PowerShell/7/pwsh.exe" if name == "pwsh.exe" else None), mock.patch.object(_trampoline.subprocess, "run", return_value=completed) as run:
+        with mock.patch.object(_trampoline.sys, "platform", "win32"), mock.patch.object(_psrt.shutil, "which", side_effect=lambda name: "C:/Program Files/PowerShell/7/pwsh.exe" if name == "pwsh.exe" else None), mock.patch.object(_trampoline.subprocess, "run", return_value=completed) as run:
             env = _trampoline._host_env_for_parent(456)
 
         argv = run.call_args.args[0]
         self.assertPowerShellCimCommand(argv, "pwsh.exe")
-        self.assertEqual(env["AGENT_BRIDGE_MCP_HOST_PROCESS_NAME"], "codex.exe")
-        self.assertEqual(env["AGENT_BRIDGE_MCP_HOST_EXECUTABLE_PATH"], "C:/Codex/codex.exe")
-        self.assertEqual(env["AGENT_BRIDGE_MCP_HOST_CREATION_DATE"], "20260510123456.000000-000")
-
-    def test_trampoline_host_env_uses_native_fingerprint_without_cim(self) -> None:
-        native = {
-            "name": "codex.exe",
-            "executable_path": "C:/Codex/codex.exe",
-            "creation_date": "20260510123456.000000-000",
-            "command_line": "codex desktop",
-        }
-        with mock.patch.object(_trampoline.sys, "platform", "win32"), mock.patch.object(_trampoline, "native_process_entry", return_value=native), mock.patch.object(_trampoline.subprocess, "run") as run:
-            env = _trampoline._host_env_for_parent(456)
-
-        run.assert_not_called()
         self.assertEqual(env["AGENT_BRIDGE_MCP_HOST_PROCESS_NAME"], "codex.exe")
         self.assertEqual(env["AGENT_BRIDGE_MCP_HOST_EXECUTABLE_PATH"], "C:/Codex/codex.exe")
         self.assertEqual(env["AGENT_BRIDGE_MCP_HOST_CREATION_DATE"], "20260510123456.000000-000")
