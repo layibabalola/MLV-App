@@ -200,6 +200,10 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HOOK = os.path.join(REPO_ROOT, "tools", "hooks", "mlv-never-authorized.py")
+# ROUND 3 (S134): this suite's own text, so a gate that depends on a HARNESS line can assert
+# that line instead of remembering it.  Read once, at import, from `__file__` itself.
+with open(os.path.abspath(__file__), "r", encoding="utf-8") as _handle:
+    HARNESS_SOURCE = _handle.read()
 
 
 def _load_hook_module():
@@ -3750,6 +3754,155 @@ CASES = [
         "input": {"command": "$env:MLV_FLEET_BUS_ROOT = 'C:/lane/worktree'"},
         "expect": "ALLOW",
     },
+    # (ix) ROUND 3, S134 -- THE HOOK'S OWN ENVIRONMENT VARIABLES ARE EXPANDED BEFORE EVERY
+    # PATH CHECK.
+    #
+    # SOL'S BLOCKER ON PR #104 AT `78c35431`, REPRODUCED HERE.  Round 2's bus guard denied a
+    # LITERAL delete under the bus and returned ALLOW for
+    # `Remove-Item -LiteralPath "$env:MLV_FLEET_BUS_ROOT\specs\mlv-app.md"` -- the same file,
+    # the same act, spelled through the variable that told THAT VERY PROCESS where the bus
+    # is.  The header meanwhile claimed deletes were "denied at every value".  The fix is in
+    # `norm`, beside the `..` collapse and BEFORE it, so every arm inherits it and an
+    # expanded path is canonicalised rather than compared raw.
+    #
+    # WHAT EACH PAIR VARIES, AND WHERE ONE TOKEN WAS NOT HONESTLY POSSIBLE:
+    #   ix-a, ix-b vary EXACTLY ONE TOKEN, the variable NAME, against a control whose name is
+    #       exported IN THE SAME PROCESS TO THE SAME VALUE and is simply not one this hook
+    #       reads (`fixture_fleet_bus_with_unread_alias`).  Those controls MUST stay ALLOW:
+    #       they are the residual limit stated in the hook's header, and a row expecting a
+    #       DENY there would assert a guarantee no text matcher can keep.
+    #   ix-c, ix-d vary EXACTLY ONE TOKEN against their ALLOW subject: an INSERTED `..`
+    #       segment, same variable, same spelling, same basename, same `specs` segment.  They
+    #       are what proves the expansion happens BEFORE `canonical` -- a hook that collapsed
+    #       first would still see `$env:...` as an ordinary relative segment and let the walk
+    #       out of the bus through.
+    #   ix-e IS NOT A ONE-TOKEN DENY/ALLOW PAIR IN THE USUAL SENSE and its control says so:
+    #       it varies one DIRECTORY SEGMENT (`coordination` -> `coordination-scratch`), which
+    #       is what takes the path off NA-2's protected tail.  Its falsifying power is in
+    #       `reason_contains`, not in the verdict: NA-2's tails are matched SEGMENT-WISE, so
+    #       the round-2 hook DENIES this row too -- naming the UNEXPANDED
+    #       `$env:mlv_board_root/...` in the reason.  Pinning the needle to `{BOARD_NORM}`
+    #       makes the row RED there and is the only way this arm's reach is measurable at
+    #       all.
+    {
+        "name": "fp1 ix a env spelled delete under the fleet bus",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Remove-Item -LiteralPath "
+            '"$env:MLV_FLEET_BUS_ROOT/specs/mlv-app.md"'
+        },
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "under the fleet doctrine bus",
+        "fixture": "fleet_bus_with_unread_alias",
+    },
+    {
+        "name": "fp1 ix a CTL the same delete through a name the hook does not read",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Remove-Item -LiteralPath "
+            '"$env:FP1_UNREAD_BUS_ROOT/specs/mlv-app.md"'
+        },
+        "expect": "ALLOW",
+        "fixture": "fleet_bus_with_unread_alias",
+    },
+    {
+        "name": "fp1 ix b cmd spelled delete under the fleet bus",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": 'Remove-Item -LiteralPath "%MLV_FLEET_BUS_ROOT%/specs/mlv-app.md"'
+        },
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "under the fleet doctrine bus",
+        "fixture": "fleet_bus_with_unread_alias",
+    },
+    {
+        "name": "fp1 ix b CTL the same cmd spelling with a name the hook does not read",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": 'Remove-Item -LiteralPath "%FP1_UNREAD_BUS_ROOT%/specs/mlv-app.md"'
+        },
+        "expect": "ALLOW",
+        "fixture": "fleet_bus_with_unread_alias",
+    },
+    {
+        "name": "fp1 ix c env spelled publish to the fleet bus",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "$env:MLV_FLEET_BUS_ROOT/specs/mlv-app.md",
+            "content": "# mlv-app spec\n",
+        },
+        "expect": "ALLOW",
+        "fixture": "fleet_bus_with_unread_alias",
+    },
+    {
+        "name": "fp1 ix c CTL the same env spelled publish walked out with dot dot",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "$env:MLV_FLEET_BUS_ROOT/../specs/mlv-app.md",
+            "content": "# mlv-app spec\n",
+        },
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "outside both the worktree and the board root",
+        "fixture": "fleet_bus_with_unread_alias",
+    },
+    {
+        "name": "fp1 ix d braced env spelled publish to the fleet bus",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "${env:MLV_FLEET_BUS_ROOT}/specs/mlv-app.md",
+            "content": "# mlv-app spec\n",
+        },
+        "expect": "ALLOW",
+        "fixture": "fleet_bus_with_unread_alias",
+    },
+    {
+        "name": "fp1 ix d CTL the same braced spelling walked out with dot dot",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "${env:MLV_FLEET_BUS_ROOT}/../specs/mlv-app.md",
+            "content": "# mlv-app spec\n",
+        },
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "outside both the worktree and the board root",
+        "fixture": "fleet_bus_with_unread_alias",
+    },
+    {
+        "name": "fp1 ix e env spelled delete of the protected queue ledger",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Remove-Item -LiteralPath "
+            '"$env:MLV_BOARD_ROOT/.claude-state/coordination/dual-lane/queue.json"'
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "{BOARD_NORM}/.claude-state/coordination/dual-lane/queue.json",
+            "denied on the carve-out paths",
+        ),
+    },
+    {
+        "name": "fp1 ix e CTL the same variable on an unprotected sibling directory",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Remove-Item -LiteralPath "
+            '"$env:MLV_BOARD_ROOT/.claude-state/coordination-scratch/dual-lane/queue.json"'
+        },
+        "expect": "ALLOW",
+    },
     # ------------------------------------------------------- the 6 benign ALLOW controls
     {
         "name": "benign git push fork product branch",
@@ -4383,6 +4536,24 @@ def fixture_fleet_bus(paths):
     """
     _write(os.path.join(paths["BUS"], "TRAPS.md"), "# fleet traps\n")
     return {"MLV_FLEET_BUS_ROOT": paths["BUS"]}
+
+
+def fixture_fleet_bus_with_unread_alias(paths):
+    """ROUND 3 (S134): the bus root ALSO exported under a name the hook does not read.
+
+    THE CONTROL HALF OF THE EXPANSION PAIRS, and it is deliberately the SHARPEST one
+    available: `FP1_UNREAD_BUS_ROOT` is SET, in this very process, to the SAME value as
+    `MLV_FLEET_BUS_ROOT`, so the two rows differ in the variable NAME and in nothing else --
+    not the value, not the path, not the verb.  The control must stay ALLOW: this hook
+    resolves the names IT READS and no others, and a row that expected a DENY here would be
+    asserting a guarantee a text matcher cannot keep (see the residual limit in the hook's
+    header).  The name carries no `MLV_` prefix so it cannot be mistaken for a steering
+    input, and `_invoke` strips `MLV_*` BEFORE applying overrides, so it is only ever set by
+    this fixture.
+    """
+    overrides = fixture_fleet_bus(paths)
+    overrides["FP1_UNREAD_BUS_ROOT"] = paths["BUS"]
+    return overrides
 
 
 def fixture_receipts_all_six(paths):
@@ -5190,6 +5361,7 @@ FIXTURES = {
     # HOOK-FALSE-POSITIVE-1
     "existing_ledger": fixture_existing_ledger,
     "fleet_bus": fixture_fleet_bus,
+    "fleet_bus_with_unread_alias": fixture_fleet_bus_with_unread_alias,
     "receipts_all_six": fixture_receipts_all_six,
     "receipts_all_six_at_board": fixture_receipts_all_six_at_board,
     "receipts_all_six_at_worktree": fixture_receipts_all_six_at_worktree,
@@ -5318,6 +5490,13 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         }
         for key in ("BOARD", "DUAL", "RECEIPTS", "OUTSIDE", "CACHE", "WORKTREE", "BUS"):
             os.makedirs(self.paths[key])
+        # ROUND 3 (S134): the board root as the hook PRINTS it -- normalised, so a
+        # `reason_contains` can pin the RESOLVED path rather than the placeholder.  That is
+        # what turns the `$env:MLV_BOARD_ROOT` NA-2 row into a falsifier: a hook that does
+        # not expand still DENIES that row, but names `$env:mlv_board_root/...` in the
+        # reason, which this needle does not match.  Derived with the hook's OWN `norm`, so
+        # it is right on both matrix legs and cannot drift from the printer.
+        self.paths["BOARD_NORM"] = _load_hook_module().norm(self.paths["BOARD"])
         self.paths["CHECKPOINT_SHA"] = hashlib.sha256(
             CHECKPOINT_LONG.encode("utf-8")
         ).hexdigest()
@@ -5553,6 +5732,63 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         for name in steering:
             self.assertIn(name, PERSISTENT_NAMES, name)
 
+    def test_every_environment_input_the_hook_reads_is_expanded_in_a_path(self):
+        """S134: THE EXPANSION LIST IS THE READ LIST, DERIVED FROM THE SAME CALL SITES.
+
+        Round 2 shipped a bus delete guard whose docstring promised "denied at every value"
+        while the code resolved only a LITERAL path; sol found it by spelling the same file
+        `"$env:MLV_FLEET_BUS_ROOT\\specs\\mlv-app.md"`.  The repair is only durable if the
+        NEXT input added to `Ctx.__init__` is expanded too, so this gate derives the names
+        from the hook's own `env.get(...)` call sites -- the SAME derivation the NA-3
+        protection gate above performs -- and asserts `HOOK_READ_ENV_NAMES` is EXACTLY that
+        set.  Equality in both directions is the point: a missing name is the round-2 defect
+        returning, and an EXTRA name is this hook substituting a value it never read, which
+        is the fabrication the header's residual limit refuses.
+        """
+        with open(HOOK, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        read_names = set(re.findall(r"env(?:iron)?\.get\(\s*[\"'](\w+)[\"']", source))
+        module = _load_hook_module()
+        self.assertEqual(
+            sorted(module.HOOK_READ_ENV_NAMES),
+            sorted(read_names),
+            "the expansion list must be exactly the names the hook reads",
+        )
+        # And every spelling the list claims really resolves, at the value THIS process
+        # carries -- one assertion per spelling, so a regex that loses one goes red by name.
+        saved = os.environ.get("MLV_FLEET_BUS_ROOT")
+        os.environ["MLV_FLEET_BUS_ROOT"] = r"C:\fp1\bus"
+        try:
+            for spelling in (
+                "$env:MLV_FLEET_BUS_ROOT/specs/x.md",
+                "${env:MLV_FLEET_BUS_ROOT}/specs/x.md",
+                "%MLV_FLEET_BUS_ROOT%/specs/x.md",
+                "$ENV:mlv_fleet_bus_root/specs/x.md",
+            ):
+                self.assertEqual(
+                    module.norm(spelling), "c:/fp1/bus/specs/x.md", spelling
+                )
+            # A name the hook does NOT read is left standing, not blanked and not guessed.
+            self.assertEqual(
+                module.norm("$env:FP1_UNREAD_BUS_ROOT/specs/x.md"),
+                "$env:fp1_unread_bus_root/specs/x.md",
+            )
+            # Expansion precedes the `..` collapse, which is the whole reason it lives in
+            # `norm` rather than at a call site.
+            self.assertEqual(
+                module.norm("$env:MLV_FLEET_BUS_ROOT/../escaped.txt"), "c:/fp1/escaped.txt"
+            )
+            # ... and an UNEXPANDED reading of the same text collapses to a bare relative
+            # name, which is what NA-7's early return waved past on the parent revision.
+            self.assertEqual(
+                module.norm("$env:FP1_UNREAD_BUS_ROOT/../escaped.txt"), "escaped.txt"
+            )
+        finally:
+            if saved is None:
+                del os.environ["MLV_FLEET_BUS_ROOT"]
+            else:
+                os.environ["MLV_FLEET_BUS_ROOT"] = saved
+
     def test_every_register_row_has_at_least_one_deny_case(self):
         """The suite FAILS if any of NA-1,2,3,4,6,7,8,9,10 has zero DENY cases.
 
@@ -5594,8 +5830,27 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # consulted; and the `setx` row, ALLOW there.  The re-cut pairs in (i), (ii), (iv)
         # and (v) are green on both hooks BY DESIGN: they change what the table PROVES about
         # round 1's behaviour, not what round 2 does.
+        #
+        # PINNED DELIBERATELY, ROUND 3 (S134, sol's review of `78c35431`): 29 -> 39.  NO row
+        # was dropped and none re-expected.  The hook now EXPANDS the six environment names
+        # it reads, in all three spellings, inside `norm` and BEFORE the `..` collapse, so
+        # the round-2 bus guard's docstring claim stops being false for the one spelling sol
+        # tried.  TEN new rows: the env-spelled and cmd-spelled bus deletes (DENY) each
+        # against a control whose variable is exported to THE SAME VALUE under a name the
+        # hook does not read (ALLOW -- the residual limit, asserted rather than wished away);
+        # the env and braced-env publishes (ALLOW) each against the same path with one `..`
+        # inserted (DENY -- expansion precedes canonicalisation); and the `$env:MLV_BOARD_ROOT`
+        # delete of the protected queue ledger against an unprotected sibling directory.
+        #
+        # MEASURED against `78c35431`'s own hook, not asserted: FIVE of the ten go RED on it
+        # -- the two bus deletes (ALLOW there), the two `..` walk-outs (ALLOW there, because
+        # an unexpanded `$env:...` reads as a relative segment and NA-7 returns early), and
+        # the NA-2 queue delete, which is DENIED there but names the UNEXPANDED
+        # `$env:mlv_board_root/...`, so its `{BOARD_NORM}` needle fails.  The five ALLOW
+        # halves are green on both hooks BY DESIGN: four are behaviour this delta must not
+        # change, and the unread-name controls are the limit itself.
         self.assertEqual(
-            counts.get("falsepositive1"), 29, "29 HOOK-FALSE-POSITIVE-1 rows"
+            counts.get("falsepositive1"), 39, "39 HOOK-FALSE-POSITIVE-1 rows"
         )
         # PINNED DELIBERATELY, 0.05 third review delta: the 0.2 enable became ONE dedicated
         # act, so the group grew 6 -> 15.  Six rows vary the canonical act's PRECONDITIONS,
@@ -6234,8 +6489,33 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         blob = json.dumps(CASES)
         self.assertNotIn("Layi Wkspc", blob)
         self.assertNotIn("bachelor", blob)
+        # ROUND 3 (S134): `$env:MLV_BOARD_ROOT` is an ANCHOR beside `{BOARD}`, and ONLY
+        # because `_invoke` binds that name to `paths["BOARD"]` -- the tmp board -- on every
+        # row.  The gate's claim is unchanged: no case may depend on the REAL board root, and
+        # the two literal guards above are what enforce that and are untouched.  What changed
+        # is that a row may now spell the fixture's board through the very variable whose
+        # expansion it is testing.  The binding is asserted here rather than remembered, so
+        # this anchor cannot outlive the harness line that makes it true.
+        self.assertIn(
+            'env["MLV_BOARD_ROOT"] = self.paths["BOARD"]',
+            HARNESS_SOURCE,
+            "the env anchor below is only safe while `_invoke` binds it to the tmp board",
+        )
+        # `{BOARD_NORM}` is the same tmp board as the hook PRINTS it, bound in `setUp` from
+        # `paths["BOARD"]` -- a fixture placeholder like `{BOARD}`, never a machine path.
+        anchors = (
+            "{BOARD}",
+            "{BOARD_NORM}",
+            "$env:MLV_BOARD_ROOT",
+            "${env:MLV_BOARD_ROOT}",
+        )
         for match in re.finditer(r"\.claude-state[^\"\\]*", blob):
-            self.assertIn("{BOARD}", blob[max(0, match.start() - 40) : match.start() + 1])
+            window = blob[max(0, match.start() - 40) : match.start() + 1]
+            self.assertTrue(
+                any(anchor in window for anchor in anchors),
+                "a `.claude-state` path must come from the fixture, not this machine: %r"
+                % window,
+            )
 
     def test_the_hook_never_reads_the_venue_from_the_environment(self):
         """O126, asserted on the SOURCE as well as on the behaviour.

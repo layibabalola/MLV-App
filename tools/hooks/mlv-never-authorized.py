@@ -80,14 +80,42 @@ MLV_FLEET_BUS_ROOT          default ``C:\\!Layi Wkspc\\softwarefactory-fleet-doc
                             so it WIDENS an allow-list rather than narrowing one, and it is
                             NA-3-PROTECTED exactly like the other five: ``setx`` or a
                             User/Machine-scope ``SetEnvironmentVariable`` of this name is
-                            DENIED (S133).  Deletes and moves under it are denied at every
-                            value -- a publish is additive.
+                            DENIED (S133).  Deletes and moves under it are DENIED -- a
+                            publish is additive -- when the path is written LITERALLY or
+                            through one of the environment variables THIS HOOK ITSELF READS
+                            (S134; see the next section for the exact reach and its limit).
 MLV_REQUIRED_CHECKS_SNAPSHOT
                             default ``<board>\\.claude-state\\coordination\\dual-lane\\
                             receipts\\required-checks-live.jsonl``.  NA-9 reads the LAST
                             non-empty row.  Absent, unparseable, or a malformed row
                             anywhere => every protection mutation is DENIED.
 MLV_HOOK_DRYRUN=1           print the decision on stdout; the exit code is unchanged.
+
+THOSE SIX NAMES ARE EXPANDED IN A COMMAND'S TEXT, AND NOTHING ELSE IS (S134)
+---------------------------------------------------------------------------
+``norm`` -- the ONE path comparison -- substitutes the six names above wherever a command
+spells them ``$env:NAME``, ``${env:NAME}`` or ``%NAME%`` (NAME case-insensitively, quoted or
+bare), using THE VALUE THIS PROCESS IS USING, and it does so BEFORE ``canonical`` collapses
+``.``/``..``.  So every arm inherits it -- NA-2's protected tails and carve-outs, NA-7's
+three roots AND the bus delete/move guard, NA-10's gate tails -- and
+``"$env:MLV_FLEET_BUS_ROOT\\..\\escaped.txt"`` cannot hide an escape behind the variable.
+
+WHY, MEASURED RATHER THAN ASSERTED.  Sol measured on ``78c35431`` that
+``Remove-Item -LiteralPath '<bus>/specs/mlv-app.md'`` was DENIED while
+``Remove-Item -LiteralPath "$env:MLV_FLEET_BUS_ROOT\\specs\\mlv-app.md"`` was ALLOWED: the
+same file, the same act, spelled through the variable THIS HOOK had already read to locate
+the bus.  The guarantee in the table above was false for that spelling, and the fix is the
+lookup, not softer prose.
+
+THE RESIDUAL LIMIT, STATED HERE RATHER THAN PAPERED OVER.  Deletes and moves under the bus
+are denied when the path is LITERAL or written through a hook-read variable; indirection
+through ANY OTHER variable, through a script, or through an interpreter one-liner remains
+INVISIBLE to a text matcher, and this hook does not pretend otherwise -- a name it never
+read has no value here to resolve, and inventing one would be a fabrication in the other
+direction.  The layers behind this one are the WORKTREE BOUNDARY, the TOOL ALLOWLIST, and
+the CROSS-FAMILY PR REVIEW.  An ABSENT name is likewise left as literal text rather than
+blanked: PowerShell expands an unset ``$env:X`` to the empty string and cmd leaves ``%X%``
+standing, so blanking would be this hook asserting which interpreter will run the command.
 
 THE CANONICAL 0.2 ENABLE COMPOUND (O128) -- the ONE shell write the receipt paths admit::
 
@@ -413,6 +441,40 @@ DEFAULT_FLEET_BUS_ROOT = r"C:\!Layi Wkspc\softwarefactory-fleet-doctrine"
 # and creates nothing.  Compared AFTER `norm`, which lowercases -- so `NUL` and `nul` are
 # the one entry `nul`.
 NULL_DEVICE_SINKS = frozenset(("/dev/null", "nul", "$null"))
+
+# HOOK-FALSE-POSITIVE-1, ROUND 3 (sol's blocker on PR #104, `78c35431`).  THE NAMES THIS
+# HOOK ITSELF READS, and therefore the only names it may resolve in a command's text.  Round
+# 2's bus guard denied a LITERAL bus delete and returned ALLOW for
+# `Remove-Item -LiteralPath "$env:MLV_FLEET_BUS_ROOT\specs\mlv-app.md"` -- the same file,
+# spelled through the very variable that told this process where the bus is.  A header
+# claiming "denied at every value" while the code denied one spelling is the board's recorded
+# house defect, so the code is widened here and the residual limit is stated in the header.
+#
+# THE LIST IS THE SAME LIST `_NA3_PERSISTENT_NAMES` protects, MINUS `CLAUDE_PROJECT_DIR`,
+# and the difference is load-bearing in the fail-closed direction: NA-3 protects
+# `CLAUDE_PROJECT_DIR` because a PERSISTENT write of it would steer the registration, but
+# this hook NEVER READS it (O126, measured absent 17/17), so it has no value here to
+# substitute and inventing one would be a fabrication.  A structural test derives this tuple
+# from the hook's own `env.get(...)` call sites, so a new input cannot ship unexpanded.
+HOOK_READ_ENV_NAMES = (
+    "MLV_BOARD_ROOT",
+    "MLV_CLIP_CACHE_ROOT",
+    "MLV_FLEET_BUS_ROOT",
+    "MLV_HOOK_DRYRUN",
+    "MLV_LANE_PROMPT",
+    "MLV_REQUIRED_CHECKS_SNAPSHOT",
+)
+_HOOK_READ_ENV_SET = frozenset(name.upper() for name in HOOK_READ_ENV_NAMES)
+# Both spellings a command on this board can carry, NAME matched case-insensitively because
+# Windows environment names are: PowerShell `$env:NAME` and `${env:NAME}`, cmd `%NAME%`.
+# Surrounding quotes are stripped by `norm` before this runs, so the quoted and bare forms
+# reach it identically.
+_ENV_REF_RX = re.compile(
+    r"\$env:(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|\$\{env:(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}"
+    r"|%(?P<cmd>[A-Za-z_][A-Za-z0-9_]*)%",
+    re.I,
+)
 
 SHELL_TOOLS = ("Bash", "PowerShell")
 FILE_TOOLS = ("Write", "Edit", "NotebookEdit")
@@ -778,17 +840,66 @@ def canonical(text):
     return drive + posixpath.normpath(text)
 
 
+def expand_hook_env(text):
+    """Substitute the environment variables THIS HOOK READS, in either spelling (S134).
+
+    THE DEFECT THIS CLOSES, measured by sol on PR #104 against ``78c35431``: round 2's bus
+    guard denied ``Remove-Item -LiteralPath '<bus>/specs/mlv-app.md'`` and ALLOWED
+    ``Remove-Item -LiteralPath "$env:MLV_FLEET_BUS_ROOT\\specs\\mlv-app.md"``.  Same file,
+    same act, spelled through the very variable that told THIS PROCESS where the bus is --
+    so the value was not unknown to the hook, it was simply never looked up.
+
+    WHAT IS SUBSTITUTED, AND WHY THAT IS THE HONEST BOUNDARY.  Only the names in
+    ``HOOK_READ_ENV_NAMES``, and only when the name is actually PRESENT in this process's
+    environment.  Both halves are deliberate:
+
+      * a name this hook does not read has no value here that is more authoritative than
+        the shell's, and guessing one would deny (or admit) a path the hook never resolved;
+      * a name that is ABSENT is left as literal text rather than blanked, because the two
+        interpreters disagree about the unset case -- PowerShell expands ``$env:X`` to the
+        empty string, cmd leaves ``%X%`` standing -- and a hook that picks one is asserting
+        which shell will run the command.  Leaving it is the reading that fabricates
+        nothing, and it changes no decision this hook made before this delta.
+
+    ONE PASS, never re-scanned: a value that itself contains ``$env:...`` is substituted
+    once and then treated as text, so no input can drive this into a loop.
+
+    Called from ``norm`` -- the hook's ONE path comparison -- and BEFORE ``canonical``, so
+    ``"$env:MLV_FLEET_BUS_ROOT\\..\\escaped.txt"`` is expanded and THEN collapsed, and the
+    ``..`` cannot hide behind the variable.
+    """
+    if "$" not in text and "%" not in text:
+        return text  # neither spelling can be present -- the common case, no scan
+
+    def _one(match):
+        name = match.group("bare") or match.group("braced") or match.group("cmd")
+        if name.upper() not in _HOOK_READ_ENV_SET:
+            return match.group(0)
+        value = os.environ.get(name)
+        if value is None:
+            value = os.environ.get(name.upper())
+        if value is None:
+            return match.group(0)
+        return value
+
+    return _ENV_REF_RX.sub(_one, text)
+
+
 def norm(path):
     """Normalise for comparison: backslashes to slashes, lowercased, no trailing slash.
 
-    ``.`` and ``..`` are COLLAPSED (``canonical`` above), so a path that walks out of a
-    root cannot keep that root as a prefix.
+    The environment variables THIS HOOK READS are EXPANDED first (``expand_hook_env``
+    above), then ``.`` and ``..`` are COLLAPSED (``canonical``), so a path that walks out of
+    a root cannot keep that root as a prefix -- whether the root arrived literally or
+    through ``$env:``/``%``.  Both live here, in the hook's ONE path comparison, so every
+    arm inherits them: NA-2's protected tails and carve-outs, NA-7's three roots and the bus
+    delete/move guard, and NA-10's gate tails.
 
     Links are NOT followed and the filesystem is NOT consulted -- NA-4 requires the
     comparison to be made without following links, and a hook that stats every token is a
     hook that misses its latency budget.
     """
-    text = str(path).strip().strip('"').strip("'").replace("\\", "/")
+    text = expand_hook_env(str(path).strip().strip('"').strip("'")).replace("\\", "/")
     unc = text.startswith("//")
     text = re.sub(r"/{2,}", "/", text)
     if unc:
