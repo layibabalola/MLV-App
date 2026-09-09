@@ -500,7 +500,13 @@ $child.StandardInput.Write($prompt); $child.StandardInput.Close(); $child.WaitFo
     }
     $jobHandle = [MlvLaneJob]::CreateKillOnClose()
     $proc = [Diagnostics.Process]::Start($psi)
-    $containedHost = [ordered]@{ pid=$proc.Id; createdUtc=$proc.StartTime.ToUniversalTime().ToString('o') }
+    # Record the pid the instant Start returns, before anything that can throw:
+    # once Start succeeds a host EXISTS, and a receipt that omits its pid is
+    # indistinguishable from "no host was started" (PR #105 round 2 blocker).
+    # createdUtc is read defensively in its own try -- a StartTime failure must
+    # not erase the pid we already have.
+    $containedHost = [ordered]@{ pid=$proc.Id; createdUtc=$null }
+    try { $containedHost.createdUtc = $proc.StartTime.ToUniversalTime().ToString('o') } catch { }
     [MlvLaneJob]::AssignOrThrow($jobHandle, $proc.Handle)
     $jobAssigned = $true
 } else {

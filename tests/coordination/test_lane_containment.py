@@ -196,18 +196,26 @@ def test_startup_consumes_same_deadline_without_starting_provider(fixture_tree):
     q=json.loads(receipt.read_text(encoding="utf-8"))
     assert q["timedOut"]
     assert not (fixture_tree["root"]/"child.json").exists()
-    # The 1 s -TimeoutSec deadline races Invoke-Lane.ps1's own setup: on a loaded
-    # runner the deadline can fire (~line 470) before a contained host is ever
-    # started (~line 503), so the catch-block fallback receipt (~lines 655-660)
-    # records containment.ownerPid=None. With no owner ever started there is
-    # nothing that could be orphaned -- the child.json absence above is already
-    # the whole proof, so only fall back to wait_absent when an owner pid exists.
+    # PR #105 round 2 (sol blocker): Invoke-Lane.ps1 now records containedHost.pid
+    # the instant Process::Start returns, before any call that can throw -- so a
+    # null ownerPid means Start itself failed, which this test's fixture (a delayed
+    # stdin read, not a launch failure) does not produce. Tolerating that ambiguity
+    # here would let a real orphaned host masquerade as "never started"; fail loud
+    # instead of guessing.
     containment=q.get("containment")
     owner_pid=containment.get("ownerPid") if containment else None
-    if owner_pid is None:
+    if containment is None or owner_pid is None:
+        pytest.fail(f"ambiguous containment receipt: ownerPid is None, which the producer fix "
+                    f"reserves for Process::Start itself throwing -- this fixture never triggers "
+                    f"that path, so a null owner here means the receipt can no longer prove "
+                    f"whether a host was started: {q}")
+    elif containment["ownerCreatedUtc"] is None:
+        # A pid with no createdUtc means Start succeeded but StartTime read threw;
+        # there is no createdUtc to compare against, so the only provable check is
+        # that the pid is not (or no longer) an alive process.
         assert identity(owner_pid) is None
     else:
-        wait_absent({"pid":owner_pid,"createdUtc":containment["ownerCreatedUtc"]})
+        wait_absent({"pid":q["containment"]["ownerPid"],"createdUtc":q["containment"]["ownerCreatedUtc"]})
 
 
 @pytest.mark.parametrize("elapsed_ms,expected_exit", [(0, 0), (4000, 124)])
