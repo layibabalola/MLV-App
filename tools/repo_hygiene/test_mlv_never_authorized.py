@@ -3903,6 +3903,103 @@ CASES = [
         },
         "expect": "ALLOW",
     },
+    # (x) ROUND 5 -- THE SAME ACTS WITH THE STEERING VARIABLE UNSET, WHICH IS THE ONLY
+    # CONFIGURATION THAT ACTUALLY SHIPS.
+    #
+    # THE HUB'S OWN DEFECT, CORRECTED HERE.  Round 3's packet told the implementer to expand
+    # a hook-read name "only when the name is actually present in this process's
+    # environment", and round 4's implementer measured what that bought and reported it
+    # rather than hiding it: with `MLV_FLEET_BUS_ROOT` UNSET -- the ambient state on this
+    # machine, where nothing but this suite ever exports it --
+    # `Remove-Item -LiteralPath "$env:MLV_FLEET_BUS_ROOT\specs\mlv-app.md"` returned ALLOW
+    # while the identical LITERAL delete returned DENY.  Sol's blocker was still open in the
+    # default configuration.  The repair is in `hook_env_values`: a name resolves to the
+    # value the hook IS USING -- the override when set, the BUILT-IN DEFAULT when not.
+    #
+    # WHY THESE ARE PAIRS AND NOT ROWS.  Every row here is the twin of an `(ix)` row above,
+    # varying EXACTLY ONE THING: whether the name is bound.  Both halves must DENY, because
+    # the hook knows where the bus is in both -- the defect was never ignorance of the root,
+    # it was asking "is the variable set?" instead of "what value am I using?".  The needles
+    # pin the RESOLVED DEFAULT (`{DEFAULT_BUS_NORM}` / `{DEFAULT_BOARD_NORM}`, derived in
+    # `setUp` from the hook's own constants), so a hook that regressed to leaving the
+    # reference literal fails by verdict AND by name.
+    #
+    # MEASURED ON THE PARENT `dda48ff9`: x-a, x-b and x-c are ALLOW there, and so is x-d --
+    # `$env:MLV_FLEET_BUS_ROOT/../escaped.txt` collapsed to the bare relative `escaped.txt`
+    # and walked past NA-7's outside-the-roots arm.  That fourth hole was NOT in the round-4
+    # report; it is the same defect one arm over, found by running the (ix) table's own acts
+    # in the unset configuration, and it is why the unset half is a table and not one row.
+    {
+        "name": "fp1 x a env spelled bus delete with the bus root UNSET",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Remove-Item -LiteralPath "
+            '"$env:MLV_FLEET_BUS_ROOT/specs/mlv-app.md"'
+        },
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": (
+            "under the fleet doctrine bus",
+            "{DEFAULT_BUS_NORM}/specs/mlv-app.md",
+        ),
+        "fixture": "fleet_bus_unset",
+    },
+    {
+        "name": "fp1 x b cmd spelled bus delete with the bus root UNSET",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": 'Remove-Item -LiteralPath "%MLV_FLEET_BUS_ROOT%/specs/mlv-app.md"'
+        },
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": (
+            "under the fleet doctrine bus",
+            "{DEFAULT_BUS_NORM}/specs/mlv-app.md",
+        ),
+        "fixture": "fleet_bus_unset",
+    },
+    {
+        "name": "fp1 x c CTL the env spelled publish with the bus root UNSET stays allowed",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "$env:MLV_FLEET_BUS_ROOT/specs/mlv-app.md",
+            "content": "# mlv-app spec\n",
+        },
+        "expect": "ALLOW",
+        "fixture": "fleet_bus_unset",
+    },
+    {
+        "name": "fp1 x d the same publish walked out with dot dot, bus root UNSET",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "$env:MLV_FLEET_BUS_ROOT/../escaped.txt",
+            "content": "# mlv-app spec\n",
+        },
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "outside both the worktree and the board root",
+        "fixture": "fleet_bus_unset",
+    },
+    {
+        "name": "fp1 x e env spelled delete of the queue ledger with the board root UNSET",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Remove-Item -LiteralPath "
+            '"$env:MLV_BOARD_ROOT/.claude-state/coordination/dual-lane/queue.json"'
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "{DEFAULT_BOARD_NORM}/.claude-state/coordination/dual-lane/queue.json",
+            "denied on the carve-out paths",
+        ),
+        "fixture": "board_root_unset",
+    },
     # ------------------------------------------------------- the 6 benign ALLOW controls
     {
         "name": "benign git push fork product branch",
@@ -3958,6 +4055,33 @@ CASES = [
 # venue must reach the hook the way the registration delivers it, and a row that wants to
 # prove the environment is NOT read sets `CLAUDE_PROJECT_DIR` instead and passes no argument.
 VENUE_KEY = "__project_dir__"
+
+
+class _Unset(object):
+    """ROUND 5: a fixture value meaning DELETE THIS NAME FROM THE HOOK'S ENVIRONMENT.
+
+    THE CAPABILITY THIS SUITE DID NOT HAVE, AND ITS ABSENCE IS WHAT LET THE HOLE THROUGH.
+    `_invoke` binds `MLV_BOARD_ROOT`, `MLV_CLIP_CACHE_ROOT` and
+    `MLV_REQUIRED_CHECKS_SNAPSHOT` for EVERY row, and `fixture_fleet_bus` binds
+    `MLV_FLEET_BUS_ROOT` for every row that names the bus -- so until this delta the suite
+    could only ever measure the SET configuration.  Round 3's expansion substituted a name
+    only when it was PRESENT, which is green in that configuration and open in the other:
+    with `MLV_FLEET_BUS_ROOT` unset -- the AMBIENT state on this machine -- the env-spelled
+    bus delete was ALLOWED while the literal one was DENIED.  A steering root's DEFAULT is a
+    configuration this hook actually runs in (it is the only one that ships), so it has to be
+    a configuration this table can express.
+
+    An override of `UNSET` is popped from the row's overrides AND deleted from the hook's
+    environment, so the hook falls back to its OWN built-in default -- which is what the
+    paired rows below measure.  Nothing is executed and no path is stat'ed; the rows assert a
+    DECISION about a path, so binding a name to nothing cannot touch this machine.
+    """
+
+    def __repr__(self):
+        return "UNSET"
+
+
+UNSET = _Unset()
 
 
 def _write(path, text):
@@ -4554,6 +4678,32 @@ def fixture_fleet_bus_with_unread_alias(paths):
     overrides = fixture_fleet_bus(paths)
     overrides["FP1_UNREAD_BUS_ROOT"] = paths["BUS"]
     return overrides
+
+
+def fixture_fleet_bus_unset(paths):
+    """ROUND 5: the bus root NOT exported at all -- the hook falls back to ITS OWN default.
+
+    THE OTHER HALF OF EVERY BUS PAIR, and the configuration that actually ships: nothing on
+    this machine exports `MLV_FLEET_BUS_ROOT` except this suite, so `DEFAULT_FLEET_BUS_ROOT`
+    is what a real hook process resolves.  The rows using this fixture spell the bus through
+    the variable and assert the same DENY as their SET twin -- differing in exactly one
+    thing, whether the name is bound.  Measured on the parent revision `dda48ff9`, both go
+    ALLOW there, which is what makes them falsifiers rather than decoration.
+
+    `MLV_BOARD_ROOT` stays bound to the tmp board, so the bus is the ONE name this fixture
+    varies and nothing else about the row's environment moves with it.
+    """
+    return {"MLV_FLEET_BUS_ROOT": UNSET}
+
+
+def fixture_board_root_unset(paths):
+    """ROUND 5: the BOARD root not exported either -- the same question for the other root.
+
+    `ix-e` proved the board root is expanded when it is SET.  This is its unset twin: with
+    the name absent the hook judges against `DEFAULT_BOARD_ROOT`, and the NA-2 tail must
+    still fire, naming the RESOLVED default rather than the literal `$env:...` text.
+    """
+    return {"MLV_BOARD_ROOT": UNSET}
 
 
 def fixture_receipts_all_six(paths):
@@ -5362,6 +5512,9 @@ FIXTURES = {
     "existing_ledger": fixture_existing_ledger,
     "fleet_bus": fixture_fleet_bus,
     "fleet_bus_with_unread_alias": fixture_fleet_bus_with_unread_alias,
+    # ROUND 5: the UNSET half of the expansion pairs.
+    "fleet_bus_unset": fixture_fleet_bus_unset,
+    "board_root_unset": fixture_board_root_unset,
     "receipts_all_six": fixture_receipts_all_six,
     "receipts_all_six_at_board": fixture_receipts_all_six_at_board,
     "receipts_all_six_at_worktree": fixture_receipts_all_six_at_worktree,
@@ -5497,6 +5650,18 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # reason, which this needle does not match.  Derived with the hook's OWN `norm`, so
         # it is right on both matrix legs and cannot drift from the printer.
         self.paths["BOARD_NORM"] = _load_hook_module().norm(self.paths["BOARD"])
+        # ROUND 5: the hook's OWN built-in defaults, as the hook PRINTS them.  Read from the
+        # module's constants and normalised with the module's `norm`, never written down
+        # here: these needles must follow the hook if a default ever moves, and a literal
+        # would turn a default change into a green suite plus a wrong claim.  They are the
+        # expected values of the UNSET half of each pair -- what the hook resolves when the
+        # steering variable is absent, which is the configuration that actually ships.
+        self.paths["DEFAULT_BUS_NORM"] = _load_hook_module().norm(
+            _load_hook_module().DEFAULT_FLEET_BUS_ROOT
+        )
+        self.paths["DEFAULT_BOARD_NORM"] = _load_hook_module().norm(
+            _load_hook_module().DEFAULT_BOARD_ROOT
+        )
         self.paths["CHECKPOINT_SHA"] = hashlib.sha256(
             CHECKPOINT_LONG.encode("utf-8")
         ).hexdigest()
@@ -5627,6 +5792,13 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         env["MLV_REQUIRED_CHECKS_SNAPSHOT"] = self.paths["SNAPSHOT"]
         overrides = dict(overrides)
         venue = overrides.pop(VENUE_KEY, None)
+        # ROUND 5: `UNSET` is not a value, it is the ABSENCE of one.  Popped before the
+        # update (a sentinel object is not a legal environment value) and deleted from the
+        # environment, so the hook resolves that name to its OWN built-in default -- the
+        # configuration this machine actually runs in, and the one round 3 never measured.
+        for key in [key for key, value in overrides.items() if value is UNSET]:
+            overrides.pop(key)
+            env.pop(key, None)
         env.update(overrides)
         env["PYTHONIOENCODING"] = "utf-8"
         argv = [sys.executable, HOOK]
@@ -5849,8 +6021,28 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # `$env:mlv_board_root/...`, so its `{BOARD_NORM}` needle fails.  The five ALLOW
         # halves are green on both hooks BY DESIGN: four are behaviour this delta must not
         # change, and the unread-name controls are the limit itself.
+        #
+        # PINNED DELIBERATELY, ROUND 5 (the HUB'S defect, reported by round 4's implementer):
+        # 39 -> 44.  NO row was dropped and none re-expected.  Round 3's instruction was to
+        # expand a name "only when it is PRESENT in this process's environment", which made
+        # every (ix) row green in the SET configuration and left the guard open in the UNSET
+        # one -- the only configuration that ships, since nothing on this machine exports
+        # `MLV_FLEET_BUS_ROOT` but this suite.  The hook now resolves a read name to the
+        # value it IS USING (`hook_env_values`: override when set, BUILT-IN DEFAULT when
+        # not), and the harness gained `UNSET` so the table can express that configuration at
+        # all -- its absence is precisely what let the hole through a whole round.  FIVE new
+        # rows, each the twin of an (ix) row varying ONE thing, whether the name is bound: the
+        # env- and cmd-spelled bus deletes (DENY), the publish that must stay ALLOW there,
+        # the `..` walk-out (DENY), and the `$env:MLV_BOARD_ROOT` queue delete (DENY).
+        #
+        # MEASURED against `dda48ff9`'s own hook, not asserted: FOUR of the five go RED on it
+        # -- x-a, x-b and x-d are ALLOW there (x-d was NOT in the round-4 report: an
+        # unexpanded `$env:...` collapses to a bare relative name and NA-7 returns early), and
+        # x-e is DENIED there but names the UNEXPANDED `$env:mlv_board_root/...`, so its
+        # `{DEFAULT_BOARD_NORM}` needle fails.  x-c is green on both BY DESIGN: a publish
+        # under the bus is behaviour this delta must not change.
         self.assertEqual(
-            counts.get("falsepositive1"), 39, "39 HOOK-FALSE-POSITIVE-1 rows"
+            counts.get("falsepositive1"), 44, "44 HOOK-FALSE-POSITIVE-1 rows"
         )
         # PINNED DELIBERATELY, 0.05 third review delta: the 0.2 enable became ONE dedicated
         # act, so the group grew 6 -> 15.  Six rows vary the canonical act's PRECONDITIONS,
@@ -6529,6 +6721,12 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
                 if name not in overrides:
                     continue
                 value = overrides[name]
+                if value is UNSET:
+                    # ROUND 5: an UNSET name binds NOTHING, so there is no fixture path to
+                    # check.  What the hook then uses is its own built-in default, which is
+                    # the very configuration the paired rows exist to measure -- and it is a
+                    # DECISION about that path, never a touch of it.
+                    continue
                 resolved = os.path.normcase(os.path.abspath(value))
                 self.assertTrue(
                     resolved == tmp or resolved.startswith(tmp + os.sep),
@@ -6565,9 +6763,19 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self._assert_no_fixture_binds_a_hook_read_root_outside_tmp(CASES, FIXTURES)
         # `{BOARD_NORM}` is the same tmp board as the hook PRINTS it, bound in `setUp` from
         # `paths["BOARD"]` -- a fixture placeholder like `{BOARD}`, never a machine path.
+        # ROUND 5: `{DEFAULT_BOARD_NORM}` is the ONE anchor that names the hook's built-in
+        # default rather than the tmp board, and it is admitted deliberately.  The `x e` row
+        # exists to measure the configuration where `MLV_BOARD_ROOT` is UNSET, and in that
+        # configuration the hook judges against `DEFAULT_BOARD_ROOT` -- so a row that could
+        # not name it could not assert the expansion resolved at all.  It stays inside this
+        # gate's claim: the placeholder is bound in `setUp` from the HOOK MODULE's own
+        # constant (never a literal here, and the "Layi Wkspc" guard above still holds over
+        # the table text), and the row asserts a REFUSAL about that path -- nothing is
+        # written, read or stat'ed there, by the hook or by this suite.
         anchors = (
             "{BOARD}",
             "{BOARD_NORM}",
+            "{DEFAULT_BOARD_NORM}",
             "$env:MLV_BOARD_ROOT",
             "${env:MLV_BOARD_ROOT}",
         )

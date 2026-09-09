@@ -116,8 +116,18 @@ through ANY OTHER variable, through a script, or through an interpreter one-line
 INVISIBLE to a text matcher, and this hook does not pretend otherwise -- a name it never
 read has no value here to resolve, and inventing one would be a fabrication in the other
 direction.  The layers behind this one are the WORKTREE BOUNDARY, the TOOL ALLOWLIST, and
-the CROSS-FAMILY PR REVIEW.  An ABSENT name is likewise left as literal text rather than
-blanked: PowerShell expands an unset ``$env:X`` to the empty string and cmd leaves ``%X%``
+the CROSS-FAMILY PR REVIEW.
+
+WHAT "THE VALUE THIS PROCESS IS USING" MEANS, CORRECTED IN ROUND 5.  For a name WITH a
+default it is the override when the variable is set and the BUILT-IN DEFAULT when it is
+not -- ``hook_env_values`` answers that question once and both ``Ctx`` and ``norm`` read the
+answer from there.  Round 3 substituted only when the variable was PRESENT, which left the
+bus guard open in the DEFAULT configuration -- the only configuration that ships, since
+nothing but the falsifier suite exports ``MLV_FLEET_BUS_ROOT`` on this machine.  The two
+names with NO default (``MLV_LANE_PROMPT``, ``MLV_HOOK_DRYRUN``) are still left as literal
+text when unset: their effective value is empty, blanking a reference can only SHORTEN a
+path out of a protected root (fail-open), and the interpreters do not even agree on the
+unset case -- PowerShell expands ``$env:X`` to the empty string, cmd leaves ``%X%``
 standing, so blanking would be this hook asserting which interpreter will run the command.
 
 THE CANONICAL 0.2 ENABLE COMPOUND (O128) -- the ONE shell write the receipt paths admit::
@@ -843,6 +853,61 @@ def canonical(text):
     return drive + posixpath.normpath(text)
 
 
+def hook_env_values():
+    """THE ONE RESOLUTION POINT: every read name -> THE VALUE THIS HOOK IS ACTUALLY USING.
+
+    ROUND 5 OF HOOK-FALSE-POSITIVE-1, AND IT IS THE HUB'S OWN DEFECT BEING CORRECTED.
+    Round 3 told the implementer to expand a name "only when it is actually PRESENT in this
+    process's environment".  That instruction was WRONG, and round 4's implementer measured
+    the consequence honestly instead of hiding it: with ``MLV_FLEET_BUS_ROOT`` UNSET -- the
+    AMBIENT state on this machine, since only the falsifier suite ever exports it --
+    ``Remove-Item -LiteralPath "$env:MLV_FLEET_BUS_ROOT\\specs\\mlv-app.md"`` returned ALLOW,
+    while the very same delete written LITERALLY was DENIED.  The hook had not failed to
+    KNOW the bus root in that configuration; ``Ctx`` had already resolved it to
+    ``DEFAULT_FLEET_BUS_ROOT`` two lines later.  The expansion was simply asking the wrong
+    question -- "is the variable set?" instead of "what value is this process using?" -- so
+    sol's blocker was still open in the DEFAULT configuration, which is the only
+    configuration that ships.
+
+    So the answer for a name is the OVERRIDE when the variable carries one and the hook's
+    OWN BUILT-IN DEFAULT when it does not, exactly as ``Ctx`` resolves it -- and ``Ctx`` now
+    reads its roots from HERE, so the two readings cannot drift apart again.  The ``or``
+    (never ``is None``) is deliberate and mirrors ``Ctx``'s: an EMPTY override is not an
+    override, and both sides must agree on that or the expansion would substitute ``""``
+    where the rules use the default.
+
+    THE TWO NAMES WITH NO DEFAULT KEEP THE ROUND-3 READING, and that is not an oversight.
+    ``MLV_LANE_PROMPT`` is mapped to ``None`` when unset rather than to its effective ``""``,
+    and ``MLV_HOOK_DRYRUN`` likewise: their unset values are not PATHS, and blanking a
+    reference is the one substitution that can only ever SHORTEN a path -- moving it OUT of a
+    protected root, i.e. failing OPEN.  A reference left standing as literal text fabricates
+    nothing and can only fail closed.  ``CLAUDE_PROJECT_DIR`` is absent from this table
+    entirely for the reason stated in the header: this hook never reads it, so it has no
+    value here to substitute and inventing one would be the fabrication S134 refuses.
+    """
+    env = os.environ
+    board_root_raw = env.get("MLV_BOARD_ROOT") or DEFAULT_BOARD_ROOT
+    return {
+        "MLV_BOARD_ROOT": board_root_raw,
+        "MLV_CLIP_CACHE_ROOT": env.get("MLV_CLIP_CACHE_ROOT") or DEFAULT_CLIP_CACHE_ROOT,
+        "MLV_FLEET_BUS_ROOT": env.get("MLV_FLEET_BUS_ROOT") or DEFAULT_FLEET_BUS_ROOT,
+        # Its default is DERIVED from the board root resolved just above, so an override of
+        # the board alone moves this too -- the same chain `Ctx` builds.
+        "MLV_REQUIRED_CHECKS_SNAPSHOT": env.get("MLV_REQUIRED_CHECKS_SNAPSHOT")
+        or os.path.join(
+            board_root_raw,
+            ".claude-state",
+            "coordination",
+            "dual-lane",
+            "receipts",
+            "required-checks-live.jsonl",
+        ),
+        # No default: see the docstring's last paragraph.  `None` means LEAVE IT LITERAL.
+        "MLV_LANE_PROMPT": env.get("MLV_LANE_PROMPT") or None,
+        "MLV_HOOK_DRYRUN": os.environ.get("MLV_HOOK_DRYRUN") or None,
+    }
+
+
 def expand_hook_env(text):
     """Substitute the environment variables THIS HOOK READS, in either spelling (S134).
 
@@ -853,16 +918,18 @@ def expand_hook_env(text):
     so the value was not unknown to the hook, it was simply never looked up.
 
     WHAT IS SUBSTITUTED, AND WHY THAT IS THE HONEST BOUNDARY.  Only the names in
-    ``HOOK_READ_ENV_NAMES``, and only when the name is actually PRESENT in this process's
-    environment.  Both halves are deliberate:
+    ``HOOK_READ_ENV_NAMES``, and at the value ``hook_env_values`` says this process is
+    USING -- the override when the variable is set, the built-in default when it is not.
+    Two halves, and round 5 rewrote the second one:
 
       * a name this hook does not read has no value here that is more authoritative than
         the shell's, and guessing one would deny (or admit) a path the hook never resolved;
-      * a name that is ABSENT is left as literal text rather than blanked, because the two
-        interpreters disagree about the unset case -- PowerShell expands ``$env:X`` to the
-        empty string, cmd leaves ``%X%`` standing -- and a hook that picks one is asserting
-        which shell will run the command.  Leaving it is the reading that fabricates
-        nothing, and it changes no decision this hook made before this delta.
+      * a name this hook DOES read is resolved in BOTH configurations, because an unset
+        steering variable does not leave the hook ignorant of the root -- it leaves the hook
+        using its DEFAULT.  Round 3 left the reference literal whenever the variable was
+        unset, which meant the guard held only on the machine the falsifier suite builds and
+        not on the one that ships.  Only a name with NO default (``MLV_LANE_PROMPT``) is
+        still left standing when unset, for the fail-closed reason in ``hook_env_values``.
 
     ONE PASS, never re-scanned: a value that itself contains ``$env:...`` is substituted
     once and then treated as text, so no input can drive this into a loop.
@@ -874,13 +941,13 @@ def expand_hook_env(text):
     if "$" not in text and "%" not in text:
         return text  # neither spelling can be present -- the common case, no scan
 
+    values = hook_env_values()  # resolved once per scan, never inside the substitution loop
+
     def _one(match):
         name = match.group("bare") or match.group("braced") or match.group("cmd")
         if name.upper() not in _HOOK_READ_ENV_SET:
             return match.group(0)
-        value = os.environ.get(name)
-        if value is None:
-            value = os.environ.get(name.upper())
+        value = values.get(name.upper())
         if value is None:
             return match.group(0)
         return value
@@ -1016,12 +1083,15 @@ class Ctx(object):
     def __init__(self, tool, tool_input, project_dir):
         self.tool = tool
         self.tool_input = tool_input
-        env = os.environ
-        self.board_root = norm(env.get("MLV_BOARD_ROOT") or DEFAULT_BOARD_ROOT)
-        self.board_root_raw = env.get("MLV_BOARD_ROOT") or DEFAULT_BOARD_ROOT
-        self.clip_cache_root = norm(
-            env.get("MLV_CLIP_CACHE_ROOT") or DEFAULT_CLIP_CACHE_ROOT
-        )
+        # ROUND 5: resolved by `hook_env_values`, the SAME call `expand_hook_env`
+        # substitutes from -- so "the value this hook uses" is one answer, not two that can
+        # drift.  Round 4's hole was exactly that drift: `Ctx` fell back to the default while
+        # the expansion left the reference literal, so the guard held only when the variable
+        # happened to be set.
+        env = hook_env_values()
+        self.board_root = norm(env["MLV_BOARD_ROOT"])
+        self.board_root_raw = env["MLV_BOARD_ROOT"]
+        self.clip_cache_root = norm(env["MLV_CLIP_CACHE_ROOT"])
         self.worktree_root = norm(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         )
@@ -1032,16 +1102,12 @@ class Ctx(object):
             self.board_root_raw, ".claude-state", "coordination", "dual-lane"
         )
         self.receipts_dir_raw = os.path.join(self.dual_dir_raw, "receipts")
-        self.snapshot_raw = env.get("MLV_REQUIRED_CHECKS_SNAPSHOT") or os.path.join(
-            self.receipts_dir_raw, "required-checks-live.jsonl"
-        )
-        self.lane_prompt = env.get("MLV_LANE_PROMPT") or ""
+        self.snapshot_raw = env["MLV_REQUIRED_CHECKS_SNAPSHOT"]
+        self.lane_prompt = env["MLV_LANE_PROMPT"] or ""
         # HOOK-FALSE-POSITIVE-1: the fleet doctrine bus, a PUBLISH surface of this board
         # (RESUME.md STEP 0.5).  Writes under it are admitted by NA-7; deletes and moves
         # under it are not, because publishing is additive.
-        self.fleet_bus_root = norm(
-            env.get("MLV_FLEET_BUS_ROOT") or DEFAULT_FLEET_BUS_ROOT
-        )
+        self.fleet_bus_root = norm(env["MLV_FLEET_BUS_ROOT"])
         # O126, THE VENUE, and it rides on ARGV.  `--project-dir` is substituted by Claude
         # Code from `${CLAUDE_PROJECT_DIR}` in the REGISTERED command, so its value is
         # fixed by `.claude/settings.json`: a tool call cannot set an argument, and NA-10
@@ -3055,7 +3121,7 @@ _NA3_RULES = (
     (re.compile(r"\bcodex\b[^\n;|&]*\blogin\b", re.I), "`codex login` is the owner's own keystrokes"),
 )
 
-# ---- O129: PERSISTENT-scope assignment of the five names the hook itself is steered by ----
+# ---- O129: PERSISTENT-scope assignment of the six names the hook itself is steered by ----
 #
 # The prefix rule above is about CREDENTIALS.  This one is about the hook's own inputs, and
 # the act it denies is narrower and sharper: a PERSISTENT write (`setx`, or
