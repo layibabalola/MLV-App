@@ -28,9 +28,12 @@ call can set it.  The environment variable of that name was MEASURED ABSENT from
 processes on this machine (``.hook-invocations.log``: null in 17/17), which is why the
 previous revision's venue test -- which read it from ``os.environ`` -- silently never
 fired.  This hook therefore NEVER reads ``CLAUDE_PROJECT_DIR`` from its environment; the
-name appears below only as one of the five NA-3 O129 names whose PERSISTENT assignment is
-denied.  Three rules key on the venue, and all three fail closed when it is missing, a
-worktree value, or empty -- ABSENT is never "unknown, assume the hub":
+name appears below as one of the FIVE NA-3 O129 names whose PERSISTENT assignment is denied,
+and as the one of those five held OUT of ``HOOK_READ_ENV_NAMES`` -- a name this hook never
+reads has no value here to substitute into a command's text, and inventing one would be the
+fabrication S134's residual limit refuses.  Three rules key on the venue, and all three
+fail closed when it is missing, a worktree value, or empty -- ABSENT is never "unknown,
+assume the hub":
 
   * NA-2 exception (iv), O124 -- writes (create, extend or amend, ANY length, by
     ``Write``/``Edit``/``NotebookEdit`` or by a shell truncating write) to the four
@@ -52,8 +55,34 @@ worktree value, or empty -- ABSENT is never "unknown, assume the hub":
     venue: this hook is re-read on every tool call, so a lane's edit of its registration or
     of this script would take effect on its next call.  Hook evolution stays hub-authored.
 
-Environment inputs (all optional; every default keeps the rule fail-closed on the real
-machine, and only the test supplies overrides, so the falsifier table is host-independent)
+THIS GATE ADMITS NO WRITE TO A SIBLING REPOSITORY, AND THAT IS DELIBERATE
+-------------------------------------------------------------------------
+NA-7 admits writes under exactly TWO roots: the hook's own worktree and the board.  An
+earlier revision of HOOK-FALSE-POSITIVE-1 added a THIRD -- the fleet doctrine bus clone
+beside this board -- and it was NARROWED OUT rather than repaired again: five review rounds
+found four reproducible bypasses and EVERY one of them was in that root's machinery, while
+the false-positive repairs recorded below carried none.  Read the absence as a RULE, not as
+an oversight and not as a ban on publishing: PUBLISHING TO THE DOCTRINE BUS IS A GIT
+OPERATION PERFORMED BY THE ORCHESTRATOR IN THAT REPOSITORY, reviewed there as a commit in
+its own history, and it needs no allowance here -- the bus was in fact published to twice
+while a gate with no bus allowance at all was in force.  Do not re-add a sibling-repo write
+root to this gate.
+
+Environment inputs -- ALL FIVE, none omitted (S133)
+-------------------------------------------------------------------------------------
+All optional, and only the test supplies overrides, so the falsifier table is
+host-independent.  Four of the five NARROW what is allowed when it is unset (an absent
+prompt denies every clip, an absent snapshot denies every protection mutation); the
+exception is ``MLV_HOOK_DRYRUN``, which gates no allow/deny decision at all -- unset, it
+only leaves the decision unprinted on stdout, and the exit code is unchanged either way.
+Not one of the four narrowing inputs WIDENS an allow-list, which is the property the
+removed bus root did not have and the reason its absence is now the invariant.
+EVERY root/prefix comparison in this hook is made on the CANONICAL form of the path:
+``norm`` collapses ``.`` and ``..`` (``canonical``, below) before ``under``/``has_seg``
+compare anything, so ``<root>/../escaped.txt`` does NOT count as under ``<root>``.  Without
+that collapse a rooted prefix admitted a write anywhere on the drive -- measured ALLOW
+on ``f888bcfd`` and closed here, and it is KEPT because it protects the BOARD root and
+NA-2's tails, not merely the root it was found on.
 -------------------------------------------------------------------------------------
 MLV_LANE_PROMPT             path to the lane's prompt file; NA-4 reads its
                             ``CLIP_OR_NONE:`` line, matched ``^(- )?CLIP_OR_NONE:``
@@ -69,6 +98,52 @@ MLV_REQUIRED_CHECKS_SNAPSHOT
                             non-empty row.  Absent, unparseable, or a malformed row
                             anywhere => every protection mutation is DENIED.
 MLV_HOOK_DRYRUN=1           print the decision on stdout; the exit code is unchanged.
+
+THOSE FIVE NAMES ARE EXPANDED IN A COMMAND'S TEXT, AND NOTHING ELSE IS (S134)
+----------------------------------------------------------------------------
+``norm`` -- the ONE path comparison -- substitutes the five names above wherever a command
+spells them ``$env:NAME``, ``${env:NAME}`` or ``%NAME%`` (NAME case-insensitively, quoted or
+bare), using THE VALUE THIS PROCESS IS USING, and it does so BEFORE ``canonical`` collapses
+``.``/``..``.  So every arm inherits it -- NA-2's protected tails and carve-outs, NA-7's two
+roots, NA-10's gate tails -- and ``"$env:MLV_BOARD_ROOT\\..\\escaped.txt"`` cannot hide an
+escape behind the variable.
+
+WHY, MEASURED RATHER THAN ASSERTED, AND WHY THIS HALF IS KEPT.  A delete of the protected
+queue ledger spelled ``"$env:MLV_BOARD_ROOT\\.claude-state\\...\\queue.json"`` was ALLOWED
+while the identical LITERAL path was DENIED: the same file, the same act, spelled through
+the variable THIS HOOK had already read to locate the board.  That is a real ALLOW on a
+protected pen, closed by the lookup rather than by softer prose.
+
+AN UNRESOLVABLE REFERENCE IS A DENIAL, NEVER A COLLAPSE
+-------------------------------------------------------
+A reference this hook cannot resolve -- ``$env:NAME``, ``${env:NAME}`` or ``%NAME%`` for a
+name it does not read, or for one of the two names it reads that has no default and is
+unset -- is left standing as literal text, and that text is NOT a directory.  Collapsing
+``..`` against it was measured to fail OPEN: ``"$env:MLV_LANE_PROMPT/../outside.txt"``
+became the bare relative ``outside.txt``, and NA-7's early return ("a relative destination
+resolves inside the worktree by construction") ALLOWED it -- while the shell resolves the
+same text to an absolute path outside every root.  So ``norm`` does NOT canonicalise a path
+that still carries a reference after expansion, and NA-7 treats such a path as UNRESOLVABLE
+and DENIES it, naming the reference.  An ordinary relative path with no reference in it
+keeps exactly the behaviour it had.
+
+THE RESIDUAL LIMIT, STATED HERE RATHER THAN PAPERED OVER.  A name this hook never read has
+no value here to resolve, and inventing one would be a fabrication in the other direction;
+what the hook does instead is REFUSE the path rather than guess at it.  Indirection through
+a script or through an interpreter one-liner remains INVISIBLE to a text matcher, and this
+hook does not pretend otherwise.  The layers behind this one are the WORKTREE BOUNDARY, the
+TOOL ALLOWLIST, and the CROSS-FAMILY PR REVIEW.
+
+WHAT "THE VALUE THIS PROCESS IS USING" MEANS.  For a name WITH a default it is the override
+when the variable is set and the BUILT-IN DEFAULT when it is not -- ``hook_env_values``
+answers that question once and both ``Ctx`` and ``norm`` read the answer from there.
+Substituting only when the variable was PRESENT left the guard open in the DEFAULT
+configuration, which is the only configuration that ships.  The two
+names with NO default (``MLV_LANE_PROMPT``, ``MLV_HOOK_DRYRUN``) are still left as literal
+text when unset: their effective value is empty, blanking a reference can only SHORTEN a
+path out of a protected root (fail-open), and the interpreters do not even agree on the
+unset case -- PowerShell expands ``$env:X`` to the empty string, cmd leaves ``%X%``
+standing, so blanking would be this hook asserting which interpreter will run the command.
 
 THE CANONICAL 0.2 ENABLE COMPOUND (O128) -- the ONE shell write the receipt paths admit::
 
@@ -262,6 +337,41 @@ arm, because the digest is recomputed from that object.  What the hook still doe
 is unchanged from S123: the equality itself is the hub's git assertion, and what is checked
 here is that the attestation is bound to THIS receipt's shas and THIS receipt's hashes.
 
+THREE FALSE-POSITIVE CLASSES, MEASURED AND CLOSED (HOOK-FALSE-POSITIVE-1)
+--------------------------------------------------------------------------
+Up to this delta three arms classified an act by the TEXT AROUND it rather than by what it
+named, and the board paid for all three: fourteen of twenty-seven headless editing runs
+ended at ``max_turns`` after a denial, and the orchestrator was refused five times.  What
+changed, and what deliberately did NOT:
+
+  * NA-2 shell truncation.  ``shell_acts`` asked "does this text truncate anything" and the
+    answer was then attributed to EVERY protected token on the line.  So
+    ``cat <protected> 2>/dev/null`` was "a truncating write" of the file it only READ (the
+    ``2>`` set the act; the bit bucket was the target), and a Python heredoc was too when
+    its code merely contained ``if len(r) > 0``.  Truncation is now attributed ONLY when
+    the redirect's or cmdlet's TARGET TOKEN itself resolves to the protected path --
+    ``truncating_destinations``.  ``2>&1``, ``>&2`` and ``1>&2`` are file-descriptor dups
+    and are never targets; ``>>`` and ``Add-Content`` remain appends.  DELETE and MOVE keep
+    their whole-command attribution: a delete verb's operands really are its tokens.
+  * Interpreter method names are still NOT verbs.  ``write_bytes(``, ``write_text(`` and
+    ``open(..., 'w')`` are not shell truncation and no arm was added for them.  An
+    interpreter one-liner is invisible to a text matcher BY DESIGN (the limit recorded
+    under the pre-flight artifact act, unchanged); reading one as a truncation of whatever
+    protected path the same command mentions proves nothing about the target and denied the
+    ordinary read-here / write-there shape.
+  * NA-7 destinations.  ``/dev/null``, ``NUL``, ``nul`` and ``$null`` are SINKS, not files,
+    and are no longer "a write outside both roots".  THE ROOTS THEMSELVES DID NOT WIDEN:
+    they are the worktree and the board, and the sibling-repository root an earlier revision
+    of this delta added was narrowed back out -- see the second section of this header.
+  * NA-2 generic file-tool arm.  Its refusal is about OVERWRITING ledger/pen/receipt
+    content, and it fired on a ``Write`` of a path nothing existed at -- a CREATE, which
+    ``_file_shrinks`` already reads as create-or-extend one branch up.  A ``Write`` to an
+    ABSENT target is now allowed there, with two name classes held back at exactly their
+    former behaviour: anything under a ``receipts/`` directory, and any basename that is an
+    ``execution-control-*`` chain name or one of the five fixed gate receipts.  Nothing
+    about DELETE, MOVE or the shrink guard changed, and ``$D/receipts/**`` still reaches
+    the receipts carve-out before this arm is consulted.
+
 THE PRE-FLIGHT ARTIFACT ACT (S125, register v25)
 ------------------------------------------------
 Before typing the enable the hub writes the EXACT hook-stdin JSON of the final board-path
@@ -337,6 +447,7 @@ import datetime
 import hashlib
 import json
 import os
+import posixpath
 import re
 import sys
 
@@ -345,6 +456,50 @@ EXIT_DENY = 2
 
 DEFAULT_BOARD_ROOT = r"C:\!Layi Wkspc\MLV-App"
 DEFAULT_CLIP_CACHE_ROOT = r"\\bachelor\mlv-agent\cache"
+
+# NOTE FOR THE NEXT READER: there is deliberately NO sibling-repository root constant here.
+# An earlier revision of HOOK-FALSE-POSITIVE-1 carried one for the fleet doctrine bus and it
+# was NARROWED BACK OUT, not lost: publishing to that bus is a git operation performed by the
+# orchestrator IN the bus repository and reviewed there as a commit in its own history, so
+# this gate needs no allowance for it.  See this file's header before adding a third root.
+#
+# A bit bucket is a SINK, not a file this register protects: `2>/dev/null` discards stderr
+# and creates nothing.  Compared AFTER `norm`, which lowercases -- so `NUL` and `nul` are
+# the one entry `nul`.
+NULL_DEVICE_SINKS = frozenset(("/dev/null", "nul", "$null"))
+
+# HOOK-FALSE-POSITIVE-1 (S134).  THE NAMES THIS HOOK ITSELF READS, and therefore the only
+# names it may resolve in a command's text.  Measured defect: a delete of the protected queue
+# ledger written LITERALLY was DENIED while the same delete spelled
+# `"$env:MLV_BOARD_ROOT\.claude-state\...\queue.json"` was ALLOWED -- the same file, spelled
+# through the very variable that told this process where the board is.  A header claiming a
+# guarantee "at every value" while the code held it for one spelling is the board's recorded
+# house defect, so the code is widened here and the residual limit is stated in the header.
+#
+# THE LIST IS THE SAME LIST `_NA3_PERSISTENT_NAMES` protects, MINUS `CLAUDE_PROJECT_DIR`,
+# and the difference is load-bearing in the fail-closed direction: NA-3 protects
+# `CLAUDE_PROJECT_DIR` because a PERSISTENT write of it would steer the registration, but
+# this hook NEVER READS it (O126, measured absent 17/17), so it has no value here to
+# substitute and inventing one would be a fabrication.  A structural test derives this tuple
+# from the hook's own `env.get(...)` call sites, so a new input cannot ship unexpanded.
+HOOK_READ_ENV_NAMES = (
+    "MLV_BOARD_ROOT",
+    "MLV_CLIP_CACHE_ROOT",
+    "MLV_HOOK_DRYRUN",
+    "MLV_LANE_PROMPT",
+    "MLV_REQUIRED_CHECKS_SNAPSHOT",
+)
+_HOOK_READ_ENV_SET = frozenset(name.upper() for name in HOOK_READ_ENV_NAMES)
+# Both spellings a command on this board can carry, NAME matched case-insensitively because
+# Windows environment names are: PowerShell `$env:NAME` and `${env:NAME}`, cmd `%NAME%`.
+# Surrounding quotes are stripped by `norm` before this runs, so the quoted and bare forms
+# reach it identically.
+_ENV_REF_RX = re.compile(
+    r"\$env:(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|\$\{env:(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}"
+    r"|%(?P<cmd>[A-Za-z_][A-Za-z0-9_]*)%",
+    re.I,
+)
 
 SHELL_TOOLS = ("Bash", "PowerShell")
 FILE_TOOLS = ("Write", "Edit", "NotebookEdit")
@@ -673,19 +828,189 @@ class Deny(Exception):
 # --------------------------------------------------------------------------- paths
 
 
+_DRIVE_RX = re.compile(r"^([a-z]:)(/.*)?$")
+
+
+def canonical(text):
+    """Collapse ``.`` and ``..`` segments so ONE path has ONE comparable form (S133).
+
+    THE DEFECT THIS CLOSES, measured by sol on PR #104 against
+    ``f888bcfd``: ``norm`` folded case and separators but never collapsed ``..``, so
+    ``<root>/../escaped.txt`` still carried the root as a literal PREFIX and ``under()``
+    returned True for a path that resolves OUTSIDE it.  A ``Write`` there was ALLOWED.  The
+    measurement was taken on a root this delta has since removed, but the collapse is KEPT
+    and is not about that root: it protects the BOARD root and NA-2's protected tails, which
+    the same escape reached.  Every prefix test in this hook -- NA-7's two
+    roots, NA-2's protected tails and carve-outs, NA-10's gate tails -- is a comparison of
+    STRINGS, so the collapse has to happen before any of them, and the one place that is
+    true of all of them is ``norm`` itself, which is the hook's ONE path comparison.
+
+    ``posixpath.normpath``, not ``os.path.normpath``, and the difference is load-bearing:
+    this suite runs on windows-latest AND ubuntu-latest, ``ntpath.normpath`` returns
+    backslashes while ``posixpath.normpath`` does not, and ``ntpath`` alone knows ``c:`` is
+    a drive -- so ``os.path.normpath`` would give ONE input TWO canonical forms depending on
+    the runner.  The drive is split off here instead and the remainder is normalised as an
+    absolute POSIX path, which makes the answer identical on both legs AND clamps at the
+    root: ``c:/../escaped.txt`` is ``c:/escaped.txt``, never the drive-less ``escaped.txt``
+    that ``posixpath`` alone would return and that ``is_absolute`` would then wave past
+    NA-7's early return.  The filesystem is still not consulted and links are still not
+    followed -- this is string algebra, and a ``..`` through a symlink is a limit recorded
+    here rather than a stat call in the latency budget.
+    """
+    if not text or "." not in text:
+        return text  # no dot, no `.`/`..` segment -- nothing to collapse
+    drive = ""
+    match = _DRIVE_RX.match(text)
+    if match:
+        drive = match.group(1)
+        text = match.group(2) or "/"
+    return drive + posixpath.normpath(text)
+
+
+def hook_env_values():
+    """THE ONE RESOLUTION POINT: every read name -> THE VALUE THIS HOOK IS ACTUALLY USING.
+
+    "IS THE VARIABLE SET?" IS THE WRONG QUESTION, AND ASKING IT WAS A MEASURED HOLE.
+    An earlier revision substituted a name only when it was actually PRESENT in this
+    process's environment.  With a steering name UNSET -- the ambient state on this machine,
+    since only the falsifier suite ever exports one -- an act spelled ``"$env:NAME\\..."``
+    returned ALLOW while the very same act written LITERALLY was DENIED.  The hook had not
+    failed to KNOW the root in that configuration; ``Ctx`` resolved it to the BUILT-IN
+    DEFAULT two lines later.  The right question is "what value is this process using?", and
+    the default configuration is the only one that ships.
+
+    So the answer for a name is the OVERRIDE when the variable carries one and the hook's
+    OWN BUILT-IN DEFAULT when it does not, exactly as ``Ctx`` resolves it -- and ``Ctx`` now
+    reads its roots from HERE, so the two readings cannot drift apart again.  The ``or``
+    (never ``is None``) is deliberate and mirrors ``Ctx``'s: an EMPTY override is not an
+    override, and both sides must agree on that or the expansion would substitute ``""``
+    where the rules use the default.
+
+    THE TWO NAMES WITH NO DEFAULT KEEP THE ROUND-3 READING, and that is not an oversight.
+    ``MLV_LANE_PROMPT`` is mapped to ``None`` when unset rather than to its effective ``""``,
+    and ``MLV_HOOK_DRYRUN`` likewise: their unset values are not PATHS, and blanking a
+    reference is the one substitution that can only ever SHORTEN a path -- moving it OUT of a
+    protected root, i.e. failing OPEN.  A reference left standing as literal text fabricates
+    nothing and can only fail closed.  ``CLAUDE_PROJECT_DIR`` is absent from this table
+    entirely for the reason stated in the header: this hook never reads it, so it has no
+    value here to substitute and inventing one would be the fabrication S134 refuses.
+    """
+    env = os.environ
+    board_root_raw = env.get("MLV_BOARD_ROOT") or DEFAULT_BOARD_ROOT
+    return {
+        "MLV_BOARD_ROOT": board_root_raw,
+        "MLV_CLIP_CACHE_ROOT": env.get("MLV_CLIP_CACHE_ROOT") or DEFAULT_CLIP_CACHE_ROOT,
+        # Its default is DERIVED from the board root resolved just above, so an override of
+        # the board alone moves this too -- the same chain `Ctx` builds.
+        "MLV_REQUIRED_CHECKS_SNAPSHOT": env.get("MLV_REQUIRED_CHECKS_SNAPSHOT")
+        or os.path.join(
+            board_root_raw,
+            ".claude-state",
+            "coordination",
+            "dual-lane",
+            "receipts",
+            "required-checks-live.jsonl",
+        ),
+        # No default: see the docstring's last paragraph.  `None` means LEAVE IT LITERAL.
+        "MLV_LANE_PROMPT": env.get("MLV_LANE_PROMPT") or None,
+        "MLV_HOOK_DRYRUN": os.environ.get("MLV_HOOK_DRYRUN") or None,
+    }
+
+
+def expand_hook_env(text):
+    """Substitute the environment variables THIS HOOK READS, in either spelling (S134).
+
+    THE DEFECT THIS CLOSES, measured on PR #104: a delete of the protected queue ledger
+    written ``Remove-Item -LiteralPath '<board>/.claude-state/.../queue.json'`` was DENIED
+    while ``Remove-Item -LiteralPath "$env:MLV_BOARD_ROOT\\.claude-state\\...\\queue.json"``
+    was ALLOWED.  Same file, same act, spelled through the very variable that told THIS
+    PROCESS where the board is -- so the value was not unknown to the hook, it was simply
+    never looked up.
+
+    WHAT IS SUBSTITUTED, AND WHY THAT IS THE HONEST BOUNDARY.  Only the names in
+    ``HOOK_READ_ENV_NAMES``, and at the value ``hook_env_values`` says this process is
+    USING -- the override when the variable is set, the built-in default when it is not.
+    Two halves:
+
+      * a name this hook does not read has no value here that is more authoritative than
+        the shell's, and guessing one would deny (or admit) a path the hook never resolved.
+        Such a reference is left STANDING, and ``_na7_check_path`` then refuses the path as
+        UNRESOLVABLE rather than letting ``canonical`` collapse it into a bare relative name;
+      * a name this hook DOES read is resolved in BOTH configurations, because an unset
+        steering variable does not leave the hook ignorant of the root -- it leaves the hook
+        using its DEFAULT.  Substituting only when the variable was set meant the guard held
+        only on the machine the falsifier suite builds and not on the one that ships.  Only a
+        name with NO default (``MLV_LANE_PROMPT``) is still left standing when unset, for the
+        fail-closed reason in ``hook_env_values`` -- and standing now means DENIED at NA-7.
+
+    ONE PASS, never re-scanned: a value that itself contains ``$env:...`` is substituted
+    once and then treated as text, so no input can drive this into a loop.
+
+    Called from ``norm`` -- the hook's ONE path comparison -- and BEFORE ``canonical``, so
+    ``"$env:MLV_BOARD_ROOT\\..\\escaped.txt"`` is expanded and THEN collapsed, and the
+    ``..`` cannot hide behind the variable.
+    """
+    if "$" not in text and "%" not in text:
+        return text  # neither spelling can be present -- the common case, no scan
+
+    values = hook_env_values()  # resolved once per scan, never inside the substitution loop
+
+    def _one(match):
+        name = match.group("bare") or match.group("braced") or match.group("cmd")
+        if name.upper() not in _HOOK_READ_ENV_SET:
+            return match.group(0)
+        value = values.get(name.upper())
+        if value is None:
+            return match.group(0)
+        return value
+
+    return _ENV_REF_RX.sub(_one, text)
+
+
+def _unresolved_env_ref(text):
+    # Returns the FIRST environment reference still standing in `text`, else None.
+    #
+    # Called on a path `expand_hook_env` has already been over, so anything this finds is a
+    # reference the hook CANNOT resolve: a name it does not read, or one of the two names it
+    # does read that has no default and is unset.  Such text is not a directory, and both
+    # `norm` (which declines to collapse `..` against it) and NA-7 (which denies it) key on
+    # this ONE answer rather than each re-deriving it.
+    if "$" not in text and "%" not in text:
+        return None
+    match = _ENV_REF_RX.search(text)
+    return match.group(0) if match else None
+
+
 def norm(path):
     """Normalise for comparison: backslashes to slashes, lowercased, no trailing slash.
+
+    The environment variables THIS HOOK READS are EXPANDED first (``expand_hook_env``
+    above), then ``.`` and ``..`` are COLLAPSED (``canonical``), so a path that walks out of
+    a root cannot keep that root as a prefix -- whether the root arrived literally or
+    through ``$env:``/``%``.  Both live here, in the hook's ONE path comparison, so every
+    arm inherits them: NA-2's protected tails and carve-outs, NA-7's two roots, and NA-10's
+    gate tails.
+
+    THE COLLAPSE IS SKIPPED WHEN A REFERENCE IS STILL STANDING, and that is the round-5
+    repair.  A reference this hook cannot resolve is TEXT, not a directory, so collapsing a
+    following ``..`` against it invents a parent that does not exist -- measured:
+    ``"$env:MLV_LANE_PROMPT/../outside.txt"`` became the bare relative ``outside.txt`` and
+    NA-7's early return ALLOWED it, while the shell resolves the same text to an absolute
+    path outside every root.  The path is left uncollapsed here and DENIED there
+    (``_na7_check_path``); a path with no reference in it is collapsed exactly as before.
 
     Links are NOT followed and the filesystem is NOT consulted -- NA-4 requires the
     comparison to be made without following links, and a hook that stats every token is a
     hook that misses its latency budget.
     """
-    text = str(path).strip().strip('"').strip("'").replace("\\", "/")
+    text = expand_hook_env(str(path).strip().strip('"').strip("'")).replace("\\", "/")
     unc = text.startswith("//")
     text = re.sub(r"/{2,}", "/", text)
     if unc:
         text = "/" + text
     text = text.lower()
+    if _unresolved_env_ref(text) is None:
+        text = canonical(text)
     while len(text) > 1 and text.endswith("/"):
         text = text[:-1]
     return text
@@ -793,12 +1118,15 @@ class Ctx(object):
     def __init__(self, tool, tool_input, project_dir):
         self.tool = tool
         self.tool_input = tool_input
-        env = os.environ
-        self.board_root = norm(env.get("MLV_BOARD_ROOT") or DEFAULT_BOARD_ROOT)
-        self.board_root_raw = env.get("MLV_BOARD_ROOT") or DEFAULT_BOARD_ROOT
-        self.clip_cache_root = norm(
-            env.get("MLV_CLIP_CACHE_ROOT") or DEFAULT_CLIP_CACHE_ROOT
-        )
+        # ROUND 5: resolved by `hook_env_values`, the SAME call `expand_hook_env`
+        # substitutes from -- so "the value this hook uses" is one answer, not two that can
+        # drift.  Round 4's hole was exactly that drift: `Ctx` fell back to the default while
+        # the expansion left the reference literal, so the guard held only when the variable
+        # happened to be set.
+        env = hook_env_values()
+        self.board_root = norm(env["MLV_BOARD_ROOT"])
+        self.board_root_raw = env["MLV_BOARD_ROOT"]
+        self.clip_cache_root = norm(env["MLV_CLIP_CACHE_ROOT"])
         self.worktree_root = norm(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         )
@@ -809,10 +1137,11 @@ class Ctx(object):
             self.board_root_raw, ".claude-state", "coordination", "dual-lane"
         )
         self.receipts_dir_raw = os.path.join(self.dual_dir_raw, "receipts")
-        self.snapshot_raw = env.get("MLV_REQUIRED_CHECKS_SNAPSHOT") or os.path.join(
-            self.receipts_dir_raw, "required-checks-live.jsonl"
-        )
-        self.lane_prompt = env.get("MLV_LANE_PROMPT") or ""
+        self.snapshot_raw = env["MLV_REQUIRED_CHECKS_SNAPSHOT"]
+        self.lane_prompt = env["MLV_LANE_PROMPT"] or ""
+        # There is deliberately NO sibling-repository root here.  NA-7's roots are the
+        # worktree and the board; see this file's header for why the fleet doctrine bus root
+        # was narrowed back out rather than repaired.
         # O126, THE VENUE, and it rides on ARGV.  `--project-dir` is substituted by Claude
         # Code from `${CLAUDE_PROJECT_DIR}` in the REGISTERED command, so its value is
         # fixed by `.claude/settings.json`: a tool call cannot set an argument, and NA-10
@@ -925,6 +1254,53 @@ _TRUNC_CMDLET_RX = re.compile(
     re.I,
 )
 _APPEND_FLAG_RX = re.compile(r"-append\b|(?:^|\s)tee\s+(?:[^|;]*\s)?-a\b", re.I)
+
+# HOOK-FALSE-POSITIVE-1 -- WHAT a command truncates, not merely WHETHER it truncates.
+# `_TRUNC_REDIRECT_RX`/`_TRUNC_CMDLET_RX` above answer "does this text truncate ANYTHING",
+# which is all `shell_acts` needs; this answers "which TOKEN is written to", which is the
+# only question NA-2's attribution may ask.  The two were conflated up to this delta, so a
+# command that truncated ANYTHING and merely MENTIONED a protected path anywhere else on
+# the line was refused as a truncating write OF that path -- measured 2026-09-07/08 on
+# `cat <protected> 2>/dev/null` (the `2>` sets the act; the target is the bit bucket) and
+# on a Python heredoc whose `if len(r) > 0` sets the act while the real write goes to an
+# unprotected path.  Fourteen of twenty-seven headless editing runs died on that class.
+#
+# A file-descriptor dup is never a target: `&` is outside the destination character class,
+# so `2>&1`, `>&2` and `1>&2` capture nothing at all.  `>>` is excluded by the same `(?!>)`
+# the act regex uses, so an append is never read as a truncation.  A leading stream number
+# (`1>`, `2>`) is NOT excluded -- `2> log.txt` really does truncate `log.txt`.
+_TRUNC_DEST_RX = re.compile(r"(?<![>\-=!<])>(?!>)\s*(['\"][^'\"]+['\"]|[^\s;|&()<>]+)")
+# The truncating cmdlets only -- `add-content` is an append and is deliberately absent.
+_TRUNC_CMDLET_SEGMENT_RX = re.compile(
+    r"\b(?:set-content|out-file|clear-content)\b[^\n;|&]*"
+    r"|(?:^|[\s;&|`(])tee\b[^\n;|&]*"
+    r"|\bos\.truncate\s*\([^\n;]*",
+    re.I,
+)
+
+
+def truncating_destinations(command):
+    """The tokens a truncating redirect or cmdlet actually WRITES TO.
+
+    Interpreter method names (``write_bytes(``, ``write_text(``, ``open(..., 'w')``) are
+    NOT shell truncation verbs and are not looked for here or in ``shell_acts``: an
+    interpreter one-liner's effect is invisible to a text matcher BY DESIGN (see the limit
+    recorded under the pre-flight artifact act), and inventing a verb for it denies the
+    common read-then-write-elsewhere shape while still proving nothing about the target.
+    """
+    dests = []
+    for match in _TRUNC_DEST_RX.finditer(command or ""):
+        dests.append(match.group(1))
+    for match in _TRUNC_CMDLET_SEGMENT_RX.finditer(command or ""):
+        segment = match.group(0)
+        if _APPEND_FLAG_RX.search(segment):
+            continue
+        dests.extend(
+            token
+            for token in tokens(segment)[1:]
+            if not token.startswith("-") and ("/" in token or "\\" in token)
+        )
+    return dests
 
 
 _GIT_RM_CACHED_RX = re.compile(r"\bgit\s+rm\b(?=[^\n;|&]*--cached\b)", re.I)
@@ -2345,6 +2721,42 @@ def _file_shrinks(ctx):
     return len(ctx.new_text.encode("utf-8")) < existing
 
 
+RECEIPTS_DIR_SEG = "receipts"
+FIXED_RECEIPT_BASENAMES = frozenset(name.lower() for name in KILL_SWITCH_RECEIPTS)
+
+
+def _create_is_admissible(ctx, path_norm):
+    """HOOK-FALSE-POSITIVE-1: is this a CREATE the generic NA-2 arm has no cause to refuse?
+
+    Only a ``Write`` (an ``Edit`` names text it claims already exists, and a
+    ``NotebookEdit`` amends a document), only when the payload carries its new content, and
+    only when nothing is on disk at the target -- so the refusal this replaces, which is
+    about OVERWRITING, still fires for every real overwrite.
+
+    TWO NAME CLASSES ARE HELD BACK, and they keep exactly the behaviour they had before
+    this delta rather than joining the new allowance: anything under a ``receipts/``
+    directory, and any basename that is an ``execution-control-*`` chain name or one of the
+    five FIXED gate receipts.  Those are the files whose PRESENCE spends the one-shot 0.2
+    authorization and whose set the enable act ENUMERATES, so a create under them is never
+    the harmless act "nothing was there" makes it look like.  ``$D/receipts/**`` already
+    reaches the receipts carve-out one branch up and never arrives here at all; this guard
+    is what stops the new allowance from admitting a receipt name under any OTHER protected
+    directory (`.claude-state/coordination/receipts/`, `.claude-state/closeout/receipts/`).
+    """
+    if ctx.tool != "Write" or ctx.new_text is None:
+        return False
+    if not ctx.path or os.path.isfile(ctx.path):
+        return False
+    if has_seg(path_norm, RECEIPTS_DIR_SEG):
+        return False
+    base = path_norm.rsplit("/", 1)[-1]
+    if base.startswith(EXECUTION_CONTROL_PREFIX):
+        return False
+    if base in FIXED_RECEIPT_BASENAMES:
+        return False
+    return True
+
+
 def _na2_decide(ctx, path_norm, acts, source):
     """One protected path, one act set.  Raises Deny, or returns for ALLOW."""
     tag = _carve_tag(ctx, path_norm)
@@ -2435,6 +2847,14 @@ def _na2_decide(ctx, path_norm, acts, source):
                 "%s of ledger/pen/receipt/evidence content at %s"
                 % ("/".join(sorted(acts)), path_norm),
             )
+        return
+    # HOOK-FALSE-POSITIVE-1: OVERWRITING is what this arm names and what it may refuse.  A
+    # `Write` whose target does NOT EXIST overwrites nothing -- it is the same
+    # create-or-extend the carve-outs already allow, and `_file_shrinks` already reads it
+    # that way one branch up.  Denying it cost the board five orchestrator refusals in two
+    # days (measured 2026-09-07/08), each on a NEW file under
+    # `.claude-state/coordination/dual-lane/` that nothing existed at.
+    if _create_is_admissible(ctx, path_norm):
         return
     raise Deny("NA-2", "overwriting ledger/pen/receipt/evidence content at %s" % path_norm)
 
@@ -2668,10 +3088,28 @@ def rule_na2(ctx):
         if not acts:
             return
         _refuse_marker_delete_outside_the_act(ctx, acts)
+        # HOOK-FALSE-POSITIVE-1: "truncate" is attributed to the TARGET of the redirect or
+        # the cmdlet, never to every protected token that happens to share the command
+        # line.  Delete and move keep the whole-command attribution they have always had:
+        # `rm -rf A B` really does name both, and a delete verb's operands are the tokens.
+        # A truncation, by contrast, has exactly one destination per redirect, and reading
+        # a protected file BESIDE one is the commonest read-only act on this board.
+        positional = acts - {"truncate"}
+        targets = (
+            frozenset(norm(dest) for dest in truncating_destinations(ctx.command))
+            if "truncate" in acts
+            else frozenset()
+        )
         for token in tokens(ctx.command):
             path_norm = norm(token)
-            if _is_na2_protected(path_norm):
-                _na2_decide(ctx, path_norm, acts, "shell")
+            if not _is_na2_protected(path_norm):
+                continue
+            token_acts = set(positional)
+            if path_norm in targets:
+                token_acts.add("truncate")
+            if not token_acts:
+                continue
+            _na2_decide(ctx, path_norm, token_acts, "shell")
         return
     # S125: the SECOND dedicated act is decided BEFORE generic content attribution, and
     # content attribution BEFORE the path guard and its carve-outs -- a carve-out is a
@@ -2717,7 +3155,7 @@ _NA3_RULES = (
     (re.compile(r"\bcodex\b[^\n;|&]*\blogin\b", re.I), "`codex login` is the owner's own keystrokes"),
 )
 
-# ---- O129: PERSISTENT-scope assignment of the five names the hook itself is steered by ----
+# ---- O129: PERSISTENT-scope assignment of the six names the hook itself is steered by ----
 #
 # The prefix rule above is about CREDENTIALS.  This one is about the hook's own inputs, and
 # the act it denies is narrower and sharper: a PERSISTENT write (`setx`, or
@@ -2726,7 +3164,11 @@ _NA3_RULES = (
 # `MLV_CLIP_CACHE_ROOT`.  Those five decide, respectively, the registered venue argument's
 # source, the board root every path in NA-2/NA-7/NA-10 is judged against, the clip
 # authorization NA-4 reads, the required-checks snapshot NA-9 fails closed without, and the
-# cache prefix NA-4 guards.  A persistent write is INHERITED BY EVERY LATER HOOK PROCESS on
+# cache prefix NA-4 guards.  THE RULE IS THE LIST: a new
+# input that any rule reads is added here in the same commit that introduces it -- and the
+# recorded reason is a steering root that once shipped ahead of this list and could be
+# `setx`-ed to `C:\`, which is one of the four bypasses that got that root removed entirely.
+# A persistent write is INHERITED BY EVERY LATER HOOK PROCESS on
 # this machine: it does not break a rule, it MOVES the ground the rules stand on, and it
 # survives the session that made it.  A plain in-process `$env:MLV_BOARD_ROOT = ...` is NOT
 # this act -- it dies with its shell, reaches no hook process, and the test carries an
@@ -3027,12 +3469,46 @@ def _write_destinations(command):
 
 
 def _na7_check_path(ctx, path_norm, how):
+    # HOOK-FALSE-POSITIVE-1: a bit bucket is a SINK, not a destination this rule protects.
+    # `2>/dev/null` writes no file anywhere, and refusing it as "a write outside both roots"
+    # denied the commonest read-only shape on this board (measured 2026-09-07/08).
+    if path_norm in NULL_DEVICE_SINKS:
+        return
+    # AN UNRESOLVABLE REFERENCE IS A DENIAL, NEVER A COLLAPSE.  `norm` has already
+    # substituted every name THIS HOOK READS at the value it is using; a reference still
+    # standing here is one the hook cannot resolve -- a name it never reads, or one of the
+    # two it reads that has no default and is unset -- so this text is NOT a directory and
+    # nothing downstream may reason about it as one.  MEASURED: `norm` used to collapse
+    # `"$env:MLV_LANE_PROMPT/../outside.txt"` to the bare relative `outside.txt`, which the
+    # early return below waved through as "inside the worktree by construction", while the
+    # shell resolves the same text to an absolute path outside every root.  `norm` now leaves
+    # such a path uncollapsed and the refusal is here, where the roots are decided.
+    if _unresolved_env_ref(path_norm):
+        raise Deny(
+            "NA-7",
+            "%s to a path carrying an UNRESOLVABLE environment reference (%s): this hook "
+            "cannot resolve `%s`, so the destination is not a path it can bound"
+            % (how, path_norm, _unresolved_env_ref(path_norm)),
+        )
     if has_seg(path_norm, FACTORY_TAIL):
         raise Deny("NA-7", "%s into .factory/ is never authorized (%s)" % (how, path_norm))
     if not is_absolute(path_norm):
+        # S133: "resolves inside the worktree by construction" is true only while the
+        # relative path stays inside it.  `norm` has already collapsed `..`, so a canonical
+        # form that STILL begins `..` is one that walks out of whatever it is relative to --
+        # the same escape the absolute rows below refuse, spelled without a root.
+        if path_norm == ".." or path_norm.startswith("../"):
+            raise Deny(
+                "NA-7",
+                "%s walks out of the worktree with `..` (%s)" % (how, path_norm),
+            )
         return  # a relative destination resolves inside the worktree by construction
     if under(path_norm, ctx.worktree_root) or under(path_norm, ctx.board_root):
         return
+    # THE ROOTS ARE THESE TWO AND NO OTHER.  A sibling repository -- the fleet doctrine bus
+    # included -- is OUTSIDE them and falls through to the refusal below, exactly as it did
+    # before HOOK-FALSE-POSITIVE-1.  Publishing to the bus is a git operation performed by
+    # the orchestrator in that repository; see this file's header before adding a third root.
     raise Deny(
         "NA-7",
         "%s outside both the worktree and the board root (%s)" % (how, path_norm),
@@ -3042,7 +3518,8 @@ def _na7_check_path(ctx, path_norm, how):
 def rule_na7(ctx):
     if ctx.tool in SHELL_TOOLS:
         dests = _write_destinations(ctx.command)
-        if dests or shell_acts(ctx.command):
+        acts = shell_acts(ctx.command)
+        if dests or acts:
             for token in tokens(ctx.command):
                 path_norm = norm(token)
                 if has_seg(path_norm, FACTORY_TAIL):
