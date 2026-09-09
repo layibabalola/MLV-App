@@ -113,7 +113,7 @@ if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
                         DisableLookAssist = [bool]$profile.disableLookAssist
                         RequireLookAssist = $false
                     }
-                    if ([string]$profile.playbackProcessing -eq 'receipt') {
+                    if ($profile.useReceipt) {
                         $runnerArgs.Receipt = [string]$spec.receipt.path
                     }
                     & $runner @runnerArgs | Out-Null

@@ -24,6 +24,7 @@
 #include <QElapsedTimer>
 #include <QTimer>
 #include <QDir>
+#include <QEvent>
 #include <QVector2D>
 #include <QVector3D>
 #include <QtDebug>
@@ -148,15 +149,14 @@ void maybeGrabDisplayFrame(const QImage &image)
     }
 }
 
-/* Bug A on-screen present A/B (env-selectable, ONE binary, all inert unless the
- * matching var is set, freely combinable). The Dell Optimus hybrid renders the GL
- * viewport correctly into its offscreen FBO -- QWidget::grab()/--window-screenshot
- * look right -- but never composites it to the iGPU-driven panel, so the physical
- * screen stays solid BLACK while the non-GL pixmap viewport displays fine. These
- * probe whether a different swap / flush / native-window present mode makes the
- * cross-adapter present land on the panel. VALIDATE WITH EYES ON THE DELL SCREEN;
- * screenshots capture the FBO and lie on hybrids. The matching global toggles
- * (AA_ShareOpenGLContexts skip, global default QSurfaceFormat) live in main.cpp. */
+/* Historical presentation probes, inert unless explicitly enabled. The black
+ * viewport was reproduced on both Bachelor and UltraMagnus on September 8:
+ * QGraphicsView consumed normal paint events while internal grabs forced GL
+ * rendering. Explicit viewport paint ownership fixed that defect on both hosts.
+ * Hybrid composition, swap and flush remain hypotheses for other incidents,
+ * not the established cause here. Validate the actual application HWND with
+ * compositor captures; an internal framebuffer grab cannot prove visibility.
+ * The matching global format/context probes live in main.cpp. */
 QSurfaceFormat::SwapBehavior viewportAbSwapBehavior(bool *isSet)
 {
     const QByteArray v = qgetenv("MLVAPP_VIEWPORT_AB_SWAP").trimmed().toLower();
@@ -189,20 +189,16 @@ bool viewportAbNativeWindow()
     return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_NATIVE"));
 }
 
-/* Add an alpha channel to the per-widget requested format. Qt documents that a
- * QOpenGLWidget needs an alpha channel in the top-level backing store or its content
- * "will not be visible" -- the exact correct-FBO-but-black symptom. The decisive part
- * is the GLOBAL default format set before QApplication (main.cpp); this is the
- * belt-and-suspenders per-widget half. Highest-probability cheap fix. */
+/* Probe an alpha channel in the per-widget format. Top-level backing-store alpha
+ * is a separate Qt composition requirement; this flag did not establish the
+ * cause of the September 8 paint-routing defect. */
 bool viewportAbAlphaEnabled()
 {
     return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_ALPHA"));
 }
 
-/* Qt's explicit escape hatch for the QOpenGLWidget composition limitation that
- * causes the alpha-less-backing-store black: WA_AlwaysStackOnTop presents the GL
- * widget outside the normal flushed backing-store composite. Per-widget, so it works
- * for an embedded viewport. Breaks sibling stacking, fine for a full-bleed viewport. */
+/* Probe WA_AlwaysStackOnTop composition. This changes sibling stacking and is
+ * retained as an explicit diagnostic option, not the normal playback fix. */
 bool viewportAbStackTopEnabled()
 {
     return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_STACKTOP"));
@@ -463,16 +459,12 @@ const char *GpuDisplayViewport::environmentVariableName()
     return "MLVAPP_EXPERIMENTAL_GL_VIEWPORT";
 }
 
-/* Known hybrid-GPU limitation: on NVIDIA Optimus laptops (discrete GPU renders,
- * Intel iGPU drives the panel), this experimental QOpenGLWidget viewport renders
- * correctly into its offscreen framebuffer -- QWidget::grab()/--window-screenshot
- * is correct -- but the result is NOT presented to the physical display: the panel
- * stays solid BLACK, while the normal non-GL pixmap viewport displays fine.
- * Observed on an RTX 3060 Laptop across NVIDIA drivers 591.74 / 596.08 / 610.62; a
- * driver update did NOT fix the on-screen black (it only changed an offscreen
- * CPU-texture-upload detail that grab() captures, which is why FBO screenshots
- * looked fine). Desktop GPUs (RTX 4090) and Mesa llvmpipe present correctly.
- * Prefer the non-GL pixmap viewport on hybrid laptops. */
+/* QGraphicsView normally consumes viewport Paint events to draw its scene.
+ * Our GPU path hides the scene's pixmap and paints in QOpenGLWidget::paintGL,
+ * so it must own Paint while a GPU frame is pending. Otherwise ordinary playback
+ * paints an empty scene even though grab()/grabFramebuffer() can force a correct
+ * offscreen image. Reproduced with compositor capture on RTX 4090; internal grabs
+ * alone cannot establish physical presentation on desktop or hybrid GPUs. */
 bool GpuDisplayViewport::installOn(QGraphicsView *view)
 {
     if ( !view || !isRequestedByEnvironment() ) return false;
@@ -480,12 +472,27 @@ bool GpuDisplayViewport::installOn(QGraphicsView *view)
 
     GpuDisplayViewport *viewport = new GpuDisplayViewport(view);
     view->setViewport(viewport);
+    // Install after setViewport: Qt invokes the newest event filter first.
+    viewport->installEventFilter(viewport);
     view->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     view->setCacheMode(QGraphicsView::CacheNone);
     qInfo() << "Experimental GPU viewport enabled via"
             << environmentVariableName()
             << "- QGraphicsView now renders through QOpenGLWidget.";
     return true;
+}
+
+bool GpuDisplayViewport::eventFilter(QObject *watched, QEvent *event)
+{
+    if ( watched == this && event->type() == QEvent::Paint && hasPendingFrame() )
+    {
+        // Invoke Qt's paint-event path, which binds the widget FBO, calls paintGL,
+        // and schedules composition. Calling paintGL directly skips that setup.
+        QOpenGLWidget::event(event);
+        return true;
+    }
+    // Preserve QGraphicsView's scene/fallback, input, resize and scroll handling.
+    return QOpenGLWidget::eventFilter(watched, event);
 }
 
 bool GpuDisplayViewport::isInstalledOn(const QGraphicsView *view)
@@ -1702,20 +1709,9 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     const bool ok = reconOk && amazeOk;
     if ( timing )
     {
-        memset(timing, 0, sizeof(*timing));
-        timing->available = reconTiming.available || amazeTiming.available;
-        timing->upload_ms =
-            (reconTiming.available ? reconTiming.upload_ms : 0.0)
-            + (amazeTiming.available ? amazeTiming.uploadMs : 0.0);
-        timing->kernel_ms =
-            (reconTiming.available ? reconTiming.kernel_ms : 0.0)
-            + (amazeTiming.available ? amazeTiming.kernelMs : 0.0);
-        timing->interop_ms =
-            (reconTiming.available ? reconTiming.interop_ms : 0.0)
-            + (amazeTiming.available ? amazeTiming.downloadMs : 0.0);
-        timing->total_ms =
-            (reconTiming.available ? reconTiming.total_ms : 0.0)
-            + (amazeTiming.available ? amazeTiming.totalMs : 0.0);
+        *timing = llrpGpuPlaybackReconCombineTiming(
+            &reconTiming, amazeTiming.available, amazeTiming.uploadMs,
+            amazeTiming.kernelMs, amazeTiming.downloadMs, amazeTiming.totalMs);
     }
     if ( !ok )
     {
@@ -2184,7 +2180,9 @@ QRectF GpuDisplayViewport::targetRectInViewport() const
 
     if ( sceneRect.isEmpty() ) return QRectF();
 
-    return m_view->mapFromScene(sceneRect).boundingRect();
+    // GL vertices describe continuous edges. Integer QPolygon/QRect bounds
+    // include both endpoints and would expand a 4x4 frame to a 5x5 quad.
+    return m_view->viewportTransform().mapRect(sceneRect);
 }
 
 int GpuDisplayViewport::pendingWidth() const
