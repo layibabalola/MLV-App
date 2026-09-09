@@ -138,6 +138,21 @@ the O159 cascade preserves each rewritten receipt's ORIGINAL ``recordedUtc``: th
 commit's cascade fixture already did, now asserted structurally, and ONE new row restamps
 0.6 and 0.7 at the rewrite's instant -- a tie, undecidable.
 
+SIX FALSE-POSITIVE PAIRS, EACH MEASURED DENY ON THE PARENT COMMIT (HOOK-FALSE-POSITIVE-1).
+The ``falsepositive1`` group is fifteen rows: six ALLOW SUBJECTS, eight DENY CONTROLS that
+differ from their subject in exactly ONE load-bearing token, and one pin recording an
+ALLOW this delta deliberately did NOT change.  All six subjects were measured DENY on
+``3e2b2220`` and ALLOW here; all eight controls DENY on both.  What each pair isolates: a
+redirect truncates only its TARGET, so ``cat <ledger> 2>/dev/null`` reads and the control
+that redirects INTO the ledger still writes; the same claim beside ``2>&1`` with a real
+scratch destination; an interpreter body is still not decoded, so a heredoc whose
+``if len(r) > 0`` set the act is allowed while a real ``Set-Content`` of the ledger is not;
+a ``Write`` to an ABSENT target creates rather than overwrites, with a receipt NAME and a
+shrinking pen overwrite held back; the fleet doctrine bus is a publish surface for WRITES
+only (RESUME.md STEP 0.5), so a delete under it is refused; and a bit bucket is a sink, not
+a path outside the roots.  ``MLV_FLEET_BUS_ROOT`` is a tmp fixture like every other root,
+so no row depends on this machine's layout.
+
 NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
 payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
 strings are data -- including the O129 rows, whose ``setx`` and ``SetEnvironmentVariable``
@@ -778,6 +793,11 @@ CASES = [
         "input": {"file_path": "{DUAL}/claude.md", "content": "# replaced\n"},
         "expect": "DENY",
         "na": "NA-2",
+        # HOOK-FALSE-POSITIVE-1: the row says `over`, so the ledger has to BE there.  Until
+        # this delta the generic arm refused the path without ever opening it, and the row
+        # passed against a board where `claude.md` did not exist -- a DENY row that was
+        # really measuring "the hook never looks".  An ABSENT target is now a create.
+        "fixture": "existing_ledger",
     },
     {
         "name": "r2 rm -rf a whole test directory",
@@ -3319,6 +3339,192 @@ CASES = [
         "expect": "ALLOW",
         "fixture": "venue_at_worktree",
     },
+    # ------------------------------------ HOOK-FALSE-POSITIVE-1: six falsifier PAIRS
+    #
+    # MEASURED, NOT ARGUED.  On 2026-09-07/08 the hub measured this gate refusing read-only
+    # and create-only acts: fourteen of twenty-seven headless Sonnet editing runs ended at
+    # `max_turns` after a denial, and the orchestrator was refused five times.  Every pair
+    # below is an ALLOW SUBJECT beside a DENY CONTROL that differs in exactly ONE
+    # load-bearing token, so a hook that simply stopped enforcing goes RED on the control
+    # rather than looking fixed.  Every subject was measured DENY on the parent commit
+    # (3e2b2220) except where a row says otherwise.
+    #
+    # (i) THE REDIRECT'S TARGET IS THE ONLY THING IT TRUNCATES.  `2>` sets the truncation
+    # act, and up to this delta the act was attributed to every protected token on the
+    # line -- so reading a ledger with stderr discarded was "a truncating write" OF that
+    # ledger.  The control redirects INTO the same file and stays DENY.
+    {
+        "name": "fp1 read a ledger with stderr to the bit bucket",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {"command": "cat \"{DUAL}/queue.json\" 2>/dev/null"},
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 CTL truncating redirect into that same ledger",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {"command": "echo x > \"{DUAL}/queue.json\""},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "cannot be proven non-shrinking",
+    },
+    # (ii) THE SAME CLAIM WITH A REAL REDIRECT BESIDE `2>&1`.  The subject truncates
+    # something -- an unprotected scratch file -- so the act really is present; what
+    # changed is WHICH token it is attributed to.  The control moves only the destination.
+    {
+        "name": "fp1 read a ledger into a scratch file with stderr merged",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {
+            "command": "cat \"{DUAL}/queue.json\" > \"{BOARD}/scratch/out.txt\" 2>&1"
+        },
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 CTL that same shape redirected into the ledger",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {
+            "command": "cat \"{BOARD}/scratch/in.txt\" > \"{DUAL}/queue.json\" 2>&1"
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "cannot be proven non-shrinking",
+    },
+    # (iii) AN INTERPRETER METHOD NAME IS NOT A SHELL TRUNCATION VERB.  The heredoc READS
+    # the ledger and writes an UNPROTECTED continuity path; its `if len(r) > 0` is what set
+    # the truncation act, and the ledger is named only as the thing being read.  The hook
+    # still does not decode interpreter bodies -- that limit is unchanged and deliberate --
+    # so the control is a real `Set-Content` of the ledger, which the text matcher DOES see.
+    {
+        "name": "fp1 heredoc reading a ledger and writing an unprotected path",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {
+            "command": "py -3 - <<'PY'\n"
+            "from pathlib import Path\n"
+            "q = Path(r'{DUAL}/queue.json')\n"
+            "rows = [r for r in q.read_text().splitlines() if len(r) > 0]\n"
+            "Path(r'{BOARD}/.claude-state/continuity/x.json').write_bytes(b'ok')\n"
+            "PY"
+        },
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 CTL a real Set-Content of that ledger",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {"command": "Set-Content -LiteralPath '{DUAL}/queue.json' -Value 'x'"},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "cannot be proven non-shrinking",
+    },
+    # (iv) A CREATE OVERWRITES NOTHING.  The generic arm's refusal names OVERWRITING, and it
+    # fired on a `Write` of a path nothing existed at -- the orchestrator's five refusals
+    # were all this shape.  TWO controls: a receipt name under a protected `receipts/`
+    # directory, which is held back from the new allowance by NAME, and a shrinking
+    # overwrite of an existing pen, which is the shrink guard and is untouched.
+    {
+        "name": "fp1 Write creates a new coordination file",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "{DUAL}/OPUS-HUB-PASTE.md", "content": CHECKPOINT_LONG},
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 CTL Write creates a forged chain receipt under a receipts dir",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "{BOARD}/.claude-state/coordination/receipts/"
+            "execution-control-forged.json",
+            "content": RECEIPT_LONG,
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "overwriting ledger/pen/receipt/evidence content",
+    },
+    {
+        # UNCHANGED BY THIS DELTA, PINNED SO NOBODY READS THE CONTROL ABOVE AS BROADER THAN
+        # IT IS.  The SAME forged name under `$D/receipts/**` reaches the RECEIPTS CARVE-OUT
+        # one branch earlier and has always been ALLOWED as a create -- measured ALLOW on
+        # 3e2b2220 and still ALLOW here.  A forged chain name is defended at the ENABLE ACT
+        # (S118: it is not one of the six, so it fails the exception closed by name), never
+        # at write time, because the hub writes the six legitimate ones with this same tool.
+        "name": "fp1 forged chain receipt under the dual-lane carve-out is unchanged",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "{RECEIPTS}/execution-control-forged.json",
+            "content": RECEIPT_LONG,
+        },
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 CTL Write shrinks an existing pen",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "{DUAL}/orchestrator-resume-CURRENT.md",
+            "content": "# stub\n",
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "shrinking overwrite",
+        "fixture": "checkpoint_unarchived",
+    },
+    # (v) THE FLEET DOCTRINE BUS IS A PUBLISH SURFACE OF THIS BOARD (RESUME.md STEP 0.5).
+    # Writes under it are this board's own act; the first control is any OTHER absolute
+    # path, which stays outside both roots, and the second is a DELETE under the bus, which
+    # this delta refuses because a publish is additive.
+    {
+        "name": "fp1 Write publishes the board spec to the fleet bus",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "{BUS}/specs/mlv-app.md", "content": "# mlv-app spec\n"},
+        "expect": "ALLOW",
+        "fixture": "fleet_bus",
+    },
+    {
+        "name": "fp1 CTL Write to a path outside every root",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "{OUTSIDE}/x.md", "content": "# x\n"},
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "outside both the worktree and the board root",
+        "fixture": "fleet_bus",
+    },
+    {
+        "name": "fp1 CTL Remove-Item under the fleet bus",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {"command": "Remove-Item -LiteralPath '{BUS}/TRAPS.md'"},
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "under the fleet doctrine bus",
+        "fixture": "fleet_bus",
+    },
+    # (vi) A BIT BUCKET IS A SINK, NOT A FILE.  `/dev/null` is absolute and under neither
+    # root, so NA-7 refused it as a write outside both -- which is what made every
+    # `2>/dev/null` on this board a denial.  The control is a real absolute destination.
+    {
+        "name": "fp1 shell write to the bit bucket",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {"command": "echo probe > /dev/null"},
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 CTL shell write to an absolute path outside every root",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {"command": "echo probe > \"{OUTSIDE}/stray.txt\""},
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "outside both the worktree and the board root",
+    },
     # ------------------------------------------------------- the 6 benign ALLOW controls
     {
         "name": "benign git push fork product branch",
@@ -3929,6 +4135,29 @@ def fixture_clip_authorized(paths):
 def fixture_existing_receipt(paths):
     _write(os.path.join(paths["RECEIPTS"], "live.json"), RECEIPT_LONG)
     return {}
+
+
+def fixture_existing_ledger(paths):
+    """HOOK-FALSE-POSITIVE-1: the gate ledger EXISTS, so a `Write` of it really overwrites.
+
+    The `r2 Write over a coordination ledger` row says `over` and always meant an
+    overwrite, but nothing had ever put the file on the tmp board -- so up to this delta it
+    was passing against the generic arm's blanket refusal of a path it never opened.  Now
+    that an ABSENT target is a create-or-extend, the row states its own precondition.
+    """
+    _write(os.path.join(paths["DUAL"], "claude.md"), CHECKPOINT_LONG)
+    return {}
+
+
+def fixture_fleet_bus(paths):
+    """HOOK-FALSE-POSITIVE-1: the fleet doctrine bus root, as a tmp fixture.
+
+    RESUME.md STEP 0.5 has the orchestrator lane publishing `specs/mlv-app.md` into the bus
+    clone, so NA-7 admits WRITES under this root beside the worktree and the board -- and
+    refuses a delete or a move under it, because a publish is additive.
+    """
+    _write(os.path.join(paths["BUS"], "TRAPS.md"), "# fleet traps\n")
+    return {"MLV_FLEET_BUS_ROOT": paths["BUS"]}
 
 
 def fixture_receipts_all_six(paths):
@@ -4733,6 +4962,9 @@ FIXTURES = {
     "snapshot_absent": fixture_snapshot_absent,
     "clip_authorized": fixture_clip_authorized,
     "existing_receipt": fixture_existing_receipt,
+    # HOOK-FALSE-POSITIVE-1
+    "existing_ledger": fixture_existing_ledger,
+    "fleet_bus": fixture_fleet_bus,
     "receipts_all_six": fixture_receipts_all_six,
     "receipts_all_six_at_board": fixture_receipts_all_six_at_board,
     "receipts_all_six_at_worktree": fixture_receipts_all_six_at_worktree,
@@ -4852,9 +5084,14 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
             # that tree by construction, so an NA-10 DENY there is attributable to NA-10.
             # It is derived, never a literal, so it is the checkout on either matrix leg.
             "REPO": REPO_ROOT,
+            # HOOK-FALSE-POSITIVE-1: the fleet doctrine bus, a PUBLISH surface of this
+            # board (RESUME.md STEP 0.5).  A tmp fixture like every other root, supplied
+            # through `MLV_FLEET_BUS_ROOT` by `fixture_fleet_bus`, so no row depends on
+            # this machine's layout and the table stays green on both matrix legs.
+            "BUS": os.path.join(self.tmp, "fleet-bus"),
             "CLIP_AUTH": os.path.join(board, "clips", "authorized", "take01.mlv"),
         }
-        for key in ("BOARD", "DUAL", "RECEIPTS", "OUTSIDE", "CACHE", "WORKTREE"):
+        for key in ("BOARD", "DUAL", "RECEIPTS", "OUTSIDE", "CACHE", "WORKTREE", "BUS"):
             os.makedirs(self.paths[key])
         self.paths["CHECKPOINT_SHA"] = hashlib.sha256(
             CHECKPOINT_LONG.encode("utf-8")
@@ -5079,6 +5316,13 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self.assertEqual(counts.get("round2"), 12, "12 round-2 falsifiers")
         self.assertEqual(counts.get("failclosed"), 4, "4 fail-closed inputs")
         self.assertEqual(counts.get("benign"), 6, "6 benign ALLOW controls")
+        # HOOK-FALSE-POSITIVE-1: six ALLOW subjects, eight DENY controls and one
+        # unchanged-behaviour ALLOW pin (the forged chain name under the dual-lane
+        # receipts carve-out, which this delta deliberately did not touch).  Pinned so a
+        # subject cannot be dropped once its control still passes.
+        self.assertEqual(
+            counts.get("falsepositive1"), 15, "15 HOOK-FALSE-POSITIVE-1 rows"
+        )
         # PINNED DELIBERATELY, 0.05 third review delta: the 0.2 enable became ONE dedicated
         # act, so the group grew 6 -> 15.  Six rows vary the canonical act's PRECONDITIONS,
         # six vary its SHAPE (all DENY), two are exception (iii) creates and one is the

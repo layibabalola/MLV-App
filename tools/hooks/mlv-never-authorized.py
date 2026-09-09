@@ -262,6 +262,44 @@ arm, because the digest is recomputed from that object.  What the hook still doe
 is unchanged from S123: the equality itself is the hub's git assertion, and what is checked
 here is that the attestation is bound to THIS receipt's shas and THIS receipt's hashes.
 
+THREE FALSE-POSITIVE CLASSES, MEASURED AND CLOSED (HOOK-FALSE-POSITIVE-1)
+--------------------------------------------------------------------------
+Up to this delta three arms classified an act by the TEXT AROUND it rather than by what it
+named, and the board paid for all three: fourteen of twenty-seven headless editing runs
+ended at ``max_turns`` after a denial, and the orchestrator was refused five times.  What
+changed, and what deliberately did NOT:
+
+  * NA-2 shell truncation.  ``shell_acts`` asked "does this text truncate anything" and the
+    answer was then attributed to EVERY protected token on the line.  So
+    ``cat <protected> 2>/dev/null`` was "a truncating write" of the file it only READ (the
+    ``2>`` set the act; the bit bucket was the target), and a Python heredoc was too when
+    its code merely contained ``if len(r) > 0``.  Truncation is now attributed ONLY when
+    the redirect's or cmdlet's TARGET TOKEN itself resolves to the protected path --
+    ``truncating_destinations``.  ``2>&1``, ``>&2`` and ``1>&2`` are file-descriptor dups
+    and are never targets; ``>>`` and ``Add-Content`` remain appends.  DELETE and MOVE keep
+    their whole-command attribution: a delete verb's operands really are its tokens.
+  * Interpreter method names are still NOT verbs.  ``write_bytes(``, ``write_text(`` and
+    ``open(..., 'w')`` are not shell truncation and no arm was added for them.  An
+    interpreter one-liner is invisible to a text matcher BY DESIGN (the limit recorded
+    under the pre-flight artifact act, unchanged); reading one as a truncation of whatever
+    protected path the same command mentions proves nothing about the target and denied the
+    ordinary read-here / write-there shape.
+  * NA-7 destinations.  ``/dev/null``, ``NUL``, ``nul`` and ``$null`` are SINKS, not files,
+    and are no longer "a write outside both roots".  Beside the worktree and the board,
+    NA-7 now admits writes under the FLEET DOCTRINE BUS (``MLV_FLEET_BUS_ROOT``, default
+    ``C:\\!Layi Wkspc\\softwarefactory-fleet-doctrine``): RESUME.md STEP 0.5 has the
+    orchestrator lane publishing ``specs/mlv-app.md`` there, so it is a write surface OF
+    this board.  WRITES ONLY -- a delete or a move naming a path under that root is DENIED,
+    because a publish is additive.
+  * NA-2 generic file-tool arm.  Its refusal is about OVERWRITING ledger/pen/receipt
+    content, and it fired on a ``Write`` of a path nothing existed at -- a CREATE, which
+    ``_file_shrinks`` already reads as create-or-extend one branch up.  A ``Write`` to an
+    ABSENT target is now allowed there, with two name classes held back at exactly their
+    former behaviour: anything under a ``receipts/`` directory, and any basename that is an
+    ``execution-control-*`` chain name or one of the five fixed gate receipts.  Nothing
+    about DELETE, MOVE or the shrink guard changed, and ``$D/receipts/**`` still reaches
+    the receipts carve-out before this arm is consulted.
+
 THE PRE-FLIGHT ARTIFACT ACT (S125, register v25)
 ------------------------------------------------
 Before typing the enable the hub writes the EXACT hook-stdin JSON of the final board-path
@@ -345,6 +383,16 @@ EXIT_DENY = 2
 
 DEFAULT_BOARD_ROOT = r"C:\!Layi Wkspc\MLV-App"
 DEFAULT_CLIP_CACHE_ROOT = r"\\bachelor\mlv-agent\cache"
+
+# HOOK-FALSE-POSITIVE-1.  RESUME.md STEP 0.5: the orchestrator lane PUBLISHES this board's
+# spec to `specs/mlv-app.md` in the fleet doctrine bus clone, so the bus is a write surface
+# OF this board and NA-7 must admit it beside the worktree and the board root.  Overridable
+# (`MLV_FLEET_BUS_ROOT`) so no falsifier row depends on this machine's layout.
+DEFAULT_FLEET_BUS_ROOT = r"C:\!Layi Wkspc\softwarefactory-fleet-doctrine"
+# A bit bucket is a SINK, not a file this register protects: `2>/dev/null` discards stderr
+# and creates nothing.  Compared AFTER `norm`, which lowercases -- so `NUL` and `nul` are
+# the one entry `nul`.
+NULL_DEVICE_SINKS = frozenset(("/dev/null", "nul", "$null"))
 
 SHELL_TOOLS = ("Bash", "PowerShell")
 FILE_TOOLS = ("Write", "Edit", "NotebookEdit")
@@ -813,6 +861,12 @@ class Ctx(object):
             self.receipts_dir_raw, "required-checks-live.jsonl"
         )
         self.lane_prompt = env.get("MLV_LANE_PROMPT") or ""
+        # HOOK-FALSE-POSITIVE-1: the fleet doctrine bus, a PUBLISH surface of this board
+        # (RESUME.md STEP 0.5).  Writes under it are admitted by NA-7; deletes and moves
+        # under it are not, because publishing is additive.
+        self.fleet_bus_root = norm(
+            env.get("MLV_FLEET_BUS_ROOT") or DEFAULT_FLEET_BUS_ROOT
+        )
         # O126, THE VENUE, and it rides on ARGV.  `--project-dir` is substituted by Claude
         # Code from `${CLAUDE_PROJECT_DIR}` in the REGISTERED command, so its value is
         # fixed by `.claude/settings.json`: a tool call cannot set an argument, and NA-10
@@ -925,6 +979,53 @@ _TRUNC_CMDLET_RX = re.compile(
     re.I,
 )
 _APPEND_FLAG_RX = re.compile(r"-append\b|(?:^|\s)tee\s+(?:[^|;]*\s)?-a\b", re.I)
+
+# HOOK-FALSE-POSITIVE-1 -- WHAT a command truncates, not merely WHETHER it truncates.
+# `_TRUNC_REDIRECT_RX`/`_TRUNC_CMDLET_RX` above answer "does this text truncate ANYTHING",
+# which is all `shell_acts` needs; this answers "which TOKEN is written to", which is the
+# only question NA-2's attribution may ask.  The two were conflated up to this delta, so a
+# command that truncated ANYTHING and merely MENTIONED a protected path anywhere else on
+# the line was refused as a truncating write OF that path -- measured 2026-09-07/08 on
+# `cat <protected> 2>/dev/null` (the `2>` sets the act; the target is the bit bucket) and
+# on a Python heredoc whose `if len(r) > 0` sets the act while the real write goes to an
+# unprotected path.  Fourteen of twenty-seven headless editing runs died on that class.
+#
+# A file-descriptor dup is never a target: `&` is outside the destination character class,
+# so `2>&1`, `>&2` and `1>&2` capture nothing at all.  `>>` is excluded by the same `(?!>)`
+# the act regex uses, so an append is never read as a truncation.  A leading stream number
+# (`1>`, `2>`) is NOT excluded -- `2> log.txt` really does truncate `log.txt`.
+_TRUNC_DEST_RX = re.compile(r"(?<![>\-=!<])>(?!>)\s*(['\"][^'\"]+['\"]|[^\s;|&()<>]+)")
+# The truncating cmdlets only -- `add-content` is an append and is deliberately absent.
+_TRUNC_CMDLET_SEGMENT_RX = re.compile(
+    r"\b(?:set-content|out-file|clear-content)\b[^\n;|&]*"
+    r"|(?:^|[\s;&|`(])tee\b[^\n;|&]*"
+    r"|\bos\.truncate\s*\([^\n;]*",
+    re.I,
+)
+
+
+def truncating_destinations(command):
+    """The tokens a truncating redirect or cmdlet actually WRITES TO.
+
+    Interpreter method names (``write_bytes(``, ``write_text(``, ``open(..., 'w')``) are
+    NOT shell truncation verbs and are not looked for here or in ``shell_acts``: an
+    interpreter one-liner's effect is invisible to a text matcher BY DESIGN (see the limit
+    recorded under the pre-flight artifact act), and inventing a verb for it denies the
+    common read-then-write-elsewhere shape while still proving nothing about the target.
+    """
+    dests = []
+    for match in _TRUNC_DEST_RX.finditer(command or ""):
+        dests.append(match.group(1))
+    for match in _TRUNC_CMDLET_SEGMENT_RX.finditer(command or ""):
+        segment = match.group(0)
+        if _APPEND_FLAG_RX.search(segment):
+            continue
+        dests.extend(
+            token
+            for token in tokens(segment)[1:]
+            if not token.startswith("-") and ("/" in token or "\\" in token)
+        )
+    return dests
 
 
 _GIT_RM_CACHED_RX = re.compile(r"\bgit\s+rm\b(?=[^\n;|&]*--cached\b)", re.I)
@@ -2345,6 +2446,42 @@ def _file_shrinks(ctx):
     return len(ctx.new_text.encode("utf-8")) < existing
 
 
+RECEIPTS_DIR_SEG = "receipts"
+FIXED_RECEIPT_BASENAMES = frozenset(name.lower() for name in KILL_SWITCH_RECEIPTS)
+
+
+def _create_is_admissible(ctx, path_norm):
+    """HOOK-FALSE-POSITIVE-1: is this a CREATE the generic NA-2 arm has no cause to refuse?
+
+    Only a ``Write`` (an ``Edit`` names text it claims already exists, and a
+    ``NotebookEdit`` amends a document), only when the payload carries its new content, and
+    only when nothing is on disk at the target -- so the refusal this replaces, which is
+    about OVERWRITING, still fires for every real overwrite.
+
+    TWO NAME CLASSES ARE HELD BACK, and they keep exactly the behaviour they had before
+    this delta rather than joining the new allowance: anything under a ``receipts/``
+    directory, and any basename that is an ``execution-control-*`` chain name or one of the
+    five FIXED gate receipts.  Those are the files whose PRESENCE spends the one-shot 0.2
+    authorization and whose set the enable act ENUMERATES, so a create under them is never
+    the harmless act "nothing was there" makes it look like.  ``$D/receipts/**`` already
+    reaches the receipts carve-out one branch up and never arrives here at all; this guard
+    is what stops the new allowance from admitting a receipt name under any OTHER protected
+    directory (`.claude-state/coordination/receipts/`, `.claude-state/closeout/receipts/`).
+    """
+    if ctx.tool != "Write" or ctx.new_text is None:
+        return False
+    if not ctx.path or os.path.isfile(ctx.path):
+        return False
+    if has_seg(path_norm, RECEIPTS_DIR_SEG):
+        return False
+    base = path_norm.rsplit("/", 1)[-1]
+    if base.startswith(EXECUTION_CONTROL_PREFIX):
+        return False
+    if base in FIXED_RECEIPT_BASENAMES:
+        return False
+    return True
+
+
 def _na2_decide(ctx, path_norm, acts, source):
     """One protected path, one act set.  Raises Deny, or returns for ALLOW."""
     tag = _carve_tag(ctx, path_norm)
@@ -2435,6 +2572,14 @@ def _na2_decide(ctx, path_norm, acts, source):
                 "%s of ledger/pen/receipt/evidence content at %s"
                 % ("/".join(sorted(acts)), path_norm),
             )
+        return
+    # HOOK-FALSE-POSITIVE-1: OVERWRITING is what this arm names and what it may refuse.  A
+    # `Write` whose target does NOT EXIST overwrites nothing -- it is the same
+    # create-or-extend the carve-outs already allow, and `_file_shrinks` already reads it
+    # that way one branch up.  Denying it cost the board five orchestrator refusals in two
+    # days (measured 2026-09-07/08), each on a NEW file under
+    # `.claude-state/coordination/dual-lane/` that nothing existed at.
+    if _create_is_admissible(ctx, path_norm):
         return
     raise Deny("NA-2", "overwriting ledger/pen/receipt/evidence content at %s" % path_norm)
 
@@ -2668,10 +2813,28 @@ def rule_na2(ctx):
         if not acts:
             return
         _refuse_marker_delete_outside_the_act(ctx, acts)
+        # HOOK-FALSE-POSITIVE-1: "truncate" is attributed to the TARGET of the redirect or
+        # the cmdlet, never to every protected token that happens to share the command
+        # line.  Delete and move keep the whole-command attribution they have always had:
+        # `rm -rf A B` really does name both, and a delete verb's operands are the tokens.
+        # A truncation, by contrast, has exactly one destination per redirect, and reading
+        # a protected file BESIDE one is the commonest read-only act on this board.
+        positional = acts - {"truncate"}
+        targets = (
+            frozenset(norm(dest) for dest in truncating_destinations(ctx.command))
+            if "truncate" in acts
+            else frozenset()
+        )
         for token in tokens(ctx.command):
             path_norm = norm(token)
-            if _is_na2_protected(path_norm):
-                _na2_decide(ctx, path_norm, acts, "shell")
+            if not _is_na2_protected(path_norm):
+                continue
+            token_acts = set(positional)
+            if path_norm in targets:
+                token_acts.add("truncate")
+            if not token_acts:
+                continue
+            _na2_decide(ctx, path_norm, token_acts, "shell")
         return
     # S125: the SECOND dedicated act is decided BEFORE generic content attribution, and
     # content attribution BEFORE the path guard and its carve-outs -- a carve-out is a
@@ -3027,11 +3190,23 @@ def _write_destinations(command):
 
 
 def _na7_check_path(ctx, path_norm, how):
+    # HOOK-FALSE-POSITIVE-1: a bit bucket is a SINK, not a destination this rule protects.
+    # `2>/dev/null` writes no file anywhere, and refusing it as "a write outside both roots"
+    # denied the commonest read-only shape on this board (measured 2026-09-07/08).
+    if path_norm in NULL_DEVICE_SINKS:
+        return
     if has_seg(path_norm, FACTORY_TAIL):
         raise Deny("NA-7", "%s into .factory/ is never authorized (%s)" % (how, path_norm))
     if not is_absolute(path_norm):
         return  # a relative destination resolves inside the worktree by construction
     if under(path_norm, ctx.worktree_root) or under(path_norm, ctx.board_root):
+        return
+    # HOOK-FALSE-POSITIVE-1: the fleet doctrine bus clone is a PUBLISH SURFACE of this
+    # board -- RESUME.md STEP 0.5 has the orchestrator lane publishing `specs/mlv-app.md`
+    # there -- so a write under it is this board's own act, not a write outside it.  Only
+    # a WRITE: `rule_na7`'s shell arm refuses a delete or a move under the same root,
+    # because a publish is additive and nothing here re-ratifies a deletion.
+    if under(path_norm, ctx.fleet_bus_root):
         return
     raise Deny(
         "NA-7",
@@ -3042,12 +3217,22 @@ def _na7_check_path(ctx, path_norm, how):
 def rule_na7(ctx):
     if ctx.tool in SHELL_TOOLS:
         dests = _write_destinations(ctx.command)
-        if dests or shell_acts(ctx.command):
+        acts = shell_acts(ctx.command)
+        if dests or acts:
+            destructive = "delete" in acts or "move" in acts
             for token in tokens(ctx.command):
                 path_norm = norm(token)
                 if has_seg(path_norm, FACTORY_TAIL):
                     raise Deny(
                         "NA-7", "writing into .factory/ is never authorized (%s)" % path_norm
+                    )
+                if destructive and under(path_norm, ctx.fleet_bus_root):
+                    raise Deny(
+                        "NA-7",
+                        "%s %s under the fleet doctrine bus is never authorized: the bus "
+                        "is a PUBLISH surface for this board (RESUME.md STEP 0.5) and a "
+                        "publish is additive"
+                        % ("deleting" if "delete" in acts else "moving", path_norm),
                     )
         for dest in dests:
             _na7_check_path(ctx, norm(dest), "write")
