@@ -1,4 +1,4 @@
-import hashlib, json, os, subprocess, sys, time
+import hashlib, json, os, re, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +18,15 @@ PWSH = "pwsh.exe"
 # $OWNER_ABSENT_* constants (declared beside $hostStarted, ~line 337-346).
 NO_HOST_TOKENS = {"launch-budget-exhausted", "start-threw"}
 POST_START_UNRECORDED = "post-start-unrecorded"
+
+# PR #105 final: containment.ownerKillOutcome tokens, same hand-duplication problem
+# as NO_HOST_TOKENS above -- kept in sync BY HAND with Invoke-Lane.ps1's own
+# $OWNER_KILL_OUTCOME_* constants (declared beside $ownerKillAttempted, ~line 365-372).
+# The cross-family review that added kill-wait-timeout noted this duplication drifts
+# silently unless something pins the full set; test_kill_outcome_token_set_matches_
+# producer_constants below asserts this literal against the source directly instead
+# of trusting the hand-copy.
+KILL_OUTCOME_TOKENS = {"already-exited", "killed", "kill-wait-timeout", "kill-threw"}
 
 
 def assert_owner_absence_is_legitimate(containment, context):
@@ -379,6 +388,61 @@ def test_pre_assignment_kill_failure_is_recorded_not_swallowed(fixture_tree):
     subprocess.run([PWSH,"-NoProfile","-NonInteractive","-Command",
                      f"Stop-Process -Id {int(owner_pid)} -Force -ErrorAction SilentlyContinue"],
                     timeout=5, check=False)
+
+
+def test_pre_assignment_kill_wait_timeout_is_recorded_not_killed(fixture_tree):
+    # Falsifier for PR #105 final (cross-family review of 0f8ba40a): WaitForExit(Int32)
+    # RETURNS a bool -- true iff the process exited within the timeout -- and round 5
+    # discarded that return with [void], recording 'killed' unconditionally. A host
+    # that outlives the bounded wait -- exactly the orphan this whole change exists to
+    # make visible -- was therefore reported as killed: manufactured evidence, worse
+    # than the bare `catch { }` this whole packet replaced.
+    #
+    # Constructing a process that genuinely SURVIVES Process.Kill(entireProcessTree:
+    # true) is not achievable on this platform -- TerminateProcess cannot be caught,
+    # ignored, or slowed by the target, so "make the host ignore termination" is not
+    # reachable on Windows. This falsifier instead takes the packet's other allowed
+    # construction: shrink the bounded wait itself (5000ms -> 0ms in a fixture
+    # mutation) so the check happens before the OS has necessarily finished tearing
+    # the process down, reaching the timeout branch deterministically. This proves the
+    # CODE correctly captures WaitForExit's observed return value and reports the new
+    # token when it is false; it does NOT prove a real host that is merely slow to die
+    # is always caught inside a realistic multi-second window -- that remains a timing
+    # property of the OS, not a property of this code path.
+    def shrink_wait(text):
+        old = "$exitedWithinWait = $proc.WaitForExit(5000)"
+        assert text.count(old) == 1
+        return text.replace(old, "$exitedWithinWait = $proc.WaitForExit(0)")
+    cmd,env,receipt=prepare(fixture_tree,"normal",assignment_failure=True,mutation=shrink_wait)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=15)
+    assert r.returncode==127,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    containment=q["containment"]
+    # The whole point: a wait that expired must never be reported as a completed kill.
+    assert containment["ownerKillAttempted"] is True
+    assert containment["ownerKillOutcome"]=="kill-wait-timeout", (
+        f"expected the observed-timeout token, got {containment['ownerKillOutcome']!r} -- "
+        "this is the exact false-evidence defect this test exists to catch"
+    )
+    # Kill() itself was real (only the wait window was shortened), so the host is
+    # gone or about to be -- reap defensively like the sibling kill-threw test does.
+    owner_pid = containment["ownerPid"]
+    assert owner_pid is not None
+    subprocess.run([PWSH,"-NoProfile","-NonInteractive","-Command",
+                     f"Stop-Process -Id {int(owner_pid)} -Force -ErrorAction SilentlyContinue"],
+                    timeout=5, check=False)
+
+
+def test_kill_outcome_token_set_matches_producer_constants():
+    # Guard against the exact drift the cross-family review flagged: this file's
+    # KILL_OUTCOME_TOKENS is a hand-copy of Invoke-Lane.ps1's $OWNER_KILL_OUTCOME_*
+    # constants because this file cannot import a .ps1. Pin the full set against the
+    # source directly so an added/renamed/removed token fails this test loudly
+    # instead of only failing closed by accident via an exact-string assertion
+    # elsewhere.
+    text = CANDIDATE.read_text(encoding="utf-8")
+    found = set(re.findall(r"\$OWNER_KILL_OUTCOME_\w+\s*=\s*'([^']+)'", text))
+    assert found == KILL_OUTCOME_TOKENS, f"producer constants {found!r} != pinned set {KILL_OUTCOME_TOKENS!r}"
 
 
 def test_owner_absence_helper_fails_loud_on_post_start_or_unrecognised_tokens():

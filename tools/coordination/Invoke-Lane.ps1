@@ -366,7 +366,8 @@ $ownerKillAttempted = $false
 $ownerKillOutcome = $null
 $ownerKillDetail = $null
 $OWNER_KILL_OUTCOME_ALREADY_EXITED = 'already-exited'  # host had already exited before the pre-assignment kill was attempted
-$OWNER_KILL_OUTCOME_KILLED = 'killed'                  # Kill() and the subsequent WaitForExit both completed without throwing
+$OWNER_KILL_OUTCOME_KILLED = 'killed'                  # Kill() did not throw AND WaitForExit's own return value was $true -- the host was OBSERVED to exit within the bounded wait
+$OWNER_KILL_OUTCOME_KILL_WAIT_TIMEOUT = 'kill-wait-timeout'  # Kill() did not throw, but WaitForExit's return value was $false -- the bounded wait expired before the host was observed to exit. It MAY STILL BE ALIVE. (PR #105 final: WaitForExit(Int32) returns a bool and round 5 discarded it with [void], so a host that outlived the wait was misreported as 'killed' -- worse than the bare catch{} it replaced, since it manufactured false evidence instead of merely omitting true evidence.)
 $OWNER_KILL_OUTCOME_KILL_THREW = 'kill-threw'          # Kill() or WaitForExit itself threw -- see ownerKillDetail for the raw message
 $childIdentity = $null
 $deadlineUtc = $startedUtc.AddSeconds($TimeoutSec)
@@ -711,13 +712,30 @@ catch {
             if ($proc.HasExited) {
                 $ownerKillOutcome = $OWNER_KILL_OUTCOME_ALREADY_EXITED
             } else {
-                $proc.Kill($true); [void]$proc.WaitForExit(5000)
-                $ownerKillOutcome = $OWNER_KILL_OUTCOME_KILLED
+                # WaitForExit(Int32) RETURNS a bool -- $true iff the process exited
+                # within the timeout, $false if the wait merely expired. Round 5
+                # discarded that return with [void] and recorded 'killed'
+                # unconditionally, so a host that survived the bounded wait (exactly
+                # the orphan this whole change exists to make visible) was reported
+                # as killed -- manufactured evidence, not just an omission. Capture
+                # the observed boolean and branch on IT, never on what was attempted.
+                $proc.Kill($true)
+                $exitedWithinWait = $proc.WaitForExit(5000)
+                $ownerKillOutcome = if ($exitedWithinWait) { $OWNER_KILL_OUTCOME_KILLED } else { $OWNER_KILL_OUTCOME_KILL_WAIT_TIMEOUT }
             }
         } catch {
             $ownerKillOutcome = $OWNER_KILL_OUTCOME_KILL_THREW
             $ownerKillDetail = $_.Exception.Message
         }
+        # Considered also stamping $proc.HasExited at the moment the containment
+        # record is BUILT (further below, well after this try/catch) as a second,
+        # cheaper corroborating observation. Declined: that build site sits inside
+        # the outer exception handler with no catch of its own, so a HasExited
+        # read there that throws (it CAN -- Win32Exception/InvalidOperationException
+        # per the .NET contract) would escape uncaught and blow past receipt
+        # construction entirely, the same "second exception masks the first"
+        # failure mode the comment on this catch already warns against. Not worth
+        # it for a value that WaitForExit's own return already answers.
     }
     if ($cfg.engine -eq 'claude' -and $null -eq $containment) {
         $native = if ($_.Exception.PSObject.Properties.Name -contains 'NativeErrorCode') { [int]$_.Exception.NativeErrorCode } else { $null }
