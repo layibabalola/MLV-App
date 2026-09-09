@@ -68,6 +68,10 @@ SOURCES += \
     $$REPO_ROOT/src/dng/dng_reader.c \
     $$REPO_ROOT/platform/mlv_blender/MLVBlender.c \
     $$REPO_ROOT/src/batch/BatchLogger.cpp \
+    $$REPO_ROOT/src/batch/BatchContext.cpp \
+    $$REPO_ROOT/src/batch/BatchPrompts.cpp \
+    $$REPO_ROOT/src/batch/CdngSequenceExport.cpp \
+    $$REPO_ROOT/src/batch/BatchRunner.cpp \
     $$REPO_ROOT/src/batch/ReceiptLoader.cpp \
     $$REPO_ROOT/src/batch/ReceiptApplier.cpp \
     $$REPO_ROOT/src/librtprocess/src/include/librtprocesswrapper.cpp \
@@ -96,7 +100,8 @@ SOURCES += \
     $$REPO_ROOT/tests/pipeline/test_playback_scaling.cpp \
     $$REPO_ROOT/tests/pipeline/test_crash_forensics.cpp \
     $$REPO_ROOT/tests/pipeline/test_phase3_infrastructure.cpp \
-    $$REPO_ROOT/tests/pipeline/test_phase3_parity.cpp
+    $$REPO_ROOT/tests/pipeline/test_phase3_parity.cpp \
+    $$REPO_ROOT/tests/pipeline/test_cdng_sequence_export.cpp
 
 HEADERS += \
     $$REPO_ROOT/tests/common/minitest.h \
@@ -117,7 +122,8 @@ HEADERS += \
     $$REPO_ROOT/platform/qt/GpuPreviewProcessing.h \
     $$REPO_ROOT/tests/pipeline/mlv_pipeline_fixture.h \
     $$REPO_ROOT/tests/pipeline/backend_parametric_fixture.h \
-    $$REPO_ROOT/tests/pipeline/playback_path_test_state.h
+    $$REPO_ROOT/tests/pipeline/playback_path_test_state.h \
+    $$REPO_ROOT/src/batch/CdngSequenceExport.h
 
 win32{
     QMAKE_CFLAGS_RELEASE -= -O2

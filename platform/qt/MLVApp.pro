@@ -293,6 +293,7 @@ SOURCES += \
     ../../src/batch/BatchContext.cpp \
     ../../src/batch/BatchPrompts.cpp \
     ../../src/batch/BatchRunner.cpp \
+    ../../src/batch/CdngSequenceExport.cpp \
     ../../src/batch/MlvTrim.cpp \
     ../../src/batch/BatchLogger.cpp \
     ../../src/batch/ReceiptLoader.cpp \
@@ -452,6 +453,7 @@ HEADERS += MainWindow.h \
     ../../src/batch/BatchContext.h \
     ../../src/batch/BatchPrompts.h \
     ../../src/batch/BatchRunner.h \
+    ../../src/batch/CdngSequenceExport.h \
     ../../src/batch/MlvTrim.h \
     ../../src/batch/BatchLogger.h \
     ../../src/batch/ReceiptLoader.h \

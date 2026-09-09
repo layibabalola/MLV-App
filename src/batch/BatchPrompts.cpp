@@ -2,8 +2,10 @@
 #include "BatchContext.h"
 #include "BatchLogger.h"
 
+#ifdef QT_WIDGETS_LIB
 #include <QMessageBox>
 #include <QApplication>
+#endif
 
 /* Static member definition */
 std::function<void()> BatchPrompts::s_abortBatchFn;
@@ -33,6 +35,7 @@ bool BatchPrompts::shouldSkipFrame(const QString &clipName,
         }
     }
 
+#ifdef QT_WIDGETS_LIB
     /* GUI mode — show the original 3-button QMessageBox */
     QWidget *parent = QApplication::activeWindow();
     int ret = QMessageBox::critical(
@@ -57,6 +60,11 @@ bool BatchPrompts::shouldSkipFrame(const QString &clipName,
     }
     /* ret == 0: "Skip frame" */
     return true;
+#else
+    BatchLogger::err(QStringLiteral("[BATCH] ERROR GUI prompts unavailable: %1 frame=%2 error=%3\n")
+                    .arg( clipName ).arg( frameIndex ).arg( errorDetail ));
+    return false;
+#endif
 }
 
 bool BatchPrompts::shouldContinue(const QString &context,
@@ -69,10 +77,16 @@ bool BatchPrompts::shouldContinue(const QString &context,
         return false;
     }
 
+#ifdef QT_WIDGETS_LIB
     /* GUI mode — show warning dialog with context and message */
     QWidget *parent = QApplication::activeWindow();
     QMessageBox::warning( parent,
         QStringLiteral("MLV App"),
         QStringLiteral("%1: %2").arg( context, message ) );
     return false; /* always abort on disk full */
+#else
+    BatchLogger::err(QStringLiteral("[BATCH] ERROR GUI prompts unavailable: %1: %2\n")
+                    .arg( context, message ));
+    return false;
+#endif
 }
