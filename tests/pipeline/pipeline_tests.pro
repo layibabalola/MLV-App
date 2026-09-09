@@ -72,6 +72,7 @@ SOURCES += \
     $$REPO_ROOT/src/batch/BatchPrompts.cpp \
     $$REPO_ROOT/src/batch/CdngSequenceExport.cpp \
     $$REPO_ROOT/src/batch/BatchRunner.cpp \
+    $$REPO_ROOT/src/batch/BatchRenderedVideoPlan.cpp \
     $$REPO_ROOT/src/batch/ReceiptLoader.cpp \
     $$REPO_ROOT/src/batch/ReceiptApplier.cpp \
     $$REPO_ROOT/src/librtprocess/src/include/librtprocesswrapper.cpp \
@@ -123,6 +124,7 @@ HEADERS += \
     $$REPO_ROOT/tests/pipeline/mlv_pipeline_fixture.h \
     $$REPO_ROOT/tests/pipeline/backend_parametric_fixture.h \
     $$REPO_ROOT/tests/pipeline/playback_path_test_state.h \
+    $$REPO_ROOT/src/batch/BatchRenderedVideoPlan.h \
     $$REPO_ROOT/src/batch/CdngSequenceExport.h
 
 win32{
