@@ -660,11 +660,19 @@ catch {
     }
     if ($cfg.engine -eq 'claude' -and $null -eq $containment) {
         $native = if ($_.Exception.PSObject.Properties.Name -contains 'NativeErrorCode') { [int]$_.Exception.NativeErrorCode } else { $null }
+        # NAMING THE THIRD STATE (PR #105 round 3): a null ownerPid is ambiguous on its
+        # own -- it means EITHER "the launch budget was already gone, so Start was never
+        # called" (line ~470, legitimate) OR "Start itself threw" (also legitimate, but a
+        # different failure) -- and a reader could not tell those apart from ownerPid=null
+        # alone. Record the discarded exception's message as the reason WHY there is no
+        # owner, so both remain distinguishable from each other and from a genuine bug.
+        # When a pid WAS recorded (line ~508 already ran), there is no absence to explain.
         $containment = [ordered]@{
             kind='windows-job-kill-on-close'; jobAssigned=$jobAssigned
             runnerPid=$PID; runnerCreatedUtc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
             ownerPid=if($null-ne $containedHost){$containedHost.pid}else{$null}
             ownerCreatedUtc=if($null-ne $containedHost){$containedHost.createdUtc}else{$null}
+            ownerAbsentReason=if($null-eq $containedHost){$_.Exception.Message}else{$null}
             childPid=$null; childCreatedUtc=$null; deadlineUtc=$deadlineUtc.ToString('o')
             promptDelivered=$promptDelivered; assignmentErrorCode=$native
         }

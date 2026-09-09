@@ -198,24 +198,70 @@ def test_startup_consumes_same_deadline_without_starting_provider(fixture_tree):
     assert not (fixture_tree["root"]/"child.json").exists()
     # PR #105 round 2 (sol blocker): Invoke-Lane.ps1 now records containedHost.pid
     # the instant Process::Start returns, before any call that can throw -- so a
-    # null ownerPid means Start itself failed, which this test's fixture (a delayed
-    # stdin read, not a launch failure) does not produce. Tolerating that ambiguity
-    # here would let a real orphaned host masquerade as "never started"; fail loud
-    # instead of guessing.
+    # null ownerPid means no host exists (either the launch budget was already
+    # gone, or Start itself threw). This fixture's delayed stdin read happens
+    # AFTER a successful Start, so it must land in the "owner present" branch;
+    # ownerPid==None here would itself be the round-2 regression.
+    #
+    # PR #105 round 3: a null ownerPid alone still can't tell "budget exhausted
+    # before Start was ever called" (Invoke-Lane.ps1:470-472, legitimate) apart
+    # from an ambiguous, unexplained absence. containment.ownerAbsentReason
+    # (Invoke-Lane.ps1's catch block, ~661-676) now names WHY, so classify on
+    # that instead of guessing from ownerPid alone.
     containment=q.get("containment")
     owner_pid=containment.get("ownerPid") if containment else None
-    if containment is None or owner_pid is None:
-        pytest.fail(f"ambiguous containment receipt: ownerPid is None, which the producer fix "
-                    f"reserves for Process::Start itself throwing -- this fixture never triggers "
-                    f"that path, so a null owner here means the receipt can no longer prove "
-                    f"whether a host was started: {q}")
-    elif containment["ownerCreatedUtc"] is None:
-        # A pid with no createdUtc means Start succeeded but StartTime read threw;
-        # there is no createdUtc to compare against, so the only provable check is
-        # that the pid is not (or no longer) an alive process.
-        assert identity(owner_pid) is None
+    if containment is None:
+        pytest.fail(f"ambiguous containment receipt: containment itself is None, so there is no "
+                    f"way to tell whether a host was started: {q}")
+    elif owner_pid is not None:
+        # Unchanged from round 2: a pid was recorded, so a host definitely exists
+        # (or existed) and must be reaped.
+        if containment["ownerCreatedUtc"] is None:
+            # A pid with no createdUtc means Start succeeded but StartTime read threw;
+            # there is no createdUtc to compare against, so the only provable check is
+            # that the pid is not (or no longer) an alive process.
+            assert identity(owner_pid) is None
+        else:
+            wait_absent({"pid":q["containment"]["ownerPid"],"createdUtc":q["containment"]["ownerCreatedUtc"]})
     else:
-        wait_absent({"pid":q["containment"]["ownerPid"],"createdUtc":q["containment"]["ownerCreatedUtc"]})
+        reason = containment.get("ownerAbsentReason")
+        if reason:
+            # LEGITIMATE branch (the third state, named): ownerPid is None AND the
+            # producer recorded why -- the deadline beat the spawn
+            # (Invoke-Lane.ps1:470-472, throws before Process::Start is ever
+            # reached) or Process::Start itself threw (Invoke-Lane.ps1:502). Either
+            # way no host was ever created, which is exactly what "no child.json"
+            # (asserted above) already proves. Nothing further to check.
+            pass
+        else:
+            # ownerAbsentReason is null (or empty) with ownerPid also null: this is
+            # the exact ambiguity round 2 left behind -- a null owner with no
+            # explanation is indistinguishable from a bug that dropped the pid.
+            # That branch must stay reachable and loud, never silently tolerated.
+            pytest.fail(f"ambiguous containment receipt: ownerPid is None and ownerAbsentReason "
+                        f"is {reason!r} -- the round-3 producer fix (Invoke-Lane.ps1's catch "
+                        f"block) should always name why a host is absent when ownerPid is null; "
+                        f"a missing reason means the ambiguity round 2 was meant to close is "
+                        f"back: {q}")
+
+
+def test_zero_timeout_exhausts_budget_before_spawn_and_names_the_reason(fixture_tree):
+    # Reachability proof for the legitimate null-owner branch (PR #105 round 3,
+    # task item 4): -TimeoutSec 0 means the budget is already spent by the time
+    # execution reaches Invoke-Lane.ps1:470, so that line's throw fires BEFORE
+    # Process::Start is ever called -- no mutation/mock needed, this is the real
+    # code path. No host exists, so ownerPid must be null with ownerAbsentReason
+    # naming why.
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    cmd[cmd.index("-TimeoutSec")+1]="0"
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=15)
+    assert r.returncode==124,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["timedOut"]
+    assert not (fixture_tree["root"]/"child.json").exists()
+    containment=q["containment"]
+    assert containment["ownerPid"] is None
+    assert containment["ownerAbsentReason"]=="launch-budget-exhausted"
 
 
 @pytest.mark.parametrize("elapsed_ms,expected_exit", [(0, 0), (4000, 124)])
@@ -242,6 +288,12 @@ def test_setup_origin_and_expired_budget_are_deterministic(fixture_tree, elapsed
     if expected_exit == 124:
         assert not q["containment"]["jobAssigned"]
         assert q["containment"]["ownerPid"] is None
+        # PR #105 round 3: this parametrization mocks $sw.Elapsed to already exceed
+        # the budget, so Invoke-Lane.ps1:470-472 throws before $proc = ...Start()
+        # (proven by marker.exists() is False above) -- the same code path
+        # -TimeoutSec 0 reproduces for real in
+        # test_zero_timeout_exhausts_budget_before_spawn_and_names_the_reason.
+        assert q["containment"]["ownerAbsentReason"]=="launch-budget-exhausted"
         assert not (fixture_tree["root"] / "child.json").exists()
 
 
