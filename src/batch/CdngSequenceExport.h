@@ -2,6 +2,7 @@
 #define CDNGSEQUENCEEXPORT_H
 
 #include "BatchTypes.h"
+#include "BatchRenderedVideoPlan.h"
 #include "../../src/mlv_include.h"
 
 #include <QString>

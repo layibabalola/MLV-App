@@ -3,7 +3,7 @@
 
 #include <QString>
 #include <cstdint>
-#include "BatchTypes.h"
+#include "BatchRenderedVideoPlan.h"
 
 /* Static singleton holding batch-mode flags.
  * Set once at startup from CLI args, read throughout the codebase.
