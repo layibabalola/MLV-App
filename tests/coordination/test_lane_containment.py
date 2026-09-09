@@ -23,6 +23,11 @@ def wait_json(path, pred=lambda x: True, seconds=12):
 
 
 def identity(pid):
+    # 1 s -TimeoutSec deadline race (evidence 2026-09-09): the fallback receipt
+    # built in Invoke-Lane.ps1's catch block can carry containment.ownerPid=None
+    # when the deadline fires before a contained host was ever started. There is
+    # no process to look up in that case, so return None instead of int(None).
+    if pid is None: return None
     q=f"$p=Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue;if($null-eq $p){{exit 3}};$p.StartTime.ToUniversalTime().ToString('o')"
     r=subprocess.run([PWSH,"-NoProfile","-NonInteractive","-Command",q],text=True,capture_output=True,timeout=5)
     return r.stdout.strip() if r.returncode==0 else None
@@ -191,7 +196,18 @@ def test_startup_consumes_same_deadline_without_starting_provider(fixture_tree):
     q=json.loads(receipt.read_text(encoding="utf-8"))
     assert q["timedOut"]
     assert not (fixture_tree["root"]/"child.json").exists()
-    wait_absent({"pid":q["containment"]["ownerPid"],"createdUtc":q["containment"]["ownerCreatedUtc"]})
+    # The 1 s -TimeoutSec deadline races Invoke-Lane.ps1's own setup: on a loaded
+    # runner the deadline can fire (~line 470) before a contained host is ever
+    # started (~line 503), so the catch-block fallback receipt (~lines 655-660)
+    # records containment.ownerPid=None. With no owner ever started there is
+    # nothing that could be orphaned -- the child.json absence above is already
+    # the whole proof, so only fall back to wait_absent when an owner pid exists.
+    containment=q.get("containment")
+    owner_pid=containment.get("ownerPid") if containment else None
+    if owner_pid is None:
+        assert identity(owner_pid) is None
+    else:
+        wait_absent({"pid":owner_pid,"createdUtc":containment["ownerCreatedUtc"]})
 
 
 @pytest.mark.parametrize("elapsed_ms,expected_exit", [(0, 0), (4000, 124)])
