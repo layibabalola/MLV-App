@@ -334,6 +334,21 @@ $jobHandle = [IntPtr]::Zero
 $jobAssigned = $false
 $promptDelivered = $false
 $containedHost = $null
+# Set to $true the INSTANT Process::Start returns for the claude engine (a plain
+# boolean assignment cannot throw), BEFORE the pid/dictionary construction that
+# builds $containedHost -- which CAN throw (PR #105 round 4). $containedHost alone
+# cannot tell "Start was never called/never returned" apart from "Start returned
+# but the record of it never got built"; $hostStarted can, because it is set
+# unconditionally the moment a host process exists.
+$hostStarted = $false
+# Fixed tokens for containment.ownerAbsentReason, chosen by WHERE the failure
+# happened rather than by what its exception message said -- free text is not
+# admissible evidence about a safety property (PR #105 round 4). Kept in one
+# place; tests/coordination/test_lane_containment.py pins these as literals
+# since it cannot import a .ps1 file, with a comment pointing back here.
+$OWNER_ABSENT_NO_HOST_BUDGET = 'launch-budget-exhausted'  # unchanged text: line ~471's throw message, asserted verbatim since PR #105 round 3
+$OWNER_ABSENT_NO_HOST_START_THREW = 'start-threw'         # Process::Start itself threw; no host was ever created
+$OWNER_ABSENT_POST_START_UNRECORDED = 'post-start-unrecorded'  # Start returned (a host EXISTS) but $containedHost's own construction threw -- the genuinely ambiguous state
 $childIdentity = $null
 $deadlineUtc = $startedUtc.AddSeconds($TimeoutSec)
 $containment = $null
@@ -500,11 +515,14 @@ $child.StandardInput.Write($prompt); $child.StandardInput.Close(); $child.WaitFo
     }
     $jobHandle = [MlvLaneJob]::CreateKillOnClose()
     $proc = [Diagnostics.Process]::Start($psi)
+    $hostStarted = $true
     # Record the pid the instant Start returns, before anything that can throw:
     # once Start succeeds a host EXISTS, and a receipt that omits its pid is
     # indistinguishable from "no host was started" (PR #105 round 2 blocker).
     # createdUtc is read defensively in its own try -- a StartTime failure must
-    # not erase the pid we already have.
+    # not erase the pid we already have. $proc.Id / the ordered-map build below
+    # CAN still throw with the host already alive (PR #105 round 4 blocker) --
+    # that is exactly why $hostStarted was set on its own line, above, first.
     $containedHost = [ordered]@{ pid=$proc.Id; createdUtc=$null }
     try { $containedHost.createdUtc = $proc.StartTime.ToUniversalTime().ToString('o') } catch { }
     [MlvLaneJob]::AssignOrThrow($jobHandle, $proc.Handle)
@@ -660,19 +678,44 @@ catch {
     }
     if ($cfg.engine -eq 'claude' -and $null -eq $containment) {
         $native = if ($_.Exception.PSObject.Properties.Name -contains 'NativeErrorCode') { [int]$_.Exception.NativeErrorCode } else { $null }
-        # NAMING THE THIRD STATE (PR #105 round 3): a null ownerPid is ambiguous on its
-        # own -- it means EITHER "the launch budget was already gone, so Start was never
-        # called" (line ~470, legitimate) OR "Start itself threw" (also legitimate, but a
-        # different failure) -- and a reader could not tell those apart from ownerPid=null
-        # alone. Record the discarded exception's message as the reason WHY there is no
-        # owner, so both remain distinguishable from each other and from a genuine bug.
-        # When a pid WAS recorded (line ~508 already ran), there is no absence to explain.
+        # CLASSIFYING THE THIRD STATE (PR #105 round 4): round 3 recorded the raw exception
+        # MESSAGE as ownerAbsentReason, and the test accepted any truthy string as proof no
+        # host existed. But $containedHost's own construction (the pid/dictionary build
+        # above) can itself throw AFTER Start already returned and a host is alive -- so
+        # that exception's message would pose as a legitimate no-host reason. Free text is
+        # not admissible evidence about a safety property, so classify by WHERE the failure
+        # happened instead of by WHAT it said:
+        #   - $containedHost non-null  -> a pid was recorded; no absence to explain.
+        #   - $containedHost null, $hostStarted false -> Start never returned: either the
+        #     launch budget was already gone (line ~470, throws before Start is reached) or
+        #     Start itself threw. Distinguish cheaply by exception type/message where we can;
+        #     otherwise fall back to the generic "start threw" token. Both are legitimate
+        #     no-host reasons.
+        #   - $containedHost null, $hostStarted true -> Start returned (a host EXISTS) but
+        #     the record of it was never built. This is the genuinely ambiguous state and it
+        #     is named as such, never hidden behind a message that merely looks legitimate.
+        # The raw message is kept for humans in ownerAbsentDetail, a field no decision reads.
+        $ownerAbsentReason = $null
+        $ownerAbsentDetail = $null
+        if ($null -eq $containedHost) {
+            $ownerAbsentDetail = $_.Exception.Message
+            if (-not $hostStarted) {
+                $ownerAbsentReason = if ($_.Exception -is [TimeoutException] -and $_.Exception.Message -eq $OWNER_ABSENT_NO_HOST_BUDGET) {
+                    $OWNER_ABSENT_NO_HOST_BUDGET
+                } else {
+                    $OWNER_ABSENT_NO_HOST_START_THREW
+                }
+            } else {
+                $ownerAbsentReason = $OWNER_ABSENT_POST_START_UNRECORDED
+            }
+        }
         $containment = [ordered]@{
             kind='windows-job-kill-on-close'; jobAssigned=$jobAssigned
             runnerPid=$PID; runnerCreatedUtc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
             ownerPid=if($null-ne $containedHost){$containedHost.pid}else{$null}
             ownerCreatedUtc=if($null-ne $containedHost){$containedHost.createdUtc}else{$null}
-            ownerAbsentReason=if($null-eq $containedHost){$_.Exception.Message}else{$null}
+            ownerAbsentReason=$ownerAbsentReason
+            ownerAbsentDetail=$ownerAbsentDetail
             childPid=$null; childCreatedUtc=$null; deadlineUtc=$deadlineUtc.ToString('o')
             promptDelivered=$promptDelivered; assignmentErrorCode=$native
         }

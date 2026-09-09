@@ -10,6 +10,32 @@ CANDIDATE = ROOT / "tools" / "coordination" / "Invoke-Lane.ps1"
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object contract")
 PWSH = "pwsh.exe"
 
+# PR #105 round 4: Invoke-Lane.ps1 classifies containment.ownerAbsentReason into a
+# CLOSED set of fixed tokens, chosen by WHERE a failure happened rather than by what
+# its raw exception message said -- free text is not admissible evidence about a
+# safety property. This test file cannot import a .ps1 file, so the tokens are
+# pinned here as literals; keep them in sync BY HAND with Invoke-Lane.ps1's own
+# $OWNER_ABSENT_* constants (declared beside $hostStarted, ~line 337-346).
+NO_HOST_TOKENS = {"launch-budget-exhausted", "start-threw"}
+POST_START_UNRECORDED = "post-start-unrecorded"
+
+
+def assert_owner_absence_is_legitimate(containment, context):
+    # The one place both round-3 and round-4 tests funnel through: ownerPid is None
+    # only ever means one of three things now, and everything outside that closed
+    # set is a bug, loud. See Invoke-Lane.ps1's catch block (~line 679-711) for the
+    # producer side of this contract.
+    assert containment is not None, f"ambiguous containment receipt: containment itself is None: {context}"
+    assert containment.get("ownerPid") is None
+    reason = containment.get("ownerAbsentReason")
+    if reason in NO_HOST_TOKENS:
+        return  # legitimate: no host was ever created
+    pytest.fail(f"ambiguous or unrecognised containment receipt: ownerPid is None and "
+                f"ownerAbsentReason is {reason!r}, which is not one of the closed-set "
+                f"no-host tokens {NO_HOST_TOKENS!r} -- either it is {POST_START_UNRECORDED!r} "
+                f"(a host EXISTED and its record was lost, never a legitimate absence) or it "
+                f"is unrecognised entirely: {context}")
+
 
 def wait_json(path, pred=lambda x: True, seconds=12):
     end=time.monotonic()+seconds; last=None
@@ -210,10 +236,7 @@ def test_startup_consumes_same_deadline_without_starting_provider(fixture_tree):
     # that instead of guessing from ownerPid alone.
     containment=q.get("containment")
     owner_pid=containment.get("ownerPid") if containment else None
-    if containment is None:
-        pytest.fail(f"ambiguous containment receipt: containment itself is None, so there is no "
-                    f"way to tell whether a host was started: {q}")
-    elif owner_pid is not None:
+    if containment is not None and owner_pid is not None:
         # Unchanged from round 2: a pid was recorded, so a host definitely exists
         # (or existed) and must be reaped.
         if containment["ownerCreatedUtc"] is None:
@@ -224,25 +247,10 @@ def test_startup_consumes_same_deadline_without_starting_provider(fixture_tree):
         else:
             wait_absent({"pid":q["containment"]["ownerPid"],"createdUtc":q["containment"]["ownerCreatedUtc"]})
     else:
-        reason = containment.get("ownerAbsentReason")
-        if reason:
-            # LEGITIMATE branch (the third state, named): ownerPid is None AND the
-            # producer recorded why -- the deadline beat the spawn
-            # (Invoke-Lane.ps1:470-472, throws before Process::Start is ever
-            # reached) or Process::Start itself threw (Invoke-Lane.ps1:502). Either
-            # way no host was ever created, which is exactly what "no child.json"
-            # (asserted above) already proves. Nothing further to check.
-            pass
-        else:
-            # ownerAbsentReason is null (or empty) with ownerPid also null: this is
-            # the exact ambiguity round 2 left behind -- a null owner with no
-            # explanation is indistinguishable from a bug that dropped the pid.
-            # That branch must stay reachable and loud, never silently tolerated.
-            pytest.fail(f"ambiguous containment receipt: ownerPid is None and ownerAbsentReason "
-                        f"is {reason!r} -- the round-3 producer fix (Invoke-Lane.ps1's catch "
-                        f"block) should always name why a host is absent when ownerPid is null; "
-                        f"a missing reason means the ambiguity round 2 was meant to close is "
-                        f"back: {q}")
+        # PR #105 round 4: ownerAbsentReason must be one of the closed-set no-host
+        # tokens, never an arbitrary truthy string (round 3's "if reason: pass" let
+        # a POST_START_UNRECORDED-shaped failure pose as a legitimate absence).
+        assert_owner_absence_is_legitimate(containment, q)
 
 
 def test_zero_timeout_exhausts_budget_before_spawn_and_names_the_reason(fixture_tree):
@@ -262,6 +270,75 @@ def test_zero_timeout_exhausts_budget_before_spawn_and_names_the_reason(fixture_
     containment=q["containment"]
     assert containment["ownerPid"] is None
     assert containment["ownerAbsentReason"]=="launch-budget-exhausted"
+
+
+def test_start_threw_is_classified_as_no_host(fixture_tree):
+    # Reachability proof for the other no-host token (PR #105 round 4): make
+    # Process::Start itself throw for the claude engine. $hostStarted is never set
+    # (it is assigned on the line immediately AFTER Start returns), so the catch
+    # block must land in the "Start never returned" branch and pick the generic
+    # start-threw token, not the budget token (this is not a TimeoutException) and
+    # not POST_START_UNRECORDED (no host ever existed).
+    def break_start(text):
+        old = "$proc = [Diagnostics.Process]::Start($psi)"
+        assert text.count(old) == 2
+        # Replace ONLY the first occurrence -- the claude-engine branch (~line 517),
+        # which runs before $hostStarted is set. The second occurrence is the
+        # non-claude branch and must stay untouched.
+        return text.replace(old, "throw 'fixture-start-threw'", 1)
+    cmd,env,receipt=prepare(fixture_tree,"normal",mutation=break_start)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=15)
+    assert r.returncode==127,(r.stdout,r.stderr)
+    assert not (fixture_tree["root"]/"child.json").exists()
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    containment=q["containment"]
+    assert containment["ownerPid"] is None
+    assert containment["ownerAbsentReason"]=="start-threw"
+    assert containment["ownerAbsentDetail"]=="fixture-start-threw"
+    assert_owner_absence_is_legitimate(containment, q)
+
+
+def test_post_start_unrecorded_is_named_not_hidden(fixture_tree):
+    # Reachability proof for the genuinely-ambiguous branch (PR #105 round 4, task
+    # item 4): inject a throw between Process::Start returning (a host now EXISTS)
+    # and $containedHost being built, using the same fixture-mutation mechanism
+    # test_setup_origin_and_expired_budget_are_deterministic already uses to inject
+    # text at a specific line. This is exactly the failure the cross-family review
+    # found: without $hostStarted, this exception's message would pose as a
+    # legitimate no-host reason. With it, the catch block must name it
+    # POST_START_UNRECORDED instead -- and the test below must FAIL LOUD on that
+    # receipt if a caller naively treated it as legitimate (proven by calling the
+    # shared assertion helper and expecting it to raise).
+    def break_containedHost_build(text):
+        old = "$containedHost = [ordered]@{ pid=$proc.Id; createdUtc=$null }"
+        assert text.count(old) == 1
+        return text.replace(old, "throw 'fixture-post-start-unrecorded'")
+    cmd,env,receipt=prepare(fixture_tree,"normal",mutation=break_containedHost_build)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=15)
+    assert r.returncode==127,(r.stdout,r.stderr)
+    assert not (fixture_tree["root"]/"child.json").exists()
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    containment=q["containment"]
+    assert containment["ownerPid"] is None
+    assert containment["ownerAbsentReason"]==POST_START_UNRECORDED
+    assert containment["ownerAbsentDetail"]=="fixture-post-start-unrecorded"
+    assert containment["ownerAbsentReason"] not in NO_HOST_TOKENS
+    # The whole point: this receipt must NOT be accepted as a legitimate absence.
+    with pytest.raises(pytest.fail.Exception):
+        assert_owner_absence_is_legitimate(containment, q)
+
+
+def test_owner_absence_helper_fails_loud_on_post_start_or_unrecognised_tokens():
+    # Prove the test-side guardrail itself is reachable and fires (not just
+    # written): both the named-ambiguous token and a wholly unrecognised string
+    # must be rejected, never silently tolerated the way round 3's bare
+    # "if reason: pass" tolerated any truthy string.
+    for reason in (POST_START_UNRECORDED, "something-unrecognised", None):
+        with pytest.raises(pytest.fail.Exception):
+            assert_owner_absence_is_legitimate({"ownerPid": None, "ownerAbsentReason": reason}, {"case": reason})
+    # And the closed set itself must still pass.
+    for reason in NO_HOST_TOKENS:
+        assert_owner_absence_is_legitimate({"ownerPid": None, "ownerAbsentReason": reason}, {"case": reason})
 
 
 @pytest.mark.parametrize("elapsed_ms,expected_exit", [(0, 0), (4000, 124)])
