@@ -1,16 +1,16 @@
 #include "../common/minitest.h"
 
 #include <string>
-#include "../../src/batch/BatchTypes.h"
-/* GUI-free: BatchRunner.h includes only QString + BatchTypes.h, so the static stretch
+#include "../../src/batch/BatchRenderedVideoPlan.h"
+/* GUI-free: BatchRunner.h includes only QString + the batch type/plan headers, so the static stretch
  * helpers are reachable without linking BatchRunner.cpp. */
 #include "../../src/batch/BatchRunner.h"
 
 /* Pins the pure, GUI-free pieces of the E4-1 rendered-video runner.
  *
  * Everything here is reachable without linking BatchRunner.cpp (which pulls in
- * MainWindow.h and the whole GUI), which is exactly why these pieces live in
- * BatchTypes.h. The runner's process orchestration is proven end-to-end instead, by
+ * MainWindow.h and the whole GUI), because the pure plan helpers live in
+ * BatchRenderedVideoPlan.cpp. The runner's process orchestration is proven end-to-end instead, by
  * running the real binary against tests/fixtures/clips/tiny_dual_iso.mlv. */
 
 /* ---------------------------------------------------------------------------

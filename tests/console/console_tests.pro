@@ -17,6 +17,7 @@ SOURCES += \
     $$REPO_ROOT/src/mlv/frame_caching.c \
     $$REPO_ROOT/src/mlv/pipeline_stage_capture.c \
     $$REPO_ROOT/src/batch/BatchContext.cpp \
+    $$REPO_ROOT/src/batch/BatchRenderedVideoPlan.cpp \
     $$REPO_ROOT/src/batch/BatchLogger.cpp \
     $$REPO_ROOT/src/batch/ReceiptLoader.cpp \
     $$REPO_ROOT/src/batch/ReceiptApplier.cpp \
@@ -56,6 +57,7 @@ HEADERS += \
     $$REPO_ROOT/tests/common/hash_helpers.h \
     $$REPO_ROOT/tests/common/repo_paths.h \
     $$REPO_ROOT/src/batch/BatchTypes.h \
+    $$REPO_ROOT/src/batch/BatchRenderedVideoPlan.h \
     $$REPO_ROOT/src/batch/EnvFlags.h \
     $$REPO_ROOT/src/batch/BatchRunner.h \
     $$REPO_ROOT/src/batch/RawAspectStretchPolicy.h \
