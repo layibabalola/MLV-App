@@ -160,17 +160,20 @@ What each pair isolates.  (i)/(ii) a redirect truncates only its TARGET, so
 target still writes.  (iii) an interpreter body is still not decoded.  (iv) a ``Write`` to
 an ABSENT target creates rather than overwrites -- with the receipt NAME class and the
 receipts DIRECTORY class each held back by a one-token control, and the shrink guard proved
-by payload alone.  (v) the fleet doctrine bus is a publish surface for WRITES only
-(RESUME.md STEP 0.5).  (vi) a bit bucket is a sink, not a path outside the roots.
+by payload alone.  (v) NA-7's roots did NOT widen: a ``Write`` into a SIBLING REPOSITORY is
+refused by the ordinary rule, which is the NARROWING pinned as a row rather than left as an
+absence.  (vi) a bit bucket is a sink, not a path outside the roots.
 (vii) S133: ``..`` is COLLAPSED before every root and prefix comparison -- the round-1 hook
-admitted ``<bus>/../escaped.txt`` because the bus root was still a literal prefix of it
-(sol's blocker) -- proved under all three NA-7 roots AND against an NA-2 protected path,
+admitted ``<root>/../escaped.txt`` because the root was still a literal prefix of it
+(sol's blocker) -- proved under both NA-7 roots AND against an NA-2 protected path,
 whose ``..`` detour must still be recognised as the protected file while an unprotected
-path's identical detour stays ALLOW.  (viii) S133: ``MLV_FLEET_BUS_ROOT`` WIDENS NA-7's
-roots, so a PERSISTENT write of it is NA-3-denied like the other five steered names; the
-in-process ``$env:`` assignment beside it keeps the rule about PERSISTENCE.
-``MLV_FLEET_BUS_ROOT`` is a tmp fixture like every other root, so no row depends on this
-machine's layout.
+path's identical detour stays ALLOW.  (viii)/(ix) S134: the names the hook READS are
+substituted at the value it is USING -- override when set, built-in default when not -- so a
+delete of the protected queue ledger spelled ``$env:MLV_BOARD_ROOT\\...`` is denied in BOTH
+configurations and names the RESOLVED path.  (x) a reference the hook CANNOT resolve is not
+canonicalised into a relative name and is DENIED as unresolvable, with an ordinary relative
+path beside it to prove the new rule is not doing the ``..`` collapse's job.  Every root is
+a tmp fixture, so no row depends on this machine's layout.
 
 NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
 payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
@@ -530,18 +533,17 @@ def _set_content(path):
 # rules stand on.  The payload text below is DATA: it is delivered to the hook on stdin and
 # never reaches a shell, here or anywhere else in this repo.
 #
-# S133: `MLV_FLEET_BUS_ROOT` joined the list in round 2 of HOOK-FALSE-POSITIVE-1, and this
-# tuple stopped being decorative in the same commit --
-# `test_every_environment_input_the_hook_reads_is_na3_protected` derives the real list from
-# the hook's own `env.get(...)` calls and asserts it against the hook's regex, so the next
-# steering input cannot ship unprotected the way this one did.
+# This tuple is not decorative: `test_every_environment_input_the_hook_reads_is_na3_protected`
+# derives the real list from the hook's own `env.get(...)` calls and asserts it against the
+# hook's regex, so a steering input cannot ship unprotected.  The recorded reason is a root
+# that once did exactly that -- it widened NA-7 and was absent from this list, so it could be
+# `setx`-ed to `C:\` -- and that root has since been removed from the gate entirely.
 PERSISTENT_NAMES = (
     "CLAUDE_PROJECT_DIR",
     "MLV_BOARD_ROOT",
     "MLV_LANE_PROMPT",
     "MLV_REQUIRED_CHECKS_SNAPSHOT",
     "MLV_CLIP_CACHE_ROOT",
-    "MLV_FLEET_BUS_ROOT",
 )
 # Assembled from fragments so the persistent-write verbs never appear as one literal token
 # in this source either -- the machine-level continuity gate matches TEXT, and a maintainer
@@ -3559,56 +3561,34 @@ CASES = [
         "reason_contains": "shrinking overwrite",
         "fixture": "checkpoint_unarchived",
     },
-    # (v) THE FLEET DOCTRINE BUS IS A PUBLISH SURFACE OF THIS BOARD (RESUME.md STEP 0.5).
-    # Writes under it are this board's own act.
-    #   v-a VARIES EXACTLY ONE TOKEN, the ROOT -- the same publish, same relative path,
-    #       same content, moved from the bus to a root that is not one of the three.
-    #       Round 1's control also renamed the file to `x.md`.
-    #   v-b IS NOT A ONE-TOKEN PAIR AND CANNOT BE: it varies the VERB (`Set-Content` ->
-    #       `Remove-Item`) and, unavoidably, the `-Value` argument, because a delete takes
-    #       no content and inventing `Remove-Item -Value` would make the row a command
-    #       PowerShell cannot parse.  Same tool, same path, same parameter name otherwise.
+    # (v) THE NARROWING, PINNED AS A ROW RATHER THAN LEFT AS AN ABSENCE.
+    #
+    # An earlier revision of this packet admitted a THIRD NA-7 root -- the fleet doctrine bus
+    # clone beside this board -- and every one of the four reproducible bypasses the review
+    # rounds found lived in that root's machinery.  It was NARROWED OUT.  A removal that is
+    # only an absence is indistinguishable from a feature nobody wrote, so the DENY is
+    # asserted here: a `Write` to that sibling repository is refused by the ORDINARY NA-7
+    # rule, exactly as it was before this branch existed.  `{OUTSIDE}` is the tmp stand-in
+    # for any sibling of the board, so the row carries no machine layout.
+    #
+    # WHAT THIS ROW IS NOT.  It is not a ban on publishing the board's spec: that is a git
+    # operation performed by the orchestrator IN the bus repository and reviewed there as a
+    # commit, which this gate never sees and does not need to.  See the hook's header.
     {
-        "name": "fp1 v a Write publishes the board spec to the fleet bus",
+        "name": "fp1 v Write publishing the board spec to a sibling repository is refused",
         "group": "falsepositive1",
         "tool": "Write",
-        "input": {"file_path": "{BUS}/specs/mlv-app.md", "content": "# mlv-app spec\n"},
-        "expect": "ALLOW",
-        "fixture": "fleet_bus",
-    },
-    {
-        "name": "fp1 v a CTL the same publish under a root that is not the bus",
-        "group": "falsepositive1",
-        "tool": "Write",
-        "input": {
-            "file_path": "{OUTSIDE}/specs/mlv-app.md",
-            "content": "# mlv-app spec\n",
-        },
+        "input": {"file_path": "{OUTSIDE}/specs/mlv-app.md", "content": "# mlv-app spec\n"},
         "expect": "DENY",
         "na": "NA-7",
         "reason_contains": "outside both the worktree and the board root",
-        "fixture": "fleet_bus",
     },
     {
-        "name": "fp1 v b shell publish of the board spec to the fleet bus",
+        "name": "fp1 v CTL the same publish under the board root",
         "group": "falsepositive1",
-        "tool": "PowerShell",
-        "input": {
-            "command": "Set-Content -LiteralPath '{BUS}/specs/mlv-app.md' "
-            "-Value '# mlv-app spec'"
-        },
+        "tool": "Write",
+        "input": {"file_path": "{BOARD}/specs/mlv-app.md", "content": "# mlv-app spec\n"},
         "expect": "ALLOW",
-        "fixture": "fleet_bus",
-    },
-    {
-        "name": "fp1 v b CTL the same path with a delete verb instead",
-        "group": "falsepositive1",
-        "tool": "PowerShell",
-        "input": {"command": "Remove-Item -LiteralPath '{BUS}/specs/mlv-app.md'"},
-        "expect": "DENY",
-        "na": "NA-7",
-        "reason_contains": "under the fleet doctrine bus",
-        "fixture": "fleet_bus",
     },
     # (vi) A BIT BUCKET IS A SINK, NOT A FILE.  `/dev/null` is absolute and under neither
     # root, so NA-7 refused it as a write outside both -- which is what made every
@@ -3643,27 +3623,16 @@ CASES = [
     # three roots are covered, because a fix applied at one call site would leave the other
     # two open and every other row would still be green.
     {
-        "name": "fp1 vii a CTL bus publish path walked one level out with dot dot",
-        "group": "falsepositive1",
-        "tool": "Write",
-        "input": {"file_path": "{BUS}/../escaped.txt", "content": "# mlv-app spec\n"},
-        "expect": "DENY",
-        "na": "NA-7",
-        "reason_contains": "outside both the worktree and the board root",
-        "fixture": "fleet_bus",
-    },
-    {
-        "name": "fp1 vii a CTL bus publish path walked two levels out with dot dot",
+        "name": "fp1 vii a CTL board publish path walked two levels out with dot dot",
         "group": "falsepositive1",
         "tool": "Write",
         "input": {
-            "file_path": "{BUS}/specs/../../escaped.txt",
+            "file_path": "{BOARD}/specs/../../escaped.txt",
             "content": "# mlv-app spec\n",
         },
         "expect": "DENY",
         "na": "NA-7",
         "reason_contains": "outside both the worktree and the board root",
-        "fixture": "fleet_bus",
     },
     {
         "name": "fp1 vii b Write under the board root",
@@ -3728,158 +3697,26 @@ CASES = [
         "na": "NA-2",
         "reason_contains": "cannot be proven non-shrinking",
     },
-    # (viii) S133 -- `MLV_FLEET_BUS_ROOT` IS AN NA-3 PERSISTENT NAME.
+    # (viii) S134 -- THE HOOK'S OWN ENVIRONMENT VARIABLES ARE EXPANDED BEFORE EVERY PATH
+    # CHECK, AND THE CLAIM IS NOW MADE ABOUT THE ROOT THAT SURVIVED.
     #
-    # SOL'S SECOND BLOCKER ON PR #104.  This packet introduced a steering input that WIDENS
-    # NA-7's roots and did not add it to the protected list, so a persistent write of it was
-    # ALLOWED -- `setx MLV_FLEET_BUS_ROOT C:\` would have made every later hook process on
-    # the machine treat the whole drive as a publish surface.  VARIES EXACTLY ONE TOKEN
-    # against its control: the assignment VERB.  Persistence is the act; naming, reading or
-    # setting the variable in-process is not, and the control keeps it that way.  A NEW
-    # group would split the claim from the packet that caused it, and `na3_persistent` (6)
-    # is a historical count that may not move, so both rows live here.
-    {
-        "name": "fp1 viii persistent setx of the fleet bus root name",
-        "group": "falsepositive1",
-        "tool": "PowerShell",
-        "input": {"command": _persist_setx("MLV_FLEET_BUS_ROOT")},
-        "expect": "DENY",
-        "na": "NA-3",
-        "reason_contains": "PERSISTENT MLV_FLEET_BUS_ROOT",
-    },
-    {
-        "name": "fp1 viii CTL in process assignment of the same name",
-        "group": "falsepositive1",
-        "tool": "PowerShell",
-        "input": {"command": "$env:MLV_FLEET_BUS_ROOT = 'C:/lane/worktree'"},
-        "expect": "ALLOW",
-    },
-    # (ix) ROUND 3, S134 -- THE HOOK'S OWN ENVIRONMENT VARIABLES ARE EXPANDED BEFORE EVERY
-    # PATH CHECK.
+    # The measured defect: a delete of the protected queue ledger spelled through
+    # `$env:MLV_BOARD_ROOT` was ALLOWED while the identical LITERAL path was DENIED.  The fix
+    # is in `norm`, beside the `..` collapse and BEFORE it, so every arm inherits it and an
+    # expanded path is canonicalised rather than compared raw.  This half of the packet is
+    # KEPT: it closed a real ALLOW on a protected pen, and it never depended on the
+    # sibling-repository root that was narrowed out.
     #
-    # SOL'S BLOCKER ON PR #104 AT `78c35431`, REPRODUCED HERE.  Round 2's bus guard denied a
-    # LITERAL delete under the bus and returned ALLOW for
-    # `Remove-Item -LiteralPath "$env:MLV_FLEET_BUS_ROOT\specs\mlv-app.md"` -- the same file,
-    # the same act, spelled through the variable that told THAT VERY PROCESS where the bus
-    # is.  The header meanwhile claimed deletes were "denied at every value".  The fix is in
-    # `norm`, beside the `..` collapse and BEFORE it, so every arm inherits it and an
-    # expanded path is canonicalised rather than compared raw.
-    #
-    # WHAT EACH PAIR VARIES, AND WHERE ONE TOKEN WAS NOT HONESTLY POSSIBLE:
-    #   ix-a, ix-b vary EXACTLY ONE TOKEN, the variable NAME, against a control whose name is
-    #       exported IN THE SAME PROCESS TO THE SAME VALUE and is simply not one this hook
-    #       reads (`fixture_fleet_bus_with_unread_alias`).  Those controls MUST stay ALLOW:
-    #       they are the residual limit stated in the hook's header, and a row expecting a
-    #       DENY there would assert a guarantee no text matcher can keep.
-    #   ix-c, ix-d vary EXACTLY ONE TOKEN against their ALLOW subject: an INSERTED `..`
-    #       segment, same variable, same spelling, same basename, same `specs` segment.  They
-    #       are what proves the expansion happens BEFORE `canonical` -- a hook that collapsed
-    #       first would still see `$env:...` as an ordinary relative segment and let the walk
-    #       out of the bus through.
-    #   ix-e IS NOT A ONE-TOKEN DENY/ALLOW PAIR IN THE USUAL SENSE and its control says so:
-    #       it varies one DIRECTORY SEGMENT (`coordination` -> `coordination-scratch`), which
-    #       is what takes the path off NA-2's protected tail.  Its falsifying power is in
-    #       `reason_contains`, not in the verdict: NA-2's tails are matched SEGMENT-WISE, so
-    #       the round-2 hook DENIES this row too -- naming the UNEXPANDED
-    #       `$env:mlv_board_root/...` in the reason.  Pinning the needle to `{BOARD_NORM}`
-    #       makes the row RED there and is the only way this arm's reach is measurable at
-    #       all.
+    # WHAT THE PAIR VARIES.  viii IS NOT A ONE-TOKEN DENY/ALLOW PAIR IN THE USUAL SENSE and
+    # its control says so: it varies one DIRECTORY SEGMENT (`coordination` ->
+    # `coordination-scratch`), which is what takes the path off NA-2's protected tail.  Its
+    # falsifying power is in `reason_contains`, not in the verdict: NA-2's tails are matched
+    # SEGMENT-WISE, so a hook that does not expand DENIES this row too -- naming the
+    # UNEXPANDED `$env:mlv_board_root/...` in the reason.  Pinning the needle to
+    # `{BOARD_NORM}` makes the row RED there and is the only way this arm's reach is
+    # measurable at all.
     {
-        "name": "fp1 ix a env spelled delete under the fleet bus",
-        "group": "falsepositive1",
-        "tool": "PowerShell",
-        "input": {
-            "command": "Remove-Item -LiteralPath "
-            '"$env:MLV_FLEET_BUS_ROOT/specs/mlv-app.md"'
-        },
-        "expect": "DENY",
-        "na": "NA-7",
-        "reason_contains": "under the fleet doctrine bus",
-        "fixture": "fleet_bus_with_unread_alias",
-    },
-    {
-        "name": "fp1 ix a CTL the same delete through a name the hook does not read",
-        "group": "falsepositive1",
-        "tool": "PowerShell",
-        "input": {
-            "command": "Remove-Item -LiteralPath "
-            '"$env:FP1_UNREAD_BUS_ROOT/specs/mlv-app.md"'
-        },
-        "expect": "ALLOW",
-        "fixture": "fleet_bus_with_unread_alias",
-    },
-    {
-        "name": "fp1 ix b cmd spelled delete under the fleet bus",
-        "group": "falsepositive1",
-        "tool": "PowerShell",
-        "input": {
-            "command": 'Remove-Item -LiteralPath "%MLV_FLEET_BUS_ROOT%/specs/mlv-app.md"'
-        },
-        "expect": "DENY",
-        "na": "NA-7",
-        "reason_contains": "under the fleet doctrine bus",
-        "fixture": "fleet_bus_with_unread_alias",
-    },
-    {
-        "name": "fp1 ix b CTL the same cmd spelling with a name the hook does not read",
-        "group": "falsepositive1",
-        "tool": "PowerShell",
-        "input": {
-            "command": 'Remove-Item -LiteralPath "%FP1_UNREAD_BUS_ROOT%/specs/mlv-app.md"'
-        },
-        "expect": "ALLOW",
-        "fixture": "fleet_bus_with_unread_alias",
-    },
-    {
-        "name": "fp1 ix c env spelled publish to the fleet bus",
-        "group": "falsepositive1",
-        "tool": "Write",
-        "input": {
-            "file_path": "$env:MLV_FLEET_BUS_ROOT/specs/mlv-app.md",
-            "content": "# mlv-app spec\n",
-        },
-        "expect": "ALLOW",
-        "fixture": "fleet_bus_with_unread_alias",
-    },
-    {
-        "name": "fp1 ix c CTL the same env spelled publish walked out with dot dot",
-        "group": "falsepositive1",
-        "tool": "Write",
-        "input": {
-            "file_path": "$env:MLV_FLEET_BUS_ROOT/../specs/mlv-app.md",
-            "content": "# mlv-app spec\n",
-        },
-        "expect": "DENY",
-        "na": "NA-7",
-        "reason_contains": "outside both the worktree and the board root",
-        "fixture": "fleet_bus_with_unread_alias",
-    },
-    {
-        "name": "fp1 ix d braced env spelled publish to the fleet bus",
-        "group": "falsepositive1",
-        "tool": "Write",
-        "input": {
-            "file_path": "${env:MLV_FLEET_BUS_ROOT}/specs/mlv-app.md",
-            "content": "# mlv-app spec\n",
-        },
-        "expect": "ALLOW",
-        "fixture": "fleet_bus_with_unread_alias",
-    },
-    {
-        "name": "fp1 ix d CTL the same braced spelling walked out with dot dot",
-        "group": "falsepositive1",
-        "tool": "Write",
-        "input": {
-            "file_path": "${env:MLV_FLEET_BUS_ROOT}/../specs/mlv-app.md",
-            "content": "# mlv-app spec\n",
-        },
-        "expect": "DENY",
-        "na": "NA-7",
-        "reason_contains": "outside both the worktree and the board root",
-        "fixture": "fleet_bus_with_unread_alias",
-    },
-    {
-        "name": "fp1 ix e env spelled delete of the protected queue ledger",
+        "name": "fp1 viii env spelled delete of the protected queue ledger",
         "group": "falsepositive1",
         "tool": "PowerShell",
         "input": {
@@ -3894,7 +3731,7 @@ CASES = [
         ),
     },
     {
-        "name": "fp1 ix e CTL the same variable on an unprotected sibling directory",
+        "name": "fp1 viii CTL the same variable on an unprotected sibling directory",
         "group": "falsepositive1",
         "tool": "PowerShell",
         "input": {
@@ -3903,89 +3740,23 @@ CASES = [
         },
         "expect": "ALLOW",
     },
-    # (x) ROUND 5 -- THE SAME ACTS WITH THE STEERING VARIABLE UNSET, WHICH IS THE ONLY
-    # CONFIGURATION THAT ACTUALLY SHIPS.
+    # (ix) THE SAME ACT WITH THE STEERING VARIABLE UNSET, WHICH IS THE ONLY CONFIGURATION
+    # THAT ACTUALLY SHIPS.
     #
-    # THE HUB'S OWN DEFECT, CORRECTED HERE.  Round 3's packet told the implementer to expand
-    # a hook-read name "only when the name is actually present in this process's
-    # environment", and round 4's implementer measured what that bought and reported it
-    # rather than hiding it: with `MLV_FLEET_BUS_ROOT` UNSET -- the ambient state on this
-    # machine, where nothing but this suite ever exports it --
-    # `Remove-Item -LiteralPath "$env:MLV_FLEET_BUS_ROOT\specs\mlv-app.md"` returned ALLOW
-    # while the identical LITERAL delete returned DENY.  Sol's blocker was still open in the
-    # default configuration.  The repair is in `hook_env_values`: a name resolves to the
-    # value the hook IS USING -- the override when set, the BUILT-IN DEFAULT when not.
+    # Substituting a hook-read name "only when the name is actually present in this process's
+    # environment" is green in the SET configuration and open in the other: nothing on this
+    # machine exports a steering root except this suite, so the guard held only on the
+    # machine the falsifier suite builds.  The repair is in `hook_env_values`: a name resolves
+    # to the value the hook IS USING -- the override when set, the BUILT-IN DEFAULT when not.
     #
-    # WHY THESE ARE PAIRS AND NOT ROWS.  Every row here is the twin of an `(ix)` row above,
-    # varying EXACTLY ONE THING: whether the name is bound.  Both halves must DENY, because
-    # the hook knows where the bus is in both -- the defect was never ignorance of the root,
-    # it was asking "is the variable set?" instead of "what value am I using?".  The needles
-    # pin the RESOLVED DEFAULT (`{DEFAULT_BUS_NORM}` / `{DEFAULT_BOARD_NORM}`, derived in
-    # `setUp` from the hook's own constants), so a hook that regressed to leaving the
-    # reference literal fails by verdict AND by name.
-    #
-    # MEASURED ON THE PARENT `dda48ff9`: x-a, x-b and x-c are ALLOW there, and so is x-d --
-    # `$env:MLV_FLEET_BUS_ROOT/../escaped.txt` collapsed to the bare relative `escaped.txt`
-    # and walked past NA-7's outside-the-roots arm.  That fourth hole was NOT in the round-4
-    # report; it is the same defect one arm over, found by running the (ix) table's own acts
-    # in the unset configuration, and it is why the unset half is a table and not one row.
+    # This row is the twin of `viii` above, varying EXACTLY ONE THING: whether the name is
+    # bound.  Both must DENY, because the hook knows where the board is in both -- the defect
+    # was never ignorance of the root, it was asking "is the variable set?" instead of "what
+    # value am I using?".  The needle pins the RESOLVED DEFAULT (`{DEFAULT_BOARD_NORM}`,
+    # derived in `setUp` from the hook's own constant), so a hook that regressed to leaving
+    # the reference literal fails by verdict AND by name.
     {
-        "name": "fp1 x a env spelled bus delete with the bus root UNSET",
-        "group": "falsepositive1",
-        "tool": "PowerShell",
-        "input": {
-            "command": "Remove-Item -LiteralPath "
-            '"$env:MLV_FLEET_BUS_ROOT/specs/mlv-app.md"'
-        },
-        "expect": "DENY",
-        "na": "NA-7",
-        "reason_contains": (
-            "under the fleet doctrine bus",
-            "{DEFAULT_BUS_NORM}/specs/mlv-app.md",
-        ),
-        "fixture": "fleet_bus_unset",
-    },
-    {
-        "name": "fp1 x b cmd spelled bus delete with the bus root UNSET",
-        "group": "falsepositive1",
-        "tool": "PowerShell",
-        "input": {
-            "command": 'Remove-Item -LiteralPath "%MLV_FLEET_BUS_ROOT%/specs/mlv-app.md"'
-        },
-        "expect": "DENY",
-        "na": "NA-7",
-        "reason_contains": (
-            "under the fleet doctrine bus",
-            "{DEFAULT_BUS_NORM}/specs/mlv-app.md",
-        ),
-        "fixture": "fleet_bus_unset",
-    },
-    {
-        "name": "fp1 x c CTL the env spelled publish with the bus root UNSET stays allowed",
-        "group": "falsepositive1",
-        "tool": "Write",
-        "input": {
-            "file_path": "$env:MLV_FLEET_BUS_ROOT/specs/mlv-app.md",
-            "content": "# mlv-app spec\n",
-        },
-        "expect": "ALLOW",
-        "fixture": "fleet_bus_unset",
-    },
-    {
-        "name": "fp1 x d the same publish walked out with dot dot, bus root UNSET",
-        "group": "falsepositive1",
-        "tool": "Write",
-        "input": {
-            "file_path": "$env:MLV_FLEET_BUS_ROOT/../escaped.txt",
-            "content": "# mlv-app spec\n",
-        },
-        "expect": "DENY",
-        "na": "NA-7",
-        "reason_contains": "outside both the worktree and the board root",
-        "fixture": "fleet_bus_unset",
-    },
-    {
-        "name": "fp1 x e env spelled delete of the queue ledger with the board root UNSET",
+        "name": "fp1 ix env spelled delete of the queue ledger with the board root UNSET",
         "group": "falsepositive1",
         "tool": "PowerShell",
         "input": {
@@ -3999,6 +3770,54 @@ CASES = [
             "denied on the carve-out paths",
         ),
         "fixture": "board_root_unset",
+    },
+    # (x) AN UNRESOLVABLE ENVIRONMENT REFERENCE IS A DENIAL, NEVER A COLLAPSE.
+    #
+    # THE ROUND-5 REVIEWER'S REPRO, AND IT SURVIVES THE NARROWING BECAUSE IT WAS NEVER ABOUT
+    # THE REMOVED ROOT.  `MLV_LANE_PROMPT` is a name this hook READS but which has NO default,
+    # so when it is unset the reference is deliberately left standing as literal text (see
+    # `hook_env_values`).  `norm` then canonicalised `..` against that text and
+    # `"$env:MLV_LANE_PROMPT/../outside.txt"` became the bare relative `outside.txt` -- which
+    # NA-7's early return waves through as "resolves inside the worktree by construction",
+    # while the SHELL resolves the same string to an absolute path outside every root.  ALLOW,
+    # measured on `10b71482`.  `norm` now declines to collapse a path that still carries a
+    # reference and NA-7 refuses it as UNRESOLVABLE.
+    #
+    # THE PAIR VARIES EXACTLY ONE TOKEN: the leading segment.  The control is the identical
+    # `../outside.txt` walk with no reference in front of it, and it must keep WHATEVER
+    # behaviour it had -- which is DENY, from the `..`-out-of-the-worktree arm S133 added.
+    # That is the point of pairing them: the new rule must not be doing the old rule's job,
+    # and the two refusals are attributable by their DIFFERENT reasons.
+    {
+        "name": "fp1 x an unresolvable env reference walks out and is refused",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "$env:MLV_LANE_PROMPT/../outside.txt",
+            "content": "probe\n",
+        },
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "UNRESOLVABLE environment reference",
+        "fixture": "lane_prompt_unset",
+    },
+    {
+        "name": "fp1 x CTL the same walk with an ordinary relative path and no reference",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "prompts/../outside.txt", "content": "probe\n"},
+        "expect": "ALLOW",
+        "fixture": "lane_prompt_unset",
+    },
+    {
+        "name": "fp1 x CTL a bare dot dot walk with no reference keeps its own refusal",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "../outside.txt", "content": "probe\n"},
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "walks out of the worktree with `..`",
+        "fixture": "lane_prompt_unset",
     },
     # ------------------------------------------------------- the 6 benign ALLOW controls
     {
@@ -4060,16 +3879,15 @@ VENUE_KEY = "__project_dir__"
 class _Unset(object):
     """ROUND 5: a fixture value meaning DELETE THIS NAME FROM THE HOOK'S ENVIRONMENT.
 
-    THE CAPABILITY THIS SUITE DID NOT HAVE, AND ITS ABSENCE IS WHAT LET THE HOLE THROUGH.
+    THE CAPABILITY THIS SUITE DID NOT HAVE, AND ITS ABSENCE IS WHAT LET A HOLE THROUGH.
     `_invoke` binds `MLV_BOARD_ROOT`, `MLV_CLIP_CACHE_ROOT` and
-    `MLV_REQUIRED_CHECKS_SNAPSHOT` for EVERY row, and `fixture_fleet_bus` binds
-    `MLV_FLEET_BUS_ROOT` for every row that names the bus -- so until this delta the suite
-    could only ever measure the SET configuration.  Round 3's expansion substituted a name
-    only when it was PRESENT, which is green in that configuration and open in the other:
-    with `MLV_FLEET_BUS_ROOT` unset -- the AMBIENT state on this machine -- the env-spelled
-    bus delete was ALLOWED while the literal one was DENIED.  A steering root's DEFAULT is a
-    configuration this hook actually runs in (it is the only one that ships), so it has to be
-    a configuration this table can express.
+    `MLV_REQUIRED_CHECKS_SNAPSHOT` for EVERY row, so until this delta the suite could only
+    ever measure the SET configuration.  An expansion that substituted a name only when it
+    was PRESENT is green in that configuration and open in the other: with the name unset --
+    the AMBIENT state on this machine -- the env-spelled delete of a protected path was
+    ALLOWED while the literal one was DENIED.  A steering root's DEFAULT is a configuration
+    this hook actually runs in (it is the only one that ships), so it has to be a
+    configuration this table can express.
 
     An override of `UNSET` is popped from the row's overrides AND deleted from the hook's
     environment, so the hook falls back to its OWN built-in default -- which is what the
@@ -4651,49 +4469,20 @@ def fixture_existing_ledger(paths):
     return {}
 
 
-def fixture_fleet_bus(paths):
-    """HOOK-FALSE-POSITIVE-1: the fleet doctrine bus root, as a tmp fixture.
+def fixture_lane_prompt_unset(paths):
+    """THE UNRESOLVABLE-REFERENCE ROWS: `MLV_LANE_PROMPT` bound to NOTHING, stated explicitly.
 
-    RESUME.md STEP 0.5 has the orchestrator lane publishing `specs/mlv-app.md` into the bus
-    clone, so NA-7 admits WRITES under this root beside the worktree and the board -- and
-    refuses a delete or a move under it, because a publish is additive.
+    `_invoke` strips every `MLV_*` name before it binds the three it anchors, so this name is
+    already absent on every row -- which is exactly why it is written down here rather than
+    relied on.  These rows assert a DECISION about a path spelled through a name the hook
+    READS but CANNOT resolve (it has no built-in default), and the precondition that makes
+    them mean anything is that the name is unbound.  A future harness change that started
+    exporting it would otherwise turn these falsifiers green for the wrong reason.
+
+    `MLV_BOARD_ROOT` stays bound to the tmp board, so the prompt name is the ONE thing this
+    fixture varies.  Nothing is written and no path is stat'ed.
     """
-    _write(os.path.join(paths["BUS"], "TRAPS.md"), "# fleet traps\n")
-    return {"MLV_FLEET_BUS_ROOT": paths["BUS"]}
-
-
-def fixture_fleet_bus_with_unread_alias(paths):
-    """ROUND 3 (S134): the bus root ALSO exported under a name the hook does not read.
-
-    THE CONTROL HALF OF THE EXPANSION PAIRS, and it is deliberately the SHARPEST one
-    available: `FP1_UNREAD_BUS_ROOT` is SET, in this very process, to the SAME value as
-    `MLV_FLEET_BUS_ROOT`, so the two rows differ in the variable NAME and in nothing else --
-    not the value, not the path, not the verb.  The control must stay ALLOW: this hook
-    resolves the names IT READS and no others, and a row that expected a DENY here would be
-    asserting a guarantee a text matcher cannot keep (see the residual limit in the hook's
-    header).  The name carries no `MLV_` prefix so it cannot be mistaken for a steering
-    input, and `_invoke` strips `MLV_*` BEFORE applying overrides, so it is only ever set by
-    this fixture.
-    """
-    overrides = fixture_fleet_bus(paths)
-    overrides["FP1_UNREAD_BUS_ROOT"] = paths["BUS"]
-    return overrides
-
-
-def fixture_fleet_bus_unset(paths):
-    """ROUND 5: the bus root NOT exported at all -- the hook falls back to ITS OWN default.
-
-    THE OTHER HALF OF EVERY BUS PAIR, and the configuration that actually ships: nothing on
-    this machine exports `MLV_FLEET_BUS_ROOT` except this suite, so `DEFAULT_FLEET_BUS_ROOT`
-    is what a real hook process resolves.  The rows using this fixture spell the bus through
-    the variable and assert the same DENY as their SET twin -- differing in exactly one
-    thing, whether the name is bound.  Measured on the parent revision `dda48ff9`, both go
-    ALLOW there, which is what makes them falsifiers rather than decoration.
-
-    `MLV_BOARD_ROOT` stays bound to the tmp board, so the bus is the ONE name this fixture
-    varies and nothing else about the row's environment moves with it.
-    """
-    return {"MLV_FLEET_BUS_ROOT": UNSET}
+    return {"MLV_LANE_PROMPT": UNSET}
 
 
 def fixture_board_root_unset(paths):
@@ -5510,10 +5299,8 @@ FIXTURES = {
     "existing_receipt": fixture_existing_receipt,
     # HOOK-FALSE-POSITIVE-1
     "existing_ledger": fixture_existing_ledger,
-    "fleet_bus": fixture_fleet_bus,
-    "fleet_bus_with_unread_alias": fixture_fleet_bus_with_unread_alias,
-    # ROUND 5: the UNSET half of the expansion pairs.
-    "fleet_bus_unset": fixture_fleet_bus_unset,
+    # The UNSET half of the expansion pairs, and the unresolvable-reference rows.
+    "lane_prompt_unset": fixture_lane_prompt_unset,
     "board_root_unset": fixture_board_root_unset,
     "receipts_all_six": fixture_receipts_all_six,
     "receipts_all_six_at_board": fixture_receipts_all_six_at_board,
@@ -5634,14 +5421,9 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
             # that tree by construction, so an NA-10 DENY there is attributable to NA-10.
             # It is derived, never a literal, so it is the checkout on either matrix leg.
             "REPO": REPO_ROOT,
-            # HOOK-FALSE-POSITIVE-1: the fleet doctrine bus, a PUBLISH surface of this
-            # board (RESUME.md STEP 0.5).  A tmp fixture like every other root, supplied
-            # through `MLV_FLEET_BUS_ROOT` by `fixture_fleet_bus`, so no row depends on
-            # this machine's layout and the table stays green on both matrix legs.
-            "BUS": os.path.join(self.tmp, "fleet-bus"),
             "CLIP_AUTH": os.path.join(board, "clips", "authorized", "take01.mlv"),
         }
-        for key in ("BOARD", "DUAL", "RECEIPTS", "OUTSIDE", "CACHE", "WORKTREE", "BUS"):
+        for key in ("BOARD", "DUAL", "RECEIPTS", "OUTSIDE", "CACHE", "WORKTREE"):
             os.makedirs(self.paths[key])
         # ROUND 3 (S134): the board root as the hook PRINTS it -- normalised, so a
         # `reason_contains` can pin the RESOLVED path rather than the placeholder.  That is
@@ -5656,9 +5438,6 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # would turn a default change into a green suite plus a wrong claim.  They are the
         # expected values of the UNSET half of each pair -- what the hook resolves when the
         # steering variable is absent, which is the configuration that actually ships.
-        self.paths["DEFAULT_BUS_NORM"] = _load_hook_module().norm(
-            _load_hook_module().DEFAULT_FLEET_BUS_ROOT
-        )
         self.paths["DEFAULT_BOARD_NORM"] = _load_hook_module().norm(
             _load_hook_module().DEFAULT_BOARD_ROOT
         )
@@ -5874,11 +5653,12 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
     def test_every_environment_input_the_hook_reads_is_na3_protected(self):
         """S133: THE RULE IS THE LIST, and the list is DERIVED, not remembered.
 
-        `MLV_FLEET_BUS_ROOT` shipped in round 1 of HOOK-FALSE-POSITIVE-1 as a steering
-        input that WIDENS NA-7's roots, and it was absent from `_NA3_PERSISTENT_NAMES` --
-        so `setx` of it was ALLOWED and every later hook process on the machine would have
-        inherited a bus root of the reviewer's choosing.  Sol found it by trying it; nothing
-        in this suite could have.
+        An earlier revision of HOOK-FALSE-POSITIVE-1 shipped a steering input that WIDENS
+        NA-7's roots while it was absent from `_NA3_PERSISTENT_NAMES` -- so `setx` of it was
+        ALLOWED and every later hook process on the machine would have inherited a root of
+        the reviewer's choosing.  A reviewer found it by trying it; nothing in this suite
+        could have.  That root has since been removed from the gate, but the GATE THAT WOULD
+        HAVE CAUGHT IT is kept, because it is about the next input, not that one.
 
         This gate reads the hook's OWN source for the environment names it consults and
         asserts each one is matched by the hook's OWN persistent-name regex, so the next
@@ -5890,7 +5670,7 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         with open(HOOK, "r", encoding="utf-8") as handle:
             source = handle.read()
         read_names = set(re.findall(r"env(?:iron)?\.get\(\s*[\"'](\w+)[\"']", source))
-        self.assertIn("MLV_FLEET_BUS_ROOT", read_names, "the hook must read the bus root")
+        self.assertIn("MLV_BOARD_ROOT", read_names, "the hook must read the board root")
         steering = sorted(read_names - {"MLV_HOOK_DRYRUN"})
         self.assertTrue(steering, "the hook reads no environment input at all?")
         name_rx = _load_hook_module()._NA3_PERSISTENT_NAME_RX
@@ -5907,15 +5687,15 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
     def test_every_environment_input_the_hook_reads_is_expanded_in_a_path(self):
         """S134: THE EXPANSION LIST IS THE READ LIST, DERIVED FROM THE SAME CALL SITES.
 
-        Round 2 shipped a bus delete guard whose docstring promised "denied at every value"
-        while the code resolved only a LITERAL path; sol found it by spelling the same file
-        `"$env:MLV_FLEET_BUS_ROOT\\specs\\mlv-app.md"`.  The repair is only durable if the
-        NEXT input added to `Ctx.__init__` is expanded too, so this gate derives the names
-        from the hook's own `env.get(...)` call sites -- the SAME derivation the NA-3
-        protection gate above performs -- and asserts `HOOK_READ_ENV_NAMES` is EXACTLY that
-        set.  Equality in both directions is the point: a missing name is the round-2 defect
-        returning, and an EXTRA name is this hook substituting a value it never read, which
-        is the fabrication the header's residual limit refuses.
+        An earlier revision shipped a guard whose docstring promised "denied at every value"
+        while the code resolved only a LITERAL path; a reviewer broke it by spelling the same
+        file through `$env:`.  The repair is only durable if the NEXT input added to
+        `Ctx.__init__` is expanded too, so this gate derives the names from the hook's own
+        `env.get(...)` call sites -- the SAME derivation the NA-3 protection gate above
+        performs -- and asserts `HOOK_READ_ENV_NAMES` is EXACTLY that set.  Equality in both
+        directions is the point: a missing name is that defect returning, and an EXTRA name
+        is this hook substituting a value it never read, which is the fabrication the
+        header's residual limit refuses.
         """
         with open(HOOK, "r", encoding="utf-8") as handle:
             source = handle.read()
@@ -5928,38 +5708,49 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         )
         # And every spelling the list claims really resolves, at the value THIS process
         # carries -- one assertion per spelling, so a regex that loses one goes red by name.
-        saved = os.environ.get("MLV_FLEET_BUS_ROOT")
-        os.environ["MLV_FLEET_BUS_ROOT"] = r"C:\fp1\bus"
+        saved = os.environ.get("MLV_BOARD_ROOT")
+        os.environ["MLV_BOARD_ROOT"] = r"C:\fp1\board"
         try:
             for spelling in (
-                "$env:MLV_FLEET_BUS_ROOT/specs/x.md",
-                "${env:MLV_FLEET_BUS_ROOT}/specs/x.md",
-                "%MLV_FLEET_BUS_ROOT%/specs/x.md",
-                "$ENV:mlv_fleet_bus_root/specs/x.md",
+                "$env:MLV_BOARD_ROOT/specs/x.md",
+                "${env:MLV_BOARD_ROOT}/specs/x.md",
+                "%MLV_BOARD_ROOT%/specs/x.md",
+                "$ENV:mlv_board_root/specs/x.md",
             ):
                 self.assertEqual(
-                    module.norm(spelling), "c:/fp1/bus/specs/x.md", spelling
+                    module.norm(spelling), "c:/fp1/board/specs/x.md", spelling
                 )
             # A name the hook does NOT read is left standing, not blanked and not guessed.
             self.assertEqual(
-                module.norm("$env:FP1_UNREAD_BUS_ROOT/specs/x.md"),
-                "$env:fp1_unread_bus_root/specs/x.md",
+                module.norm("$env:FP1_UNREAD_ROOT/specs/x.md"),
+                "$env:fp1_unread_root/specs/x.md",
             )
             # Expansion precedes the `..` collapse, which is the whole reason it lives in
             # `norm` rather than at a call site.
             self.assertEqual(
-                module.norm("$env:MLV_FLEET_BUS_ROOT/../escaped.txt"), "c:/fp1/escaped.txt"
+                module.norm("$env:MLV_BOARD_ROOT/../escaped.txt"), "c:/fp1/escaped.txt"
             )
-            # ... and an UNEXPANDED reading of the same text collapses to a bare relative
-            # name, which is what NA-7's early return waved past on the parent revision.
+            # ... and a reference that CANNOT be resolved is not collapsed at all.  It used
+            # to become the bare relative `escaped.txt`, which NA-7's early return waved past
+            # as "inside the worktree by construction"; `norm` now leaves the text standing
+            # so `_na7_check_path` can refuse it as unresolvable.
             self.assertEqual(
-                module.norm("$env:FP1_UNREAD_BUS_ROOT/../escaped.txt"), "escaped.txt"
+                module.norm("$env:FP1_UNREAD_ROOT/../escaped.txt"),
+                "$env:fp1_unread_root/../escaped.txt",
             )
+            self.assertEqual(
+                module._unresolved_env_ref("$env:fp1_unread_root/../escaped.txt"),
+                "$env:fp1_unread_root",
+            )
+            # A path with NO reference in it is collapsed exactly as before -- the new rule
+            # must not be doing the `..` collapse's job.
+            self.assertIsNone(module._unresolved_env_ref("prompts/../escaped.txt"))
+            self.assertEqual(module.norm("prompts/../escaped.txt"), "escaped.txt")
         finally:
             if saved is None:
-                del os.environ["MLV_FLEET_BUS_ROOT"]
+                del os.environ["MLV_BOARD_ROOT"]
             else:
-                os.environ["MLV_FLEET_BUS_ROOT"] = saved
+                os.environ["MLV_BOARD_ROOT"] = saved
 
     def test_every_register_row_has_at_least_one_deny_case(self):
         """The suite FAILS if any of NA-1,2,3,4,6,7,8,9,10 has zero DENY cases.
@@ -5982,67 +5773,36 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self.assertEqual(counts.get("round2"), 12, "12 round-2 falsifiers")
         self.assertEqual(counts.get("failclosed"), 4, "4 fail-closed inputs")
         self.assertEqual(counts.get("benign"), 6, "6 benign ALLOW controls")
-        # HOOK-FALSE-POSITIVE-1, ROUND 1: six ALLOW subjects, eight DENY controls and one
-        # unchanged-behaviour ALLOW pin (the forged chain name under the dual-lane
-        # receipts carve-out, which this delta deliberately did not touch).  Pinned so a
-        # subject cannot be dropped once its control still passes.
+        # HOOK-FALSE-POSITIVE-1.  Pinned so a subject cannot be dropped once its control
+        # still passes.  The count rose 15 -> 29 -> 39 -> 44 across five review rounds as the
+        # pairs were re-cut and two claims (the `..` collapse, the environment expansion)
+        # arrived with their own rows.
         #
-        # PINNED DELIBERATELY, ROUND 2 (S133, sol's review of PR #104): 15 -> 29.  NO row
-        # was dropped and none re-expected; the pairs were RE-CUT so each names the one
-        # token it varies (iv gained two one-token pairs and the ALLOW half of the shrink
-        # pair, v gained the shell publish beside the delete), and TWO NEW claims arrived
-        # with their own rows: eight for the `..` collapse under all three NA-7 roots and
-        # against an NA-2 protected path (sol's first blocker), two for
-        # `MLV_FLEET_BUS_ROOT` as an NA-3 persistent name (sol's second).
+        # PINNED DELIBERATELY AT THE NARROWING: 44 -> 30, AND THIS IS THE ONE TIME ROWS WERE
+        # DROPPED ON PURPOSE.  Fourteen rows asserted behaviour of a THIRD NA-7 root -- a
+        # sibling-repository write surface -- which is REMOVED from the gate: the four
+        # reproducible bypasses five rounds turned up were all in that root's machinery, and
+        # a row asserting a removed feature is not a falsifier, it is a resurrection notice.
+        # What went with it: the bus publish/delete pair (v), the two bus `..` escapes (vii),
+        # the two NA-3 `setx` rows for its name (viii), the six env/cmd/braced spelling rows
+        # and their unread-name controls (ix), and four of the five UNSET twins (x).
         #
-        # MEASURED against `f888bcfd`'s own hook, not asserted: SIX of the new rows go RED
-        # on it -- the three `..` escapes (bus one level, bus two levels, board root; the
-        # worktree row is the same mechanism at the third root), all ALLOW there; the NA-2
-        # `..` detour, DENIED there but from the GENERIC arm with the carve-out never
-        # consulted; and the `setx` row, ALLOW there.  The re-cut pairs in (i), (ii), (iv)
-        # and (v) are green on both hooks BY DESIGN: they change what the table PROVES about
-        # round 1's behaviour, not what round 2 does.
+        # WHAT WAS KEPT, AND WHY IT IS NOT ENTANGLED WITH WHAT WENT.  Every retained claim is
+        # measured against a root that still exists: the `..` collapse is proved at the BOARD
+        # root, the WORKTREE root and against an NA-2 protected tail (vii); the environment
+        # expansion is proved on `$env:MLV_BOARD_ROOT` in BOTH the bound and unbound
+        # configurations, where it closed a real ALLOW on the protected queue ledger
+        # (viii/ix); the bit-bucket sinks, the redirect-target precision and the
+        # create-under-coordination arm never named a root at all (i, ii, iii, iv, vi).
         #
-        # PINNED DELIBERATELY, ROUND 3 (S134, sol's review of `78c35431`): 29 -> 39.  NO row
-        # was dropped and none re-expected.  The hook now EXPANDS the six environment names
-        # it reads, in all three spellings, inside `norm` and BEFORE the `..` collapse, so
-        # the round-2 bus guard's docstring claim stops being false for the one spelling sol
-        # tried.  TEN new rows: the env-spelled and cmd-spelled bus deletes (DENY) each
-        # against a control whose variable is exported to THE SAME VALUE under a name the
-        # hook does not read (ALLOW -- the residual limit, asserted rather than wished away);
-        # the env and braced-env publishes (ALLOW) each against the same path with one `..`
-        # inserted (DENY -- expansion precedes canonicalisation); and the `$env:MLV_BOARD_ROOT`
-        # delete of the protected queue ledger against an unprotected sibling directory.
-        #
-        # MEASURED against `78c35431`'s own hook, not asserted: FIVE of the ten go RED on it
-        # -- the two bus deletes (ALLOW there), the two `..` walk-outs (ALLOW there, because
-        # an unexpanded `$env:...` reads as a relative segment and NA-7 returns early), and
-        # the NA-2 queue delete, which is DENIED there but names the UNEXPANDED
-        # `$env:mlv_board_root/...`, so its `{BOARD_NORM}` needle fails.  The five ALLOW
-        # halves are green on both hooks BY DESIGN: four are behaviour this delta must not
-        # change, and the unread-name controls are the limit itself.
-        #
-        # PINNED DELIBERATELY, ROUND 5 (the HUB'S defect, reported by round 4's implementer):
-        # 39 -> 44.  NO row was dropped and none re-expected.  Round 3's instruction was to
-        # expand a name "only when it is PRESENT in this process's environment", which made
-        # every (ix) row green in the SET configuration and left the guard open in the UNSET
-        # one -- the only configuration that ships, since nothing on this machine exports
-        # `MLV_FLEET_BUS_ROOT` but this suite.  The hook now resolves a read name to the
-        # value it IS USING (`hook_env_values`: override when set, BUILT-IN DEFAULT when
-        # not), and the harness gained `UNSET` so the table can express that configuration at
-        # all -- its absence is precisely what let the hole through a whole round.  FIVE new
-        # rows, each the twin of an (ix) row varying ONE thing, whether the name is bound: the
-        # env- and cmd-spelled bus deletes (DENY), the publish that must stay ALLOW there,
-        # the `..` walk-out (DENY), and the `$env:MLV_BOARD_ROOT` queue delete (DENY).
-        #
-        # MEASURED against `dda48ff9`'s own hook, not asserted: FOUR of the five go RED on it
-        # -- x-a, x-b and x-d are ALLOW there (x-d was NOT in the round-4 report: an
-        # unexpanded `$env:...` collapses to a bare relative name and NA-7 returns early), and
-        # x-e is DENIED there but names the UNEXPANDED `$env:mlv_board_root/...`, so its
-        # `{DEFAULT_BOARD_NORM}` needle fails.  x-c is green on both BY DESIGN: a publish
-        # under the bus is behaviour this delta must not change.
+        # THREE ROWS ARE NEW.  (v) pins the NARROWING itself as a DENY, so the removal is a
+        # rule a reader can see rather than an absence they might read as an oversight; (x)
+        # is the round-5 blocker, which SURVIVES the narrowing because it was never about the
+        # removed root -- a reference the hook cannot resolve used to collapse into a bare
+        # relative name that NA-7's early return waved through -- with two controls beside it
+        # so the new refusal is attributable and is not doing the `..` collapse's job.
         self.assertEqual(
-            counts.get("falsepositive1"), 44, "44 HOOK-FALSE-POSITIVE-1 rows"
+            counts.get("falsepositive1"), 30, "30 HOOK-FALSE-POSITIVE-1 rows"
         )
         # PINNED DELIBERATELY, 0.05 third review delta: the 0.2 enable became ONE dedicated
         # act, so the group grew 6 -> 15.  Six rows vary the canonical act's PRECONDITIONS,
@@ -6707,8 +6467,8 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         hook READS, no case's fixture may bind it anywhere but inside this test's tmp tree.
 
         The name list is DERIVED from the hook's own call sites (`_hook_read_env_names`), so
-        a new steering root is covered the day it is read -- `MLV_FLEET_BUS_ROOT` is the
-        recorded case of a root that shipped ahead of the gates that should have known it.
+        a new steering root is covered the day it is read -- the recorded case is a root that
+        shipped ahead of the gates that should have known it, and was ultimately removed.
         The venue is not among them by construction: it arrives on argv under `VENUE_KEY`,
         never through the environment (O126), and NA-10's `venue_at_worktree` row legitimately
         names the real checkout root there.
