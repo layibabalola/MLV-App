@@ -5,6 +5,9 @@
 Standing September 7 workflow: automatically remediate recoverable errors with
 hub/wisdom adjudication and a bounded read-only Luna swarm, preserving authority
 gates. Follow [agents/error-remediation.md](agents/error-remediation.md).
+Standing September 8 tiering: Fable reviews, Opus hubs and adjudicates, Sonnet
+implements, Haiku reports, Sol/Luna review and recon. Follow
+[agents/orchestration-tiering.md](agents/orchestration-tiering.md).
 
 Index only; details live in claude/. Policy: [fragmentation limits](docs/22-doc-fragmentation-policy.md), 8KB soft/12KB hard. Check with:
 
