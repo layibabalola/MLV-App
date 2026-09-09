@@ -1,4 +1,5 @@
 #include "BatchRunner.h"
+#include "CdngSequenceExport.h"
 #include "BatchContext.h"
 #include "BatchLogger.h"
 #include "ReceiptLoader.h"
@@ -20,9 +21,6 @@
 #include <csignal>
 #include <cstdlib>
 
-/* MainWindow.h gives us the static exportCdngSequence helper
- * and pulls in mlv_include.h (C API) transitively. */
-#include "../../platform/qt/MainWindow.h"
 #include "../../platform/qt/ExportCodecIds.h"
 #include "../../platform/qt/StretchFactors.h"
 #include "../../platform/qt/ReceiptSettings.h"
@@ -381,7 +379,7 @@ int BatchRunner::exportRenderedVideoFile(
     }
 
     const uint32_t unclampedCutOut = cutOut;
-    cutOut = BatchRunner::cutOutClampedForMaxFrames(
+    cutOut = CdngSequenceExport::cutOutClampedForMaxFrames(
         cutIn, cutOut, BatchContext::maxFrames() );
     if( cutOut != unclampedCutOut )
     {
@@ -414,13 +412,13 @@ int BatchRunner::exportRenderedVideoFile(
     /* ---- Complete the plan against the clip's real geometry ------------- */
     double stretchX = STRETCH_H_100;
     double stretchY = STRETCH_V_100;
-    BatchRunner::effectiveStretchFactors( receipt->stretchFactorX(),
+    CdngSequenceExport::effectiveStretchFactors( receipt->stretchFactorX(),
                                           receipt->stretchFactorY(),
                                           getMlvAspectRatio( mlvObject ),
                                           &stretchX, &stretchY );
 
     const BatchRenderedVideoSourceMetadata metadata =
-        BatchRunner::renderedVideoSourceMetadataFromClipState(
+        CdngSequenceExport::renderedVideoSourceMetadataFromClipState(
             static_cast<int>(getMlvWidth( mlvObject )),
             static_cast<int>(getMlvHeight( mlvObject )),
             getMlvFramerate( mlvObject ),
@@ -1215,7 +1213,7 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
     }
 
     const uint32_t unclampedCutOut = cutOut;
-    cutOut = BatchRunner::cutOutClampedForMaxFrames(
+    cutOut = CdngSequenceExport::cutOutClampedForMaxFrames(
         cutIn, cutOut, BatchContext::maxFrames() );
     if( cutOut != unclampedCutOut )
     {
@@ -1237,7 +1235,7 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
      * one definition in BatchRunner.h rather than each carrying a copy of the bands. */
     double stretchX = STRETCH_H_100;
     double stretchY = STRETCH_V_100;
-    BatchRunner::effectiveStretchFactors( receipt->stretchFactorX(),
+    CdngSequenceExport::effectiveStretchFactors( receipt->stretchFactorX(),
                                           receipt->stretchFactorY(),
                                           getMlvAspectRatio( mlvObject ),
                                           &stretchX, &stretchY );
@@ -1362,12 +1360,12 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
      * effectiveCutIn past already-exported frames, and Look Assist defaults are
      * clip-wide, so a resumed run must analyze the same anchor as the first run
      * or the remaining DNGs would get different BaselineExposure / AsShotNeutral
-     * / raw-level defaults. See BatchRunner::lookAssistAnalysisFrameIndex. */
+     * / raw-level defaults. See CdngSequenceExport::lookAssistAnalysisFrameIndex. */
     const bool lookAssistApplied = ReceiptApplier::applyHeadlessLookAssist(
         receipt,
         mlvObject,
         processingObject,
-        BatchRunner::lookAssistAnalysisFrameIndex( cutIn, effectiveCutIn ) );
+        CdngSequenceExport::lookAssistAnalysisFrameIndex( cutIn, effectiveCutIn ) );
 
     /* Print runtime FINGERPRINT — proves settings reached the pipeline */
     ReceiptApplier::printFingerprint( mlvObject, processingObject );
@@ -1376,7 +1374,7 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
         CODEC_CDNG + normalizedBatchCdngCodecOffset( BatchContext::cdngCodecOffset() );
 
     /* Export CDNG sequence */
-    result = MainWindow::exportCdngSequence(
+    result = CdngSequenceExport::exportCdngSequence(
         mlvObject,
         outputRoot,
         baseName,
