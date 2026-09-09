@@ -368,7 +368,13 @@ def test_pre_assignment_kill_failure_is_recorded_not_swallowed(fixture_tree):
         old_throw = "$containedHost = [ordered]@{ pid=$hostPid; createdUtc=$null }"
         assert text.count(old_throw) == 1
         text = text.replace(old_throw, "throw 'fixture-post-start-unrecorded'")
-        old_kill = "$proc.Kill($true); [void]$proc.WaitForExit(5000)"
+        # 1b4a82ab split the old single `Kill($true); [void]WaitForExit(5000)`
+        # statement into two lines so WaitForExit's bool return could be
+        # captured instead of discarded -- the anchor now spans both lines.
+        # `$proc.Kill($true)` alone is NOT unique (the post-timeout kill at
+        # ~line 626 also calls it), so the second line's exact indentation is
+        # part of the anchor, same discipline as every other anchor here.
+        old_kill = "$proc.Kill($true)\n                $exitedWithinWait = $proc.WaitForExit(5000)"
         assert text.count(old_kill) == 1
         return text.replace(old_kill, "throw 'fixture-kill-failed'")
     cmd,env,receipt=prepare(fixture_tree,"normal",mutation=break_kill)
