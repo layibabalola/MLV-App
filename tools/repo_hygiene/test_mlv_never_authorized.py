@@ -138,6 +138,41 @@ the O159 cascade preserves each rewritten receipt's ORIGINAL ``recordedUtc``: th
 commit's cascade fixture already did, now asserted structurally, and ONE new row restamps
 0.6 and 0.7 at the rewrite's instant -- a tie, undecidable.
 
+THE FALSE-POSITIVE PAIRS (HOOK-FALSE-POSITIVE-1, rows i-x; ``falsepositive1``, 30 rows).
+Each pair is an ALLOW SUBJECT beside a DENY CONTROL, so a hook that simply stopped
+enforcing goes RED on the control rather than looking fixed.
+
+PAIR DISCIPLINE, STATED HONESTLY (round 2, sol's MAJOR on PR #104).  Round 1 claimed every
+pair differed in exactly one load-bearing token and only pair vi actually did -- the rest
+moved command, tool, path and payload at once, which is a comparison of two situations, not
+of one token.  The rows below are rewritten so that (i), (ii), (iv), (v), (vi), (vii) and
+(viii) each vary EXACTLY ONE token -- a redirect target, a basename, a directory segment, a
+payload, a verb, a root -- with everything else byte-identical.  ONE row is NOT a one-token
+pair and says so in its own comment rather than claiming otherwise: (iii), where the
+subject is an interpreter heredoc and the control must be a shell truncation verb BECAUSE
+the claim is precisely that those are different classes and no single token turns one into
+the other.  Do not restore the one-token claim over a pair that does not meet it.
+
+What each pair isolates.  (i)/(ii) a redirect truncates only its TARGET, so
+``cat <ledger> 2>/dev/null`` READS while the same command with the ledger as the redirect's
+target still writes.  (iii) an interpreter body is still not decoded.  (iv) a ``Write`` to
+an ABSENT target creates rather than overwrites -- with the receipt NAME class and the
+receipts DIRECTORY class each held back by a one-token control, and the shrink guard proved
+by payload alone.  (v) NA-7's roots did NOT widen: a ``Write`` into a SIBLING REPOSITORY is
+refused by the ordinary rule, which is the NARROWING pinned as a row rather than left as an
+absence.  (vi) a bit bucket is a sink, not a path outside the roots.
+(vii) S133: ``..`` is COLLAPSED before every root and prefix comparison -- the round-1 hook
+admitted ``<root>/../escaped.txt`` because the root was still a literal prefix of it
+(sol's blocker) -- proved under both NA-7 roots AND against an NA-2 protected path,
+whose ``..`` detour must still be recognised as the protected file while an unprotected
+path's identical detour stays ALLOW.  (viii)/(ix) S134: the names the hook READS are
+substituted at the value it is USING -- override when set, built-in default when not -- so a
+delete of the protected queue ledger spelled ``$env:MLV_BOARD_ROOT\\...`` is denied in BOTH
+configurations and names the RESOLVED path.  (x) a reference the hook CANNOT resolve is not
+canonicalised into a relative name and is DENIED as unresolvable, with an ordinary relative
+path beside it to prove the new rule is not doing the ``..`` collapse's job.  Every root is
+a tmp fixture, so no row depends on this machine's layout.
+
 NOTHING IS EXECUTED BY THE FALSIFIER TABLE.  Every falsifier reaches the hook as a JSON
 payload on stdin, delivered to a subprocess started with ``sys.executable``.  The command
 strings are data -- including the O129 rows, whose ``setx`` and ``SetEnvironmentVariable``
@@ -166,6 +201,10 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HOOK = os.path.join(REPO_ROOT, "tools", "hooks", "mlv-never-authorized.py")
+# ROUND 3 (S134): this suite's own text, so a gate that depends on a HARNESS line can assert
+# that line instead of remembering it.  Read once, at import, from `__file__` itself.
+with open(os.path.abspath(__file__), "r", encoding="utf-8") as _handle:
+    HARNESS_SOURCE = _handle.read()
 
 
 def _load_hook_module():
@@ -487,10 +526,16 @@ def _set_content(path):
 
 # ------------------------------------------- NA-3 / O129: PERSISTENT-scope hook inputs
 #
-# The five names are the hook's OWN inputs, and a persistent write of any of them is
+# The six names are the hook's OWN inputs, and a persistent write of any of them is
 # inherited by every later hook process -- it does not break a rule, it MOVES the ground the
 # rules stand on.  The payload text below is DATA: it is delivered to the hook on stdin and
 # never reaches a shell, here or anywhere else in this repo.
+#
+# This tuple is not decorative: `test_every_environment_input_the_hook_reads_is_na3_protected`
+# derives the real list from the hook's own `env.get(...)` calls and asserts it against the
+# hook's regex, so a steering input cannot ship unprotected.  The recorded reason is a root
+# that once did exactly that -- it widened NA-7 and was absent from this list, so it could be
+# `setx`-ed to `C:\` -- and that root has since been removed from the gate entirely.
 PERSISTENT_NAMES = (
     "CLAUDE_PROJECT_DIR",
     "MLV_BOARD_ROOT",
@@ -778,6 +823,11 @@ CASES = [
         "input": {"file_path": "{DUAL}/claude.md", "content": "# replaced\n"},
         "expect": "DENY",
         "na": "NA-2",
+        # HOOK-FALSE-POSITIVE-1: the row says `over`, so the ledger has to BE there.  Until
+        # this delta the generic arm refused the path without ever opening it, and the row
+        # passed against a board where `claude.md` did not exist -- a DENY row that was
+        # really measuring "the hook never looks".  An ABSENT target is now a create.
+        "fixture": "existing_ledger",
     },
     {
         "name": "r2 rm -rf a whole test directory",
@@ -3319,6 +3369,454 @@ CASES = [
         "expect": "ALLOW",
         "fixture": "venue_at_worktree",
     },
+    # ------------------------------------ HOOK-FALSE-POSITIVE-1: the falsifier PAIRS
+    #
+    # MEASURED, NOT ARGUED.  On 2026-09-07/08 the hub measured this gate refusing read-only
+    # and create-only acts: fourteen of twenty-seven headless Sonnet editing runs ended at
+    # `max_turns` after a denial, and the orchestrator was refused five times.  Every pair
+    # below is an ALLOW SUBJECT beside a DENY CONTROL, so a hook that simply stopped
+    # enforcing goes RED on the control rather than looking fixed.  Every subject was
+    # measured DENY on the parent commit (3e2b2220) except where a row says otherwise.
+    #
+    # PAIR DISCIPLINE (round 2, sol's MAJOR on PR #104).  Round 1 asserted "exactly one
+    # load-bearing token" for all six pairs and delivered it for one.  Each pair below now
+    # NAMES the token it varies, and the two pairs that cannot be one-token say so in their
+    # own comment instead of claiming it.  The claim is falsifiable by reading the two
+    # `input` dicts side by side; keep it that way.
+    #
+    # (i) THE REDIRECT'S TARGET IS THE ONLY THING IT TRUNCATES.  `2>` sets the truncation
+    # act, and up to this delta the act was attributed to every protected token on the
+    # line -- so reading a ledger with stderr discarded was "a truncating write" OF that
+    # ledger.  VARIES EXACTLY ONE TOKEN: the `2>` destination.  Same command, same verb,
+    # same protected path in the same read position; only the sink becomes the ledger, and
+    # a shell really does truncate what `2>` names.
+    {
+        "name": "fp1 i read a ledger with stderr to the bit bucket",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {"command": "cat \"{DUAL}/queue.json\" 2>/dev/null"},
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 i CTL the same read with the ledger as the stderr target",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {"command": "cat \"{DUAL}/queue.json\" 2>\"{DUAL}/queue.json\""},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "cannot be proven non-shrinking",
+    },
+    # (ii) THE SAME CLAIM FOR STDOUT, BESIDE `2>&1`.  The subject truncates something -- an
+    # unprotected scratch file -- so the act really is present; what changed is WHICH token
+    # it is attributed to.  VARIES EXACTLY ONE TOKEN: the `>` destination.  Round 1's
+    # control also swapped the file being READ, which meant the pair could have passed for
+    # a reason that had nothing to do with attribution.
+    {
+        "name": "fp1 ii read a ledger into a scratch file with stderr merged",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {
+            "command": "cat \"{DUAL}/queue.json\" > \"{BOARD}/scratch/out.txt\" 2>&1"
+        },
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 ii CTL the same read with the ledger as the redirect target",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {
+            "command": "cat \"{DUAL}/queue.json\" > \"{DUAL}/queue.json\" 2>&1"
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "cannot be proven non-shrinking",
+    },
+    # (iii) AN INTERPRETER METHOD NAME IS NOT A SHELL TRUNCATION VERB.  The heredoc READS
+    # the ledger and writes an UNPROTECTED continuity path; its `if len(r) > 0` is what set
+    # the truncation act, and the ledger is named only as the thing being read.  The hook
+    # still does not decode interpreter bodies -- that limit is unchanged and deliberate --
+    # so the control is a real `Set-Content` of the ledger, which the text matcher DOES see.
+    #
+    # NOT A ONE-TOKEN PAIR, AND IT CANNOT BE.  The tool, the command and the payload all
+    # differ, because the claim IS that an interpreter body and a shell cmdlet are different
+    # CLASSES to a text matcher: no single token turns a heredoc into a `Set-Content`, and
+    # any mutation of the heredoc that stayed a heredoc would still be ALLOW and so would
+    # not be a control at all.  Recorded here rather than papered over -- round 1 listed
+    # this pair as one-token and it never was.
+    {
+        "name": "fp1 iii heredoc reading a ledger and writing an unprotected path",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {
+            "command": "py -3 - <<'PY'\n"
+            "from pathlib import Path\n"
+            "q = Path(r'{DUAL}/queue.json')\n"
+            "rows = [r for r in q.read_text().splitlines() if len(r) > 0]\n"
+            "Path(r'{BOARD}/.claude-state/continuity/x.json').write_bytes(b'ok')\n"
+            "PY"
+        },
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 iii CTL a real Set-Content of that ledger",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {"command": "Set-Content -LiteralPath '{DUAL}/queue.json' -Value 'x'"},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "cannot be proven non-shrinking",
+    },
+    # (iv) A CREATE OVERWRITES NOTHING.  The generic arm's refusal names OVERWRITING, and it
+    # fired on a `Write` of a path nothing existed at -- the orchestrator's five refusals
+    # were all this shape.  THREE one-token pairs, one per thing the allowance is bounded
+    # by, because round 1's single control varied the directory, the basename AND the
+    # payload at once and so proved none of them:
+    #   iv-a VARIES EXACTLY ONE TOKEN, the BASENAME -- same directory, same content, and
+    #        the control's name is a chain receipt, held back from the allowance by NAME.
+    #   iv-b VARIES EXACTLY ONE TOKEN, the DIRECTORY segment -- same basename, same
+    #        content, and the control's directory is `receipts/`, held back by PATH.
+    #   iv-d VARIES EXACTLY ONE TOKEN, the PAYLOAD -- same tool, same existing pen, and
+    #        only the content shrinks, which is the untouched shrink guard.
+    {
+        "name": "fp1 iv a Write creates a new coordination file",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "{DUAL}/OPUS-HUB-PASTE.md", "content": CHECKPOINT_LONG},
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 iv a CTL the same create under a chain receipt basename",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "{DUAL}/execution-control-forged.json",
+            "content": CHECKPOINT_LONG,
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "overwriting ledger/pen/receipt/evidence content",
+    },
+    {
+        "name": "fp1 iv b Write creates a file under an ordinary coordination directory",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "{BOARD}/.claude-state/coordination/handoff/notes.json",
+            "content": CHECKPOINT_LONG,
+        },
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 iv b CTL the same create under a receipts directory",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "{BOARD}/.claude-state/coordination/receipts/notes.json",
+            "content": CHECKPOINT_LONG,
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "overwriting ledger/pen/receipt/evidence content",
+    },
+    {
+        # UNCHANGED BY THIS DELTA, PINNED SO NOBODY READS THE CONTROLS ABOVE AS BROADER
+        # THAN THEY ARE.  The SAME forged name under `$D/receipts/**` reaches the RECEIPTS
+        # CARVE-OUT one branch earlier and has always been ALLOWED as a create -- measured
+        # ALLOW on 3e2b2220 and still ALLOW here.  A forged chain name is defended at the
+        # ENABLE ACT (S118: it is not one of the six, so it fails the exception closed by
+        # name), never at write time, because the hub writes the six legitimate ones with
+        # this same tool.
+        "name": "fp1 iv c forged chain receipt under the dual-lane carve-out is unchanged",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "{RECEIPTS}/execution-control-forged.json",
+            "content": RECEIPT_LONG,
+        },
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 iv d Write rewrites an existing pen at its own length",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "{DUAL}/orchestrator-resume-CURRENT.md",
+            "content": CHECKPOINT_LONG,
+        },
+        "expect": "ALLOW",
+        "fixture": "checkpoint_unarchived",
+    },
+    {
+        "name": "fp1 iv d CTL the same write shrunk to a stub",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "{DUAL}/orchestrator-resume-CURRENT.md",
+            "content": "# stub\n",
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "shrinking overwrite",
+        "fixture": "checkpoint_unarchived",
+    },
+    # (v) THE NARROWING, PINNED AS A ROW RATHER THAN LEFT AS AN ABSENCE.
+    #
+    # An earlier revision of this packet admitted a THIRD NA-7 root -- the fleet doctrine bus
+    # clone beside this board -- and every one of the four reproducible bypasses the review
+    # rounds found lived in that root's machinery.  It was NARROWED OUT.  A removal that is
+    # only an absence is indistinguishable from a feature nobody wrote, so the DENY is
+    # asserted here: a `Write` to that sibling repository is refused by the ORDINARY NA-7
+    # rule, exactly as it was before this branch existed.  `{OUTSIDE}` is the tmp stand-in
+    # for any sibling of the board, so the row carries no machine layout.
+    #
+    # WHAT THIS ROW IS NOT.  It is not a ban on publishing the board's spec: that is a git
+    # operation performed by the orchestrator IN the bus repository and reviewed there as a
+    # commit, which this gate never sees and does not need to.  See the hook's header.
+    {
+        "name": "fp1 v Write publishing the board spec to a sibling repository is refused",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "{OUTSIDE}/specs/mlv-app.md", "content": "# mlv-app spec\n"},
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "outside both the worktree and the board root",
+    },
+    {
+        "name": "fp1 v CTL the same publish under the board root",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "{BOARD}/specs/mlv-app.md", "content": "# mlv-app spec\n"},
+        "expect": "ALLOW",
+    },
+    # (vi) A BIT BUCKET IS A SINK, NOT A FILE.  `/dev/null` is absolute and under neither
+    # root, so NA-7 refused it as a write outside both -- which is what made every
+    # `2>/dev/null` on this board a denial.  VARIES EXACTLY ONE TOKEN: the destination.
+    # (Round 1's only genuinely one-token pair, kept verbatim.)
+    {
+        "name": "fp1 vi shell write to the bit bucket",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {"command": "echo probe > /dev/null"},
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 vi CTL shell write to an absolute path outside every root",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {"command": "echo probe > \"{OUTSIDE}/stray.txt\""},
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "outside both the worktree and the board root",
+    },
+    # (vii) S133 -- `..` IS COLLAPSED BEFORE EVERY ROOT AND PREFIX COMPARISON.
+    #
+    # SOL'S BLOCKER ON PR #104, REPRODUCED HERE.  `norm` folded case and separators and
+    # never collapsed `..`, so `<bus>/../escaped.txt` kept the bus root as a literal PREFIX
+    # and `under()` said True -- a `Write` anywhere on the drive was ALLOWED by a rule whose
+    # whole job is to bound the roots.  A round-1 hook goes RED on every DENY row below.
+    # The fix lives in `norm` itself rather than at the NA-7 call site, so the SAME collapse
+    # protects NA-2's protected tails and NA-10's gate tails; the last pair proves that.
+    #
+    # Each control VARIES EXACTLY ONE TOKEN against the subject above it: the path.  All
+    # three roots are covered, because a fix applied at one call site would leave the other
+    # two open and every other row would still be green.
+    {
+        "name": "fp1 vii a CTL board publish path walked two levels out with dot dot",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "{BOARD}/specs/../../escaped.txt",
+            "content": "# mlv-app spec\n",
+        },
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "outside both the worktree and the board root",
+    },
+    {
+        "name": "fp1 vii b Write under the board root",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "{BOARD}/scratch/out.txt", "content": "probe\n"},
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 vii b CTL the same write walked out of the board root",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "{BOARD}/../escaped.txt", "content": "probe\n"},
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "outside both the worktree and the board root",
+    },
+    {
+        # `{REPO}` is the hook's OWN worktree root, derived from `__file__` -- the third
+        # root NA-7 admits, and the one a lane actually writes in.
+        "name": "fp1 vii c Write under the hook's own worktree root",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "{REPO}/build/fp1-scratch.txt", "content": "probe\n"},
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 vii c CTL the same write walked out of the worktree root",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "{REPO}/../escaped.txt", "content": "probe\n"},
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "outside both the worktree and the board root",
+    },
+    {
+        # THE OTHER DIRECTION, AND THE REASON THE COLLAPSE BELONGS IN `norm`: `..` must not
+        # become a way to HIDE a protected path from NA-2 either.  The ALLOW here is what
+        # keeps the fix from degenerating into "deny anything containing `..`" -- the same
+        # detour on an unprotected path is still an ordinary write.
+        #
+        # MEASURED, AND THE MEASUREMENT IS THE POINT.  The round-1 hook DENIED the control
+        # below -- but with `truncate of ledger/pen/receipt/evidence content at
+        # .../dual-lane/../dual-lane/queue.json`, the GENERIC arm, because `after_seg` could
+        # not see the `..` form as `queue.json` and `_carve_tag` returned None.  A right
+        # answer from the wrong branch: the carve-out that governs that file was never
+        # consulted, so nothing about its shrink rule, its delete rule or its receipts
+        # neighbours applied.  `reason_contains` is what makes this row a falsifier rather
+        # than a coincidence, and it is why it is pinned to the carve-out's wording.
+        "name": "fp1 vii d shell truncation of an unprotected path via a dot dot detour",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {"command": "echo x > \"{BOARD}/scratch/../scratch/out.txt\""},
+        "expect": "ALLOW",
+    },
+    {
+        "name": "fp1 vii d CTL the same detour onto the protected ledger",
+        "group": "falsepositive1",
+        "tool": "Bash",
+        "input": {"command": "echo x > \"{DUAL}/../dual-lane/queue.json\""},
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": "cannot be proven non-shrinking",
+    },
+    # (viii) S134 -- THE HOOK'S OWN ENVIRONMENT VARIABLES ARE EXPANDED BEFORE EVERY PATH
+    # CHECK, AND THE CLAIM IS NOW MADE ABOUT THE ROOT THAT SURVIVED.
+    #
+    # The measured defect: a delete of the protected queue ledger spelled through
+    # `$env:MLV_BOARD_ROOT` was ALLOWED while the identical LITERAL path was DENIED.  The fix
+    # is in `norm`, beside the `..` collapse and BEFORE it, so every arm inherits it and an
+    # expanded path is canonicalised rather than compared raw.  This half of the packet is
+    # KEPT: it closed a real ALLOW on a protected pen, and it never depended on the
+    # sibling-repository root that was narrowed out.
+    #
+    # WHAT THE PAIR VARIES.  viii IS NOT A ONE-TOKEN DENY/ALLOW PAIR IN THE USUAL SENSE and
+    # its control says so: it varies one DIRECTORY SEGMENT (`coordination` ->
+    # `coordination-scratch`), which is what takes the path off NA-2's protected tail.  Its
+    # falsifying power is in `reason_contains`, not in the verdict: NA-2's tails are matched
+    # SEGMENT-WISE, so a hook that does not expand DENIES this row too -- naming the
+    # UNEXPANDED `$env:mlv_board_root/...` in the reason.  Pinning the needle to
+    # `{BOARD_NORM}` makes the row RED there and is the only way this arm's reach is
+    # measurable at all.
+    {
+        "name": "fp1 viii env spelled delete of the protected queue ledger",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Remove-Item -LiteralPath "
+            '"$env:MLV_BOARD_ROOT/.claude-state/coordination/dual-lane/queue.json"'
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "{BOARD_NORM}/.claude-state/coordination/dual-lane/queue.json",
+            "denied on the carve-out paths",
+        ),
+    },
+    {
+        "name": "fp1 viii CTL the same variable on an unprotected sibling directory",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Remove-Item -LiteralPath "
+            '"$env:MLV_BOARD_ROOT/.claude-state/coordination-scratch/dual-lane/queue.json"'
+        },
+        "expect": "ALLOW",
+    },
+    # (ix) THE SAME ACT WITH THE STEERING VARIABLE UNSET, WHICH IS THE ONLY CONFIGURATION
+    # THAT ACTUALLY SHIPS.
+    #
+    # Substituting a hook-read name "only when the name is actually present in this process's
+    # environment" is green in the SET configuration and open in the other: nothing on this
+    # machine exports a steering root except this suite, so the guard held only on the
+    # machine the falsifier suite builds.  The repair is in `hook_env_values`: a name resolves
+    # to the value the hook IS USING -- the override when set, the BUILT-IN DEFAULT when not.
+    #
+    # This row is the twin of `viii` above, varying EXACTLY ONE THING: whether the name is
+    # bound.  Both must DENY, because the hook knows where the board is in both -- the defect
+    # was never ignorance of the root, it was asking "is the variable set?" instead of "what
+    # value am I using?".  The needle pins the RESOLVED DEFAULT (`{DEFAULT_BOARD_NORM}`,
+    # derived in `setUp` from the hook's own constant), so a hook that regressed to leaving
+    # the reference literal fails by verdict AND by name.
+    {
+        "name": "fp1 ix env spelled delete of the queue ledger with the board root UNSET",
+        "group": "falsepositive1",
+        "tool": "PowerShell",
+        "input": {
+            "command": "Remove-Item -LiteralPath "
+            '"$env:MLV_BOARD_ROOT/.claude-state/coordination/dual-lane/queue.json"'
+        },
+        "expect": "DENY",
+        "na": "NA-2",
+        "reason_contains": (
+            "{DEFAULT_BOARD_NORM}/.claude-state/coordination/dual-lane/queue.json",
+            "denied on the carve-out paths",
+        ),
+        "fixture": "board_root_unset",
+    },
+    # (x) AN UNRESOLVABLE ENVIRONMENT REFERENCE IS A DENIAL, NEVER A COLLAPSE.
+    #
+    # THE ROUND-5 REVIEWER'S REPRO, AND IT SURVIVES THE NARROWING BECAUSE IT WAS NEVER ABOUT
+    # THE REMOVED ROOT.  `MLV_LANE_PROMPT` is a name this hook READS but which has NO default,
+    # so when it is unset the reference is deliberately left standing as literal text (see
+    # `hook_env_values`).  `norm` then canonicalised `..` against that text and
+    # `"$env:MLV_LANE_PROMPT/../outside.txt"` became the bare relative `outside.txt` -- which
+    # NA-7's early return waves through as "resolves inside the worktree by construction",
+    # while the SHELL resolves the same string to an absolute path outside every root.  ALLOW,
+    # measured on `10b71482`.  `norm` now declines to collapse a path that still carries a
+    # reference and NA-7 refuses it as UNRESOLVABLE.
+    #
+    # THE PAIR VARIES EXACTLY ONE TOKEN: the leading segment.  The control is the identical
+    # `../outside.txt` walk with no reference in front of it, and it must keep WHATEVER
+    # behaviour it had -- which is DENY, from the `..`-out-of-the-worktree arm S133 added.
+    # That is the point of pairing them: the new rule must not be doing the old rule's job,
+    # and the two refusals are attributable by their DIFFERENT reasons.
+    {
+        "name": "fp1 x an unresolvable env reference walks out and is refused",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {
+            "file_path": "$env:MLV_LANE_PROMPT/../outside.txt",
+            "content": "probe\n",
+        },
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "UNRESOLVABLE environment reference",
+        "fixture": "lane_prompt_unset",
+    },
+    {
+        "name": "fp1 x CTL the same walk with an ordinary relative path and no reference",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "prompts/../outside.txt", "content": "probe\n"},
+        "expect": "ALLOW",
+        "fixture": "lane_prompt_unset",
+    },
+    {
+        "name": "fp1 x CTL a bare dot dot walk with no reference keeps its own refusal",
+        "group": "falsepositive1",
+        "tool": "Write",
+        "input": {"file_path": "../outside.txt", "content": "probe\n"},
+        "expect": "DENY",
+        "na": "NA-7",
+        "reason_contains": "walks out of the worktree with `..`",
+        "fixture": "lane_prompt_unset",
+    },
     # ------------------------------------------------------- the 6 benign ALLOW controls
     {
         "name": "benign git push fork product branch",
@@ -3374,6 +3872,32 @@ CASES = [
 # venue must reach the hook the way the registration delivers it, and a row that wants to
 # prove the environment is NOT read sets `CLAUDE_PROJECT_DIR` instead and passes no argument.
 VENUE_KEY = "__project_dir__"
+
+
+class _Unset(object):
+    """ROUND 5: a fixture value meaning DELETE THIS NAME FROM THE HOOK'S ENVIRONMENT.
+
+    THE CAPABILITY THIS SUITE DID NOT HAVE, AND ITS ABSENCE IS WHAT LET A HOLE THROUGH.
+    `_invoke` binds `MLV_BOARD_ROOT`, `MLV_CLIP_CACHE_ROOT` and
+    `MLV_REQUIRED_CHECKS_SNAPSHOT` for EVERY row, so until this delta the suite could only
+    ever measure the SET configuration.  An expansion that substituted a name only when it
+    was PRESENT is green in that configuration and open in the other: with the name unset --
+    the AMBIENT state on this machine -- the env-spelled delete of a protected path was
+    ALLOWED while the literal one was DENIED.  A steering root's DEFAULT is a configuration
+    this hook actually runs in (it is the only one that ships), so it has to be a
+    configuration this table can express.
+
+    An override of `UNSET` is popped from the row's overrides AND deleted from the hook's
+    environment, so the hook falls back to its OWN built-in default -- which is what the
+    paired rows below measure.  Nothing is executed and no path is stat'ed; the rows assert a
+    DECISION about a path, so binding a name to nothing cannot touch this machine.
+    """
+
+    def __repr__(self):
+        return "UNSET"
+
+
+UNSET = _Unset()
 
 
 def _write(path, text):
@@ -3929,6 +4453,44 @@ def fixture_clip_authorized(paths):
 def fixture_existing_receipt(paths):
     _write(os.path.join(paths["RECEIPTS"], "live.json"), RECEIPT_LONG)
     return {}
+
+
+def fixture_existing_ledger(paths):
+    """HOOK-FALSE-POSITIVE-1: the gate ledger EXISTS, so a `Write` of it really overwrites.
+
+    The `r2 Write over a coordination ledger` row says `over` and always meant an
+    overwrite, but nothing had ever put the file on the tmp board -- so up to this delta it
+    was passing against the generic arm's blanket refusal of a path it never opened.  Now
+    that an ABSENT target is a create-or-extend, the row states its own precondition.
+    """
+    _write(os.path.join(paths["DUAL"], "claude.md"), CHECKPOINT_LONG)
+    return {}
+
+
+def fixture_lane_prompt_unset(paths):
+    """THE UNRESOLVABLE-REFERENCE ROWS: `MLV_LANE_PROMPT` bound to NOTHING, stated explicitly.
+
+    `_invoke` strips every `MLV_*` name before it binds the three it anchors, so this name is
+    already absent on every row -- which is exactly why it is written down here rather than
+    relied on.  These rows assert a DECISION about a path spelled through a name the hook
+    READS but CANNOT resolve (it has no built-in default), and the precondition that makes
+    them mean anything is that the name is unbound.  A future harness change that started
+    exporting it would otherwise turn these falsifiers green for the wrong reason.
+
+    `MLV_BOARD_ROOT` stays bound to the tmp board, so the prompt name is the ONE thing this
+    fixture varies.  Nothing is written and no path is stat'ed.
+    """
+    return {"MLV_LANE_PROMPT": UNSET}
+
+
+def fixture_board_root_unset(paths):
+    """ROUND 5: the BOARD root not exported either -- the same question for the other root.
+
+    `ix-e` proved the board root is expanded when it is SET.  This is its unset twin: with
+    the name absent the hook judges against `DEFAULT_BOARD_ROOT`, and the NA-2 tail must
+    still fire, naming the RESOLVED default rather than the literal `$env:...` text.
+    """
+    return {"MLV_BOARD_ROOT": UNSET}
 
 
 def fixture_receipts_all_six(paths):
@@ -4733,6 +5295,11 @@ FIXTURES = {
     "snapshot_absent": fixture_snapshot_absent,
     "clip_authorized": fixture_clip_authorized,
     "existing_receipt": fixture_existing_receipt,
+    # HOOK-FALSE-POSITIVE-1
+    "existing_ledger": fixture_existing_ledger,
+    # The UNSET half of the expansion pairs, and the unresolvable-reference rows.
+    "lane_prompt_unset": fixture_lane_prompt_unset,
+    "board_root_unset": fixture_board_root_unset,
     "receipts_all_six": fixture_receipts_all_six,
     "receipts_all_six_at_board": fixture_receipts_all_six_at_board,
     "receipts_all_six_at_worktree": fixture_receipts_all_six_at_worktree,
@@ -4856,6 +5423,22 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         }
         for key in ("BOARD", "DUAL", "RECEIPTS", "OUTSIDE", "CACHE", "WORKTREE"):
             os.makedirs(self.paths[key])
+        # ROUND 3 (S134): the board root as the hook PRINTS it -- normalised, so a
+        # `reason_contains` can pin the RESOLVED path rather than the placeholder.  That is
+        # what turns the `$env:MLV_BOARD_ROOT` NA-2 row into a falsifier: a hook that does
+        # not expand still DENIES that row, but names `$env:mlv_board_root/...` in the
+        # reason, which this needle does not match.  Derived with the hook's OWN `norm`, so
+        # it is right on both matrix legs and cannot drift from the printer.
+        self.paths["BOARD_NORM"] = _load_hook_module().norm(self.paths["BOARD"])
+        # ROUND 5: the hook's OWN built-in defaults, as the hook PRINTS them.  Read from the
+        # module's constants and normalised with the module's `norm`, never written down
+        # here: these needles must follow the hook if a default ever moves, and a literal
+        # would turn a default change into a green suite plus a wrong claim.  They are the
+        # expected values of the UNSET half of each pair -- what the hook resolves when the
+        # steering variable is absent, which is the configuration that actually ships.
+        self.paths["DEFAULT_BOARD_NORM"] = _load_hook_module().norm(
+            _load_hook_module().DEFAULT_BOARD_ROOT
+        )
         self.paths["CHECKPOINT_SHA"] = hashlib.sha256(
             CHECKPOINT_LONG.encode("utf-8")
         ).hexdigest()
@@ -4986,6 +5569,13 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         env["MLV_REQUIRED_CHECKS_SNAPSHOT"] = self.paths["SNAPSHOT"]
         overrides = dict(overrides)
         venue = overrides.pop(VENUE_KEY, None)
+        # ROUND 5: `UNSET` is not a value, it is the ABSENCE of one.  Popped before the
+        # update (a sentinel object is not a legal environment value) and deleted from the
+        # environment, so the hook resolves that name to its OWN built-in default -- the
+        # configuration this machine actually runs in, and the one round 3 never measured.
+        for key in [key for key, value in overrides.items() if value is UNSET]:
+            overrides.pop(key)
+            env.pop(key, None)
         env.update(overrides)
         env["PYTHONIOENCODING"] = "utf-8"
         argv = [sys.executable, HOOK]
@@ -5058,6 +5648,108 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         """A hook's script must live on the SAME REF as the tree it guards."""
         self.assertTrue(os.path.isfile(HOOK), HOOK)
 
+    def test_every_environment_input_the_hook_reads_is_na3_protected(self):
+        """S133: THE RULE IS THE LIST, and the list is DERIVED, not remembered.
+
+        An earlier revision of HOOK-FALSE-POSITIVE-1 shipped a steering input that WIDENS
+        NA-7's roots while it was absent from `_NA3_PERSISTENT_NAMES` -- so `setx` of it was
+        ALLOWED and every later hook process on the machine would have inherited a root of
+        the reviewer's choosing.  A reviewer found it by trying it; nothing in this suite
+        could have.  That root has since been removed from the gate, but the GATE THAT WOULD
+        HAVE CAUGHT IT is kept, because it is about the next input, not that one.
+
+        This gate reads the hook's OWN source for the environment names it consults and
+        asserts each one is matched by the hook's OWN persistent-name regex, so the next
+        input added to `Ctx.__init__` cannot ship unprotected.  `MLV_HOOK_DRYRUN` is the one
+        exemption and it is named explicitly rather than pattern-matched: it selects whether
+        the decision is PRINTED and cannot change any decision (`main` returns the same exit
+        code either way), so a persistent write of it moves no ground.
+        """
+        with open(HOOK, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        read_names = set(re.findall(r"env(?:iron)?\.get\(\s*[\"'](\w+)[\"']", source))
+        self.assertIn("MLV_BOARD_ROOT", read_names, "the hook must read the board root")
+        steering = sorted(read_names - {"MLV_HOOK_DRYRUN"})
+        self.assertTrue(steering, "the hook reads no environment input at all?")
+        name_rx = _load_hook_module()._NA3_PERSISTENT_NAME_RX
+        unprotected = [name for name in steering if not name_rx.fullmatch(name)]
+        self.assertEqual(
+            unprotected,
+            [],
+            "environment inputs the hook READS but NA-3 does not protect: %s" % unprotected,
+        )
+        # And the table's own tuple is the same list, so a reader of either sees one answer.
+        for name in steering:
+            self.assertIn(name, PERSISTENT_NAMES, name)
+
+    def test_every_environment_input_the_hook_reads_is_expanded_in_a_path(self):
+        """S134: THE EXPANSION LIST IS THE READ LIST, DERIVED FROM THE SAME CALL SITES.
+
+        An earlier revision shipped a guard whose docstring promised "denied at every value"
+        while the code resolved only a LITERAL path; a reviewer broke it by spelling the same
+        file through `$env:`.  The repair is only durable if the NEXT input added to
+        `Ctx.__init__` is expanded too, so this gate derives the names from the hook's own
+        `env.get(...)` call sites -- the SAME derivation the NA-3 protection gate above
+        performs -- and asserts `HOOK_READ_ENV_NAMES` is EXACTLY that set.  Equality in both
+        directions is the point: a missing name is that defect returning, and an EXTRA name
+        is this hook substituting a value it never read, which is the fabrication the
+        header's residual limit refuses.
+        """
+        with open(HOOK, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        read_names = set(re.findall(r"env(?:iron)?\.get\(\s*[\"'](\w+)[\"']", source))
+        module = _load_hook_module()
+        self.assertEqual(
+            sorted(module.HOOK_READ_ENV_NAMES),
+            sorted(read_names),
+            "the expansion list must be exactly the names the hook reads",
+        )
+        # And every spelling the list claims really resolves, at the value THIS process
+        # carries -- one assertion per spelling, so a regex that loses one goes red by name.
+        saved = os.environ.get("MLV_BOARD_ROOT")
+        os.environ["MLV_BOARD_ROOT"] = r"C:\fp1\board"
+        try:
+            for spelling in (
+                "$env:MLV_BOARD_ROOT/specs/x.md",
+                "${env:MLV_BOARD_ROOT}/specs/x.md",
+                "%MLV_BOARD_ROOT%/specs/x.md",
+                "$ENV:mlv_board_root/specs/x.md",
+            ):
+                self.assertEqual(
+                    module.norm(spelling), "c:/fp1/board/specs/x.md", spelling
+                )
+            # A name the hook does NOT read is left standing, not blanked and not guessed.
+            self.assertEqual(
+                module.norm("$env:FP1_UNREAD_ROOT/specs/x.md"),
+                "$env:fp1_unread_root/specs/x.md",
+            )
+            # Expansion precedes the `..` collapse, which is the whole reason it lives in
+            # `norm` rather than at a call site.
+            self.assertEqual(
+                module.norm("$env:MLV_BOARD_ROOT/../escaped.txt"), "c:/fp1/escaped.txt"
+            )
+            # ... and a reference that CANNOT be resolved is not collapsed at all.  It used
+            # to become the bare relative `escaped.txt`, which NA-7's early return waved past
+            # as "inside the worktree by construction"; `norm` now leaves the text standing
+            # so `_na7_check_path` can refuse it as unresolvable.
+            self.assertEqual(
+                module.norm("$env:FP1_UNREAD_ROOT/../escaped.txt"),
+                "$env:fp1_unread_root/../escaped.txt",
+            )
+            self.assertEqual(
+                module._unresolved_env_ref("$env:fp1_unread_root/../escaped.txt"),
+                "$env:fp1_unread_root",
+            )
+            # A path with NO reference in it is collapsed exactly as before -- the new rule
+            # must not be doing the `..` collapse's job.
+            self.assertIsNone(module._unresolved_env_ref("prompts/../escaped.txt"))
+            self.assertEqual(module.norm("prompts/../escaped.txt"), "escaped.txt")
+        finally:
+            if saved is None:
+                del os.environ["MLV_BOARD_ROOT"]
+            else:
+                os.environ["MLV_BOARD_ROOT"] = saved
+
     def test_every_register_row_has_at_least_one_deny_case(self):
         """The suite FAILS if any of NA-1,2,3,4,6,7,8,9,10 has zero DENY cases.
 
@@ -5079,6 +5771,37 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self.assertEqual(counts.get("round2"), 12, "12 round-2 falsifiers")
         self.assertEqual(counts.get("failclosed"), 4, "4 fail-closed inputs")
         self.assertEqual(counts.get("benign"), 6, "6 benign ALLOW controls")
+        # HOOK-FALSE-POSITIVE-1.  Pinned so a subject cannot be dropped once its control
+        # still passes.  The count rose 15 -> 29 -> 39 -> 44 across five review rounds as the
+        # pairs were re-cut and two claims (the `..` collapse, the environment expansion)
+        # arrived with their own rows.
+        #
+        # PINNED DELIBERATELY AT THE NARROWING: 44 -> 30, AND THIS IS THE ONE TIME ROWS WERE
+        # DROPPED ON PURPOSE.  Fourteen rows asserted behaviour of a THIRD NA-7 root -- a
+        # sibling-repository write surface -- which is REMOVED from the gate: the four
+        # reproducible bypasses five rounds turned up were all in that root's machinery, and
+        # a row asserting a removed feature is not a falsifier, it is a resurrection notice.
+        # What went with it: the bus publish/delete pair (v), the two bus `..` escapes (vii),
+        # the two NA-3 `setx` rows for its name (viii), the six env/cmd/braced spelling rows
+        # and their unread-name controls (ix), and four of the five UNSET twins (x).
+        #
+        # WHAT WAS KEPT, AND WHY IT IS NOT ENTANGLED WITH WHAT WENT.  Every retained claim is
+        # measured against a root that still exists: the `..` collapse is proved at the BOARD
+        # root, the WORKTREE root and against an NA-2 protected tail (vii); the environment
+        # expansion is proved on `$env:MLV_BOARD_ROOT` in BOTH the bound and unbound
+        # configurations, where it closed a real ALLOW on the protected queue ledger
+        # (viii/ix); the bit-bucket sinks, the redirect-target precision and the
+        # create-under-coordination arm never named a root at all (i, ii, iii, iv, vi).
+        #
+        # THREE ROWS ARE NEW.  (v) pins the NARROWING itself as a DENY, so the removal is a
+        # rule a reader can see rather than an absence they might read as an oversight; (x)
+        # is the round-5 blocker, which SURVIVES the narrowing because it was never about the
+        # removed root -- a reference the hook cannot resolve used to collapse into a bare
+        # relative name that NA-7's early return waved through -- with two controls beside it
+        # so the new refusal is attributable and is not doing the `..` collapse's job.
+        self.assertEqual(
+            counts.get("falsepositive1"), 30, "30 HOOK-FALSE-POSITIVE-1 rows"
+        )
         # PINNED DELIBERATELY, 0.05 third review delta: the 0.2 enable became ONE dedicated
         # act, so the group grew 6 -> 15.  Six rows vary the canonical act's PRECONDITIONS,
         # six vary its SHAPE (all DENY), two are exception (iii) creates and one is the
@@ -5711,13 +6434,142 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         self.assertFalse(is_absolute(norm("outside/stray.txt")), "relative path")
         self.assertFalse(is_absolute(norm("../outside/stray.txt")), "relative parent path")
 
+    def _hook_read_env_names(self):
+        """The env names the HOOK ITSELF reads, derived from its OWN `env.get(...)` sites.
+
+        The SAME derivation `test_every_environment_input_the_hook_reads_is_na3_protected`
+        and `test_every_environment_input_the_hook_reads_is_expanded_in_a_path` perform, and
+        for the same reason: a name list spelled out twice is a list that goes stale once, so
+        the next input added to `Ctx.__init__` must reach every gate that keys on it without
+        anyone remembering to widen a literal tuple.  `MLV_HOOK_DRYRUN` is the one exemption
+        and it is named rather than pattern-matched: it is not a ROOT, it selects whether the
+        decision is PRINTED, and it can change no decision.
+        """
+        with open(HOOK, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        names = set(re.findall(r"env(?:iron)?\.get\(\s*[\"'](\w+)[\"']", source))
+        self.assertTrue(names, "the hook reads no environment input at all?")
+        return sorted(names - {"MLV_HOOK_DRYRUN"})
+
+    def _assert_no_fixture_binds_a_hook_read_root_outside_tmp(self, cases, fixtures):
+        """ROUND 4 (sol, PR #104): the guard must check the OVERRIDES, not just the base bind.
+
+        Round 3 admitted `$env:MLV_BOARD_ROOT` / `{BOARD_NORM}` as fixture anchors and
+        justified it by asserting that `_invoke` binds `MLV_BOARD_ROOT` to the TMP board.
+        That justification was incomplete, and sol showed why: `_invoke` applies
+        `env.update(overrides)` AFTER that binding, so a row's OWN fixture wins.  A case
+        whose fixture re-bound `MLV_BOARD_ROOT` to the REAL board would then have spelled the
+        real board through an APPROVED anchor and passed the very guard whose entire purpose
+        is to catch a fixture pointing at the real board.  The base binding is a default, not
+        an invariant, so the invariant is asserted directly here instead: for every name the
+        hook READS, no case's fixture may bind it anywhere but inside this test's tmp tree.
+
+        The name list is DERIVED from the hook's own call sites (`_hook_read_env_names`), so
+        a new steering root is covered the day it is read -- the recorded case is a root that
+        shipped ahead of the gates that should have known it, and was ultimately removed.
+        The venue is not among them by construction: it arrives on argv under `VENUE_KEY`,
+        never through the environment (O126), and NA-10's `venue_at_worktree` row legitimately
+        names the real checkout root there.
+        """
+        names = self._hook_read_env_names()
+        tmp = os.path.normcase(os.path.abspath(self.tmp))
+        for fixture_name in sorted(set(case.get("fixture", "default") for case in cases)):
+            overrides = fixtures[fixture_name](self.paths)
+            for name in names:
+                if name not in overrides:
+                    continue
+                value = overrides[name]
+                if value is UNSET:
+                    # ROUND 5: an UNSET name binds NOTHING, so there is no fixture path to
+                    # check.  What the hook then uses is its own built-in default, which is
+                    # the very configuration the paired rows exist to measure -- and it is a
+                    # DECISION about that path, never a touch of it.
+                    continue
+                resolved = os.path.normcase(os.path.abspath(value))
+                self.assertTrue(
+                    resolved == tmp or resolved.startswith(tmp + os.sep),
+                    "fixture %r binds %s to %r, which is OUTSIDE this test's tmp tree (%s) "
+                    "-- a fixture's overrides are applied after `_invoke`'s base binding, so "
+                    "this would aim the hook at a root on this machine"
+                    % (fixture_name, name, value, self.tmp),
+                )
+
     def test_no_case_references_a_real_board_path(self):
         """No case may depend on `.claude-state` or the real board root (O81/O97)."""
         blob = json.dumps(CASES)
         self.assertNotIn("Layi Wkspc", blob)
         self.assertNotIn("bachelor", blob)
+        # ROUND 3 (S134): `$env:MLV_BOARD_ROOT` is an ANCHOR beside `{BOARD}`, and ONLY
+        # because the name resolves to `paths["BOARD"]` -- the tmp board -- on every row.
+        # The gate's claim is unchanged: no case may depend on the REAL board root, and the
+        # two literal guards above are what enforce that and are untouched.  What changed is
+        # that a row may now spell the fixture's board through the very variable whose
+        # expansion it is testing.
+        #
+        # ROUND 4: the resolution is asserted, not remembered, and in BOTH halves -- the base
+        # binding in `_invoke`, asserted against `HARNESS_SOURCE` just below, and the fixture
+        # overrides applied after it, which round 3 did not check at all.  The second half is
+        # `_assert_no_fixture_binds_a_hook_read_root_
+        # outside_tmp` is the second half and covers every root the hook reads, not just this
+        # one; `test_the_real_board_guard_catches_a_fixture_that_rebinds_a_read_root` is its
+        # falsifier.
+        self.assertIn(
+            'env["MLV_BOARD_ROOT"] = self.paths["BOARD"]',
+            HARNESS_SOURCE,
+            "the env anchor below is only safe while `_invoke` binds it to the tmp board",
+        )
+        self._assert_no_fixture_binds_a_hook_read_root_outside_tmp(CASES, FIXTURES)
+        # `{BOARD_NORM}` is the same tmp board as the hook PRINTS it, bound in `setUp` from
+        # `paths["BOARD"]` -- a fixture placeholder like `{BOARD}`, never a machine path.
+        # ROUND 5: `{DEFAULT_BOARD_NORM}` is the ONE anchor that names the hook's built-in
+        # default rather than the tmp board, and it is admitted deliberately.  The `x e` row
+        # exists to measure the configuration where `MLV_BOARD_ROOT` is UNSET, and in that
+        # configuration the hook judges against `DEFAULT_BOARD_ROOT` -- so a row that could
+        # not name it could not assert the expansion resolved at all.  It stays inside this
+        # gate's claim: the placeholder is bound in `setUp` from the HOOK MODULE's own
+        # constant (never a literal here, and the "Layi Wkspc" guard above still holds over
+        # the table text), and the row asserts a REFUSAL about that path -- nothing is
+        # written, read or stat'ed there, by the hook or by this suite.
+        anchors = (
+            "{BOARD}",
+            "{BOARD_NORM}",
+            "{DEFAULT_BOARD_NORM}",
+            "$env:MLV_BOARD_ROOT",
+            "${env:MLV_BOARD_ROOT}",
+        )
         for match in re.finditer(r"\.claude-state[^\"\\]*", blob):
-            self.assertIn("{BOARD}", blob[max(0, match.start() - 40) : match.start() + 1])
+            window = blob[max(0, match.start() - 40) : match.start() + 1]
+            self.assertTrue(
+                any(anchor in window for anchor in anchors),
+                "a `.claude-state` path must come from the fixture, not this machine: %r"
+                % window,
+            )
+
+    def test_the_real_board_guard_catches_a_fixture_that_rebinds_a_read_root(self):
+        """ROUND 4: sol's OWN construction, run as a falsifier -- it must make the guard FAIL.
+
+        A guard nobody has ever seen fail is a guard nobody has evidence about, and this one
+        passed a whole round while blind to exactly this shape.  So the shape is built here:
+        a synthetic case whose fixture binds a hook-read root to the REAL board root --
+        `REPO_ROOT`, derived from this file's own location, so the falsifier carries no
+        machine literal and names the real checkout on either matrix leg.  Measured against
+        the round-3 guard before this delta: with that fixture appended to `CASES` the guard
+        returned OK, because it read the case TEXT and never the fixture's overrides.
+
+        One synthetic row PER NAME the hook reads, so coverage is proved for the whole
+        derived list rather than for `MLV_BOARD_ROOT` alone -- the bus root joining that list
+        a round late is why the distinction is not academic here.
+        """
+        for name in self._hook_read_env_names():
+            with self.subTest(name=name):
+                fixtures = {"fp1_rebinds_a_real_root": lambda paths, n=name: {n: REPO_ROOT}}
+                cases = [{"name": "synthetic rebind", "fixture": "fp1_rebinds_a_real_root"}]
+                with self.assertRaises(AssertionError) as caught:
+                    self._assert_no_fixture_binds_a_hook_read_root_outside_tmp(cases, fixtures)
+                self.assertIn(name, str(caught.exception))
+        # And the REAL table passes the same check, so the failures above are attributable to
+        # the synthetic rows and not to a guard that refuses everything put in front of it.
+        self._assert_no_fixture_binds_a_hook_read_root_outside_tmp(CASES, FIXTURES)
 
     def test_the_hook_never_reads_the_venue_from_the_environment(self):
         """O126, asserted on the SOURCE as well as on the behaviour.
