@@ -1063,7 +1063,8 @@ $fence
     # the worktree must already be on it.
 
     # Check if branch already exists to avoid "fatal: a branch named '...' already exists" error
-    $branchExists = & git -C $RepoRoot rev-parse --verify $branch 2>&1 | Select-Object -SkipLast 1; $LASTEXITCODE -eq 0
+    & git -C $RepoRoot rev-parse --verify $branch 2>&1 | Out-Null
+    $branchExists = ($LASTEXITCODE -eq 0)
 
     if ($branchExists) {
         # Branch exists; use it without -b flag
