@@ -1061,7 +1061,18 @@ $fence
     # diagnosis-base sha - and is recorded on the receipt below. A real branch checkout, never
     # --detach: the composed procedure itself tells the lane to `git switch -c` this branch, so
     # the worktree must already be on it.
-    & git -C $RepoRoot -c core.longpaths=true worktree add -b $branch $laneWorkDir $baseSha 2>&1 | Out-Null
+
+    # Check if branch already exists to avoid "fatal: a branch named '...' already exists" error
+    $branchExists = & git -C $RepoRoot rev-parse --verify $branch 2>&1 | Select-Object -SkipLast 1; $LASTEXITCODE -eq 0
+
+    if ($branchExists) {
+        # Branch exists; use it without -b flag
+        & git -C $RepoRoot -c core.longpaths=true worktree add $laneWorkDir $branch 2>&1 | Out-Null
+    } else {
+        # Branch doesn't exist; create it with -b flag
+        & git -C $RepoRoot -c core.longpaths=true worktree add -b $branch $laneWorkDir $baseSha 2>&1 | Out-Null
+    }
+
     if ($LASTEXITCODE -ne 0) {
         Write-Output "WORKSTREAM: CANNOT-DETERMINE - git worktree add failed for $laneWorkDir at $baseSha (branch $branch)"
         exit 3
