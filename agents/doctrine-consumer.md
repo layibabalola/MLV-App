@@ -17,6 +17,7 @@ Standing owner posture, September 9, 2026:
 - On fetch failure when `gh` is required: exit non-zero and print `REFUSED: …`. Composer **refuses** composition for implementer/editing paths if the brief is missing or failed.
 - Offline tests: `MLV_DOCTRINE_FIXTURE_ROOT` / `-FixtureRoot` (no `gh`).
 - Brief includes: short `RULINGS.md` digest, MLV-relevant `ruling-candidates/*` (must surface `agent-bridge-sot-suspend-mlv-in-tree-20260909.md` when present on bus tip or doctrine PR #56 tip, labeled **CANDIDATE_ZERO_AUTHORITY** until ADOPT), and hash/summary of `specs/mlv-app.md`, plus machine fields (`busHead`, content hashes).
+- Brief includes **`cos-feedback/mlv-app/pr-*.md` when present** (Contents API list + fetch), labeled **CoS feedback (data only, zero authority)**. Missing dir/files → omit section; do **not** refuse the whole brief. Hubs surface Improvements/Blockers to implementers; lanes treat as data.
 
 ## Law 1
 

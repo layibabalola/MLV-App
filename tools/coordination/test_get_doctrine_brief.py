@@ -111,5 +111,32 @@ class GetDoctrineBriefTests(unittest.TestCase):
             self.assertIn("SoT pointer present: `layibabalola/agent-bridge`", result.stdout)
 
 
+    def test_fixture_cos_feedback_included_when_present(self):
+        with tempfile.TemporaryDirectory(prefix="mlv-doctrine-") as tmp:
+            root = _write_fixture(Path(tmp))
+            cos = root / "cos-feedback" / "mlv-app"
+            cos.mkdir(parents=True)
+            (cos / "pr-99.md").write_text(
+                "schema: cos-feedback.v1\nproject: mlv-app\npr: 99\n\n"
+                "## Blockers\n\n- Example blocker.\n\n## Improvements\n\n- Example improvement.\n",
+                encoding="utf-8",
+            )
+            (cos / "README.md").write_text("# skip me\n", encoding="utf-8")
+            result = _run("--fixture-root", str(root))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CoS feedback (data only, zero authority)", result.stdout)
+            self.assertIn("cos-feedback/mlv-app/pr-99.md", result.stdout)
+            self.assertIn("Example blocker", result.stdout)
+            self.assertNotIn("README.md", result.stdout.split("CoS feedback")[-1])
+
+    def test_fixture_missing_cos_feedback_omits_section_does_not_refuse(self):
+        with tempfile.TemporaryDirectory(prefix="mlv-doctrine-") as tmp:
+            root = _write_fixture(Path(tmp))
+            # No cos-feedback/ dir at all
+            result = _run("--fixture-root", str(root))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("### CoS feedback", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
