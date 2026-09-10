@@ -42,6 +42,39 @@ host may cache the tool list it saw during MCP initialization. In that case the
 wrapper sets `tool-refresh-status.json` to `refresh_required` and emits
 `mcp_server_refresh_required` / `mcp_tools_refresh_required` audit rows.
 
+## Which Tree Is Running (Claude Desktop)
+
+Everything above concerns the wrong *code* in a live process. There is a second,
+independent axis: the wrong *tree*.
+
+Claude Desktop launches the bridge from the locked worktree
+`.claude-state\worktrees\bridge-runtime` (branch `bridge-runtime`), **not** from this
+checkout. Edits in the main checkout therefore do not reach the running bridge, and
+they fail silently: the edit is real, the tests pass, the commit lands on `master`,
+and the bridge keeps serving the old code from a different tree. Restarting Desktop
+does not help — a restart re-launches from the config path, which is the worktree.
+
+Do not guess which tree is live. Each bridge process reports its own:
+
+```powershell
+pwsh -NoProfile -File .claude-state\tools\Invoke-BridgeRuntimeLanding.ps1 -Phase Preflight
+```
+
+That emits one row per bridge process classified `runtime-worktree` / `main-tree` /
+`other`, plus the tree the Desktop config currently points at. It is read-only.
+
+To move the runtime forward:
+
+```powershell
+pwsh -NoProfile -File .claude-state\tools\Invoke-BridgeRuntimeLanding.ps1 -Phase UpdateRuntime
+```
+
+This is `git fetch fork --prune` plus `git merge --ff-only fork/master` inside the
+worktree, so the work must already be on `fork/master` — a local-only commit will not
+move the runtime. No Desktop restart is needed afterwards: the wrapper reloads itself
+when its files change, by the same code-watcher and exit-77 paths described above.
+Confirm with `-Phase Preflight`. Do not hand-edit the worktree and do not unlock it.
+
 ## Rule
 
 After changing bridge Python code, a fresh probe is still the strongest proof of
