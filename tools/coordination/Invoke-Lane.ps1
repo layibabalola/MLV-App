@@ -48,7 +48,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('opus', 'sonnet', 'fable', 'sol', 'luna')]
+    [ValidateSet('opus', 'sonnet', 'fable', 'sol', 'luna', 'astra')]
     [string]$Lane,
 
     [string]$Prompt,

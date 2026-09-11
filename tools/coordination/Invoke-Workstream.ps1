@@ -605,7 +605,7 @@ $cardKind   = Get-Prop $card 'kind'
 $cardOwner  = Get-Prop $card 'owner'
 $cardScope  = [string](Get-Prop $card 'scope')
 if (-not $Lane) { $Lane = Get-ResolvedLane -Kind $cardKind -Owner $cardOwner -Scope $cardScope -NeedsShell $needsShell }
-$engine = if ($Lane -eq 'sol' -or $Lane -eq 'luna') { 'codex' } else { 'claude' }
+$engine = if ($Lane -eq 'sol' -or $Lane -eq 'luna' -or $Lane -eq 'astra') { 'codex' } else { 'claude' }
 
 # ------------------------------------------------------------------ factory-bridged check (dogfooding)
 # Cards marked factory-bridged route to external factory instead of local lane dispatch.
