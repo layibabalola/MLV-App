@@ -612,8 +612,10 @@ $engine = if ($Lane -eq 'sol' -or $Lane -eq 'luna' -or $Lane -eq 'astra') { 'cod
 if ($cardScope -match 'factory-bridged') {
     $factoryRoot = 'C:\!Layi Wkspc\Adobe Document Cloud Ingester'
     Write-Output "WORKSTREAM: factory-bridged detected card=$cardId routing to external factory"
+    # Pass card as JSON to preserve object structure across process boundary
+    $cardJson = $card | ConvertTo-Json -Compress
     & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Invoke-FactoryWorkOrder.ps1') `
-        -QueueCard $card -LoopRoot $RepoRoot -ExternalFactoryRoot $factoryRoot
+        -QueueCardJson $cardJson -LoopRoot $RepoRoot -ExternalFactoryRoot $factoryRoot
     exit $LASTEXITCODE
 }
 

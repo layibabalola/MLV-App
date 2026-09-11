@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [hashtable]$QueueCard,
+    [string]$QueueCardJson,
 
     [Parameter(Mandatory = $true)]
     [string]$LoopRoot,
@@ -21,6 +21,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ExternalFactoryRoot = "C:\!Layi Wkspc\Adobe Document Cloud Ingester"
 )
+
+# Parse JSON card back to hashtable
+$QueueCard = $QueueCardJson | ConvertFrom-Json -AsHashtable
 
 $ErrorActionPreference = 'Stop'
 
