@@ -22,8 +22,22 @@ param(
     [string]$ExternalFactoryRoot = "C:\!Layi Wkspc\Adobe Document Cloud Ingester"
 )
 
-# Parse JSON card back to hashtable
-$QueueCard = $QueueCardJson | ConvertFrom-Json -AsHashtable
+# Parse JSON card back to object
+$cardObj = $QueueCardJson | ConvertFrom-Json
+
+# Map to hashtable with proper key names (JSON uses 'id', expect 'cardId')
+$QueueCard = @{
+    cardId = $cardObj.id
+    kind = $cardObj.kind
+    scope = @($cardObj.scope)  # ensure array
+    deliverable = $cardObj.deliverable
+    procedure = $cardObj.procedure
+    state = $cardObj.state
+    track = $cardObj.track
+    owner = $cardObj.owner
+    priority = $cardObj.priority
+    timestamp = $cardObj.timestamp
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -75,7 +89,7 @@ if (-not (Test-Path -LiteralPath $factoryIntakeDir)) {
 }
 
 $workOrderFile = Join-Path $factoryIntakeDir "work-order-$cardId-$(Get-Date -AsUTC -Format 'yyyyMMddTHHmmssZ').json"
-$workOrder | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $workOrderFile -Encoding UTF8NoBOM
+$workOrder | ConvertTo-Json -Depth 10 | Set-Content -Path $workOrderFile -Encoding UTF8NoBOM
 
 Write-Host "FACTORY-INTAKE: Work order written to $workOrderFile"
 
