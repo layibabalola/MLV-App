@@ -958,6 +958,9 @@ $fence
 
     $laneExit = $null
     $reservationOutcome = 'charged'
+    $originalLane = $Lane
+    $failoverAttempted = $false
+
     try {
         & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $LaneRunner `
             -Lane $Lane -PromptFile $promptPath -Card $cardId -RunDir $runDir -TimeoutSec $TimeoutSec
@@ -965,6 +968,29 @@ $fence
         $reservationOutcome = 'charged'
     } finally {
         $reservationRecord = Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir -ObservedExit $laneExit
+    }
+
+    # ================================================================ QUOTA FAILOVER (CODEX → CLAUDE)
+    # If Codex lane hit quota/rate-limit, automatically retry with Claude lane same cycle
+    if (($Lane -in @('sol', 'luna', 'astra')) -and ($laneExit -in @(429, 401, 403, 408)) -and -not $failoverAttempted) {
+        Write-Output "WORKSTREAM: quota-failover detected lane=$originalLane exit=$laneExit, retrying with Claude lane"
+
+        # Map Codex lanes to Claude equivalents: sol→opus, luna→sonnet, astra→fable
+        $claudeLaneMap = @{ 'sol' = 'opus'; 'luna' = 'sonnet'; 'astra' = 'fable' }
+        $Lane = $claudeLaneMap[$originalLane]
+        $failoverAttempted = $true
+
+        # Re-dispatch to Claude lane (reuse same runDir, same card, same brief)
+        $laneExit = $null
+        try {
+            & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $LaneRunner `
+                -Lane $Lane -PromptFile $promptPath -Card $cardId -RunDir $runDir -TimeoutSec $TimeoutSec
+            $laneExit = $LASTEXITCODE
+        } finally {
+            $reservationRecord = Write-DispatchReservation -ReservationId $reservationId -State 'charged' -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir -ObservedExit $laneExit
+        }
+
+        Write-Output "WORKSTREAM: failover-retry completed, newLane=$Lane exit=$laneExit"
     }
 
     $record = [ordered]@{
@@ -984,6 +1010,7 @@ $fence
         laneExitCode    = $laneExit
         laneCostUsd     = $reservationRecord.laneCostUsd
         laneCostReported = $reservationRecord.laneCostReported
+        failover        = if ($failoverAttempted) { @{ originalLane = $originalLane; retryLane = $Lane } } else { $null }
     }
     Add-Content -LiteralPath $LogPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
 
