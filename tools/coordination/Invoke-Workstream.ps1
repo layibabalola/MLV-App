@@ -607,6 +607,16 @@ $cardScope  = [string](Get-Prop $card 'scope')
 if (-not $Lane) { $Lane = Get-ResolvedLane -Kind $cardKind -Owner $cardOwner -Scope $cardScope -NeedsShell $needsShell }
 $engine = if ($Lane -eq 'sol' -or $Lane -eq 'luna') { 'codex' } else { 'claude' }
 
+# ------------------------------------------------------------------ factory-bridged check (dogfooding)
+# Cards marked factory-bridged route to external factory instead of local lane dispatch.
+if ($cardScope -match 'factory-bridged') {
+    $factoryRoot = 'C:\!Layi Wkspc\Adobe Document Cloud Ingester'
+    Write-Output "WORKSTREAM: factory-bridged detected card=$cardId routing to external factory"
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Invoke-FactoryWorkOrder.ps1') `
+        -QueueCard $card -LoopRoot $RepoRoot -ExternalFactoryRoot $factoryRoot
+    exit $LASTEXITCODE
+}
+
 # The run directory is named here, not at dispatch, because the brief has to be able to NAME
 # files that this script is about to write into it. -DryRun still exports, and still writes into
 # this path, so what you inspect under -DryRun is byte-identical to what a lane would receive.
