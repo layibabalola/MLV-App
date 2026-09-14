@@ -1,6 +1,6 @@
 {
-  "schema": "mlv-app/never-authorized/v26",
-  "ruled": "2026-09-06",
+  "schema": "mlv-app/never-authorized/v27",
+  "ruled": "2026-09-09",
   "authority": "owner directive 2026-09-06: the owner is out of the loop; these are the only acts no lane, quorum, or adjudication can unlock",
   "enforcement_note": "Two hooks exist. The GLOBAL hook ~/.claude/hooks/check-continuity-boundaries.py is shared by every project on this machine, fails open, and is NOT modified by this plan (rounds 1-4 measured it: 3-4 DENY controls, 28 ALLOW falsifiers; since 06:00:09Z it guards its own directory behind the agent-bridge FREEZE marker). The PROJECT hook tools/hooks/mlv-never-authorized.py (authored in 0.05, landed by 0.1) is tracked, registered in .claude/settings.json via $CLAUDE_PROJECT_DIR, applied in the board root and in every lane worktree at or after 0.1's merge, fails CLOSED, and is tested in CI with one DENY case per row. enforced_after_0_1 names the project hook.",
   "scope_note": "No Claude hook is visible to codex exec (the Codex sandbox bounds WHERE a lane writes, never WHAT it does), so no Codex lane (sol, luna) is ever started with -AllowEdits: refused by Invoke-Lane.ps1, the wrapper, and the dispatcher. An editing Claude lane receives an EXPLICIT tool allowlist of exactly the matched tool names plus Read/Glob/Grep; ALL is forbidden. LIMIT: a hook matches tool-input TEXT; an interpreter one-liner or a script invocation performs an act without matching a pattern. The hook raises the cost of a never-authorized act; the worktree boundary, the receipt checks, GitHub's protection on master, and the cross-family review are the other layers.",
@@ -69,6 +69,13 @@
       "enforced_today": "prose-only",
       "enforced_after_0_1": "project hook (venue test on the registration files and the hook script)",
       "also": "card-TOOL-HOOK-ENFORCE-1 NA-10 rows"
+    },
+    {
+      "id": "NA-11",
+      "act": "writing under tools/agent-bridge/** (Write, Edit, NotebookEdit, or a shell truncating/destructive write): Agent Bridge product SoT is layibabalola/agent-bridge; in-tree package feature/bugfix/refactor/CI churn is suspended (owner ruling 2026-09-09). Docs pointing at SoT live under agents/, outside this deny. FAIL-CLOSED: no MLV_ALLOW_* escape hatch for this row (MLV_ALLOW_STALE_TOOLS exists only for assert-script-currency and does not unlock NA-11).",
+      "enforced_today": "prose-only until this PR's hook lands",
+      "enforced_after_0_1": "project hook (path prefix tools/agent-bridge under any root)",
+      "also": "agents/agent-bridge-source-of-truth.md; doctrine candidate agent-bridge-sot-suspend-mlv-in-tree-20260909.md (CANDIDATE_ZERO_AUTHORITY until ADOPT)"
     }
   ]
 }

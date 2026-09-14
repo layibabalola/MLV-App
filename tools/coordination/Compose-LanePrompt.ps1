@@ -26,7 +26,9 @@ param(
     [Parameter(Mandatory)][string]$RunDir,
     [string]$Ts = '',
     [Parameter(Mandatory)][string]$GhCapability,
-    [string]$OutFile = ''
+    [string]$OutFile = '',
+    [string]$DoctrineBrief = '',
+    [string]$DoctrineFixtureRoot = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -39,7 +41,7 @@ if (-not $TemplatePath) {
 
 try {
     $result = Get-ComposedLanePrompt -ProcedurePath $ProcedurePath -TemplatePath $TemplatePath `
-        -WorkDir $WorkDir -BaseSha $BaseSha -RunDir $RunDir -Ts $Ts -GhCapability $GhCapability
+        -WorkDir $WorkDir -BaseSha $BaseSha -RunDir $RunDir -Ts $Ts -GhCapability $GhCapability -DoctrineBrief $DoctrineBrief -DoctrineFixtureRoot $DoctrineFixtureRoot
 } catch {
     Write-Output ("REFUSED: {0}" -f $_.Exception.Message)
     exit 3
