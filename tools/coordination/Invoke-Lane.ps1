@@ -219,9 +219,11 @@ if (-not $WorkDir) { $WorkDir = (Resolve-Path -LiteralPath (Join-Path $PSScriptR
 $WorkDir = (Resolve-Path -LiteralPath $WorkDir).Path
 
 # ---------------------------------------------------------------- 0.1 pre-flight (before any process, before any run dir)
-# (a) A codex lane (sol, luna) can never be granted write access: no Claude hook is
-# visible to codex exec, so nothing here could enforce NA-1..NA-10 against it.
-if ($AllowEdits -and ($Lane -eq 'sol' -or $Lane -eq 'luna')) {
+# (a) A codex lane can never be granted write access: no Claude hook is visible to codex exec,
+# so nothing here could enforce NA-1..NA-10 against it. Keyed on ENGINE, not an enumerated list
+# of lane names -- a new codex row (e.g. astra) refuses edits by construction, with nothing left
+# to remember to add to a name list (that omission was the hole this rekey closes).
+if ($AllowEdits -and $LANES[$Lane].engine -eq 'codex') {
     throw "codex-lane-never-edits: -Lane $Lane with -AllowEdits (no Claude hook is visible to codex exec)"
 }
 # (b) An editing lane's tool grant must be an explicit, auditable list. 'ALL' is
