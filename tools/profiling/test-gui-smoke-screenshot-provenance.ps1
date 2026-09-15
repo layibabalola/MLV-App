@@ -241,6 +241,14 @@ $allowedStatePair = Test-GuiSmokeScreenshotPair `
 Assert-True $allowedStatePair.validComparable `
     'An explicit effective-state allowlist should admit only its named difference.'
 
+# Input prefetch is diagnostic; the same fresh render and history remain comparable.
+$differentRawPrefetchLines = @(New-V2ProvenanceFixture -StartFrame 90 -Frames @(91, 92, 93) -TargetRawPrefetch 0)
+$differentRawPrefetchProof = Get-GuiSmokeScreenshotProvenance -OrderedLogLines $differentRawPrefetchLines -RequestedStartFrame 90
+$differentRawPrefetchPair = Test-GuiSmokeScreenshotPair -Left $controlledParentProof -Right $differentRawPrefetchProof
+Assert-True $differentRawPrefetchProof.validFresh 'Input prefetch must not invalidate a fresh render.'
+Assert-True ($controlledParentProof.rawPrefetch -eq 1 -and $differentRawPrefetchProof.rawPrefetch -eq 0) 'Retain both observed prefetch values.'
+Assert-True $differentRawPrefetchPair.validComparable 'Different input prefetch must not veto identical visual state and history.'
+
 # A state/policy line emitted after the selected playback transaction cannot
 # retroactively describe the screenshot. The old latest-before-screenshot scan
 # admitted this shape and could make differently rendered legs look equal.
@@ -341,5 +349,29 @@ $pairGateIndex = $blockingAbText.IndexOf('Assert-GuiSmokeScreenshotPair')
 $metricIndex = $blockingAbText.IndexOf('$metricsJson =')
 Assert-True ($pairGateIndex -ge 0 -and $metricIndex -gt $pairGateIndex) `
     'The pair comparability assertion must run before image metrics consume either screenshot.'
+
+# GPU screenshots hash actual viewport pixels in a separate stream. The raw
+# Bayer probe hash must never stand in for the image that was presented.
+$gpuFresh = @(New-V2ProvenanceFixture -StartFrame 35 -Frames @(35)) | ForEach-Object {
+    $_.Replace('draw_frame_ready.present_content display_frame=35 hash=target-content',
+        'draw_frame_ready.gpu_present_content display_frame=35 hash=abcdef serial=4 generation=8 source=gl_viewport_grab width=1530 height=816')
+}
+$gpuProof = Get-GuiSmokeScreenshotProvenance -OrderedLogLines $gpuFresh -RequestedStartFrame 35
+Assert-True $gpuProof.validFresh 'GPU framebuffer content must bind to the same fresh render transaction.'
+Assert-True ($gpuProof.contentHash -eq 'abcdef') 'GPU framebuffer hash was not retained.'
+foreach ($mutation in @(
+    @{ old = 'hash=abcdef'; new = ''; failure = 'missing-present-content-hash' },
+    @{ old = 'serial=4 generation=8 source='; new = 'serial=5 generation=8 source='; failure = 'gpu-present-serial-mismatch' },
+    @{ old = 'generation=8 source='; new = 'generation=9 source='; failure = 'gpu-present-generation-mismatch' },
+    @{ old = 'source=gl_viewport_grab'; new = 'source=raw_bayer'; failure = 'gpu-present-source-invalid' },
+    @{ old = 'width=1530'; new = 'width=0'; failure = 'gpu-present-dimensions-invalid' }
+)) {
+    $changed = @($gpuFresh | ForEach-Object { $_.Replace($mutation.old, $mutation.new) })
+    Assert-Failure (Get-GuiSmokeScreenshotProvenance -OrderedLogLines $changed -RequestedStartFrame 35) $mutation.failure
+}
+$wrongGpuFrame = @($gpuFresh | ForEach-Object { $_.Replace('gpu_present_content display_frame=35', 'gpu_present_content display_frame=36') })
+Assert-Failure (Get-GuiSmokeScreenshotProvenance -OrderedLogLines $wrongGpuFrame -RequestedStartFrame 35) 'missing-associated-present-content'
+$lateGpuPresent = @($gpuFresh[0..($gpuFresh.Count - 2)]) + @($gpuFresh[5], $gpuFresh[-1])
+Assert-Failure (Get-GuiSmokeScreenshotProvenance -OrderedLogLines $lateGpuPresent -RequestedStartFrame 35) 'later-unassociated-present-content'
 
 Write-Host 'PASS: GUI smoke screenshot fresh-render provenance tests'

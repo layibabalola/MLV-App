@@ -789,7 +789,18 @@ def atomic_replace(src: Path, dst: Path, *, storage: StorageCapability) -> None:
         # then revalidate the published destination.  Python does not expose a
         # Windows RootDirectory handle here, so hostile same-user parent swaps
         # remain outside the local trusted-user threat model.
-        os.replace(str(src), str(dst))
+        # Windows readers can briefly deny replacement without sharing DELETE.
+        # Retry the atomic operation for at most 300 ms; never remove dst first.
+        for attempt in range(6):
+            storage.validate(src)
+            storage.validate(dst)
+            try:
+                os.replace(str(src), str(dst))
+                break
+            except PermissionError as exc:
+                if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 5:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
         storage.validate(dst)
     else:
         src.replace(dst)

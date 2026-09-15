@@ -458,10 +458,36 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 mock.patch.object(_sw.ServerSupervisor, "_spawn_child", spawn):
             harness = self._start_harness()
             self.assertEqual(before_spawn, [True])
-            harness.wait_for_launch_count(2)
+            # The first child may be stopped before its launch-log append. The
+            # supervisor's completed restart and the replacement's READY prove
+            # the transition without requiring that lost startup observation.
+            restart = harness.wait_for_audit_events("mcp_server_self_restarted")[0]
+            self.assertNotEqual(restart["old_child_pid"], restart["new_child_pid"])
+            harness.stdout_stream.wait_for(("READY %s" % restart["new_child_pid"]).encode("ascii"))
             harness.wait_for_audit_events("mcp_server_refresh_required")
             harness.stdin_stream.close()
             self.assertEqual(harness.wait_for_exit(), 0)
+
+    def test_initial_snapshot_restart_with_silent_first_child(self) -> None:
+        real_spawn = _sw.ServerSupervisor._spawn_child
+        first_spawn = True
+
+        def spawn(supervisor):
+            nonlocal first_spawn
+            if not first_spawn:
+                return real_spawn(supervisor)
+            first_spawn = False
+            command = supervisor.command
+            try:
+                # Deterministically model a child stopped before it can append
+                # its launch log or send READY. Only the replacement logs READY.
+                supervisor.command = [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"]
+                return real_spawn(supervisor)
+            finally:
+                supervisor.command = command
+
+        with mock.patch.object(_sw.ServerSupervisor, "_spawn_child", spawn):
+            self.test_initial_snapshot_precedes_child_and_retains_startup_change()
 
     def test_initial_snapshot_failure_reports_error_without_child(self) -> None:
         with mock.patch.object(_sw.ServerSupervisor, "_load_and_apply_persisted_snapshot",
