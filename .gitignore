@@ -40,6 +40,8 @@ platform/build-*
 # build-provenance TOOLING (source scripts, not build output) -- re-include despite *build* above
 !tools/build-release.ps1
 !tools/gen-buildinfo.ps1
+!tools/release/build_stamp.py
+!tools/repo_hygiene/test_build_stamp.py
 .qtcreator
 
 # Docs tree is the canonical documentation set; track it even if filenames

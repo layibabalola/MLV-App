@@ -432,6 +432,50 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)
 
+    def test_initial_snapshot_precedes_child_and_retains_startup_change(self) -> None:
+        # Force a change in the startup interval; READY alone cannot prove the
+        # watcher has sampled its baseline. No scheduler timing or sleeps needed.
+        sampled = threading.Event()
+        before_spawn = []
+        real_load = _sw.ServerSupervisor._load_and_apply_persisted_snapshot
+        real_spawn = _sw.ServerSupervisor._spawn_child
+
+        def load(supervisor):
+            result = real_load(supervisor)
+            sampled.set()
+            return result
+
+        def spawn(supervisor):
+            if not before_spawn:
+                before_spawn.append(sampled.is_set())
+                path = supervisor.watch_paths[0]
+                prior = path.stat().st_mtime_ns
+                path.write_text("# changed before first child launch\n", encoding="utf-8")
+                os.utime(path, ns=(prior + 1_000_000_000, prior + 1_000_000_000))
+            return real_spawn(supervisor)
+
+        with mock.patch.object(_sw.ServerSupervisor, "_load_and_apply_persisted_snapshot", load), \
+                mock.patch.object(_sw.ServerSupervisor, "_spawn_child", spawn):
+            harness = self._start_harness()
+            self.assertEqual(before_spawn, [True])
+            harness.wait_for_launch_count(2)
+            harness.wait_for_audit_events("mcp_server_refresh_required")
+            harness.stdin_stream.close()
+            self.assertEqual(harness.wait_for_exit(), 0)
+
+    def test_initial_snapshot_failure_reports_error_without_child(self) -> None:
+        with mock.patch.object(_sw.ServerSupervisor, "_load_and_apply_persisted_snapshot",
+                               side_effect=OSError("fixture snapshot unavailable")), \
+                mock.patch.object(_sw.ServerSupervisor, "_report_error") as report, \
+                mock.patch.object(_sw.ServerSupervisor, "_spawn_child") as spawn:
+            harness = SupervisorHarness(self.tempdir / "snapshot-failure", storage=self.storage)
+            self._harnesses.append(harness)
+            self.assertEqual(harness.wait_for_exit(), 1)
+            self.assertEqual(harness.launch_pids(), [])
+            spawn.assert_not_called()
+            report.assert_called_once()
+            self.assertIn("fixture snapshot unavailable", report.call_args.args[0])
+
     def test_wrapper_phase2_restarts_in_place_on_mtime_change(self) -> None:
         harness = self._start_harness()
 

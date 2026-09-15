@@ -57,17 +57,47 @@
 class DownloadManager : public QObject
 {
     Q_OBJECT
-    QNetworkAccessManager manager;
+    // Not owned when injected externally (tests supply a fake manager); when
+    // nullptr is passed to the constructor, an internal one is created and
+    // parented to `this` so it is destroyed automatically.
+    QNetworkAccessManager *manager;
+    bool m_ownsManager;
     QList<QNetworkReply *> currentDownloads;
     bool m_downloadSucess;
+    // Sticky failure flag for the current "operation" (the run of requests
+    // between idle points): once any request in the operation fails, a
+    // later request finishing successfully must not flip the aggregate
+    // result back to success.
+    bool m_operationFailed;
 
 public:
-    DownloadManager();
+    // externalManager: optional, not owned by DownloadManager -- purely for
+    // deterministic tests with a fake QNetworkAccessManager subclass.
+    // Passing nullptr (the default, matching the historic no-arg
+    // constructor's behaviour) creates and owns one internally.
+    explicit DownloadManager(QNetworkAccessManager *externalManager = nullptr, QObject *parent = nullptr);
     void doDownload(const QUrl &url);
     QString saveFileName(const QUrl &url);
     bool saveToDisk(const QString &filename, QIODevice *data);
     bool isDownloadReady();
     bool downloadSuccess();
+    // Aborts all currently-tracked requests for the active operation. Active
+    // replies are snapshotted and removed from tracking BEFORE abort() is
+    // called on each snapshot copy, because QNetworkReply::abort() can
+    // synchronously re-emit finished() through the manager; downloadFinished()
+    // ignores replies no longer present in the tracking list, so this
+    // ordering prevents a reentrant abort-triggered finish from being
+    // double-processed. Marks the operation failed and emits
+    // downloadsFinished(false) exactly once.
+    void abortDownloads();
+
+signals:
+    // Emitted exactly once per operation (the run of requests between idle
+    // points) when the manager becomes idle again -- i.e. all currently
+    // tracked requests for that operation have finished, whether by success,
+    // failure, or abort. `success` is false if ANY request in the operation
+    // failed or was aborted.
+    void downloadsFinished(bool success);
 
 public slots:
     void execute();

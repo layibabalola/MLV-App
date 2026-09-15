@@ -41,15 +41,20 @@
     ASCII-only by project convention. The lane/model table lives in
     Invoke-Lane.ps1 and is deliberately NOT duplicated here.
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName='Dispatch')]
 param(
+    [Parameter(ParameterSetName='Dispatch')]
     [ValidateSet('factory','playback','product','continuity','fleet','gate','UNSET','auto')]
     [string]$Track = 'auto',
 
+    [Parameter(ParameterSetName='Dispatch')]
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
     [string]$CardId,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$DryRun,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [ValidateSet('opus','sonnet','fable','sol','luna')]
     [string]$Lane,
 
@@ -57,20 +62,26 @@ param(
     # Invoke-Lane.ps1 -AllowEdits directly - the wrapper is the only sanctioned
     # entry point for write access, and this script adds its own refusals on top
     # of the wrapper's). OFF by default: a read-only analysis lane is the norm.
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$AllowEdits,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [int]$TimeoutSec = 1800,
 
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$Force,
+    [Parameter(ParameterSetName='Dispatch')]
     [int]$StaleHours = 12,
 
     # Skip the merged-PR landing probe entirely (offline, or gh deliberately not consulted).
+    [Parameter(ParameterSetName='Dispatch')]
     [switch]$NoLandingProbe,
 
     # Read the queue from somewhere other than the canonical path. EXISTS FOR FALSIFICATION:
     # the landed-card guard below can only be proven by a queue in which a landed card is the
     # TOP pick, and the real queue must never be mutated to manufacture that. Never used in
     # production; the default is the canonical queue.
+    [Parameter(ParameterSetName='Dispatch')]
     [string]$QueuePath = '',
 
     # Path to the pre-dispatch PR-review evidence exporter (deliverable 9, S126). EXISTS FOR
@@ -79,11 +90,42 @@ param(
     # exporter refuses - can be proven without a real PR or a network call, matching the
     # existing fake-gh shim pattern. Never overridden in production; the default is the real
     # exporter beside this script.
-    [string]$ExporterPath = ''
+    [Parameter(ParameterSetName='Dispatch')]
+    [string]$ExporterPath = '',
+
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [switch]$RecordCompletion,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionLaneReceipt,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionReviewVerdictPath,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionWorktree,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string[]]$CompletionAllowedPath,
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string[]]$CompletionTestReceiptPath,
+    [Parameter(ParameterSetName='Completion')]
+    [string[]]$CompletionArtifactPath = @(),
+    [Parameter(Mandatory=$true,ParameterSetName='Completion')]
+    [string]$CompletionOutputReceipt
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Completion is an explicit hub operation after independent review. Parameter
+# sets prohibit dispatch flags; no queue, reservation, provider or board setup
+# is reachable through this mode. The sibling adapter owns evidence validation.
+if ($PSCmdlet.ParameterSetName -eq 'Completion') {
+    if (-not $RecordCompletion) { throw 'completion-mode-requires-record-completion' }
+    & (Join-Path $PSScriptRoot 'Record-WorkstreamCompletion.ps1') `
+        -CardId $CardId -LaneReceipt $CompletionLaneReceipt `
+        -ReviewVerdictPath $CompletionReviewVerdictPath -Worktree $CompletionWorktree `
+        -AllowedPath $CompletionAllowedPath -TestReceiptPath $CompletionTestReceiptPath `
+        -ArtifactPath $CompletionArtifactPath -OutputReceipt $CompletionOutputReceipt
+    exit $LASTEXITCODE
+}
 
 # MLV_BOARD_ROOT: only a test sets it (a tmp-dir board fixture, mirroring Invoke-Lane.ps1's own
 # resolution); the default is the real board. Needed so a test can point -AllowEdits worktree
@@ -112,6 +154,7 @@ $StartEditingLane  = Join-Path $DualLane 'Start-EditingLane.ps1'
 # $PSScriptRoot is the pinned sibling when driven by the loop, and the local sibling when run by
 # hand: correct in both cases, and it can never silently cross into another branch's checkout.
 $LaneRunner = Join-Path $PSScriptRoot 'Invoke-Lane.ps1'
+$ProductRatioGuard = Join-Path $PSScriptRoot 'Test-ProductRatioGuard.ps1'
 if (-not $ExporterPath) { $ExporterPath = Join-Path $PSScriptRoot 'Export-PrReviewEvidence.ps1' }
 
 foreach ($p in @($QueuePath, $LaneRunner, $ExporterPath)) {
@@ -226,17 +269,41 @@ function Get-LastDispatchAgeHours([string]$id) {
 # the pure logic directly rather than shelling out to Compose-LanePrompt.ps1.
 . (Join-Path $PSScriptRoot 'compose-lane-prompt-core.ps1')
 
+function Get-DispatchSpendEvidence {
+    param([string]$RunDir, [string]$Lane, [string]$Card, $ObservedExit)
+    $laneCostReported = $false
+    $evidence = [ordered]@{ receiptPath=$null; receiptSha256=$null; laneExitCode=$ObservedExit; laneCostUsd=$null; laneCostReported=$laneCostReported }
+    try {
+        $files = @(Get-ChildItem -LiteralPath $RunDir -Filter "$Lane-*.receipt.json" -File -ErrorAction Stop)
+        if ($files.Count -ne 1 -or $files[0].Length -gt 1MB -or $files[0].Length -eq 0) { return $evidence }
+        $bytes = [IO.File]::ReadAllBytes($files[0].FullName)
+        $receipt = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xfeff) | ConvertFrom-Json -ErrorAction Stop
+        if ($receipt.schema -cne 'mlv-app/fleet-lane-receipt/v1' -or $receipt.lane -cne $Lane -or $receipt.card -cne $Card) { return $evidence }
+        if (($receipt.exitCode -isnot [int] -and $receipt.exitCode -isnot [long]) -or $receipt.exitCode -ne $ObservedExit) { return $evidence }
+        $cost = $receipt.spend.costUsd
+        if ($receipt.spend.costReported -isnot [bool] -or -not $receipt.spend.costReported -or
+            ($cost -isnot [int] -and $cost -isnot [long] -and $cost -isnot [double] -and $cost -isnot [decimal])) { return $evidence }
+        $evidence.receiptPath = [IO.Path]::GetRelativePath($RepoRoot, $files[0].FullName)
+        $evidence.receiptSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        $evidence.laneCostUsd = $cost
+        $evidence.laneCostReported = $true
+    } catch { }
+    return $evidence
+}
+
 function Write-DispatchReservation {
     # APPENDED, never updated in place - a reservation is a fact about a point in time, not
     # a mutable record. Two rows per lane start: 'reserved' immediately before the process
     # launches, then 'charged' or 'refunded' once the outcome of actually launching it is
-    # known. Invoke-WorkstreamLoop.ps1 reads only the 'reserved' rows for today's spend.
+    # known. The loop refunds only terminal events with verified zero-spend evidence.
     param(
         [Parameter(Mandatory)][string]$ReservationId,
         [Parameter(Mandatory)][ValidateSet('reserved','charged','refunded')][string]$State,
         [string]$Card = '',
         [string]$Kind = '',
-        [string]$Lane = ''
+        [string]$Lane = '',
+        [string]$RunDir = '',
+        $ObservedExit = $null
     )
     $dir = Split-Path -Parent $ReservationsPath
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -246,12 +313,139 @@ function Write-DispatchReservation {
         card          = $Card
         kind          = $Kind
         lane          = $Lane
+        runDir        = $RunDir
         recordedUtc   = (Get-Date).ToUniversalTime().ToString('o')
     }
-    Add-Content -LiteralPath $ReservationsPath -Value ($row | ConvertTo-Json -Compress) -Encoding UTF8
+    if ($State -ne 'reserved') {
+        $evidence = Get-DispatchSpendEvidence -RunDir $RunDir -Lane $Lane -Card $Card -ObservedExit $ObservedExit
+        foreach ($key in $evidence.Keys) { $row[$key] = $evidence[$key] }
+        # A catch or missing receipt cannot establish that no provider started.
+        # Unknown spend remains charged; success at zero cost remains charged.
+        $row.state = if ($evidence.laneCostReported -and $evidence.laneCostUsd -eq 0 -and $null -ne $ObservedExit -and $ObservedExit -ne 0) { 'refunded' } else { 'charged' }
+    }
+    Add-Content -LiteralPath $ReservationsPath -Value ($row | ConvertTo-Json -Compress -Depth 6) -Encoding UTF8
+    return [pscustomobject]$row
 }
 
 function Test-KillSwitchArmed { return (Test-Path -LiteralPath $KillSwitch) }
+
+function Test-RatioDispatchPermission {
+    param([AllowEmptyString()][string]$Kind = '')
+
+    if (-not (Test-Path -LiteralPath $ProductRatioGuard -PathType Leaf)) {
+        Write-Information -InformationAction Continue "WORKSTREAM: CANNOT-DETERMINE ratio-guard-missing path=$ProductRatioGuard"
+        return 3
+    }
+
+    $guardText = @(& pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ProductRatioGuard -RepoRoot $RepoRoot)
+    $guardExit = $LASTEXITCODE
+    $guard = $null
+    try {
+        if ($guardText.Count -ne 1) { throw 'guard emitted other than one line' }
+        $raw = [string]$guardText[0]
+        $document = [System.Text.Json.JsonDocument]::Parse($raw)
+        try {
+            $root = $document.RootElement
+            if ($root.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) { throw 'guard root is not an object' }
+            $required = @('schema','asOfUtc','windowStartUtc','windowEndUtc','sourceRef','sourceSha','commitPopulation','productCommitCount','productShare7d','productShareThreshold','recognizedProductPrCount','recognizedProductPrIds','unrecognizedProductLandings','landingProvenanceComplete','hasProductLandings','dispatchEvidenceSource','dispatchCoverage','dispatchEvidenceAvailable','dispatchesObserved','malformedDispatchRows','dispatchesPerLandedProductPr7dLowerBound','dispatchRateThreshold','verdict','reasons','errorCode')
+            $actual = @($root.EnumerateObject() | ForEach-Object { $_.Name })
+            if (@($actual | Select-Object -Unique).Count -ne $actual.Count) { throw 'duplicate guard fields' }
+            if (@($actual | Where-Object { $required -notcontains $_ }).Count -ne 0 -or @($required | Where-Object { $actual -notcontains $_ }).Count -ne 0) { throw 'guard schema fields differ' }
+            foreach ($name in @('schema','asOfUtc','windowStartUtc','windowEndUtc','sourceRef','sourceSha','dispatchEvidenceSource','dispatchCoverage','verdict')) {
+                if ($root.GetProperty($name).ValueKind -ne [System.Text.Json.JsonValueKind]::String) { throw "invalid string field $name" }
+            }
+            foreach ($name in @('commitPopulation','productCommitCount','recognizedProductPrCount','dispatchesObserved','malformedDispatchRows')) {
+                $value = 0L
+                if (-not $root.GetProperty($name).TryGetInt64([ref]$value) -or $value -lt 0) { throw "invalid count $name" }
+            }
+            foreach ($name in @('landingProvenanceComplete','hasProductLandings','dispatchEvidenceAvailable')) {
+                if (@([System.Text.Json.JsonValueKind]::True,[System.Text.Json.JsonValueKind]::False) -notcontains $root.GetProperty($name).ValueKind) { throw "invalid bool $name" }
+            }
+            foreach ($name in @('productShare7d','dispatchesPerLandedProductPr7dLowerBound','productShareThreshold','dispatchRateThreshold')) {
+                $number = $root.GetProperty($name)
+                if ($number.ValueKind -eq [System.Text.Json.JsonValueKind]::Null -and $name -in @('productShare7d','dispatchesPerLandedProductPr7dLowerBound')) { continue }
+                if ($number.ValueKind -ne [System.Text.Json.JsonValueKind]::Number) { throw "invalid numeric field $name" }
+                $value = $number.GetDouble()
+                if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) { throw "nonfinite field $name" }
+            }
+            foreach ($name in @('recognizedProductPrIds','unrecognizedProductLandings','reasons')) {
+                if ($root.GetProperty($name).ValueKind -ne [System.Text.Json.JsonValueKind]::Array) { throw "invalid array $name" }
+            }
+        } finally { $document.Dispose() }
+
+        $guard = $raw | ConvertFrom-Json -ErrorAction Stop
+        if ($guard.schema -ne 'mlv-app/product-ratio-guard/v1') { throw 'invalid schema' }
+        if (@('GREEN','RED','ERROR') -notcontains [string]$guard.verdict) { throw 'invalid verdict' }
+        if ($guard.sourceSha -notmatch '^[0-9a-f]{40}$' -and -not ($guard.verdict -eq 'ERROR' -and $guard.sourceSha -eq '')) { throw 'invalid source sha' }
+        if (@('PARTIAL','COMPLETE') -notcontains [string]$guard.dispatchCoverage) { throw 'invalid coverage' }
+        if (@('none','dispatch-reservations','legacy-dispatch-log','unavailable') -notcontains [string]$guard.dispatchEvidenceSource) { throw 'invalid evidence source' }
+        if ([double]$guard.productShareThreshold -ne 0.50 -or [double]$guard.dispatchRateThreshold -ne 4.0) { throw 'invalid thresholds' }
+
+        $population = [long]$guard.commitPopulation
+        $productCount = [long]$guard.productCommitCount
+        $recognizedCount = [long]$guard.recognizedProductPrCount
+        $observed = [long]$guard.dispatchesObserved
+        $malformed = [long]$guard.malformedDispatchRows
+        if ($productCount -gt $population) { throw 'product count exceeds population' }
+        if (@($guard.recognizedProductPrIds).Count -ne $recognizedCount) { throw 'recognized count mismatch' }
+        if (@($guard.recognizedProductPrIds | Select-Object -Unique).Count -ne $recognizedCount) { throw 'duplicate recognized PR id' }
+        if (@($guard.recognizedProductPrIds | Where-Object { $_ -isnot [int] -and $_ -isnot [long] -or [long]$_ -le 0 }).Count -ne 0) { throw 'invalid recognized PR id' }
+        if (@($guard.unrecognizedProductLandings | Where-Object { $_ -isnot [string] -or $_ -notmatch '^[0-9a-f]{40}$' }).Count -ne 0) { throw 'invalid unrecognized landing' }
+        if (@($guard.unrecognizedProductLandings | Select-Object -Unique).Count -ne @($guard.unrecognizedProductLandings).Count) { throw 'duplicate unrecognized landing' }
+        if (@($guard.reasons | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) { throw 'invalid reasons' }
+
+        $expectedProvenance = @($guard.unrecognizedProductLandings).Count -eq 0
+        $expectedLandings = ($recognizedCount + @($guard.unrecognizedProductLandings).Count) -gt 0
+        if ($guard.verdict -ne 'ERROR' -and [bool]$guard.landingProvenanceComplete -ne $expectedProvenance) { throw 'provenance contradiction' }
+        if ([bool]$guard.hasProductLandings -ne $expectedLandings) { throw 'landing contradiction' }
+        if ([bool]$guard.dispatchEvidenceAvailable -ne ([string]$guard.dispatchEvidenceSource -notin @('none','unavailable'))) { throw 'evidence availability contradiction' }
+
+        if ($population -eq 0) {
+            if ($null -ne $guard.productShare7d -or $productCount -ne 0) { throw 'empty population contradiction' }
+        } else {
+            if ($null -eq $guard.productShare7d) { throw 'missing product share for populated history' }
+            $share = [double]$guard.productShare7d
+            if ([double]::IsNaN($share) -or [double]::IsInfinity($share) -or $share -lt 0 -or $share -gt 1) { throw 'invalid product share' }
+            if ([math]::Abs($share - ([double]$productCount / [double]$population)) -gt 1e-12) { throw 'product share mismatch' }
+        }
+
+        if ($null -ne $guard.dispatchesPerLandedProductPr7dLowerBound) {
+            $rateValue = [double]$guard.dispatchesPerLandedProductPr7dLowerBound
+            if ([double]::IsNaN($rateValue) -or [double]::IsInfinity($rateValue) -or $rateValue -lt 0 -or -not [bool]$guard.dispatchEvidenceAvailable -or -not $expectedProvenance -or $recognizedCount -eq 0) { throw 'invalid dispatch rate' }
+            if ([math]::Abs($rateValue - ([double]$observed / [double]$recognizedCount)) -gt 1e-12) { throw 'dispatch rate mismatch' }
+        } elseif ([bool]$guard.dispatchEvidenceAvailable -and $expectedProvenance -and $recognizedCount -gt 0) { throw 'missing dispatch rate' }
+
+        if ([string]$guard.verdict -eq 'GREEN') {
+            if ($guardExit -ne 0 -or $guard.dispatchCoverage -ne 'COMPLETE' -or -not [bool]$guard.dispatchEvidenceAvailable -or -not $expectedProvenance -or -not $expectedLandings -or $malformed -ne 0 -or $null -eq $guard.productShare7d -or [double]$guard.productShare7d -lt [double]$guard.productShareThreshold -or $null -eq $guard.dispatchesPerLandedProductPr7dLowerBound -or [double]$guard.dispatchesPerLandedProductPr7dLowerBound -gt [double]$guard.dispatchRateThreshold) { throw 'contradictory GREEN' }
+        } elseif ([string]$guard.verdict -eq 'ERROR') {
+            if ($guardExit -ne 3 -or [string]::IsNullOrWhiteSpace([string]$guard.errorCode)) { throw 'invalid ERROR contract' }
+        } elseif ($guardExit -ne 0 -or $null -ne $guard.errorCode) { throw 'invalid RED contract' }
+    } catch {
+        Write-Information -InformationAction Continue 'WORKSTREAM: CANNOT-DETERMINE ratio-guard-output-missing-or-malformed'
+        return 3
+    }
+
+    $share = if ($null -eq $guard.productShare7d) { 'unavailable' } else { ([double]$guard.productShare7d).ToString('0.####', [Globalization.CultureInfo]::InvariantCulture) }
+    $rate = if ($null -eq $guard.dispatchesPerLandedProductPr7dLowerBound) { 'unavailable' } else { ([double]$guard.dispatchesPerLandedProductPr7dLowerBound).ToString('0.####', [Globalization.CultureInfo]::InvariantCulture) }
+    $reasons = @($guard.reasons) -join ','
+    Write-Information -InformationAction Continue "WORKSTREAM: product_share_7d=$share"
+    Write-Information -InformationAction Continue "WORKSTREAM: dispatches_per_landed_product_pr_7d_lower_bound=$rate coverage=$($guard.dispatchCoverage)"
+    Write-Information -InformationAction Continue "WORKSTREAM: ratio-guard verdict=$($guard.verdict) reasons=$reasons"
+
+    if ($guardExit -ne 0 -or [string]$guard.verdict -eq 'ERROR') {
+        Write-Information -InformationAction Continue 'WORKSTREAM: CANNOT-DETERMINE ratio-guard-error'
+        return 3
+    }
+    if ([string]$guard.verdict -eq 'RED') {
+        if (@('product','playback') -contains $Kind) {
+            Write-Information -InformationAction Continue "WORKSTREAM: ratio-guard allowed-under-red kind=$Kind"
+            return 0
+        }
+        Write-Information -InformationAction Continue "WORKSTREAM: REFUSED ratio-guard-red kind=$Kind"
+        return 6
+    }
+    return 0
+}
 
 # Lane resolution: the card's own `kind`/`owner` fields win (0.18 seeds them for every
 # product/playback card), then a RECON:/REVIEW: scope prefix routes to the breadth-recon or
@@ -419,6 +613,83 @@ $engine = if ($Lane -eq 'sol' -or $Lane -eq 'luna') { 'codex' } else { 'claude' 
 $stamp  = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
 $runDir = Join-Path $RepoRoot ".claude-state\fleet-runs\ws-$cardId-$stamp"
 
+# DISPATCH-ATTEMPT RECEIPT. Every attempt that names a run directory leaves a typed
+# dispatch-attempt.json in it: 'launching' (about to start the lane), then 'launched' (the lane process
+# ran and returned; its own receipt sits beside this one), or 'refused-before-launch' with the cause,
+# or 'launch-unconfirmed' (a throw between 'launching' and the child returning). MEASURED 2026-09-14: PLAY-COUNTERS-CPU left
+# ~90 run dirs holding ONLY lane-prompt.md - `git worktree add` failed after the prompt was written;
+# the exit-3 reason reached only a detail line in a separate loop-cycles receipt, so the run dirs
+# themselves read as launches that silently produced nothing. Never throws: a receipt write failure is reported on stdout AND
+# stderr (the disk that refused the receipt is the one fact no receipt can carry), never fatal.
+# -DryRun writes one too (outcome 'dry-run-not-launched'): it names a run dir and writes into it.
+function Write-DispatchAttempt {
+    param([string]$Outcome, [string]$Cause, [int]$ExitCode, [string]$Detail = '', $LaneExitCode = $null)
+    try {
+        if (-not (Test-Path -LiteralPath $runDir)) { New-Item -ItemType Directory -Path $runDir -Force | Out-Null }
+        $laneReceipts = @(Get-ChildItem -LiteralPath $runDir -Filter '*.receipt.json' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        $attempt = [ordered]@{
+            schema       = 'mlv-app/workstream-dispatch-attempt/v1'
+            outcome      = $Outcome
+            cause        = $Cause
+            detail       = $Detail
+            card         = $cardId
+            track        = $cardTrack
+            lane         = $Lane
+            engine       = $engine
+            allowEdits   = [bool]$AllowEdits
+            exitCode     = $ExitCode
+            laneExitCode = $LaneExitCode
+            laneReceipts = $laneReceipts
+            runDir       = $runDir
+            recordedUtc  = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        # dispatch-attempt.json is the LATEST state; dispatch-attempts.jsonl is the append-only history of
+        # every transition (sol PR #111 post-merge: a single overwritten file lost 'launching' and any
+        # refusal cause a later trap replaced).
+        [System.IO.File]::AppendAllText((Join-Path $runDir 'dispatch-attempts.jsonl'), (($attempt | ConvertTo-Json -Depth 4 -Compress) + "`n"), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $runDir 'dispatch-attempt.json'), ($attempt | ConvertTo-Json -Depth 4), [System.Text.UTF8Encoding]::new($false))
+    } catch {
+        $why = "WORKSTREAM: dispatch-attempt receipt NOT written ($($_.Exception.Message)) runDir=$runDir"
+        # FALLBACK SPOOL outside the run dir, so an unwritable run dir still leaves a typed record a
+        # reader can find. Only when the spool also fails is stdout/stderr the last channel; the loop
+        # copies these lines into its cycle receipt (receiptWriteFailures).
+        $runDirError = $_.Exception.Message
+        try {
+            $spool = Join-Path $RepoRoot '.claude-state\fleet-runs\dispatch-attempt-spool'
+            if (-not (Test-Path -LiteralPath $spool)) { New-Item -ItemType Directory -Path $spool -Force | Out-Null }
+            $spooled = [ordered]@{
+                schema = 'mlv-app/workstream-dispatch-attempt/v1'; outcome = $Outcome; cause = $Cause; detail = $Detail
+                card = $cardId; lane = $Lane; exitCode = $ExitCode; laneExitCode = $LaneExitCode; runDir = $runDir
+                runDirWriteError = $runDirError; recordedUtc = (Get-Date).ToUniversalTime().ToString('o')
+            }
+            $spoolFile = Join-Path $spool ('{0}-{1}-{2}.json' -f $cardId, (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ'), $Outcome)
+            [System.IO.File]::WriteAllText($spoolFile, ($spooled | ConvertTo-Json -Depth 4), [System.Text.UTF8Encoding]::new($false))
+            $why += " spooled=$spoolFile"
+        } catch {
+            $why += " spool ALSO failed ($($_.Exception.Message))"
+        }
+        Write-Output $why
+        [Console]::Error.WriteLine($why)
+    }
+}
+
+# A TERMINATING ERROR is an exit path too (sol PR #111 R1): New-Item, the prompt write, Get-FileHash,
+# reservation writes and worktree cleanup can all throw after the run dir is named. A trap applies to
+# the whole script scope, so it is guarded on $runDir existing; `break` re-throws, so the process
+# still fails exactly as before - it just no longer fails silently.
+# LaneStarting is set just before the child pwsh call; LaneLaunched only AFTER it returns (sol PR #111
+# post-merge: setting 'launched' before the call receipted a start failure as a launch).
+$script:LaneStarting = $false
+$script:LaneLaunched = $false
+trap {
+    if (Get-Variable -Name runDir -Scope Script -ErrorAction SilentlyContinue) {
+        $trapOutcome = if ($script:LaneLaunched) { 'launched' } elseif ($script:LaneStarting) { 'launch-unconfirmed' } else { 'refused-before-launch' }
+        $trapLaneExit = if (Get-Variable -Name laneExit -Scope Script -ErrorAction SilentlyContinue) { $script:laneExit } else { $null }
+        Write-DispatchAttempt -Outcome $trapOutcome -Cause 'unhandled-error' -ExitCode 1 -Detail $_.Exception.Message -LaneExitCode $trapLaneExit
+    }
+    break
+}
+
 # ------------------------------------------------------------------ pre-dispatch PR review evidence
 # DELIVERABLE 9 (S126): before every review-lane dispatch, run the SAME exporter the hub ran by
 # hand for the three PRs that landed before this card - from this card on, the DISPATCHER is the
@@ -441,6 +712,7 @@ if ($isReviewLane -and $cardPrNumber) {
     $exporterExit = $LASTEXITCODE
     if ($exporterExit -ne 0) {
         Write-Output "WORKSTREAM: REFUSED review-evidence-export-failed card=$cardId pr=$cardPrNumber exit=$exporterExit"
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'review-evidence-export-failed' -ExitCode 6 -Detail "pr=$cardPrNumber exporterExit=$exporterExit"
         exit 6
     }
 }
@@ -731,6 +1003,7 @@ $fence
         # The exports above ALREADY RAN and are on disk. Saying "nothing dispatched" without saying
         # that would be a lie by omission about a directory this command created.
         Write-Output 'WORKSTREAM: DRY RUN - no lane dispatched. Any gh-evidence export above is real and on disk.'
+        Write-DispatchAttempt -Outcome 'dry-run-not-launched' -Cause 'dry-run' -ExitCode 0
         exit 0
     }
 
@@ -738,24 +1011,34 @@ $fence
     # at the top of the loop's cycle, which can dispatch several lanes across a single cycle.
     if (Test-KillSwitchArmed) {
         Write-Output "WORKSTREAM: REFUSED kill-switch-armed card=$cardId"
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'kill-switch-armed' -ExitCode 6
         exit 6
     }
 
-    # Reservation events (deliverable 7, S76): APPENDED, never updated in place. 'reserved' is
-    # written the instant before the process launches, and the loop counts ONLY these rows for
-    # today's budget - never workstream-dispatch-log.jsonl below, which a lane could in principle
-    # never reach if it dies before this script resumes.
-    $reservationId = [guid]::NewGuid().ToString()
-    Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane
+    $ratioExit = Test-RatioDispatchPermission -Kind $cardKind
+    if ($ratioExit -ne 0) {
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'product-ratio-guard' -ExitCode $ratioExit
+        exit $ratioExit
+    }
 
-    $reservationOutcome = 'refunded'
+    # Reservation events (deliverable 7, S76): APPENDED, never updated in place. 'reserved' is
+    # written before launch. The budget counts reservations and refunds only verified
+    # zero-spend terminal events; absent/ambiguous outcomes stay spent.
+    $reservationId = [guid]::NewGuid().ToString()
+    $null = Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir
+
+    Write-DispatchAttempt -Outcome 'launching' -Cause 'lane-starting' -ExitCode 0
+    $script:LaneStarting = $true
+    $laneExit = $null
+    $reservationOutcome = 'charged'
     try {
         & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $LaneRunner `
             -Lane $Lane -PromptFile $promptPath -Card $cardId -RunDir $runDir -TimeoutSec $TimeoutSec
         $laneExit = $LASTEXITCODE
+        $script:LaneLaunched = $true
         $reservationOutcome = 'charged'
     } finally {
-        Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane
+        $reservationRecord = Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir -ObservedExit $laneExit
     }
 
     $record = [ordered]@{
@@ -773,9 +1056,12 @@ $fence
         ghEvidence      = if ($needsHostedEvidence) { @($ghRows | ForEach-Object { "$($_.Name)=$($_.Result)" }) } else { @() }
         dispatchedUtc   = (Get-Date).ToUniversalTime().ToString('o')
         laneExitCode    = $laneExit
+        laneCostUsd     = $reservationRecord.laneCostUsd
+        laneCostReported = $reservationRecord.laneCostReported
     }
     Add-Content -LiteralPath $LogPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
 
+    Write-DispatchAttempt -Outcome 'launched' -Cause 'lane-returned' -ExitCode 0 -LaneExitCode $laneExit
     Write-Output "WORKSTREAM: dispatched, laneExit=$laneExit runDir=$runDir"
     exit 0
 }
@@ -787,6 +1073,7 @@ $fence
     # reason lands in stdout - and so in the loop's cycle receipt - before any process starts.
     if ($Lane -eq 'sol' -or $Lane -eq 'luna') {
         Write-Output "WORKSTREAM: REFUSED codex-lane-never-edits lane=$Lane card=$cardId"
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'codex-lane-never-edits' -ExitCode 6
         exit 6
     }
 
@@ -798,17 +1085,20 @@ $fence
     $procedureSha = Get-Prop $card 'procedureSha256'
     if (-not $procedureRel -or -not $procedureSha) {
         Write-Output "WORKSTREAM: REFUSED procedure-missing-or-drifted card=$cardId reason=no-procedure-or-sha"
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'procedure-missing-or-drifted' -ExitCode 6 -Detail 'no-procedure-or-sha'
         exit 6
     }
     $procedurePath = Join-Path $RepoRoot $procedureRel
     if (-not (Test-Path -LiteralPath $procedurePath)) {
         Write-Output "WORKSTREAM: REFUSED procedure-missing-or-drifted card=$cardId reason=file-missing path=$procedurePath"
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'procedure-missing-or-drifted' -ExitCode 6 -Detail "file-missing path=$procedurePath"
         exit 6
     }
     $actualProcedureSha = (Get-FileHash -LiteralPath $procedurePath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualProcedureSha -ne ([string]$procedureSha).ToLowerInvariant()) {
         Write-Output ("WORKSTREAM: REFUSED procedure-missing-or-drifted card=$cardId reason=sha-mismatch " +
             "recorded=$procedureSha actual=$actualProcedureSha")
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'procedure-missing-or-drifted' -ExitCode 6 -Detail "sha-mismatch recorded=$procedureSha actual=$actualProcedureSha"
         exit 6
     }
 
@@ -817,6 +1107,7 @@ $fence
     $baseSha = (& git -C $RepoRoot rev-parse fork/master 2>$null | Select-Object -First 1)
     if (-not $baseSha -or $baseSha -notmatch '^[0-9a-f]{40}$') {
         Write-Output "WORKSTREAM: CANNOT-DETERMINE - could not resolve fork/master to a full sha at $RepoRoot"
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'cannot-determine-base-sha' -ExitCode 3
         exit 3
     }
 
@@ -850,6 +1141,8 @@ $fence
         } else {
             Write-Output "WORKSTREAM: REFUSED procedure-missing-or-drifted card=$cardId detail=$composerMsg"
         }
+        $composerCause = if ($composerMsg -like 'unknown-field:*') { 'unknown-field' } else { 'procedure-missing-or-drifted' }
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause $composerCause -ExitCode 6 -Detail $composerMsg
         exit 6
     }
 
@@ -862,21 +1155,74 @@ $fence
     # diagnosis-base sha - and is recorded on the receipt below. A real branch checkout, never
     # --detach: the composed procedure itself tells the lane to `git switch -c` this branch, so
     # the worktree must already be on it.
-    & git -C $RepoRoot -c core.longpaths=true worktree add -b $branch $laneWorkDir $baseSha 2>&1 | Out-Null
+    #
+    # A branch left behind by an earlier attempt (the lane worktree is removed, the branch ref is
+    # not) used to make `worktree add -b` fail on every later cycle - the loop logged
+    # "worktree add failed" for PLAY-COUNTERS-CPU every 45 min from 2026-09-10. Reuse such a
+    # branch ONLY when it carries nothing beyond baseSha, and move it to baseSha first so the lane
+    # never starts from a stale tip. A branch with commits not in baseSha holds work this dispatch
+    # must not overwrite: refuse the card instead (exit 6, the loop's skip-this-track code).
+    & git -C $RepoRoot show-ref --verify --quiet "refs/heads/$branch" 2>$null
+    $branchExists = switch ($LASTEXITCODE) { 0 { $true } 1 { $false } default { $null } }
+    if ($null -eq $branchExists) {
+        Write-Output "WORKSTREAM: CANNOT-DETERMINE - could not check whether branch $branch exists"
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'cannot-determine-branch-exists' -ExitCode 3 -Detail "branch=$branch"
+        exit 3
+    }
+    if ($branchExists) {
+        $uniqueOut = @(& git -C $RepoRoot rev-list "$baseSha..refs/heads/$branch" 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            Write-Output "WORKSTREAM: CANNOT-DETERMINE - rev-list failed for existing branch $branch"
+            Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'cannot-determine-branch-commits' -ExitCode 3 -Detail "branch=$branch"
+            exit 3
+        }
+        $unique = @($uniqueOut | Where-Object { $_ })
+        if ($unique.Count -gt 0) {
+            Write-Output "WORKSTREAM: REFUSED existing-branch-has-work card=$cardId branch=$branch commits=$($unique.Count)"
+            Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'existing-branch-has-work' -ExitCode 6 -Detail "branch=$branch commits=$($unique.Count)"
+            exit 6
+        }
+        # Fails (and is reported) if the branch is checked out in another worktree.
+        & git -C $RepoRoot branch -f $branch $baseSha 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Output "WORKSTREAM: CANNOT-DETERMINE - could not move existing branch $branch to $baseSha (checked out elsewhere?)"
+            Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'cannot-move-existing-branch' -ExitCode 3 -Detail "branch=$branch baseSha=$baseSha"
+            exit 3
+        }
+        Write-Output "WORKSTREAM: reusing existing branch $branch (no commits beyond baseSha), moved to $baseSha"
+        & git -C $RepoRoot -c core.longpaths=true worktree add $laneWorkDir $branch 2>&1 | Out-Null
+    } else {
+        & git -C $RepoRoot -c core.longpaths=true worktree add -b $branch $laneWorkDir $baseSha 2>&1 | Out-Null
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Output "WORKSTREAM: CANNOT-DETERMINE - git worktree add failed for $laneWorkDir at $baseSha (branch $branch)"
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'worktree-add-failed' -ExitCode 3 -Detail "workDir=$laneWorkDir baseSha=$baseSha branch=$branch"
         exit 3
     }
 
+    $script:LastWorktreeDisposition = $null
     function Remove-LaneWorktreeIfClean([string]$WorkDirToCheck) {
-        # Never removes a worktree the lane left dirty - the path is recorded on the dispatch
-        # record instead, so nothing a lane produced is silently discarded.
-        $statusOut = & git -C $WorkDirToCheck status --porcelain 2>$null
-        if ($LASTEXITCODE -eq 0 -and -not $statusOut) {
-            & git -C $RepoRoot -c core.longpaths=true worktree remove $WorkDirToCheck --force 2>&1 | Out-Null
-            return $true
+        # Loaded lazily and fail-closed: a dispatcher copied without its helper (test fixtures copy
+        # dependencies by name) must KEEP the worktree with a reason, never abort the dispatch.
+        if (-not (Get-Command Invoke-RetireLaneWorktree -ErrorAction SilentlyContinue)) {
+            try { . (Join-Path $PSScriptRoot 'Retire-LaneWorktree.ps1') } catch {
+                $script:LastWorktreeDisposition = [ordered]@{ action = 'kept'; reason = "cannot-determine: Retire-LaneWorktree.ps1 not loadable: $($_.Exception.Message)" }
+                Write-Output "WORKSTREAM: worktree left in place ($($script:LastWorktreeDisposition.reason)): $WorkDirToCheck"
+                return $false
+            }
         }
-        Write-Output "WORKSTREAM: worktree left in place (not clean): $WorkDirToCheck"
+        # Never removes a worktree the lane left dirty, unpushed or unmerged - the SAFE gate in
+        # Retire-LaneWorktree.ps1 decides, without --force, and the disposition (with its
+        # reason) is recorded on the dispatch record, so nothing a lane produced is silently
+        # discarded. The previous `worktree remove --force` after a porcelain-only check
+        # also deleted git-ignored evidence and never looked for unpushed commits.
+        # MergeTarget is the ref baseSha was resolved from: local master can lag fork/master,
+        # which would wrongly keep a worktree whose HEAD is still exactly baseSha.
+        $disp = Invoke-RetireLaneWorktree -WorkDir $WorkDirToCheck -MergeTarget 'fork/master' `
+            -QuarantineRoot (Join-Path $RepoRoot ('.claude-state\disk-hygiene\quarantine\lane-exit\' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd')))
+        $script:LastWorktreeDisposition = $disp
+        if ($disp.action -eq 'retired') { return $true }
+        Write-Output "WORKSTREAM: worktree left in place ($($disp.reason)): $WorkDirToCheck"
         return $false
     }
 
@@ -890,8 +1236,15 @@ $fence
         # The worktree above is REAL, exactly like the gh-evidence export in the read-only path
         # is real under -DryRun: what you inspect is byte-identical to what a lane would receive.
         # Nothing ran in it, so it is guaranteed clean - remove it rather than leaving debris.
-        Write-Output 'WORKSTREAM: DRY RUN - no lane dispatched. Worktree and prompt above were real and are now removed.'
-        Remove-LaneWorktreeIfClean $laneWorkDir | Out-Null
+        Write-Output 'WORKSTREAM: DRY RUN - no lane dispatched. Worktree and prompt above were real; the worktree is retired if it passes the SAFE gate.'
+        # The function also emits status lines, so its pipeline output is an array (always truthy);
+        # decide from the recorded disposition instead.
+        # Receipt BEFORE cleanup, so the cause is on disk even if cleanup hangs or the process is
+        # killed. A cleanup THROW still overwrites it with 'unhandled-error' (single-file receipt;
+        # append-only semantics are deferred to TOOL-DISPATCH-ATTEMPT-WRITE-FAILURE-1).
+        Write-DispatchAttempt -Outcome 'dry-run-not-launched' -Cause 'dry-run' -ExitCode 0
+        Remove-LaneWorktreeIfClean $laneWorkDir | Out-Host
+        if ($script:LastWorktreeDisposition -and $script:LastWorktreeDisposition.action -eq 'retired') { Write-Output "WORKSTREAM: DRY RUN worktree retired: $laneWorkDir" }
         exit 0
     }
 
@@ -900,29 +1253,38 @@ $fence
     # between the cycle's own check and this particular start.
     if (Test-KillSwitchArmed) {
         Write-Output "WORKSTREAM: REFUSED kill-switch-armed card=$cardId"
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'kill-switch-armed' -ExitCode 6
         Remove-LaneWorktreeIfClean $laneWorkDir | Out-Null
         exit 6
     }
 
-    # Reservation events (deliverable 7, S76): APPENDED, never updated in place. 'reserved' is
-    # written the instant before the process launches - the earliest point a slot is actually
-    # spent, regardless of how the lane later exits - and the loop counts ONLY these rows for
-    # today's budget.
-    $reservationId = [guid]::NewGuid().ToString()
-    Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane
+    $ratioExit = Test-RatioDispatchPermission -Kind $cardKind
+    if ($ratioExit -ne 0) {
+        Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'product-ratio-guard' -ExitCode $ratioExit
+        Remove-LaneWorktreeIfClean $laneWorkDir | Out-Null
+        exit $ratioExit
+    }
 
+    # Reservation events (deliverable 7, S76): APPENDED, never updated in place. 'reserved' is
+    # written before launch. Zero-spend refunds require a bound terminal receipt;
+    # uncertain launch failures cannot create budget.
+    $reservationId = [guid]::NewGuid().ToString()
+    $null = Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir
+
+    Write-DispatchAttempt -Outcome 'launching' -Cause 'lane-starting' -ExitCode 0
+    $script:LaneStarting = $true
     $laneExit = $null
-    $reservationOutcome = 'refunded'
+    $reservationOutcome = 'charged'
     try {
         & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $StartEditingLane `
             -Lane $Lane -PromptFile $promptPath -WorkDir $laneWorkDir -Card $cardId -RunDir $runDir `
             -ExtraReadDir $runDir -TimeoutSec $TimeoutSec
         $laneExit = $LASTEXITCODE
-        # Charged once the process has actually run, regardless of ITS OWN exit code: the model
-        # turn was spent either way. Only a failure to even launch the wrapper is a refund.
+        $script:LaneLaunched = $true
+        # The terminal writer derives any refund from the actual receipt bytes.
         $reservationOutcome = 'charged'
     } finally {
-        Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane
+        $reservationRecord = Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir -ObservedExit $laneExit
     }
 
     $cleanRemoved = Remove-LaneWorktreeIfClean $laneWorkDir
@@ -942,10 +1304,14 @@ $fence
         promptPath      = $promptPath
         runDir          = $runDir
         worktreeRemoved = $cleanRemoved
+        worktreeDisposition = $script:LastWorktreeDisposition
         dispatchedUtc   = (Get-Date).ToUniversalTime().ToString('o')
         laneExitCode    = $laneExit
+        laneCostUsd     = $reservationRecord.laneCostUsd
+        laneCostReported = $reservationRecord.laneCostReported
     }
     Add-Content -LiteralPath $LogPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
 
+    Write-DispatchAttempt -Outcome 'launched' -Cause 'lane-returned' -ExitCode 0 -LaneExitCode $laneExit
     Write-Output "WORKSTREAM: dispatched, laneExit=$laneExit runDir=$runDir workDir=$laneWorkDir"
     exit 0

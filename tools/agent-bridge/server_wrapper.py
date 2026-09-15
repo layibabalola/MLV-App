@@ -1259,12 +1259,20 @@ class ServerSupervisor:
 
     def run(self) -> int:
         try:
+            # Establish the baseline before any child can announce readiness.
+            # Loading it in the watch thread could silently absorb an edit made
+            # between child startup and the first watcher sample.
+            try:
+                initial_snapshot = self._load_and_apply_persisted_snapshot()
+            except BaseException as exc:
+                self._report_error("agent-bridge server wrapper worker failed: %s" % exc)
+                return 1
             child = self._spawn_child()
             self._write_server_status(status="running", child_pid=child.pid)
             self._maybe_reap_stale_server_markers(force=True)
             self._stdin_thread = threading.Thread(target=self._pump_parent_stdin, name="agent-bridge-wrapper-stdin", daemon=True)
             self._stdin_thread.start()
-            self._watch_thread = threading.Thread(target=self._watch_for_code_changes, name="agent-bridge-wrapper-watch", daemon=True)
+            self._watch_thread = threading.Thread(target=self._watch_for_code_changes, args=(initial_snapshot,), name="agent-bridge-wrapper-watch", daemon=True)
             self._watch_thread.start()
 
             while True:
@@ -1710,9 +1718,8 @@ class ServerSupervisor:
                     pass
         return buffer if len(buffer) < 131072 else b""
 
-    def _watch_for_code_changes(self) -> None:
+    def _watch_for_code_changes(self, previous: Dict[Path, Optional[int]]) -> None:
         try:
-            previous = self._load_and_apply_persisted_snapshot()
             while not self._stop_event.wait(self.config.poll_interval_seconds):
                 current = _snapshot_mtimes(self.watch_paths)
                 changed = [path for path in self.watch_paths if current.get(path) != previous.get(path)]

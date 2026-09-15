@@ -613,14 +613,36 @@ every non-terminal `factory`-kind card (`state: frozen-factory-20260906`). Idemp
 `$D\receipts\0.5-factory-frozen.json` = `{recordedUtc, queueSha256, frozenCount, dryRunDiffSha256, scopelessIds}`. Accept: 0 dispatchable
 factory-kind cards and the receipt.
 
-**0.6 Ratio guard with a named caller (S64).** `tools/coordination/Test-ProductRatioGuard.ps1` computes `product_share_7d` and
-`dispatches_per_landed_product_pr_7d` over `fork/master`, `%ct`-bucketed; RED under 50% / above 4. **Caller:** `Invoke-Workstream.ps1`
-invokes it immediately before every dispatch and refuses any dispatch whose `kind` is not `product`/`playback` while RED, and
-`freeze-factory-cards.py` refuses to unfreeze while RED. Deterministic pytest cases in `test_coordination_guardrails.py` (synthetic 60%
-→ GREEN; synthetic 5% → RED), run with `python -m pytest`. Landed by reviewed PR; `$D\receipts\0.6-ratio-guard.json` = `{recordedUtc, mergeSha, firstReading, solVerdictPath}`, **then
-`$D\receipts\execution-control-0.6.json` — this PR changes `Invoke-Workstream.ps1`, a file every execution-control receipt hashes, so
-0.35's receipt is invalidated by §1.3's own rule and 0.6's supersedes it (S81).**
-The heartbeat prints the same two numbers FIRST for humans. Accept: the receipt's `firstReading` is RED (5.5% at DIAGNOSIS_BASE).
+**0.6 Ratio guard with a named caller (S64).** `tools/coordination/Test-ProductRatioGuard.ps1` resolves `fork/master` once
+and computes both metrics against that pinned SHA using committer epochs `%ct` in the inclusive interval
+`[asOfEpoch - 604800, asOfEpoch]`. `product_share_7d` counts every reachable non-merge commit in that interval in its denominator;
+a commit is product when its parent diff touches `src/` or `platform/`, counted once even when mixed. This is distinct from
+`landed_product_prs_7d`: unique recognized GitHub PR numbers on the first-parent walk, classified by the landing's net diff
+against parent 1. Recognize two-parent `Merge pull request #N` commits and one-parent squash subjects ending `(#N)`;
+a batch PR counts once. Unrecognized product landing provenance makes the dispatch ratio unavailable, never a commit-based substitute.
+
+Dispatch reservations, or the legacy log when reservations are absent, provide observed launches only; current manual/direct
+launches make coverage PARTIAL. Do not combine non-deduplicable sources. Report an observed dispatch-per-product-PR lower bound
+only when its denominator and provenance are valid; otherwise report null with a reason. Valid history with PARTIAL or unavailable
+dispatch evidence is RED. GREEN requires at least 50% product commit share, COMPLETE dispatch coverage and product PR provenance,
+and at most 4 dispatches per landed product PR. Missing/invalid Git history is ERROR and refuses all kinds. No current evidence
+source establishes COMPLETE coverage. Empty populations are unavailable/RED, not invalid-Git ERROR.
+
+**Caller:** `Invoke-Workstream.ps1` consults the guard immediately before every dispatch. RED refuses every kind except explicit
+`product` and `playback`; those two kinds remain allowed so missing historical launch accounting cannot block the first product
+work. ERROR refuses all kinds. Existing kill switch, selection, reservation and dry-run contracts remain intact. The freeze tool
+stays one-way with no unfreeze operation. Before any future factory unfreeze is implemented, require seven days of complete,
+version-enforced all-venue dispatch accounting and an authoritative GREEN result; PARTIAL, RED or ERROR refuses unfreeze.
+
+Deterministic cases in `test_coordination_guardrails.py`, run with `python -m pytest`, cover time boundaries, both distinct
+populations, merge/squash/batch PR provenance, partial and malformed evidence, and both actual caller seams. Synthetic 60% with
+COMPLETE evidence and ratio at most 4 is GREEN; 5% is RED; partial evidence remains RED even at 60%.
+Land by reviewed PR; `$D\receipts\0.6-ratio-guard.json` = `{recordedUtc, mergeSha, firstReading, solVerdictPath}`, then
+`$D\receipts\execution-control-0.6.json` with the unchanged fixed eleven-path schema and carried 0.35 provenance. Changing
+`Invoke-Workstream.ps1` invalidates the prior control receipt and this receipt supersedes it (S81). The heartbeat prints the same
+metrics first, including coverage and unavailable reasons. Acceptance records the actual rolling-seven-day firstReading at the
+landed merge SHA, with current dispatch coverage PARTIAL and RED for non-product work, plus evidence that product/playback still
+proceed with valid Git. Historical 3-of-55 (5.5%) diagnosis remains its original August29 interval, never a hardcoded firstReading.
 
 **0.7 Land or close the open fork PRs — a RECEIPT-WRITING step when it lands a hashed file (O102).** Derived live 2026-09-06 (`gh api
 repos/layibabalola/MLV-App/pulls/<n>/files --jq '.[].filename'`; re-derive at execution): **#71** ("refund a dispatch that failed and spent
@@ -816,3 +838,49 @@ Rounds 1-26: no contested finding except S45/O46 and S99/O118 (premises rejected
 No lane, seat, chip, heartbeat, pen, or doctrine entry is added. The global hook, the content-review gate, `closeout.config.json`
 and the finalize path are untouched. The bus gets ONE `specs/mlv-app.md` update at week 3. Nothing asks Fable to work, and
 nothing waits on the owner.
+
+
+### Clarification 0.7-c1: evidence-backed zero-spend refunds (September 8, 2026)
+
+This resolves the contradiction between 0.7's explicit refund-on-zero-spend intent,
+1.5's charged-reservation budget, and 0.35's S76 regardless-of-exit comments.
+It supersedes only that accounting predicate and those comments. All other 0.35
+deliverables, the normal-merge ancestry rule, the union of existing test names,
+the eleven-path control receipt set, and the Phase 0.2 activation gates remain.
+
+Count each nonempty reservationId once on the UTC calendar day of its reserved
+event, preserving the existing DateTimeKind normalization. A reservation counts
+as spent unless exactly one well-formed terminal event for that ID qualifies for
+a refund. Missing, malformed, duplicate or conflicting terminal events are spent;
+charged followed by refunded is spent. Duplicate conflicting reservations are
+ambiguous and cannot be refunded. Malformed ledger data must never manufacture
+available budget. A reserved event whose reservationId is missing, empty or
+non-string counts as its own distinct spent reservation and can never be refunded;
+use an internal row-ordinal identity so malformed IDs never collapse together.
+Refunds cannot restore another UTC day's budget.
+
+An ordinary refund requires terminal state refunded, same-day provenance, and
+the exact lane receipt for that invocation: a bounded run receipt path, SHA-256
+of its bytes, integer nonzero exitCode, spend.costReported exactly true, and
+numeric non-boolean spend.costUsd exactly zero. The dispatcher copies facts from
+the same receipt bytes it hashes; the reducer verifies the receipt binding and
+predicate before refunding. Successful zero-cost runs, unavailable/missing cost,
+strings, booleans, positive cost, missing receipts, hash or identity mismatches,
+provider refusal without explicit reported zero cost, and ambiguous launch errors
+remain spent. Receipt state complete is only process lifecycle evidence, never
+delivery success. No signed or adversarially tamper-proof accounting is claimed.
+
+The dispatcher is the writer of launch-failure evidence in the terminal event
+in dispatch-reservations.jsonl; no separate launch-failure file is introduced.
+A failure-to-launch refund requires affirmative evidence that no child provider
+process started, with a typed launch-failure record bound to that reservation.
+A missing receipt or catch block alone is not proof; uncertain launch failures
+remain spent. Implement only cases for which the dispatcher can establish that
+evidence, preserving the append-only reserved/terminal event design.
+
+Regression coverage must exercise the shipped reducer and preserve every test
+name from either parent. Include nonzero reported-zero refund, successful zero
+spent, all unknown/malformed cost types, stale/hash/identity-mismatched receipts,
+duplicate/conflicting events, cross-day timestamps and unresolved launch cases.
+Product-ratio accounting still counts dispatch attempts independently. No loop,
+editing provider, Desktop configuration, or frozen factory card is enabled here.

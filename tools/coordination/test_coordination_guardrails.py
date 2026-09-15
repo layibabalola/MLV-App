@@ -999,6 +999,33 @@ CLAUDE_SUCCESS_QUOTING_ENVELOPE = (
     '"num_turns":3}\n'
 )
 
+# Measured 2026-09-15, fleet-runs\ws-PLAY-COUNTERS-CPU-B-20260915T080318Z: the lane CLI's OAuth token
+# expired after an account rotation. exit 1 in 5.9 s, USD 0, and no api_error_status - yet the
+# receipt carried providerRefusal=null, so a dead login read as an ordinary incomplete run.
+REAL_CLAUDE_OAUTH_EXPIRED_ENVELOPE = (
+    '{"type":"result","subtype":"success","is_error":true,"api_error_status":null,'
+    '"result":"Failed to authenticate: OAuth session expired and could not be refreshed",'
+    '"terminal_reason":"api_error","num_turns":1}\n'
+)
+
+
+def test_an_expired_claude_oauth_session_is_a_provider_auth_refusal(tmp_path):
+    r = _classify(tmp_path, "", "claude", answer=REAL_CLAUDE_OAUTH_EXPIRED_ENVELOPE)
+    assert r is not None and r["kind"] == "provider-auth", r
+    assert "owner re-authenticates" in r["remedy"], r
+    # Quoting the phrase in a SUCCESSFUL answer is still not a refusal.
+    quoting = ('{"type":"result","subtype":"success","is_error":false,'
+               '"result":"the log said Failed to authenticate: OAuth session expired","num_turns":2}\n')
+    assert _classify(tmp_path, "", "claude", answer=quoting) is None
+    # sol PR #117 BLOCKER repro: a status on a SUCCESSFUL envelope must not let quoted text classify.
+    quoting_with_status = ('{"type":"result","subtype":"success","is_error":false,"api_error_status":401,'
+                           '"result":"Failed to authenticate: OAuth session expired"}\n')
+    assert _classify(tmp_path, "", "claude", answer=quoting_with_status) is None
+    # ...while the numeric 429 status still classifies on its own.
+    status_429 = '{"type":"result","subtype":"success","is_error":false,"api_error_status":429,"result":"ok"}\n'
+    r429 = _classify(tmp_path, "", "claude", answer=status_429)
+    assert r429 is not None and r429["kind"] == "provider-rate-limit", r429
+
 
 def _classify(tmp_path, text, engine, prompt="", answer=""):
     src = tmp_path / "lane-stderr.txt"
@@ -1188,7 +1215,90 @@ def test_invoke_lane_records_a_provider_refusal_as_refused_not_complete():
     assert "-Prompt $Prompt" in body, "the echoed prompt must be excluded from classification (sol PR #80 R1 BLOCKER)"
     assert "providerRefusal = $providerRefusal" in body, "the receipt must carry the refusal verbatim"
     assert "elseif ($null -ne $providerRefusal) { 'refused' }" in body, "state must have a third value"
-    assert "$null -eq $providerRefusal -and $exitCode -ne -999" in body, "complete must be false on refusal"
+    assert "$null -eq $failure -and $null -eq $providerRefusal -and $processEnded -and $workEvidence.workCompleted -eq $true" in body, (
+        "complete must be false on refusal, on failure, and without positive work evidence"
+    )
+
+
+# --- Invoke-Lane: `complete` is POSITIVE evidence the work finished, never "the process ended" ---
+# Incident 2026-09-14, fleet-runs\ws-PLAY-COUNTERS-CPU-20260914T151951Z: exitCode 1 and this
+# envelope (trimmed to the deciding fields), yet the receipt said state=complete, complete=true.
+REAL_CLAUDE_MAX_TURNS_ENVELOPE = (
+    '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":66,'
+    '"stop_reason":"tool_use","terminal_reason":"max_turns","total_cost_usd":4.87,'
+    '"errors":["Reached maximum number of turns (65)"]}\n'
+)
+CLAUDE_SUCCESS_ENVELOPE = (
+    '{"type":"result","subtype":"success","is_error":false,"num_turns":18,'
+    '"stop_reason":"end_turn","terminal_reason":"completed","result":"done"}\n'
+)
+# Measured on this board: is_error=true while subtype still says success.
+CLAUDE_API_ERROR_SUCCESS_SUBTYPE_ENVELOPE = (
+    '{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","result":"x"}\n'
+)
+
+
+def _work_evidence(tmp_path, engine, answer, exit_code):
+    asrc = tmp_path / "lane-answer.txt"
+    asrc.write_text(answer, encoding="utf-8")
+    cmd = (
+        f". '{REFUSAL_HELPER}'; "
+        f"$a = [IO.File]::ReadAllText('{asrc}'); "
+        f"Get-LaneWorkEvidence -Engine '{engine}' -Answer $a -ExitCode {exit_code} | ConvertTo-Json -Compress"
+    )
+    out = subprocess.run(
+        ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmd],
+        text=True, capture_output=True,
+    )
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_work_evidence_falsifier_exit_1_max_turns_is_not_complete(tmp_path):
+    r = _work_evidence(tmp_path, "claude", REAL_CLAUDE_MAX_TURNS_ENVELOPE, 1)
+    assert r["workCompleted"] is False, r
+    assert r["subtype"] == "error_max_turns" and r["terminalReason"] == "max_turns", r
+
+
+def test_work_evidence_max_turns_is_not_complete_even_with_exit_0(tmp_path):
+    # The envelope alone must defeat completion: exit code is necessary, never sufficient.
+    r = _work_evidence(tmp_path, "claude", REAL_CLAUDE_MAX_TURNS_ENVELOPE, 0)
+    assert r["workCompleted"] is False, r
+    assert r["reason"] == "envelope-is-error", r
+
+
+def test_work_evidence_requires_every_success_signal(tmp_path):
+    assert _work_evidence(tmp_path, "claude", CLAUDE_SUCCESS_ENVELOPE, 0)["workCompleted"] is True
+    assert _work_evidence(tmp_path, "claude", CLAUDE_API_ERROR_SUCCESS_SUBTYPE_ENVELOPE, 0)["workCompleted"] is False
+    # One falsifier per remaining conjunct (degraded review PR #111, opus-002 major): each envelope
+    # passes every other guard, so deleting exactly that guard turns this red.
+    bad_subtype = '{"type":"result","subtype":"error_during_execution","is_error":false,"terminal_reason":"completed"}\n'
+    r = _work_evidence(tmp_path, "claude", bad_subtype, 0)
+    assert r["workCompleted"] is False and r["reason"] == "subtype-error_during_execution", r
+    bad_terminal = '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"max_turns"}\n'
+    r = _work_evidence(tmp_path, "claude", bad_terminal, 0)
+    assert r["workCompleted"] is False and r["reason"] == "terminal-reason-max_turns", r
+    no_is_error = '{"type":"result","subtype":"success","terminal_reason":"completed"}\n'
+    r = _work_evidence(tmp_path, "claude", no_is_error, 0)
+    assert r["workCompleted"] is False and r["reason"] == "envelope-is-error-absent", r
+    # terminal_reason absent on an otherwise-successful envelope is still completion.
+    no_terminal = '{"type":"result","subtype":"success","is_error":false}\n'
+    assert _work_evidence(tmp_path, "claude", no_terminal, 0)["workCompleted"] is True
+    # No envelope on the claude engine is absence of evidence, not completion.
+    assert _work_evidence(tmp_path, "claude", "", 0)["reason"] == "no-result-envelope"
+    assert _work_evidence(tmp_path, "claude", "not json at all", 0)["workCompleted"] is False
+    # codex exposes no envelope: exit 0 is the only observable, and non-zero defeats it.
+    assert _work_evidence(tmp_path, "codex", "answer", 0)["workCompleted"] is True
+    assert _work_evidence(tmp_path, "codex", "answer", 1)["workCompleted"] is False
+
+
+def test_invoke_lane_receipt_separates_process_ended_from_complete():
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "processEnded = $processEnded" in body
+    assert "complete     = $workCompleted" in body
+    assert "workEvidence = $workEvidence" in body
+    assert "elseif ($workCompleted) { 'complete' }" in body, "state=complete must require work evidence"
+    assert "elseif ($processEnded) { 'ended-incomplete' }" in body
 
 
 def test_invoke_lane_propagates_a_refusal_as_125_ahead_of_the_child_code():
@@ -1581,6 +1691,205 @@ def test_editing_dispatch_prints_workdir_lane_and_a_full_basesha(tmp_path):
         cleanup_lane_worktree(tmp_path, "TEST-EDIT-A")
 
 
+def _reuse_card(dual, card_id):
+    proc = write_fields_card(dual / "prompts" / "v2", card_id)
+    return {"id": card_id, "state": "queued", "track": "product", "kind": "product",
+            "owner": "sonnet", "priority": 1,
+            "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-%s.md" % card_id,
+            "procedureSha256": sha256_of(proc)}
+
+
+def test_editing_dispatch_reuses_a_stale_branch_with_no_unique_commits_and_moves_it_to_base(tmp_path):
+    """A branch left by an earlier attempt, sitting on an OLDER commit that is an ancestor of
+    baseSha, must not block `worktree add` forever: it is reused and moved to baseSha, so the
+    lane starts from the fresh base, never the stale tip."""
+    dual, first = editing_board(tmp_path)
+    subprocess.run(["git", "branch", "product/TEST-EDIT-REUSE-1", first], cwd=tmp_path, check=True)
+    (tmp_path / "seed2.txt").write_text("more\n")
+    subprocess.run(["git", "add", "seed2.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "second"], cwd=tmp_path, check=True)
+    head = git(tmp_path, "rev-parse", "HEAD")
+    subprocess.run(["git", "update-ref", "refs/remotes/fork/master", head], cwd=tmp_path, check=True)
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-REUSE-1")], "TEST-EDIT-REUSE-1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "reusing existing branch product/TEST-EDIT-REUSE-1" in result.stdout, result.stdout
+        assert git(tmp_path, "rev-parse", "refs/heads/product/TEST-EDIT-REUSE-1") == head
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-REUSE-1")
+
+
+def test_editing_dispatch_refuses_an_existing_branch_that_carries_work(tmp_path):
+    """A branch with a commit NOT in baseSha holds work; the dispatcher must refuse (exit 6)
+    and must not move or overwrite the branch."""
+    dual, head = editing_board(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "product/TEST-EDIT-REUSE-2"], cwd=tmp_path, check=True)
+    (tmp_path / "work.txt").write_text("lane work\n")
+    subprocess.run(["git", "add", "work.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "lane work"], cwd=tmp_path, check=True)
+    tip = git(tmp_path, "rev-parse", "HEAD")
+    subprocess.run(["git", "checkout", "-q", "--detach", head], cwd=tmp_path, check=True)
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-REUSE-2")], "TEST-EDIT-REUSE-2")
+        assert result.returncode == 6, result.stdout + result.stderr
+        assert "REFUSED existing-branch-has-work card=TEST-EDIT-REUSE-2" in result.stdout, result.stdout
+        assert git(tmp_path, "rev-parse", "refs/heads/product/TEST-EDIT-REUSE-2") == tip
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-REUSE-2")
+
+
+def test_a_real_refused_dispatch_leaves_a_typed_attempt_receipt(tmp_path):
+    """2026-09-14: ~90 PLAY-COUNTERS-CPU run dirs held only lane-prompt.md because a pre-launch
+    refusal reached stdout alone. A NON-dry-run refusal must leave dispatch-attempt.json naming
+    the cause, and no lane may have started (no lane receipt)."""
+    dual, head = editing_board(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "product/TEST-EDIT-ATTEMPT"], cwd=tmp_path, check=True)
+    (tmp_path / "work.txt").write_text("lane work\n")
+    subprocess.run(["git", "add", "work.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "lane work"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "checkout", "-q", "--detach", head], cwd=tmp_path, check=True)
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-ATTEMPT")], "TEST-EDIT-ATTEMPT",
+                                      dry_run=False)
+        assert result.returncode == 6, result.stdout + result.stderr
+        run_dirs = glob.glob(str(tmp_path / ".claude-state" / "fleet-runs" / "ws-TEST-EDIT-ATTEMPT-*"))
+        assert len(run_dirs) == 1, run_dirs
+        attempt = json.loads((Path(run_dirs[0]) / "dispatch-attempt.json").read_text(encoding="utf-8"))
+        assert attempt["schema"] == "mlv-app/workstream-dispatch-attempt/v1"
+        assert attempt["outcome"] == "refused-before-launch", attempt
+        assert attempt["cause"] == "existing-branch-has-work", attempt
+        assert attempt["exitCode"] == 6 and attempt["laneReceipts"] == [], attempt
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-ATTEMPT")
+
+
+def test_a_terminating_error_after_the_run_dir_is_named_still_leaves_an_attempt_receipt(tmp_path):
+    """sol PR #111 R1: a THROW is an exit path too. A procedure path that is a directory passes
+    Test-Path and then makes Get-FileHash throw - after $runDir is named, before any refusal."""
+    dual, head = editing_board(tmp_path)
+    (dual / "prompts" / "v2" / "fields-TEST-EDIT-THROW.md").mkdir(parents=True)
+    item = {"id": "TEST-EDIT-THROW", "state": "queued", "track": "product", "kind": "product",
+            "owner": "sonnet", "priority": 1,
+            "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-TEST-EDIT-THROW.md",
+            "procedureSha256": "0" * 64}
+    try:
+        result = run_editing_dispatch(tmp_path, [item], "TEST-EDIT-THROW", dry_run=False)
+        assert result.returncode != 0, result.stdout + result.stderr
+        run_dirs = glob.glob(str(tmp_path / ".claude-state" / "fleet-runs" / "ws-TEST-EDIT-THROW-*"))
+        assert len(run_dirs) == 1, (run_dirs, result.stdout, result.stderr)
+        attempt = json.loads((Path(run_dirs[0]) / "dispatch-attempt.json").read_text(encoding="utf-8"))
+        assert attempt["outcome"] == "refused-before-launch" and attempt["cause"] == "unhandled-error", attempt
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-THROW")
+
+
+def test_every_workstream_exit_after_the_run_dir_is_named_writes_an_attempt_receipt():
+    """Structural: once $runDir is named, every exit (DryRun included) has a Write-DispatchAttempt
+    call within the three lines above it (a worktree-cleanup call may sit between), throws are
+    covered by a guarded trap, and both launch paths record 'launched' before and after.
+    Behavioural tests cover the real refusal and throw paths; this is the cheap net for new exits."""
+    lines = WORKSTREAM.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("$runDir = Join-Path"))
+    unreceipted = []
+    for i in range(start, len(lines)):
+        if re.match(r"^\s*exit\b", lines[i]):
+            # The receipt comes first; at most a cleanup call and its status line may sit between.
+            window = [l.strip() for l in lines[i - 3:i]]
+            if any("Write-DispatchAttempt" in l for l in window) or "WORKSTREAM: dispatched" in window[-1]:
+                continue
+            unreceipted.append((i + 1, window[-1]))
+    assert not unreceipted, unreceipted
+    body = "\n".join(lines)
+    assert "if ($DryRun) { return }" not in body
+    assert body.count("-Outcome 'dry-run-not-launched'") == 2
+    assert "-Cause 'unhandled-error'" in body and re.search(r"^trap \{", body, re.M)
+    assert body.count("-Outcome 'launching' -Cause 'lane-starting'") == 2
+    assert body.count("-Outcome 'launched' -Cause 'lane-returned'") == 2
+    assert "-Outcome 'launched' -Cause 'lane-starting'" not in body
+    # sol PR #111 post-merge: 'launched' only after the child returned. Each LaneLaunched assignment
+    # must directly follow the $LASTEXITCODE capture inside the launch try, never precede the call.
+    launched_at = [i for i, l in enumerate(lines) if l.strip() == "$script:LaneLaunched = $true"]
+    assert len(launched_at) == 2, launched_at
+    for i in launched_at:
+        assert lines[i - 1].strip() == "$laneExit = $LASTEXITCODE", (i + 1, lines[i - 1])
+    assert body.count("$script:LaneStarting = $true") == 2
+    assert "elseif ($script:LaneStarting) { 'launch-unconfirmed' }" in body
+
+
+def _extract_ps_function(tmp_path, source, name):
+    extractor = tmp_path / ("extract-%s.ps1" % name)
+    extractor.write_text(
+        "param($Source,$Name)\n$tokens=$null;$errors=$null\n"
+        "$ast=[System.Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)\n"
+        "if($errors.Count){throw 'parse failed'}\n"
+        "$f=@($ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $Name},$true))\n"
+        "if($f.Count -ne 1){throw 'expected one function'}\n$f[0].Extent.Text\n", encoding="utf-8")
+    out = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(extractor), "-Source", str(source), "-Name", name],
+                         text=True, capture_output=True)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+def test_an_unwritable_run_dir_spools_a_typed_attempt_receipt(tmp_path):
+    """sol PR #111 post-merge: a failed dispatch-attempt.json write was only printed. With the run
+    dir unwritable (its parent is a FILE), the receipt must land in the fixed spool instead."""
+    fn = _extract_ps_function(tmp_path, WORKSTREAM, "Write-DispatchAttempt")
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    harness = tmp_path / "spool-harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference='Stop'\n"
+        "$RepoRoot='" + str(tmp_path).replace("'", "''") + "'\n"
+        "$runDir='" + str(blocker / "ws-CARD-1-T").replace("'", "''") + "'\n"
+        "$cardId='CARD-1';$cardTrack='product';$Lane='sonnet';$engine='claude';$AllowEdits=$true\n"
+        + fn + "\nWrite-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'worktree-add-failed' -ExitCode 3\n",
+        encoding="utf-8")
+    result = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(harness)], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "dispatch-attempt receipt NOT written" in result.stdout and "spooled=" in result.stdout, result.stdout
+    spooled = list((tmp_path / ".claude-state" / "fleet-runs" / "dispatch-attempt-spool").glob("CARD-1-*-refused-before-launch.json"))
+    assert len(spooled) == 1, spooled
+    rec = json.loads(spooled[0].read_text(encoding="utf-8"))
+    assert rec["cause"] == "worktree-add-failed" and rec["exitCode"] == 3 and rec["runDirWriteError"], rec
+
+
+def test_the_loop_carries_receipt_write_failures_into_its_cycle_receipt(tmp_path):
+    extractor = tmp_path / "extract-loop.ps1"
+    extractor.write_text("param($Source)\n$tokens=$null;$errors=$null\n"
+        "$ast=[System.Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)\n"
+        "if($errors.Count){throw 'loop parse failed'}\n"
+        "$loops=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.ForEachStatementAst] -and $node.Variable.VariablePath.UserPath -eq 'track'},$true))\n"
+        "if($loops.Count -ne 1){throw 'expected one track loop'}\n$loops[0].Extent.Text\n", encoding="utf-8")
+    extracted = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(extractor), "-Source", str(LOOP_SCRIPT)], text=True, capture_output=True)
+    assert extracted.returncode == 0, extracted.stderr
+    dispatcher = tmp_path / "fake-dispatcher.ps1"
+    dispatcher.write_text("param($Track)\nWrite-Output ('WORKSTREAM: track=' + $Track + ' card=C1')\n"
+                          "Write-Output 'WORKSTREAM: dispatch-attempt receipt NOT written (disk full) runDir=X spool ALSO failed (disk full)'\nexit 0\n", encoding="ascii")
+    harness = tmp_path / "loop-body.ps1"
+    harness.write_text("$Tracks=@('product')\n$dispatched=@()\n$skipped=@()\n$receiptWriteFailures=@()\n$MaxDispatchesPerCycle=1\n$DailyBudget=9\n$spentToday=0\n$Dispatcher='"
+        + str(dispatcher).replace("'", "''") + "'\n$TimeoutSec=1\n$StaleHours=1\n$Lane=''\n$AllowEdits=$false\n$DryRun=$false\n"
+        + extracted.stdout + "\n[ordered]@{dispatched=$dispatched;receiptWriteFailures=$receiptWriteFailures}|ConvertTo-Json -Depth 6 -Compress\n", encoding="utf-8")
+    result = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(harness)], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout.splitlines()[-1])
+    failures = payload["receiptWriteFailures"]
+    if isinstance(failures, dict):
+        failures = [failures]
+    assert len(failures) == 1 and "disk full" in failures[0]["line"] and failures[0]["track"] == "product", payload
+    assert "receiptWriteFailures = $receiptWriteFailures" in LOOP_SCRIPT.read_text(encoding="utf-8")
+
+
+def test_editing_dispatch_creates_a_new_branch_when_none_exists(tmp_path):
+    dual, head = editing_board(tmp_path)
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-REUSE-3")], "TEST-EDIT-REUSE-3")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "reusing existing branch" not in result.stdout
+        assert git(tmp_path, "rev-parse", "refs/heads/product/TEST-EDIT-REUSE-3") == head
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-REUSE-3")
+
+
 def test_two_editing_dispatches_get_two_distinct_worktree_paths(tmp_path):
     dual, head = editing_board(tmp_path)
     proc_a = write_fields_card(dual / "prompts" / "v2", "TEST-EDIT-B1")
@@ -1673,6 +1982,14 @@ def test_a_real_editing_dispatch_reserves_before_it_starts_and_charges_after(tmp
         assert rows[0]["state"] == "reserved", rows
         assert rows[1]["state"] == "charged", rows
         assert rows[0]["reservationId"] == rows[1]["reservationId"]
+        # Attempt history is append-only: 'launching' before the child, 'launched' after it returned.
+        run_dirs = glob.glob(str(tmp_path / ".claude-state" / "fleet-runs" / "ws-TEST-EDIT-RES-1-*"))
+        assert len(run_dirs) == 1, run_dirs
+        history = [json.loads(l) for l in (Path(run_dirs[0]) / "dispatch-attempts.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+        assert [h["outcome"] for h in history] == ["launching", "launched"], history
+        assert history[1]["cause"] == "lane-returned" and history[1]["laneExitCode"] == 0, history
+        latest = json.loads((Path(run_dirs[0]) / "dispatch-attempt.json").read_text(encoding="utf-8"))
+        assert latest["outcome"] == "launched", latest
     finally:
         cleanup_lane_worktree(tmp_path, "TEST-EDIT-RES-1")
 
@@ -2099,6 +2416,8 @@ def test_exporter_writes_both_exports_byte_exact(tmp_path):
     checks_doc = json.loads(checks_raw.decode("utf-8"))
     review_doc = json.loads(review_raw.decode("utf-8"))
     assert checks_doc["checks"] == checks_payload
+    assert review_doc["number"] == 99
+    assert review_doc["stateBefore"] == "OPEN" and review_doc["stateAfter"] == "OPEN"
     assert review_doc["headRefOidBefore"] == head_sha
     assert review_doc["headRefOidAfter"] == head_sha
     assert review_doc["requiredContextsBefore"] == ["build"]
@@ -2220,3 +2539,700 @@ def test_exporter_reports_a_missing_required_context_as_a_failure(tmp_path):
     review_doc = json.loads((run_dir / "pr-99-review.json").read_text(encoding="utf-8"))
     assert review_doc["missingRequiredContexts"] == ["lint"]
     assert "EXPORT: missing-required-context lint" in result.stdout
+
+
+# Product ratio admission: disposable history and actual dispatcher fixtures.
+import json
+import os
+import re
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+RATIO_SOURCE_GUARD = ROOT / "tools" / "coordination" / "Test-ProductRatioGuard.ps1"
+RATIO_SOURCE_DISPATCHER = ROOT / "tools" / "coordination" / "Invoke-Workstream.ps1"
+RATIO_SOURCE_AS_OF = 2_000_000_000
+RATIO_SOURCE_DAY = 86400
+
+
+def ratio_source_run(*args, cwd=None, env=None):
+    return subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True)
+
+
+def ratio_source_git(repo, *args, env=None):
+    result = ratio_source_run("git", *args, cwd=repo, env=env)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def ratio_source_init_repo(path):
+    path.mkdir()
+    ratio_source_git(path, "init", "-q", "-b", "master")
+    ratio_source_git(path, "config", "user.name", "Ratio Test")
+    ratio_source_git(path, "config", "user.email", "ratio@example.invalid")
+    return path
+
+
+def ratio_source_commit(repo, subject, epoch, paths, author_epoch=None):
+    for name, text in paths.items():
+        target = repo / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    ratio_source_git(repo, "add", "-A")
+    env = dict(os.environ)
+    env["GIT_COMMITTER_DATE"] = f"@{epoch} +0000"
+    env["GIT_AUTHOR_DATE"] = f"@{author_epoch if author_epoch is not None else epoch} +0000"
+    ratio_source_git(repo, "commit", "-qm", subject, env=env)
+    return ratio_source_git(repo, "rev-parse", "HEAD")
+
+
+def ratio_source_invoke_guard(repo, *, as_of=RATIO_SOURCE_AS_OF, reservations=None, legacy=None, ref="master"):
+    command = [
+        "pwsh", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(RATIO_SOURCE_GUARD), "-RepoRoot", str(repo), "-SourceRef", ref,
+        "-AsOfEpoch", str(as_of),
+    ]
+    if reservations is not None:
+        command += ["-ReservationsPath", str(reservations)]
+    if legacy is not None:
+        command += ["-LegacyDispatchPath", str(legacy)]
+    result = ratio_source_run(*command)
+    payload = json.loads(result.stdout)
+    return result, payload
+
+
+def ratio_source_populate(repo, count, product_indices, *, start=RATIO_SOURCE_AS_OF - RATIO_SOURCE_DAY):
+    for index in range(count):
+        path = f"src/p{index}.txt" if index in product_indices else f"docs/d{index}.txt"
+        ratio_source_commit(repo, f"commit {index}", start + index, {path: str(index)})
+
+
+@pytest.mark.parametrize("count,products,expected", [(10, set(range(6)), 0.60), (20, {3}, 0.05)])
+def test_ratio_source_product_share_populations(tmp_path, count, products, expected):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_populate(repo, count, products)
+    _, payload = ratio_source_invoke_guard(repo)
+    assert payload["commitPopulation"] == count
+    assert payload["productCommitCount"] == len(products)
+    assert payload["productShare7d"] == pytest.approx(expected)
+    assert payload["verdict"] == "RED"
+
+
+def test_ratio_source_boundary_committer_date_docs_merge_and_mixed_commit(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "included boundary", RATIO_SOURCE_AS_OF - 7 * RATIO_SOURCE_DAY, {"src/a": "a"}, author_epoch=RATIO_SOURCE_AS_OF - 30 * RATIO_SOURCE_DAY)
+    ratio_source_commit(repo, "excluded old", RATIO_SOURCE_AS_OF - 7 * RATIO_SOURCE_DAY - 1, {"src/old": "old"}, author_epoch=RATIO_SOURCE_AS_OF)
+    ratio_source_commit(repo, "docs denominator", RATIO_SOURCE_AS_OF - 10, {"docs/readme": "d"})
+    ratio_source_commit(repo, "mixed once", RATIO_SOURCE_AS_OF - 9, {"src/m": "m", "docs/m": "m"})
+    ratio_source_git(repo, "checkout", "-qb", "side", "HEAD~1")
+    ratio_source_commit(repo, "side", RATIO_SOURCE_AS_OF - 8, {"platform/side": "s"})
+    ratio_source_git(repo, "checkout", "-q", "master")
+    env = dict(os.environ, GIT_COMMITTER_DATE=f"@{RATIO_SOURCE_AS_OF - 7} +0000", GIT_AUTHOR_DATE=f"@{RATIO_SOURCE_AS_OF - 7} +0000")
+    ratio_source_git(repo, "merge", "--no-ff", "-qm", "ordinary merge", "side", env=env)
+    _, payload = ratio_source_invoke_guard(repo)
+    assert payload["commitPopulation"] == 4
+    assert payload["productCommitCount"] == 3
+
+
+def test_ratio_source_future_commit_is_excluded(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "present", RATIO_SOURCE_AS_OF, {"src/a": "a"})
+    ratio_source_commit(repo, "future", RATIO_SOURCE_AS_OF + 1, {"src/b": "b"})
+    _, payload = ratio_source_invoke_guard(repo)
+    assert payload["commitPopulation"] == 1
+    assert payload["productCommitCount"] == 1
+
+
+def test_ratio_source_github_merge_squash_dedup_and_batch_count_once(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "base", RATIO_SOURCE_AS_OF - 100, {"docs/base": "base"})
+    ratio_source_git(repo, "checkout", "-qb", "feature")
+    ratio_source_commit(repo, "part one", RATIO_SOURCE_AS_OF - 90, {"src/a": "a"})
+    ratio_source_commit(repo, "part two", RATIO_SOURCE_AS_OF - 80, {"src/b": "b"})
+    ratio_source_git(repo, "checkout", "-q", "master")
+    env = dict(os.environ, GIT_COMMITTER_DATE=f"@{RATIO_SOURCE_AS_OF - 70} +0000", GIT_AUTHOR_DATE=f"@{RATIO_SOURCE_AS_OF - 70} +0000")
+    ratio_source_git(repo, "merge", "--no-ff", "-qm", "Merge pull request #91 from example/batch", "feature", env=env)
+    ratio_source_commit(repo, "squashed product (#92)", RATIO_SOURCE_AS_OF - 60, {"platform/c": "c"})
+    _, payload = ratio_source_invoke_guard(repo)
+    assert payload["recognizedProductPrIds"] == [91, 92]
+    assert payload["recognizedProductPrCount"] == 2
+
+
+def test_ratio_source_unknown_product_landing_nulls_rate(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "direct product landing", RATIO_SOURCE_AS_OF - 2, {"src/a": "a"})
+    reservations = tmp_path / "reservations.jsonl"
+    reservations.write_text(json.dumps({"state": "reserved", "recordedUtc": datetime.fromtimestamp(RATIO_SOURCE_AS_OF - 1, timezone.utc).isoformat()}) + "\n")
+    _, payload = ratio_source_invoke_guard(repo, reservations=reservations)
+    assert payload["unrecognizedProductLandings"]
+    assert payload["dispatchesPerLandedProductPr7dLowerBound"] is None
+    assert "UNAVAILABLE_LANDING_PROVENANCE" in payload["reasons"]
+
+
+def test_ratio_source_missing_and_malformed_observations_are_partial_red(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "docs", RATIO_SOURCE_AS_OF - 1, {"docs/a": "a"})
+    missing = tmp_path / "missing"
+    _, absent = ratio_source_invoke_guard(repo, reservations=missing, legacy=missing)
+    assert absent["dispatchCoverage"] == "PARTIAL"
+    assert absent["dispatchesObserved"] == 0
+    assert absent["verdict"] == "RED"
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("not-json\n")
+    _, malformed = ratio_source_invoke_guard(repo, reservations=bad, legacy=missing)
+    assert malformed["malformedDispatchRows"] == 1
+    assert malformed["verdict"] == "RED"
+    assert "ERROR_DISPATCH_EVIDENCE_MALFORMED" in malformed["reasons"]
+
+
+def test_ratio_source_reservations_take_precedence_and_are_not_combined_with_legacy(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "docs", RATIO_SOURCE_AS_OF - 1, {"docs/a": "a"})
+    stamp = datetime.fromtimestamp(RATIO_SOURCE_AS_OF - 1, timezone.utc).isoformat()
+    reservations = tmp_path / "reservations.jsonl"
+    legacy = tmp_path / "legacy.jsonl"
+    reservations.write_text(json.dumps({"state": "reserved", "recordedUtc": stamp}) + "\n")
+    legacy.write_text("\n".join(json.dumps({"dispatchedUtc": stamp}) for _ in range(4)) + "\n")
+    _, payload = ratio_source_invoke_guard(repo, reservations=reservations, legacy=legacy)
+    assert payload["dispatchEvidenceSource"] == "dispatch-reservations"
+    assert payload["dispatchesObserved"] == 1
+
+
+def test_ratio_source_invalid_ref_and_invalid_repo_are_error_exit_3(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "base", RATIO_SOURCE_AS_OF - 1, {"docs/a": "a"})
+    result, payload = ratio_source_invoke_guard(repo, ref="missing")
+    assert result.returncode == 3
+    assert payload["verdict"] == "ERROR"
+    assert payload["errorCode"] == "ERROR_REF_UNRESOLVED"
+    invalid = tmp_path / "not-repo"
+    invalid.mkdir()
+    result, payload = ratio_source_invoke_guard(invalid)
+    assert result.returncode == 3
+    assert payload["verdict"] == "ERROR"
+
+
+def ratio_source_extract_decision_function(tmp_path):
+    source = RATIO_SOURCE_GUARD.read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^function New-Decision \{.*?^\}", source)
+    assert match
+    script = tmp_path / "decision.ps1"
+    script.write_text("param([double]$Rate)\n" + match.group(0) + "\nNew-Decision -ProductShare 0.6 -Coverage COMPLETE -EvidenceAvailable $true -ProvenanceComplete $true -HasProductLandings $true -DispatchRate $Rate | ConvertTo-Json -Compress\n", encoding="utf-8")
+    return script
+
+
+def test_ratio_source_synthetic_complete_decision_green_at_four_and_red_above(tmp_path):
+    script = ratio_source_extract_decision_function(tmp_path)
+    green = ratio_source_run("pwsh", "-NoProfile", "-File", str(script), "-Rate", "4")
+    red = ratio_source_run("pwsh", "-NoProfile", "-File", str(script), "-Rate", "4.01")
+    assert json.loads(green.stdout)["verdict"] == "GREEN"
+    assert json.loads(red.stdout)["verdict"] == "RED"
+    assert "RED_DISPATCH_RATE" in json.loads(red.stdout)["reasons"]
+
+
+def test_ratio_source_caller_has_helper_at_both_post_kill_pre_reservation_seams():
+    source = RATIO_SOURCE_DISPATCHER.read_text(encoding="utf-8")
+    assert source.count("function Test-RatioDispatchPermission") == 1
+    assert source.count("$ratioExit = Test-RatioDispatchPermission -Kind $cardKind") == 2
+    for match in re.finditer(r"\$ratioExit = Test-RatioDispatchPermission -Kind \$cardKind", source):
+        prefix = source[:match.start()]
+        suffix = source[match.end():]
+        assert prefix.rfind("if (Test-KillSwitchArmed)") > prefix.rfind("if ($DryRun)")
+        assert suffix.find("Write-DispatchReservation") >= 0
+        assert suffix.find("Write-DispatchReservation") < suffix.find("& pwsh")
+
+
+def ratio_source_make_fake_guard(path, verdict, reasons=None, rate=None, malformed=False):
+    rate = 4 if rate is None else rate
+    payload = ratio_guard_payload(
+        dispatchesPerLandedProductPr7dLowerBound=rate, dispatchesObserved=int(rate),
+        dispatchCoverage="COMPLETE" if verdict == "GREEN" else "PARTIAL",
+        verdict=verdict, reasons=reasons or [],
+        errorCode="ERROR_GIT_HISTORY" if verdict == "ERROR" else None,
+    )
+    body = "Write-Output 'not-json'" if malformed else "Write-Output '" + json.dumps(payload, separators=(",", ":")) + "'"
+    path.write_text(body + "\nexit " + ("3" if verdict == "ERROR" else "0") + "\n", encoding="utf-8")
+
+
+def test_ratio_source_caller_helper_routing_and_malformed_output(tmp_path):
+    source = RATIO_SOURCE_DISPATCHER.read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^function Test-RatioDispatchPermission \{.*?^\}", source)
+    assert match
+    harness = tmp_path / "harness.ps1"
+    guard = tmp_path / "guard.ps1"
+    harness.write_text("param($Guard,$Kind)\n$ProductRatioGuard=$Guard\n$RepoRoot='x'\n" + match.group(0) + "\nexit (Test-RatioDispatchPermission -Kind $Kind)\n", encoding="utf-8")
+    for kind, expected in [("product", 0), ("playback", 0), ("factory", 6), ("", 6)]:
+        ratio_source_make_fake_guard(guard, "RED", ["RED_DISPATCH_COVERAGE_PARTIAL"])
+        result = ratio_source_run("pwsh", "-NoProfile", "-File", str(harness), "-Guard", str(guard), "-Kind", kind)
+        assert result.returncode == expected
+    ratio_source_make_fake_guard(guard, "ERROR", ["ERROR_GIT_HISTORY"])
+    assert ratio_source_run("pwsh", "-NoProfile", "-File", str(harness), "-Guard", str(guard), "-Kind", "product").returncode == 3
+    ratio_source_make_fake_guard(guard, "GREEN")
+    assert ratio_source_run("pwsh", "-NoProfile", "-File", str(harness), "-Guard", str(guard), "-Kind", "factory").returncode == 0
+    ratio_source_make_fake_guard(guard, "RED", malformed=True)
+    assert ratio_source_run("pwsh", "-NoProfile", "-File", str(harness), "-Guard", str(guard), "-Kind", "product").returncode == 3
+
+
+def test_ratio_source_dry_run_precedes_reservation_and_launch_in_both_paths():
+    source = RATIO_SOURCE_DISPATCHER.read_text(encoding="utf-8")
+    read_only = source[source.index("if (-not $AllowEdits)"):source.index("# ==================================================================== editing dispatch")]
+    editing = source[source.index("# ==================================================================== editing dispatch"):]
+    assert read_only.index("if ($DryRun)") < read_only.index("Write-DispatchReservation") < read_only.index("& pwsh")
+    assert editing.index("if ($DryRun)") < editing.index("Write-DispatchReservation") < editing.index("& pwsh")
+
+
+def test_ratio_source_dispatch_timestamp_boundaries_preserve_explicit_offsets(tmp_path):
+    repo=ratio_source_init_repo(tmp_path/'repo')
+    ratio_source_commit(repo,'base',RATIO_SOURCE_AS_OF-2,{'docs/base':'base'})
+    records=[]
+    for epoch in [RATIO_SOURCE_AS_OF-7*RATIO_SOURCE_DAY-1,RATIO_SOURCE_AS_OF-7*RATIO_SOURCE_DAY,RATIO_SOURCE_AS_OF,RATIO_SOURCE_AS_OF+1]:
+        records.append({'state':'reserved','recordedUtc':datetime.fromtimestamp(epoch,timezone.utc).isoformat()})
+    path=tmp_path/'reservations.jsonl'
+    path.write_text('\n'.join(json.dumps(x) for x in records)+'\n')
+    result,payload=ratio_source_invoke_guard(repo,reservations=path)
+    assert result.returncode==0,result.stderr
+    assert payload['dispatchesObserved']==2 and payload['malformedDispatchRows']==0
+
+
+def test_ratio_source_old_history_does_not_spawn_a_process_per_commit(tmp_path):
+    repo=ratio_source_init_repo(tmp_path/'repo')
+    ratio_source_populate(repo,30,set(),start=RATIO_SOURCE_AS_OF-30*RATIO_SOURCE_DAY)
+    ratio_source_commit(repo,'current',RATIO_SOURCE_AS_OF,{'src/current':'current'})
+    trace=tmp_path/'git-trace.jsonl'
+    env=dict(os.environ,GIT_TRACE2_EVENT=str(trace))
+    result=ratio_source_run('pwsh','-NoProfile','-File',str(RATIO_SOURCE_GUARD),'-RepoRoot',str(repo),'-SourceRef','master','-AsOfEpoch',str(RATIO_SOURCE_AS_OF),env=env)
+    assert result.returncode==0,result.stderr
+    assert json.loads(result.stdout)['commitPopulation']==1
+    starts=[json.loads(line) for line in trace.read_text().splitlines() if json.loads(line).get('event')=='start']
+    assert len(starts)<=8,[(x.get('argv')) for x in starts]
+
+
+
+# Prefix every addition to avoid collisions with the existing guardrail helpers.
+RATIO_GUARD = ROOT / "tools" / "coordination" / "Test-ProductRatioGuard.ps1"
+RATIO_WORKSTREAM = ROOT / "tools" / "coordination" / "Invoke-Workstream.ps1"
+RATIO_LOOP = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
+
+
+def ratio_guard_payload(**overrides):
+    payload = {
+        "schema": "mlv-app/product-ratio-guard/v1",
+        "asOfUtc": "2033-05-18T03:33:20.0000000Z",
+        "windowStartUtc": "2033-05-11T03:33:20.0000000Z",
+        "windowEndUtc": "2033-05-18T03:33:20.0000000Z",
+        "sourceRef": "fork/master",
+        "sourceSha": "1" * 40,
+        "commitPopulation": 10,
+        "productCommitCount": 6,
+        "productShare7d": 0.6,
+        "productShareThreshold": 0.5,
+        "recognizedProductPrCount": 1,
+        "recognizedProductPrIds": [101],
+        "unrecognizedProductLandings": [],
+        "landingProvenanceComplete": True,
+        "hasProductLandings": True,
+        "dispatchEvidenceSource": "dispatch-reservations",
+        "dispatchCoverage": "PARTIAL",
+        "dispatchEvidenceAvailable": True,
+        "dispatchesObserved": 5,
+        "malformedDispatchRows": 0,
+        "dispatchesPerLandedProductPr7dLowerBound": 5.0,
+        "dispatchRateThreshold": 4.0,
+        "verdict": "RED",
+        "reasons": ["RED_DISPATCH_COVERAGE_PARTIAL", "RED_DISPATCH_RATE"],
+        "errorCode": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def ratio_write_guard(path, payload, exit_code=0, raw=None):
+    text = raw if raw is not None else json.dumps(payload, separators=(",", ":"))
+    path.write_text("Write-Output '" + text.replace("'", "''") + "'\nexit %d\n" % exit_code, encoding="utf-8")
+
+
+def ratio_extract_helper(tmp_path):
+    source = RATIO_WORKSTREAM.read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^function Test-RatioDispatchPermission \{.*?^\}", source)
+    assert match
+    harness = tmp_path / "ratio-helper.ps1"
+    harness.write_text("param($Guard,$Kind)\n$ProductRatioGuard=$Guard\n$RepoRoot='x'\n" + match.group(0) + "\nexit (Test-RatioDispatchPermission -Kind $Kind)\n", encoding="utf-8")
+    return harness
+
+
+def ratio_run_helper(tmp_path, payload, kind="factory", exit_code=0, raw=None):
+    helper = ratio_extract_helper(tmp_path)
+    guard = tmp_path / "ratio-fake-guard.ps1"
+    ratio_write_guard(guard, payload, exit_code=exit_code, raw=raw)
+    return subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(helper), "-Guard", str(guard), "-Kind", kind], text=True, capture_output=True)
+
+
+def test_ratio_dispatch_read_failure_is_named_partial_red_and_never_uses_legacy(tmp_path):
+    repo = ratio_source_init_repo(tmp_path / "repo")
+    ratio_source_commit(repo, "docs", 2_000_000_000 - 2, {"docs/a": "a"})
+    ratio_source_commit(repo, "fix product (#101)", 2_000_000_000 - 1, {"src/a": "a"})
+    reservations = tmp_path / "reservations"
+    reservations.mkdir()
+    legacy = tmp_path / "legacy.jsonl"
+    legacy.write_text(json.dumps({"dispatchedUtc": "2033-05-18T03:33:19+00:00"}) + "\n", encoding="utf-8")
+    command = ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(RATIO_GUARD), "-RepoRoot", str(repo), "-SourceRef", "master", "-AsOfEpoch", "2000000000", "-ReservationsPath", str(reservations), "-LegacyDispatchPath", str(legacy)]
+    result = subprocess.run(command, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["dispatchEvidenceSource"] == "unavailable"
+    assert payload["dispatchCoverage"] == "PARTIAL"
+    assert payload["dispatchEvidenceAvailable"] is False
+    assert payload["dispatchesObserved"] == 0
+    assert payload["recognizedProductPrIds"] == [101]
+    assert payload["dispatchesPerLandedProductPr7dLowerBound"] is None
+    assert payload["malformedDispatchRows"] == 0
+    assert payload["verdict"] == "RED"
+    assert "UNAVAILABLE_DISPATCH_EVIDENCE" in payload["reasons"]
+
+
+@pytest.mark.parametrize("rate, expected", [(0.0, 3), (None, 0)])
+def test_ratio_unavailable_evidence_requires_null_rate_for_product_admission(tmp_path, rate, expected):
+    payload = ratio_guard_payload(dispatchEvidenceSource="unavailable",
+        dispatchEvidenceAvailable=False, dispatchesObserved=0,
+        dispatchesPerLandedProductPr7dLowerBound=rate,
+        reasons=["UNAVAILABLE_DISPATCH_EVIDENCE", "RED_DISPATCH_COVERAGE_PARTIAL"])
+    assert ratio_run_helper(tmp_path, payload, kind="product").returncode == expected
+
+
+def test_ratio_empty_window_has_null_share_and_valid_red_is_typed_allowed(tmp_path):
+    payload = ratio_guard_payload(commitPopulation=0, productCommitCount=0, productShare7d=None, recognizedProductPrCount=0, recognizedProductPrIds=[], hasProductLandings=False, dispatchesObserved=0, dispatchesPerLandedProductPr7dLowerBound=None, reasons=["RED_PRODUCT_SHARE", "RED_DISPATCH_COVERAGE_PARTIAL", "NO_PRODUCT_LANDINGS"])
+    assert ratio_run_helper(tmp_path, payload, kind="product").returncode == 0
+    assert ratio_run_helper(tmp_path, payload, kind="playback").returncode == 0
+    assert ratio_run_helper(tmp_path, payload, kind="factory").returncode == 6
+
+
+@pytest.mark.parametrize("mutation", [
+    {"dispatchCoverage": "MAYBE"},
+    {"verdict": "AMBER"},
+    {"commitPopulation": "10"},
+    {"productShare7d": float("nan")},
+    {"productShare7d": 1.2},
+    {"productCommitCount": 7},
+    {"recognizedProductPrCount": 2},
+    {"landingProvenanceComplete": False},
+    {"dispatchEvidenceAvailable": False},
+    {"unexpected": True},
+    {"productShare7d": "0.6"},
+    {"productShare7d": None, "productCommitCount": 0},
+    {"productShareThreshold": "0.5"},
+    {"dispatchRateThreshold": None},
+    {"dispatchesPerLandedProductPr7dLowerBound": "5"},
+    {"sourceSha": "not-a-sha"},
+])
+def test_ratio_unknown_types_ranges_and_count_contradictions_fail_closed(tmp_path, mutation):
+    payload = ratio_guard_payload()
+    payload.update(mutation)
+    assert ratio_run_helper(tmp_path, payload, kind="product").returncode == 3
+
+
+def test_ratio_contradictory_green_fails_closed_and_complete_green_passes(tmp_path):
+    green = ratio_guard_payload(dispatchCoverage="COMPLETE", dispatchesObserved=4, dispatchesPerLandedProductPr7dLowerBound=4.0, verdict="GREEN", reasons=[])
+    assert ratio_run_helper(tmp_path, green, kind="factory").returncode == 0
+    partial = dict(green, dispatchCoverage="PARTIAL")
+    assert ratio_run_helper(tmp_path, partial, kind="factory").returncode == 3
+    missing_provenance = dict(green, landingProvenanceComplete=False)
+    assert ratio_run_helper(tmp_path, missing_provenance, kind="factory").returncode == 3
+
+
+def test_ratio_error_exit_three_blocks_every_kind(tmp_path):
+    payload = ratio_guard_payload(sourceSha="", commitPopulation=0, productCommitCount=0, productShare7d=None, recognizedProductPrCount=0, recognizedProductPrIds=[], landingProvenanceComplete=False, hasProductLandings=False, dispatchEvidenceSource="unavailable", dispatchEvidenceAvailable=False, dispatchesObserved=0, dispatchesPerLandedProductPr7dLowerBound=None, verdict="ERROR", reasons=["ERROR_GIT_HISTORY"], errorCode="ERROR_GIT_HISTORY")
+    for kind in ("factory", "product", "playback", ""):
+        assert ratio_run_helper(tmp_path, payload, kind=kind, exit_code=3).returncode == 3
+
+
+def ratio_full_dispatch_board(tmp_path, guard_payload, use_real_guard=False):
+    dual, _ = editing_board(tmp_path, with_lane_shim=True)
+    guard = tmp_path / "fake-product-ratio-guard.ps1"
+    ratio_write_guard(guard, guard_payload)
+    # The dispatcher resolves the guard beside itself; use a copied dispatcher plus fake guard,
+    # while retaining fake lane/wrapper fixtures and a synthetic queue.
+    tool_dir = tmp_path / "tools" / "coordination"
+    tool_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(RATIO_WORKSTREAM, tool_dir / "Invoke-Workstream.ps1")
+    shutil.copy2(RATIO_GUARD if use_real_guard else guard, tool_dir / "Test-ProductRatioGuard.ps1")
+    for dependency in ("landing-probe.ps1", "compose-lane-prompt-core.ps1", "Retire-LaneWorktree.ps1"):
+        shutil.copy2(RATIO_WORKSTREAM.parent / dependency, tool_dir / dependency)
+    (tool_dir / "Invoke-Lane.ps1").write_text("param($Lane,$PromptFile,$Card,$RunDir,$TimeoutSec)\nWrite-Output 'RATIO_FAKE_LANE'\nexit 0\n", encoding="ascii")
+    (tool_dir / "Export-PrReviewEvidence.ps1").write_text("exit 0\n", encoding="ascii")
+    return dual, tool_dir / "Invoke-Workstream.ps1"
+
+
+@pytest.mark.parametrize("use_real_guard", [False, True])
+def test_ratio_full_dispatcher_read_only_and_editing_apply_valid_red(tmp_path, use_real_guard):
+    red = ratio_guard_payload()
+    dual, dispatcher = ratio_full_dispatch_board(tmp_path, red, use_real_guard=use_real_guard)
+    procedure = write_fields_card(dual / "prompts" / "v2", "RATIO-EDIT-PRODUCT")
+    factory_procedure = write_fields_card(dual / "prompts" / "v2", "RATIO-EDIT-FACTORY")
+    queue = tmp_path / "queue.json"
+    items = [
+        {"id": "RATIO-READ-PRODUCT", "state": "queued", "track": "product", "kind": "product", "owner": "sonnet", "priority": 1},
+        {"id": "RATIO-READ-FACTORY", "state": "queued", "track": "factory", "kind": "factory", "owner": "sonnet", "priority": 1},
+        {"id": "RATIO-EDIT-PRODUCT", "state": "queued", "track": "product", "kind": "product", "owner": "sonnet", "priority": 1, "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-RATIO-EDIT-PRODUCT.md", "procedureSha256": sha256_of(procedure)},
+        {"id": "RATIO-EDIT-FACTORY", "state": "queued", "track": "factory", "kind": "factory", "owner": "sonnet", "priority": 1, "procedure": ".claude-state/coordination/dual-lane/prompts/v2/fields-RATIO-EDIT-FACTORY.md", "procedureSha256": sha256_of(factory_procedure)},
+    ]
+    queue.write_text(json.dumps({"schema": "test", "items": items}), encoding="utf-8")
+    queue_before = queue.read_bytes()
+    base = ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(dispatcher), "-QueuePath", str(queue), "-NoLandingProbe", "-TimeoutSec", "1"]
+    env = editing_dispatch_env(tmp_path)
+    read_product = subprocess.run(base + ["-CardId", "RATIO-READ-PRODUCT"], text=True, capture_output=True, env=env)
+    read_factory = subprocess.run(base + ["-CardId", "RATIO-READ-FACTORY"], text=True, capture_output=True, env=env)
+    try:
+        edit_product = subprocess.run(base + ["-CardId", "RATIO-EDIT-PRODUCT", "-AllowEdits"], text=True, capture_output=True, env=env)
+        edit_factory = subprocess.run(base + ["-CardId", "RATIO-EDIT-FACTORY", "-AllowEdits"], text=True, capture_output=True, env=env)
+        assert read_product.returncode == 0 and "RATIO_FAKE_LANE" in read_product.stdout, read_product.stdout + read_product.stderr
+        assert read_factory.returncode == 6 and "REFUSED ratio-guard-red kind=factory" in read_factory.stdout
+        assert edit_product.returncode == 0 and "SHIM: lane=sonnet card=RATIO-EDIT-PRODUCT" in edit_product.stdout, edit_product.stdout + edit_product.stderr
+        assert edit_factory.returncode == 6 and "REFUSED ratio-guard-red kind=factory" in edit_factory.stdout, edit_factory.stdout + edit_factory.stderr
+        assert queue.read_bytes() == queue_before
+        reserved = [json.loads(line) for line in (dual / "receipts" / "dispatch-reservations.jsonl").read_text().splitlines() if json.loads(line)["state"] == "reserved"]
+        assert {row["card"] for row in reserved} == {"RATIO-READ-PRODUCT", "RATIO-EDIT-PRODUCT"}
+        assert len(reserved) == 2
+    finally:
+        cleanup_lane_worktree(tmp_path, "RATIO-EDIT-PRODUCT")
+        cleanup_lane_worktree(tmp_path, "RATIO-EDIT-FACTORY")
+
+
+def test_ratio_actual_loop_foreach_body_skips_factory_exit_six_then_counts_product_zero(tmp_path):
+    extractor = tmp_path / "extract-ratio-loop.ps1"
+    extractor.write_text("param($Source)\n$tokens=$null;$errors=$null\n"
+        "$ast=[System.Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)\n"
+        "if($errors.Count){throw 'loop parse failed'}\n"
+        "$loops=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.ForEachStatementAst] -and $node.Variable.VariablePath.UserPath -eq 'track'},$true))\n"
+        "if($loops.Count -ne 1){throw 'expected one track loop'}\n$loops[0].Extent.Text\n", encoding="utf-8")
+    extracted = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(extractor), "-Source", str(RATIO_LOOP)], text=True, capture_output=True)
+    assert extracted.returncode == 0, extracted.stderr
+    body = extracted.stdout
+    dispatcher = tmp_path / "ratio-fake-dispatcher.ps1"
+    dispatcher.write_text("param($Track)\nif($Track -eq 'factory'){ Write-Output 'WORKSTREAM: REFUSED ratio-guard-red kind=factory'; exit 6 }; Write-Output ('WORKSTREAM: track=' + $Track + ' card=RATIO-NEXT'); exit 0\n", encoding="ascii")
+    harness = tmp_path / "ratio-loop-body.ps1"
+    harness.write_text("$Tracks=@('factory','product')\n$dispatched=@()\n$skipped=@()\n$MaxDispatchesPerCycle=1\n$DailyBudget=9\n$spentToday=0\n$Dispatcher='" + str(dispatcher).replace("'", "''") + "'\n$TimeoutSec=1\n$StaleHours=1\n$Lane=''\n$AllowEdits=$false\n$DryRun=$false\n" + body + "\n[ordered]@{dispatched=$dispatched;skipped=$skipped}|ConvertTo-Json -Depth 6 -Compress\n", encoding="utf-8")
+    result = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(harness)], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout.splitlines()[-1])
+    assert [row["track"] for row in payload["dispatched"]] == ["product"]
+    assert payload["skipped"][0]["track"] == "factory"
+    assert payload["skipped"][0]["reason"] == "exit-6"
+
+
+# --- the refund rule: a dispatch that FAILED and spent NOTHING is refunded ------------------
+# Measured 2026-09-05: two of twelve dispatches hit HTTP 429 "You've hit your session limit",
+# and the loop then halted the rest of the UTC day at "daily budget exhausted (12/12)" having
+# done ten units of work. The budget caps CONSUMPTION, not success -- so the test is
+# costUsd == 0, NOT "it failed": CITE-TXN-1 failed after burning USD 2.24 and must still be
+# charged, or the loop gets to spend the same money twice. And costReported must be TRUE,
+# because an unreported cost read as free is the permissive branch of a fail-open.
+
+LOOP_SCRIPT = ROOT / "tools" / "coordination" / "Invoke-WorkstreamLoop.ps1"
+
+
+def test_the_dispatch_log_records_the_lane_spend_beside_its_exit_code():
+    # Keep operator-visible spend in the legacy log. Budget authority is the
+    # reservation ledger plus the bound receipt, not these copied log fields.
+    body = WORKSTREAM.read_text(encoding="utf-8")
+    assert "laneCostUsd" in body, "dispatch-log row does not carry the lane cost"
+    assert "laneCostReported" in body, "dispatch-log row does not carry cost reportedness"
+
+
+def test_an_unreadable_receipt_leaves_the_cost_UNREPORTED_not_zero():
+    # Failing to read a cost must never look like a zero cost.
+    body = WORKSTREAM.read_text(encoding="utf-8")
+    assert "$laneCostReported = $false" in body, "cost reportedness does not default to false"
+
+
+def test_the_refund_requires_all_three_conditions(tmp_path):
+    rows = [_row('ZERO', 1, 0), _row('SUCCESS', 0, 0),
+            _row('UNKNOWN', 1, 0, reported=False), _row('PAID', 1, 0.01)]
+    assert _budget_of(tmp_path, rows) == 3
+
+
+def test_the_refund_is_announced_rather_than_silent():
+    # A budget that silently un-spends itself is indistinguishable from a miscount.
+    assert "LOOP: refunded dispatch" in LOOP_SCRIPT.read_text(encoding="utf-8")
+
+
+def _run_reservation_budget(tmp_path, rows):
+    ledger = tmp_path / 'dispatch-reservations.jsonl'
+    ledger.write_text('\n'.join(json.dumps(row) for row in rows) + '\n', encoding='utf-8')
+    harness = tmp_path / 'run-budget.ps1'
+    harness.write_text('''param($Source,$Ledger,$Board)
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'source parse failed'}
+$functions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ReservationBudget'},$true))
+if($functions.Count -ne 1){throw 'shipped budget function missing or ambiguous'}
+$calls=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-ReservationBudget'},$true))
+if($calls.Count -ne 1){throw 'loop must call the shipped reducer'}
+Invoke-Expression $functions[0].Extent.Text
+$spent=Get-ReservationBudget -LedgerPath $Ledger -TodayUtc ([datetime]'2026-09-05T12:00:00Z') -BoardRoot $Board
+Write-Output ('SPENT=' + $spent)
+''', encoding='utf-8')
+    result = subprocess.run(['pwsh', '-NoProfile', '-NonInteractive', '-File', str(harness),
+        '-Source', str(LOOP_SCRIPT), '-Ledger', str(ledger), '-Board', str(tmp_path)], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return int(result.stdout.split('SPENT=')[-1].strip())
+
+
+def _reservation_fixture(tmp_path, index=0, exit_code=1, cost=0.0, reported=True):
+    # Disposable actual-schema evidence. These are fixtures, never live lane receipts.
+    run = tmp_path / '.claude-state' / 'fleet-runs' / f'fixture-{index}'
+    run.mkdir(parents=True, exist_ok=True)
+    receipt_path = run / 'sonnet-001.receipt.json'
+    receipt = {'schema': 'mlv-app/fleet-lane-receipt/v1', 'lane': 'sonnet', 'card': f'CARD-{index}',
+        'startedUtc': '2026-09-05T09:00:01Z', 'endedUtc': '2026-09-05T09:00:02Z',
+        'exitCode': exit_code, 'spend': {'costReported': reported, 'costUsd': cost},
+        'promptPath': str(run / 'sonnet-001.prompt.txt'), 'outputPath': str(run / 'sonnet-001.last.txt')}
+    receipt_path.write_text(json.dumps(receipt), encoding='utf-8')
+    reserved = {'reservationId': f'ID-{index}', 'state': 'reserved', 'lane': 'sonnet', 'card': f'CARD-{index}',
+        'runDir': str(run), 'recordedUtc': '2026-09-05T09:00:00Z'}
+    terminal = {**reserved, 'state': 'refunded', 'recordedUtc': '2026-09-05T09:00:03Z',
+        'receiptPath': str(receipt_path), 'receiptSha256': sha256_of(receipt_path),
+        'laneExitCode': exit_code, 'laneCostReported': reported, 'laneCostUsd': cost}
+    return reserved, terminal, receipt, receipt_path
+
+
+def _budget_of(tmp_path, rows):
+    # Exercise the production reservation reducer using the historical cases'
+    # exit/cost facts, translated into the new receipt-bound ledger contract.
+    ledger = []
+    for index, row in enumerate(rows):
+        reserved, terminal, _, _ = _reservation_fixture(tmp_path, index, row['laneExitCode'],
+            row['laneCostUsd'], row['laneCostReported'])
+        ledger.extend([reserved, terminal])
+    return _run_reservation_budget(tmp_path, ledger)
+
+
+
+def _row(card, exit_code, cost, reported=True):
+    return {
+        "cardId": card, "dispatchedUtc": "2026-09-05T03:49:26.0000000Z",
+        "laneExitCode": exit_code, "laneCostUsd": cost, "laneCostReported": reported,
+    }
+
+
+def test_the_three_real_receipts_from_20260905_score_correctly(tmp_path):
+    rows = [
+        _row("GATE-FAMILY-BOOKED", 1, 0.0),        # 429 in 2.8s, bought nothing -> REFUND
+        _row("CITE-TXN-1", 1, 2.244599),           # failed, but USD 2.24 is gone -> CHARGE
+        _row("CLEANUP-1", 0, 2.048145),            # succeeded                    -> CHARGE
+    ]
+    assert _budget_of(tmp_path, rows) == 2
+
+
+def test_a_failed_but_EXPENSIVE_lane_is_still_charged(tmp_path):
+    assert _budget_of(tmp_path, [_row("X", 1, 2.24)]) == 1
+
+
+def test_an_unreported_cost_is_never_treated_as_free(tmp_path):
+    assert _budget_of(tmp_path, [_row("X", 1, None, reported=False)]) == 1
+
+
+def test_a_successful_free_lane_is_still_charged(tmp_path):
+    # exit 0 means work happened, whatever it cost.
+    assert _budget_of(tmp_path, [_row("X", 0, 0.0)]) == 1
+
+
+@pytest.mark.parametrize('mutation', [
+    'charged', 'duplicate_terminal', 'duplicate_reserved', 'cross_day_terminal',
+    'missing_receipt', 'wrong_hash', 'changed_receipt', 'foreign_lane', 'foreign_card',
+    'foreign_prompt', 'foreign_output', 'missing_run', 'foreign_terminal_run',
+    'bool_exit', 'string_cost', 'bool_cost', 'null_cost', 'string_reported',
+    'receipt_before_reservation', 'receipt_after_terminal', 'copied_cost_mismatch',
+])
+def test_reservation_refund_rejects_ambiguous_or_unbound_evidence(tmp_path, mutation):
+    reserved, terminal, receipt, path = _reservation_fixture(tmp_path)
+    rows = [reserved, terminal]
+    if mutation == 'charged': terminal['state'] = 'charged'
+    elif mutation == 'duplicate_terminal': rows.append(dict(terminal))
+    elif mutation == 'duplicate_reserved': rows.append(dict(reserved))
+    elif mutation == 'cross_day_terminal': rows.append({**terminal, 'recordedUtc': '2026-09-06T01:00:00Z'})
+    elif mutation == 'missing_receipt': path.unlink()
+    elif mutation == 'wrong_hash': terminal['receiptSha256'] = '0' * 64
+    elif mutation == 'changed_receipt': path.write_text('{}')
+    elif mutation == 'foreign_lane': receipt['lane'] = 'opus'
+    elif mutation == 'foreign_card': receipt['card'] = 'FOREIGN'
+    elif mutation == 'foreign_prompt': receipt['promptPath'] = str(tmp_path / 'foreign.prompt.txt')
+    elif mutation == 'foreign_output': receipt['outputPath'] = str(tmp_path / 'foreign.last.txt')
+    elif mutation == 'missing_run': reserved.pop('runDir')
+    elif mutation == 'foreign_terminal_run': terminal['runDir'] = str(tmp_path / 'foreign')
+    elif mutation == 'bool_exit': receipt['exitCode'] = True
+    elif mutation == 'string_cost': receipt['spend']['costUsd'] = '0'
+    elif mutation == 'bool_cost': receipt['spend']['costUsd'] = False
+    elif mutation == 'null_cost': receipt['spend']['costUsd'] = None
+    elif mutation == 'string_reported': receipt['spend']['costReported'] = 'true'
+    elif mutation == 'receipt_before_reservation': receipt['startedUtc'] = '2026-09-05T08:00:00Z'
+    elif mutation == 'receipt_after_terminal': receipt['endedUtc'] = '2026-09-05T10:00:00Z'
+    elif mutation == 'copied_cost_mismatch': terminal['laneCostUsd'] = 1
+    if mutation.startswith(('foreign_lane', 'foreign_card', 'foreign_prompt', 'foreign_output',
+                            'bool_', 'string_', 'null_', 'receipt_')):
+        path.write_text(json.dumps(receipt), encoding='utf-8')
+        terminal['receiptSha256'] = sha256_of(path)
+    assert _run_reservation_budget(tmp_path, rows) == 1
+
+
+def test_malformed_reservation_ids_each_count_without_sentinel_collision(tmp_path):
+    reserved, _, _, _ = _reservation_fixture(tmp_path)
+    rows = [{**reserved, 'reservationId': value} for value in (None, '', 23, '__malformed__0')]
+    assert _run_reservation_budget(tmp_path, rows) == 4
+
+
+def test_reservation_budget_preserves_utc_boundary_and_counts_unresolved_once(tmp_path):
+    reserved, _, _, _ = _reservation_fixture(tmp_path)
+    rows = [reserved, dict(reserved),
+        {**reserved, 'reservationId': 'PREVIOUS', 'recordedUtc': '2026-09-04T23:59:59Z'},
+        {**reserved, 'reservationId': 'OFFSET', 'recordedUtc': '2026-09-04T20:00:00-05:00'}]
+    assert _run_reservation_budget(tmp_path, rows) == 2
+
+
+@pytest.mark.parametrize('bad_row', [None, [], {'state': 'mystery', 'recordedUtc': '2026-09-05T09:00:00Z'},
+    {'state': 'reserved', 'recordedUtc': 'not-a-date'}])
+def test_malformed_ledger_cannot_create_budget(tmp_path, bad_row):
+    with pytest.raises(AssertionError):
+        _run_reservation_budget(tmp_path, [bad_row])
+
+
+@pytest.mark.parametrize('exit_code,cost,reported,expected', [
+    (1, 0, True, 'refunded'), (0, 0, True, 'charged'), (1, 2.24, True, 'charged'),
+    (1, None, False, 'charged'), (1, '0', True, 'charged'), (1, False, True, 'charged'),
+    (1, 0, 'true', 'charged'),
+])
+def test_dispatch_terminal_uses_actual_typed_receipt_bytes(tmp_path, exit_code, cost, reported, expected):
+    reserved, _, _, path = _reservation_fixture(tmp_path, exit_code=exit_code, cost=cost, reported=reported)
+    harness = tmp_path / 'terminal-writer.ps1'
+    harness.write_text('''param($Source,$Board,$Run,$ExitCode)
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+$RepoRoot=$Board
+$ReservationsPath=Join-Path $Board 'writer-ledger.jsonl'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'source parse failed'}
+foreach($name in @('Get-DispatchSpendEvidence','Write-DispatchReservation')) {
+    $found=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true))
+    if($found.Count -ne 1){throw 'writer function missing or ambiguous'}
+    Invoke-Expression $found[0].Extent.Text
+}
+$row=Write-DispatchReservation -ReservationId 'TEST-ID' -State charged -Card 'CARD-0' -Kind product -Lane sonnet -RunDir $Run -ObservedExit ([int]$ExitCode)
+$row|ConvertTo-Json -Depth 6 -Compress
+''', encoding='utf-8')
+    result = subprocess.run(['pwsh', '-NoProfile', '-NonInteractive', '-File', str(harness),
+        '-Source', str(WORKSTREAM), '-Board', str(tmp_path), '-Run', reserved['runDir'],
+        '-ExitCode', str(exit_code)], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    terminal = json.loads(result.stdout.strip().splitlines()[-1])
+    assert terminal['state'] == expected
+    assert terminal['runDir'] == reserved['runDir']
+    assert json.loads((tmp_path / 'writer-ledger.jsonl').read_text(encoding='utf-8-sig')) == terminal
+    if expected == 'refunded':
+        assert terminal['receiptSha256'] == sha256_of(path)
+        assert (tmp_path / terminal['receiptPath']).resolve() == path.resolve()
+        assert terminal['laneCostReported'] is True and terminal['laneCostUsd'] == 0

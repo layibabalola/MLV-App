@@ -72,7 +72,12 @@ param(
     # Backstop against a runaway lane. Claude only (codex exec has no equivalent).
     # 0 disables the cap. Measured 2026-09-03: real lanes used 13-21 turns, so 40 is a
     # runaway guard, NOT the spend control - that is -DenyBulkReads below.
-    [int]$MaxTurns = 40,
+    # Updated 2026-09-10: raised from 40 to 65 to prevent mid-work cutoffs (lanes executed 41 turns).
+    [int]$MaxTurns = 65,
+
+    # Optional per-process override; never changes the user's provider settings.
+    [ValidateSet('', 'low', 'medium', 'high')]
+    [string]$ReasoningEffort = '',
 
     # Let the lane read the bulk coordination files. OFF by default.
     # MEASURED 2026-09-03: three unattended fable lanes cost USD 22-25 EACH, every one
@@ -91,7 +96,20 @@ param(
     # 0.1: an extra directory the lane may read beyond -WorkDir (e.g. board
     # coordination paths an editing lane needs without a full -AllowBulkReads
     # grant). Optional; claude engine only (--add-dir).
-    [string]$ExtraReadDir = ''
+    [string]$ExtraReadDir = '',
+
+    # Disk hygiene (2026-09-14): when the lane exits, retire -WorkDir if it is a linked
+    # worktree that passes the SAFE gate in Retire-LaneWorktree.ps1; otherwise keep it.
+    # Either way the receipt carries `worktreeDisposition` saying which and why.
+    # Never applies to the main checkout, and never deletes a branch ref.
+    [switch]$RetireWorktree,
+
+    # Lane scratch. The child's TEMP/TMP point at <ScratchRoot>\<lane>-NNN, never bare
+    # %TEMP% (which every project on this box shares). C:\mlvtmp is a DiskGuard-registered
+    # MLV root. The run's own scratch dir is removed when the lane exits unless -KeepScratch;
+    # its size is recorded in the receipt either way.
+    [string]$ScratchRoot = 'C:\mlvtmp\lane-scratch',
+    [switch]$KeepScratch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -127,6 +145,69 @@ function Write-Utf8NoBom([string]$Path, [string]$Content) {
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Write-Utf8NoBomAtomic([string]$Path, [string]$Content) {
+    $tmp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($tmp, $Content, [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($tmp, $Path, $true)
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+    }
+}
+
+# Windows job ownership is established around an inert PowerShell host before that
+# host receives any provider configuration. Descendants then inherit kill-on-close.
+if (-not ('MlvLaneJob' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class MlvLaneJob {
+  [StructLayout(LayoutKind.Sequential)] struct IO_COUNTERS { public UInt64 a,b,c,d,e,f; }
+  [StructLayout(LayoutKind.Sequential)] struct BASIC_LIMIT {
+    public Int64 PerProcessUserTimeLimit, PerJobUserTimeLimit;
+    public UInt32 LimitFlags;
+    public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+    public UInt32 ActiveProcessLimit;
+    public UIntPtr Affinity;
+    public UInt32 PriorityClass, SchedulingClass;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct EXTENDED_LIMIT {
+    public BASIC_LIMIT BasicLimitInformation;
+    public IO_COUNTERS IoInfo;
+    public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+  }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool CloseHandle(IntPtr handle);
+  public static IntPtr CreateKillOnClose() {
+    IntPtr job=CreateJobObject(IntPtr.Zero, null);
+    if(job==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject");
+    EXTENDED_LIMIT value=new EXTENDED_LIMIT();
+    value.BasicLimitInformation.LimitFlags=0x2000;
+    int size=Marshal.SizeOf(value); IntPtr mem=Marshal.AllocHGlobal(size);
+    try {
+      Marshal.StructureToPtr(value,mem,false);
+      if(!SetInformationJobObject(job,9,mem,(uint)size)) {
+        int error=Marshal.GetLastWin32Error(); CloseHandle(job);
+        throw new Win32Exception(error,"SetInformationJobObject");
+      }
+    } finally { Marshal.FreeHGlobal(mem); }
+    return job;
+  }
+  public static void AssignOrThrow(IntPtr job, IntPtr process) {
+    if(!AssignProcessToJobObject(job,process))
+      throw new Win32Exception(Marshal.GetLastWin32Error(),"AssignProcessToJobObject");
+  }
+}
+'@
+}
+
 # ---------------------------------------------------------------- resolve inputs
 if (-not $Prompt -and -not $PromptFile) { throw 'Supply -Prompt or -PromptFile.' }
 if ($PromptFile) {
@@ -147,6 +228,15 @@ if ($AllowEdits -and ($Lane -eq 'sol' -or $Lane -eq 'luna')) {
 # never accepted - that is the exact grant this whole patch exists to narrow.
 if ($AllowEdits -and ([string]::IsNullOrWhiteSpace($AllowedTools) -or $AllowedTools -eq 'ALL')) {
     throw "allowlist-required: -AllowEdits requires -AllowedTools <comma-separated list>; 'ALL' is never granted"
+}
+# Nested agent dispatch is forbidden even when embedded in a caller-supplied editing
+# allowlist. Normalize comma tokens for the decision; preserve the original argv text.
+if ($AllowEdits) {
+    $forbiddenTools = @($AllowedTools -split ',' | ForEach-Object { $_.Trim().ToLowerInvariant() } |
+        Where-Object { $_ -eq 'agent' -or $_ -eq 'task' })
+    if ($forbiddenTools.Count -gt 0) {
+        throw "nested-agent-tool-forbidden: -AllowedTools cannot contain Agent or Task"
+    }
 }
 # MLV_BOARD_ROOT: only a test sets it (a tmp-dir board fixture); the default is the
 # real board (mirrors Start-EditingLane.ps1's own resolution, O107).
@@ -187,7 +277,8 @@ if (-not $RunDir) {
 if (-not (Test-Path -LiteralPath $RunDir)) { New-Item -ItemType Directory -Path $RunDir -Force | Out-Null }
 $RunDir = (Resolve-Path -LiteralPath $RunDir).Path
 
-$cfg = $LANES[$Lane]
+$cfg = $LANES[$Lane].Clone()
+if ($ReasoningEffort) { $cfg.effort = $ReasoningEffort }
 
 # ATOMIC SLOT RESERVATION. The previous form was
 #     while (Test-Path <candidate>) { $n++ }
@@ -248,11 +339,59 @@ $exitCode   = -999
 $timedOut   = $false
 $final      = ''
 $failure    = $null
+# Initialized here, before the try, so the finally never resolves a parent-scope $scratchDir
+# (dynamic scoping) and removes a path this run did not create.
+$scratchDir = $null
 # A PROVIDER REFUSAL is a third outcome beside ran/threw: the child exited cleanly and
 # the provider did no work. Detected from raw output after harvest; see lane-provider-refusal.ps1.
 $providerRefusal = $null
-$authority  = [ordered]@{ permissionMode = 'unset'; allowedTools = 'unset'; sandbox = 'unset'; writableRoot = $null }
+# Harvested child stdout; initialised here so the finally can classify work evidence on every path.
+$stdout = ''
+$authority  =[ordered]@{ permissionMode = 'unset'; allowedTools = 'unset'; sandbox = 'unset'; writableRoot = $null }
 $denyRules  = @()
+$jobHandle = [IntPtr]::Zero
+$jobAssigned = $false
+$promptDelivered = $false
+$containedHost = $null
+# Set to $true the INSTANT Process::Start returns for the claude engine (a plain
+# boolean assignment cannot throw), BEFORE the pid/dictionary construction that
+# builds $containedHost -- which CAN throw (PR #105 round 4). $containedHost alone
+# cannot tell "Start was never called/never returned" apart from "Start returned
+# but the record of it never got built"; $hostStarted can, because it is set
+# unconditionally the moment a host process exists.
+$hostStarted = $false
+# Captured on its OWN line the instant Start returns (PR #105 round 5, this
+# packet): a bare property read on a live Process, which the .NET contract
+# binds before Start returns and which therefore cannot throw. Kept separate
+# from $containedHost (whose own dictionary/build CAN still throw) so the
+# post-start-unrecorded fallback always has a pid to report -- the pid is the
+# only channel by which anyone later learns an orphan existed.
+$hostPid = $null
+# Fixed tokens for containment.ownerAbsentReason, chosen by WHERE the failure
+# happened rather than by what its exception message said -- free text is not
+# admissible evidence about a safety property (PR #105 round 4). Kept in one
+# place; tests/coordination/test_lane_containment.py pins these as literals
+# since it cannot import a .ps1 file, with a comment pointing back here.
+$OWNER_ABSENT_NO_HOST_BUDGET = 'launch-budget-exhausted'  # unchanged text: line ~471's throw message, asserted verbatim since PR #105 round 3
+$OWNER_ABSENT_NO_HOST_START_THREW = 'start-threw'         # Process::Start itself threw; no host was ever created
+$OWNER_ABSENT_POST_START_UNRECORDED = 'post-start-unrecorded'  # Start returned (a host EXISTS) but $containedHost's own construction threw -- the genuinely ambiguous state
+# Outcome of the PRE-ASSIGNMENT kill at line ~677 (host started but never
+# joined the job, so a swallowed kill failure there is a genuine orphan, unlike
+# the post-timeout kill at line ~602 where the job is kill-on-close and the
+# tree is already terminated). A kill cannot be made infallible, but its
+# failure can be made visible instead of vanishing into a bare `catch { }`
+# (PR #105 round 5, sol PR #105 blocker).
+$ownerKillAttempted = $false
+$ownerKillOutcome = $null
+$ownerKillDetail = $null
+$OWNER_KILL_OUTCOME_ALREADY_EXITED = 'already-exited'  # host had already exited before the pre-assignment kill was attempted
+$OWNER_KILL_OUTCOME_KILLED = 'killed'                  # Kill() did not throw AND WaitForExit's own return value was $true -- the host was OBSERVED to exit within the bounded wait
+$OWNER_KILL_OUTCOME_KILL_WAIT_TIMEOUT = 'kill-wait-timeout'  # Kill() did not throw, but WaitForExit's return value was $false -- the bounded wait expired before the host was observed to exit. It MAY STILL BE ALIVE. (PR #105 final: WaitForExit(Int32) returns a bool and round 5 discarded it with [void], so a host that outlived the wait was misreported as 'killed' -- worse than the bare catch{} it replaced, since it manufactured false evidence instead of merely omitting true evidence.)
+$OWNER_KILL_OUTCOME_KILL_THREW = 'kill-threw'          # Kill() or WaitForExit itself threw -- see ownerKillDetail for the raw message
+$childIdentity = $null
+$deadlineUtc = $startedUtc.AddSeconds($TimeoutSec)
+$containment = $null
+$proc = $null
 # $null, never 0. An engine that does not REPORT cost and a run that cost nothing are
 # different facts and this receipt will not merge them - the same rule the dispatcher's
 # malformed-row counter follows.
@@ -298,7 +437,14 @@ if ($cfg.engine -eq 'claude') {
         # follows and the CLI dies with "Input must be provided...".
         $argv += @('--permission-mode', 'dontAsk',
                    '--allowedTools', 'Read,Grep,Glob')
+        # A permission allowlist does not hide other tools from the model. A
+        # readonly review previously burned its turn cap retrying denied shells.
+        $capabilityNotice = 'This read-only lane has permission to use only Read, Grep, and Glob. Bash, PowerShell, editing tools, Agent, and Task are unavailable: do not call or retry them. Inspect hub-exported diffs and evidence with the available read tools. If a required export is missing, name that missing evidence and return an unmeasured finding; do not claim you ran shell commands or tests.'
+        $argv += @('--append-system-prompt', $capabilityNotice)
     }
+    # Prevent nested provider fan-out through the CLI's supported deny surface.
+    # One comma-separated token avoids the same variadic swallowing hazard as allowedTools.
+    $argv += @('--disallowedTools', 'Agent,Task')
     # PROMPT GOES VIA STDIN, NOT AS A POSITIONAL ARGUMENT. Several claude flags
     # (--allowedTools, --add-dir) are VARIADIC and keep consuming every following
     # token that does not start with '-', so a trailing positional prompt is
@@ -317,6 +463,8 @@ if ($cfg.engine -eq 'claude') {
         maxTurns       = if ($MaxTurns -gt 0) { $MaxTurns } else { 'unset' }
         bulkReads      = if ($AllowBulkReads) { 'ALLOWED' } else { 'DENIED' }
         denyRules      = if ($AllowBulkReads) { @() } else { $denyRules }
+        disallowedTools = @('Agent', 'Task')
+        capabilityNotice = if ($AllowEdits) { $null } else { $capabilityNotice }
     }
 } else {
     $exe  = $CODEX_EXE
@@ -351,8 +499,8 @@ if ($cfg.engine -eq 'claude') {
 }
 
 # ---------------------------------------------------------------- run, bounded
-$startedUtc = (Get-Date).ToUniversalTime()
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
+# Keep the stopwatch started at reservation: setup and child startup consume the
+# same wall budget as provider execution.
 
 # LAUNCH VIA ProcessStartInfo.ArgumentList, NOT Start-Process -ArgumentList.
 # Start-Process joins an array into ONE command-line string without quoting the
@@ -361,17 +509,79 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 # ArgumentList is a real collection and .NET applies correct per-argument
 # escaping (including the special .cmd rules), so a path with spaces survives.
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
-$psi.FileName               = $exe
-foreach ($a in $argv) { [void]$psi.ArgumentList.Add($a) }
 $psi.WorkingDirectory       = $WorkDir
 $psi.UseShellExecute        = $false
+$psi.CreateNoWindow         = $true
+if ($cfg.engine -eq 'claude' -and $ReasoningEffort) {
+    $psi.Environment['CLAUDE_CODE_EFFORT_LEVEL'] = $ReasoningEffort
+}
+# Per-run lane scratch under an MLV-owned root instead of the shared %TEMP%.
+$scratchDir = $null
+if ($ScratchRoot) {
+    $scratchDir = Join-Path $ScratchRoot ('{0}-{1}' -f (Split-Path $RunDir -Leaf), (Split-Path $base -Leaf))
+    New-Item -ItemType Directory -Force -Path $scratchDir | Out-Null
+    foreach ($v in 'TEMP', 'TMP', 'TMPDIR') { $psi.Environment[$v] = $scratchDir }
+}
 $psi.RedirectStandardInput  = $true
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError  = $true
 $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $psi.StandardErrorEncoding  = [System.Text.UTF8Encoding]::new($false)
 
-$proc = [System.Diagnostics.Process]::Start($psi)
+if ($sw.Elapsed.TotalMilliseconds -ge ($TimeoutSec * 1000.0)) {
+    throw [TimeoutException]::new('launch-budget-exhausted')
+}
+
+if ($cfg.engine -eq 'claude') {
+    # This trusted host is inert until it reads frame one. It is assigned to the job
+    # before frame one is sent, so the provider and every descendant inherit the job.
+    $hostSource = @'
+$ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
+$line=[Console]::In.ReadLine(); if([string]::IsNullOrWhiteSpace($line)){throw 'launch-frame-missing'}
+$launch=$line|ConvertFrom-Json; if([string]$launch.schema -ne 'mlv-lane-launch/v1'){throw 'launch-frame-schema'}
+$p=[Diagnostics.ProcessStartInfo]::new(); $p.FileName=[string]$launch.exe
+foreach($a in @($launch.argv)){[void]$p.ArgumentList.Add([string]$a)}
+$p.WorkingDirectory=[string]$launch.cwd; $p.UseShellExecute=$false
+$p.RedirectStandardInput=$true; $p.RedirectStandardOutput=$true; $p.RedirectStandardError=$true
+$p.StandardOutputEncoding=[Text.UTF8Encoding]::new($false); $p.StandardErrorEncoding=[Text.UTF8Encoding]::new($false)
+$child=[Diagnostics.Process]::Start($p); $ot=$child.StandardOutput.ReadToEndAsync(); $et=$child.StandardError.ReadToEndAsync()
+$control=[ordered]@{schema='mlv-lane-child/v1';pid=$child.Id;createdUtc=$child.StartTime.ToUniversalTime().ToString('o')}|ConvertTo-Json -Compress
+$tmp=[string]$launch.controlPath+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+[IO.File]::WriteAllText($tmp,$control,[Text.UTF8Encoding]::new($false)); [IO.File]::Move($tmp,[string]$launch.controlPath)
+$line=[Console]::In.ReadLine(); if([string]::IsNullOrWhiteSpace($line)){throw 'prompt-frame-missing'}
+$frame=$line|ConvertFrom-Json; if([string]$frame.schema -ne 'mlv-lane-prompt/v1'){throw 'prompt-frame-schema'}
+$prompt=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$frame.promptBase64))
+$child.StandardInput.Write($prompt); $child.StandardInput.Close(); $child.WaitForExit()
+[Console]::Out.Write($ot.GetAwaiter().GetResult()); [Console]::Error.Write($et.GetAwaiter().GetResult()); exit $child.ExitCode
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hostSource))
+    $psi.FileName = (Get-Command pwsh.exe -ErrorAction Stop).Source
+    foreach ($a in @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded)) {
+        [void]$psi.ArgumentList.Add($a)
+    }
+    $jobHandle = [MlvLaneJob]::CreateKillOnClose()
+    $proc = [Diagnostics.Process]::Start($psi)
+    $hostStarted = $true
+    # Record the pid the instant Start returns, before anything that can throw:
+    # once Start succeeds a host EXISTS, and a receipt that omits its pid is
+    # indistinguishable from "no host was started" (PR #105 round 2 blocker).
+    # $hostPid is a bare property read on a live Process -- it cannot throw,
+    # unlike $containedHost's own ordered-map build below (PR #105 round 4
+    # blocker), so it survives even when that build itself throws (PR #105
+    # round 5): the post-start-unrecorded fallback reports $hostPid instead of
+    # null, so a host that exists is never reported as if it did not.
+    # createdUtc is read defensively in its own try -- a StartTime failure must
+    # not erase the pid we already have.
+    $hostPid = $proc.Id
+    $containedHost = [ordered]@{ pid=$hostPid; createdUtc=$null }
+    try { $containedHost.createdUtc = $proc.StartTime.ToUniversalTime().ToString('o') } catch { }
+    [MlvLaneJob]::AssignOrThrow($jobHandle, $proc.Handle)
+    $jobAssigned = $true
+} else {
+    $psi.FileName = $exe
+    foreach ($a in $argv) { [void]$psi.ArgumentList.Add($a) }
+    $proc = [Diagnostics.Process]::Start($psi)
+}
 
 # Start the async reads BEFORE waiting: a child that fills a redirected pipe
 # buffer blocks forever if nobody is draining it, and the timeout below would
@@ -381,12 +591,64 @@ $errTask = $proc.StandardError.ReadToEndAsync()
 
 # The prompt reaches claude this way; codex gets an empty stdin that is CLOSED,
 # which is what stops it waiting on "Reading additional input from stdin...".
-$proc.StandardInput.Write($stdinContent)
-$proc.StandardInput.Close()
+if ($cfg.engine -eq 'claude') {
+    $controlPath = "$base.child.json"
+    if (Test-Path -LiteralPath $controlPath) { throw "control-path-exists: $controlPath" }
+    $launchFrame = [ordered]@{ schema='mlv-lane-launch/v1'; exe=$exe; argv=$argv; cwd=$WorkDir; controlPath=$controlPath } | ConvertTo-Json -Compress -Depth 5
+    $proc.StandardInput.WriteLine($launchFrame); $proc.StandardInput.Flush()
+    $controlDeadlineMs = [math]::Min($sw.Elapsed.TotalMilliseconds + 10000.0, $TimeoutSec * 1000.0)
+    while (-not (Test-Path -LiteralPath $controlPath)) {
+        if ($proc.HasExited) { throw "contained-host-exited-before-child: $($proc.ExitCode)" }
+        if ($sw.Elapsed.TotalMilliseconds -ge $controlDeadlineMs) { throw [TimeoutException]::new('contained-child-start-timeout') }
+        Start-Sleep -Milliseconds 25
+    }
+    # ConvertFrom-Json can turn ISO strings into DateTime values on newer pwsh;
+    # casting back to string then loses precision and uses the current culture.
+    # Keep the exact UTC creation identity emitted by the contained host.
+    $controlJson = [System.Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($controlPath))
+    try {
+        $childIdentity = [pscustomobject]@{
+            schema = $controlJson.RootElement.GetProperty('schema').GetString()
+            pid = $controlJson.RootElement.GetProperty('pid').GetInt32()
+            createdUtc = $controlJson.RootElement.GetProperty('createdUtc').GetString()
+        }
+    } finally { $controlJson.Dispose() }
+    if ([string]$childIdentity.schema -ne 'mlv-lane-child/v1') { throw 'contained-child-schema' }
+    $containment = [ordered]@{
+        kind='windows-job-kill-on-close'; jobAssigned=$jobAssigned
+        runnerPid=$PID; runnerCreatedUtc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
+        ownerPid=$containedHost.pid; ownerCreatedUtc=$containedHost.createdUtc
+        childPid=[int]$childIdentity.pid; childCreatedUtc=[string]$childIdentity.createdUtc
+        deadlineUtc=$deadlineUtc.ToString('o'); promptDelivered=$false; assignmentErrorCode=$null
+    }
+    $runningReceipt = [ordered]@{
+        schema='mlv-app/fleet-lane-receipt/v1'; state='running'; complete=$false
+        lane=$Lane; card=$Card; startedUtc=$startedUtc.ToString('o'); timeoutSec=$TimeoutSec
+        promptSha256=(Get-Sha256 $Prompt); promptBytes=[Text.Encoding]::UTF8.GetByteCount($Prompt)
+        containment=$containment
+    }
+    Write-Utf8NoBomAtomic $rcptPath ($runningReceipt | ConvertTo-Json -Depth 6)
+    if ($sw.Elapsed.TotalMilliseconds -ge ($TimeoutSec * 1000.0)) { throw [TimeoutException]::new('contained-prompt-deadline-exhausted') }
+    $promptFrame = [ordered]@{schema='mlv-lane-prompt/v1';promptBase64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($stdinContent))}|ConvertTo-Json -Compress
+    $proc.StandardInput.WriteLine($promptFrame); $proc.StandardInput.Flush()
+    $promptDelivered = $true; $containment.promptDelivered = $true
+    Write-Utf8NoBomAtomic $rcptPath ($runningReceipt | ConvertTo-Json -Depth 6)
+    $proc.StandardInput.Close()
+} else {
+    $proc.StandardInput.Write($stdinContent)
+    $proc.StandardInput.Close()
+}
 
 $timedOut = $false
-if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+$remainingMs = [math]::Max(0, [math]::Floor(($TimeoutSec * 1000.0) - $sw.Elapsed.TotalMilliseconds))
+if ($remainingMs -eq 0 -or -not $proc.WaitForExit([int]$remainingMs)) {
     $timedOut = $true
+    # Closing the job is the authoritative descendant cleanup. Do it before
+    # harvesting pipes, which descendants could otherwise keep open indefinitely.
+    if ($jobHandle -ne [IntPtr]::Zero) {
+        [void][MlvLaneJob]::CloseHandle($jobHandle)
+        $jobHandle = [IntPtr]::Zero
+    }
     try { $proc.Kill($true) } catch { }
     try { [void]$proc.WaitForExit(15000) } catch { }
 }
@@ -452,18 +714,168 @@ if ($cfg.engine -eq 'claude') {
 
 }
 catch {
-    $failure = $_.Exception.Message
-    throw
+    if ($_.Exception -is [TimeoutException]) {
+        $timedOut = $true
+        $exitCode = -1
+        $failure = $null
+    } else {
+        $failure = $_.Exception.Message
+    }
+    # Before assignment the inert host is outside the job. Terminate only the exact
+    # Process object created by this invocation; it has received no launch frame.
+    # UNLIKE the post-timeout kill at line ~602 -- where the job handle has just
+    # been closed and the job is kill-on-close, so the tree is already terminated
+    # and that catch is belt-and-braces -- this host was NEVER inside the job, so
+    # a swallowed failure here is a GENUINE orphan (PR #105 round 5, sol PR #105
+    # blocker). The kill call itself still must not throw out of this catch (this
+    # is already a failure path; a second exception would only mask the first),
+    # but its OUTCOME is recorded into the containment record below instead of
+    # vanishing silently -- the honest fix for a swallow is not to make the kill
+    # infallible (it cannot be), but to make its failure visible.
+    if ($cfg.engine -eq 'claude' -and -not $jobAssigned -and $null -ne $proc) {
+        $ownerKillAttempted = $true
+        try {
+            if ($proc.HasExited) {
+                $ownerKillOutcome = $OWNER_KILL_OUTCOME_ALREADY_EXITED
+            } else {
+                # WaitForExit(Int32) RETURNS a bool -- $true iff the process exited
+                # within the timeout, $false if the wait merely expired. Round 5
+                # discarded that return with [void] and recorded 'killed'
+                # unconditionally, so a host that survived the bounded wait (exactly
+                # the orphan this whole change exists to make visible) was reported
+                # as killed -- manufactured evidence, not just an omission. Capture
+                # the observed boolean and branch on IT, never on what was attempted.
+                $proc.Kill($true)
+                $exitedWithinWait = $proc.WaitForExit(5000)
+                $ownerKillOutcome = if ($exitedWithinWait) { $OWNER_KILL_OUTCOME_KILLED } else { $OWNER_KILL_OUTCOME_KILL_WAIT_TIMEOUT }
+            }
+        } catch {
+            $ownerKillOutcome = $OWNER_KILL_OUTCOME_KILL_THREW
+            $ownerKillDetail = $_.Exception.Message
+        }
+        # Considered also stamping $proc.HasExited at the moment the containment
+        # record is BUILT (further below, well after this try/catch) as a second,
+        # cheaper corroborating observation. Declined: that build site sits inside
+        # the outer exception handler with no catch of its own, so a HasExited
+        # read there that throws (it CAN -- Win32Exception/InvalidOperationException
+        # per the .NET contract) would escape uncaught and blow past receipt
+        # construction entirely, the same "second exception masks the first"
+        # failure mode the comment on this catch already warns against. Not worth
+        # it for a value that WaitForExit's own return already answers.
+    }
+    if ($cfg.engine -eq 'claude' -and $null -eq $containment) {
+        $native = if ($_.Exception.PSObject.Properties.Name -contains 'NativeErrorCode') { [int]$_.Exception.NativeErrorCode } else { $null }
+        # CLASSIFYING THE THIRD STATE (PR #105 round 4): round 3 recorded the raw exception
+        # MESSAGE as ownerAbsentReason, and the test accepted any truthy string as proof no
+        # host existed. But $containedHost's own construction (the pid/dictionary build
+        # above) can itself throw AFTER Start already returned and a host is alive -- so
+        # that exception's message would pose as a legitimate no-host reason. Free text is
+        # not admissible evidence about a safety property, so classify by WHERE the failure
+        # happened instead of by WHAT it said:
+        #   - $containedHost non-null  -> a pid was recorded; no absence to explain.
+        #   - $containedHost null, $hostStarted false -> Start never returned: either the
+        #     launch budget was already gone (line ~470, throws before Start is reached) or
+        #     Start itself threw. Distinguish cheaply by exception type/message where we can;
+        #     otherwise fall back to the generic "start threw" token. Both are legitimate
+        #     no-host reasons, and $hostPid is still null in both (no host ever existed).
+        #   - $containedHost null, $hostStarted true -> Start returned (a host EXISTS) but
+        #     the record of it was never built. This is the genuinely ambiguous state and it
+        #     is named as such, never hidden behind a message that merely looks legitimate.
+        #     $hostPid (captured on its own non-throwing line before this build) is used for
+        #     ownerPid below, so this state is never reported as if no host existed (PR #105
+        #     round 5): the pid is the only channel by which anyone learns the orphan existed.
+        # The raw message is kept for humans in ownerAbsentDetail, a field no decision reads.
+        $ownerAbsentReason = $null
+        $ownerAbsentDetail = $null
+        if ($null -eq $containedHost) {
+            $ownerAbsentDetail = $_.Exception.Message
+            if (-not $hostStarted) {
+                $ownerAbsentReason = if ($_.Exception -is [TimeoutException] -and $_.Exception.Message -eq $OWNER_ABSENT_NO_HOST_BUDGET) {
+                    $OWNER_ABSENT_NO_HOST_BUDGET
+                } else {
+                    $OWNER_ABSENT_NO_HOST_START_THREW
+                }
+            } else {
+                $ownerAbsentReason = $OWNER_ABSENT_POST_START_UNRECORDED
+            }
+        }
+        $containment = [ordered]@{
+            kind='windows-job-kill-on-close'; jobAssigned=$jobAssigned
+            runnerPid=$PID; runnerCreatedUtc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
+            ownerPid=if($null-ne $containedHost){$containedHost.pid}else{$hostPid}
+            ownerCreatedUtc=if($null-ne $containedHost){$containedHost.createdUtc}else{$null}
+            ownerAbsentReason=$ownerAbsentReason
+            ownerAbsentDetail=$ownerAbsentDetail
+            ownerKillAttempted=$ownerKillAttempted
+            ownerKillOutcome=$ownerKillOutcome
+            ownerKillDetail=$ownerKillDetail
+            childPid=$null; childCreatedUtc=$null; deadlineUtc=$deadlineUtc.ToString('o')
+            promptDelivered=$promptDelivered; assignmentErrorCode=$native
+        }
+    }
+    # Convert managed failures into the receipt/exit taxonomy below. Rethrowing here
+    # bypasses the final `exit $propagated` and turns the documented 127 into shell 1.
 }
 finally {
 
+# Cleanup must precede all receipt construction and I/O, including exceptional
+# startup paths. Failure to write evidence cannot keep a provider running.
+if ($jobHandle -ne [IntPtr]::Zero) {
+    [void][MlvLaneJob]::CloseHandle($jobHandle)
+    $jobHandle = [IntPtr]::Zero
+}
+$sw.Stop()
+# Disk hygiene. Neither step may throw: a failure here is recorded, never propagated,
+# because the receipt below must still be written on every exit path.
+$scratchDisposition = $null
+if ($scratchDir) {
+    try {
+        $sb = [int64]0
+        if (Test-Path -LiteralPath $scratchDir) { Get-ChildItem -LiteralPath $scratchDir -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $sb += $_.Length } }
+        $removed = $false
+        if (-not $KeepScratch -and (Test-Path -LiteralPath $scratchDir)) { Remove-Item -LiteralPath $scratchDir -Recurse -Force -ErrorAction Stop; $removed = $true }
+        $scratchDisposition = [ordered]@{ path = $scratchDir; bytes = $sb; removed = $removed; error = $null }
+    } catch {
+        $scratchDisposition = [ordered]@{ path = $scratchDir; bytes = $null; removed = $false; error = $_.Exception.Message }
+    }
+}
+$worktreeDisposition = $null
+if ($RetireWorktree) {
+    try {
+        . (Join-Path $PSScriptRoot 'Retire-LaneWorktree.ps1')
+        # The CANONICAL board (parent of the common .git), never the checkout this script runs
+        # from: a copy of this script inside a linked worktree must not quarantine into that worktree.
+        # No `| Select-Object -First 1` on the native call: it can stop the pipeline before
+        # $LASTEXITCODE is set, and reading it then throws under StrictMode Latest.
+        $commonOut = @(& git -C $PSScriptRoot rev-parse --path-format=absolute --git-common-dir 2>$null)
+        $commonDir = if ($commonOut.Count) { [string]$commonOut[0] } else { $null }
+        if (-not $commonDir -or -not (Test-Path -LiteralPath $commonDir)) { throw 'cannot resolve board root from git common dir' }
+        $boardRoot = Split-Path -Parent ($commonDir -replace '/', '\')
+        $worktreeDisposition = Invoke-RetireLaneWorktree -WorkDir $WorkDir -ProtectPath @($RunDir) `
+            -QuarantineRoot (Join-Path $boardRoot ('.claude-state\disk-hygiene\quarantine\lane-exit\' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd')))
+    } catch {
+        $worktreeDisposition = [ordered]@{ action = 'kept'; reason = "cannot-determine: $($_.Exception.Message)" }
+    }
+}
+# `processEnded` records that the child exited; `complete` records POSITIVE evidence that the WORK
+# finished (exit 0 and, for claude, a success envelope). Until 2026-09-14 `complete` meant only the
+# former, so an exit-1 error_max_turns run was receipted state=complete, complete=true.
+$processEnded = ($exitCode -ne -999)
+try {
+    $workEvidence = Get-LaneWorkEvidence -Engine $cfg.engine -Answer $stdout -ExitCode $exitCode
+} catch {
+    $workEvidence = [ordered]@{ workCompleted = $false; reason = "cannot-determine: $($_.Exception.Message)"; subtype = $null; terminalReason = $null; isError = $null }
+}
+$workCompleted = ($null -eq $failure -and $null -eq $providerRefusal -and $processEnded -and $workEvidence.workCompleted -eq $true)
 $receipt = [ordered]@{
     schema       = 'mlv-app/fleet-lane-receipt/v1'
     # SAME KEY AT EVERY STAGE. A reader checks `state` once - reserved, complete or
     # failed - instead of inferring liveness from which fields happen to be present.
+    # 'ended-incomplete' = the process exited but there is no positive evidence the work finished.
     state        = if ($null -ne $failure) { 'failed' }
                    elseif ($null -ne $providerRefusal) { 'refused' }
-                   elseif ($exitCode -ne -999) { 'complete' }
+                   elseif ($workCompleted) { 'complete' }
+                   elseif ($processEnded) { 'ended-incomplete' }
                    else { 'incomplete' }
     lane         = $Lane
     role         = $cfg.role
@@ -496,7 +908,12 @@ $receipt = [ordered]@{
     # `complete` is false in that case even though `failure` is null -- the lane script did not
     # fail, the provider declined, and a reader must never mistake that for a verdict.
     providerRefusal = $providerRefusal
-    complete     = ($null -eq $failure -and $null -eq $providerRefusal -and $exitCode -ne -999)
+    containment  = $containment
+    scratch      = $scratchDisposition
+    worktreeDisposition = $worktreeDisposition
+    processEnded = $processEnded
+    complete     = $workCompleted
+    workEvidence = $workEvidence
     spend        = [ordered]@{
         costUsd            = $costUsd
         costReported       = ($null -ne $costUsd)
@@ -511,7 +928,15 @@ $receipt = [ordered]@{
         outputTokens       = $outputTokens
     }
 }
-Write-Utf8NoBom $rcptPath (($receipt | ConvertTo-Json -Depth 6))
+try {
+    Write-Utf8NoBomAtomic $rcptPath (($receipt | ConvertTo-Json -Depth 6))
+} finally {
+    # Receipt I/O failure must not retain the job handle and its provider tree.
+    if ($jobHandle -ne [IntPtr]::Zero) {
+        [void][MlvLaneJob]::CloseHandle($jobHandle)
+        $jobHandle = [IntPtr]::Zero
+    }
+}
 
 }   # end finally - the receipt is now written on EVERY exit path
 

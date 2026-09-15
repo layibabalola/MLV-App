@@ -37,6 +37,7 @@ from .vendored_native_payloads import (
     _validate_policy,
     _validate_provenance,
     _validate_readiness,
+    _validate_compatibility_group,
     _validate_release_target_compatibility,
     main,
     validate,
@@ -351,6 +352,170 @@ class VendoredNativePayloadTests(unittest.TestCase):
         incompatible["payloads"][0]["selected_members"][0]["binary"]["machine"] = "x86_64"
         with self.assertRaisesRegex(PayloadIntegrityError, "required architecture arm64"):
             _validate_release_target_compatibility(self.root, incompatible, "macos-arm64")
+
+    def test_windows_release_target_admits_wow64_raw2mlv_compat_group_explicitly(self) -> None:
+        result = validate(ROOT, required_target="windows-x86_64")
+        admitted = result["target_compatibility"]
+        self.assertEqual(admitted["status"], "pass")
+        self.assertEqual(admitted["target"], "windows-x86_64")
+        compat_rows = [row for row in admitted["members"] if row["payload_id"] == "raw2mlv-windows-x86-compat"]
+        self.assertEqual({row["output_name"] for row in compat_rows}, {"raw2mlv.exe", "libraw.dll"})
+        for row in compat_rows:
+            self.assertEqual(row["machine"], "x86")
+            self.assertEqual(row["compatibility_mode"], "wow64-child-process")
+        ffmpeg_rows = [row for row in admitted["members"] if row["payload_id"] == "ffmpeg-windows-x86_64"]
+        self.assertEqual(ffmpeg_rows[0]["machine"], "x86_64")
+        self.assertNotIn("compatibility_mode", ffmpeg_rows[0])
+
+    def _windows_compat_record(self) -> dict:
+        return copy.deepcopy(
+            next(record for record in self.manifest["payloads"] if record["id"] == "raw2mlv-windows-x86-compat")
+        )
+
+    def _windows_compat_consumer(self, record: dict) -> dict:
+        return next(consumer for consumer in record["consumers"] if consumer["target"] == "windows-x86_64")
+
+    def test_windows_compat_group_rejects_mutated_dependency_hash(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        record = next(record for record in manifest["payloads"] if record["id"] == "raw2mlv-windows-x86-compat")
+        dependency = next(m for m in record["selected_members"] if m["output_name"] == "libraw.dll")
+        dependency["sha256"] = "0" * 64
+        with self.assertRaisesRegex(PayloadIntegrityError, "sha256"):
+            validate_manifest(ROOT, manifest)
+
+    def test_windows_compatibility_is_limited_to_the_reviewed_payload_and_pair(self) -> None:
+        for changed_field in ("payload", "launcher", "dependency", "target"):
+            with self.subTest(changed_field=changed_field):
+                record = self._windows_compat_record()
+                consumer = self._windows_compat_consumer(record)
+                if changed_field == "payload":
+                    record["id"] = consumer["compatibility"]["payload_id"] = "another-payload"
+                elif changed_field == "launcher":
+                    consumer["compatibility"]["launcher"] = "other.exe"
+                    record["selected_members"][0]["output_name"] = "other.exe"
+                elif changed_field == "dependency":
+                    consumer["compatibility"]["dependencies"] = ["other.dll"]
+                    record["selected_members"][1]["output_name"] = "other.dll"
+                else:
+                    consumer["target"] = "linux-x86_64"
+                with self.assertRaises(PayloadIntegrityError):
+                    _validate_compatibility_group(record, consumer)
+
+    def test_windows_compat_group_rejects_missing_dependency(self) -> None:
+        record = self._windows_compat_record()
+        consumer = self._windows_compat_consumer(record)
+        record["selected_members"] = [m for m in record["selected_members"] if m["output_name"] != "libraw.dll"]
+        with self.assertRaisesRegex(
+            PayloadIntegrityError, "compatibility group must exactly match selected_members"
+        ):
+            _validate_compatibility_group(record, consumer)
+
+    def test_windows_compat_group_rejects_renamed_launcher(self) -> None:
+        record = self._windows_compat_record()
+        consumer = self._windows_compat_consumer(record)
+        launcher = next(m for m in record["selected_members"] if m["output_name"] == "raw2mlv.exe")
+        launcher["output_name"] = "raw2mlv-renamed.exe"
+        with self.assertRaisesRegex(
+            PayloadIntegrityError, "compatibility group must exactly match selected_members"
+        ):
+            _validate_compatibility_group(record, consumer)
+
+    def test_windows_compat_group_rejects_extra_third_binary(self) -> None:
+        record = self._windows_compat_record()
+        consumer = self._windows_compat_consumer(record)
+        extra = copy.deepcopy(record["selected_members"][1])
+        extra["output_name"] = "extra.dll"
+        record["selected_members"].append(extra)
+        with self.assertRaisesRegex(
+            PayloadIntegrityError, "compatibility group must exactly match selected_members"
+        ):
+            _validate_compatibility_group(record, consumer)
+
+    def test_windows_compat_group_rejects_wrong_mode(self) -> None:
+        record = self._windows_compat_record()
+        consumer = self._windows_compat_consumer(record)
+        consumer["compatibility"]["mode"] = "in-process-load"
+        with self.assertRaisesRegex(PayloadIntegrityError, "not a recognized WOW64 child-process mode"):
+            _validate_compatibility_group(record, consumer)
+
+    def test_windows_compat_group_rejects_wrong_kind(self) -> None:
+        record = self._windows_compat_record()
+        consumer = self._windows_compat_consumer(record)
+        launcher = next(m for m in record["selected_members"] if m["output_name"] == "raw2mlv.exe")
+        launcher["kind"] = "shared-library"
+        with self.assertRaisesRegex(PayloadIntegrityError, "must be kind executable"):
+            _validate_compatibility_group(record, consumer)
+
+    def test_windows_x86_main_executable_still_rejected_by_release_target_policy(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        ffmpeg = next(record for record in manifest["payloads"] if record["id"] == "ffmpeg-windows-x86_64")
+        ffmpeg["selected_members"][0]["binary"]["machine"] = "x86"
+        with self.assertRaisesRegex(PayloadIntegrityError, "release target windows-x86_64 rejects"):
+            _validate_release_target_compatibility(ROOT, manifest, "windows-x86_64")
+
+    def test_undeclared_x86_dll_in_windows_bundle_remains_rejected(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        raw = next(record for record in manifest["payloads"] if record["id"] == "raw2mlv-windows-x86-compat")
+        consumer = next(c for c in raw["consumers"] if c["target"] == "windows-x86_64")
+        consumer["status"] = "active-release-workflow"
+        del consumer["compatibility"]
+        with self.assertRaisesRegex(PayloadIntegrityError, "release target windows-x86_64 rejects"):
+            _validate_release_target_compatibility(ROOT, manifest, "windows-x86_64")
+
+    def test_plain_active_release_consumer_cannot_smuggle_a_compatibility_exception(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        raw = next(record for record in manifest["payloads"] if record["id"] == "raw2mlv-windows-x86-compat")
+        consumer = next(c for c in raw["consumers"] if c["target"] == "windows-x86_64")
+        consumer["status"] = "active-release-workflow"
+        with self.assertRaisesRegex(PayloadIntegrityError, "must not declare a compatibility exception"):
+            _validate_release_target_compatibility(ROOT, manifest, "windows-x86_64")
+
+    def test_wow64_compat_status_is_not_recognized_off_windows_x86_64(self) -> None:
+        workflow = self.root / ".github" / "workflows" / "macOS-Arm64.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Extract\n"
+            "      run: |\n"
+            "        python -m tools.repo_hygiene.extract_vendored_native_payload "
+            "--payload-id helper\n",
+            encoding="utf-8",
+        )
+        manifest = {
+            "payloads": [
+                {
+                    "id": "helper",
+                    "selected_members": [
+                        {
+                            "output_name": "helper.exe",
+                            "kind": "executable",
+                            "binary": {"format": "pe", "machine": "x86"},
+                        },
+                        {
+                            "output_name": "helper.dll",
+                            "kind": "shared-library",
+                            "binary": {"format": "pe", "machine": "x86"},
+                        },
+                    ],
+                    "consumers": [
+                        {
+                            "target": "macos-arm64",
+                            "status": "active-release-workflow-wow64-compat",
+                            "compatibility": {
+                                "mode": "wow64-child-process",
+                                "payload_id": "helper",
+                                "launcher": "helper.exe",
+                                "dependencies": ["helper.dll"],
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+        with self.assertRaisesRegex(PayloadIntegrityError, "not 'active-release-workflow'"):
+            _validate_release_target_compatibility(self.root, manifest, "macos-arm64")
 
     def test_provenance_truth_keeps_archive_equality_separate_from_upstream_checksum(self) -> None:
         linux_ffmpeg = next(
@@ -1476,6 +1641,8 @@ class VendoredNativePayloadTests(unittest.TestCase):
             with self.subTest(workflow=relative):
                 text = (ROOT / relative).read_text(encoding="utf-8")
                 self.assertEqual(text.count(command), 1)
+                if relative == ".github/workflows/Windows.yml":
+                    self.assertIn(command + " --require-target-compatible windows-x86_64", text)
                 self.assertIn("actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1", text)
                 self.assertLess(text.index("actions/setup-python@"), text.index(command))
                 self.assertEqual(text.count('python-version-file: ".python-version"'), 1)

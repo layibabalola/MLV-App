@@ -153,7 +153,9 @@ linux-g++*{
         QMAKE_CFLAGS += -std=c99
     }
     QMAKE_CFLAGS += -O3 -fopenmp  -ftree-vectorize
-    QMAKE_CXXFLAGS += -fopenmp -std=c++11 -ftree-vectorize
+    QMAKE_CXXFLAGS += -fopenmp -ftree-vectorize
+    greaterThan(QT_MAJOR_VERSION, 5): QMAKE_CXXFLAGS += -std=c++17
+    else: QMAKE_CXXFLAGS += -std=c++11
     LIBS += -lgomp
     equals(QT_ARCH, x86_64) {
         QMAKE_CFLAGS += -msse4.1 -mssse3 -msse3 -msse2 -msse
@@ -289,8 +291,10 @@ SOURCES += \
     ../../src/librtprocess/src/include/librtprocesswrapper.cpp \
     ../../src/debayer/ahdOld.c \
     ../../src/batch/BatchContext.cpp \
+    ../../src/batch/BatchRenderedVideoPlan.cpp \
     ../../src/batch/BatchPrompts.cpp \
     ../../src/batch/BatchRunner.cpp \
+    ../../src/batch/CdngSequenceExport.cpp \
     ../../src/batch/MlvTrim.cpp \
     ../../src/batch/BatchLogger.cpp \
     ../../src/batch/ReceiptLoader.cpp \
@@ -305,6 +309,7 @@ HEADERS += MainWindow.h \
            ClipLifecycleBarrier.h \
            CrashForensics.h \
            PlaybackFrameRange.h \
+           PlaybackGatePolicy.h \
            Phase3Breadcrumbs.h \
            Phase3Checksums.h \
            Phase3Mode.h \
@@ -447,9 +452,11 @@ HEADERS += MainWindow.h \
     ../../src/librtprocess/src/include/sleef.h \
     ../../src/librtprocess/src/include/sleefsseavx.h \
     ../../src/batch/BatchTypes.h \
+    ../../src/batch/BatchRenderedVideoPlan.h \
     ../../src/batch/BatchContext.h \
     ../../src/batch/BatchPrompts.h \
     ../../src/batch/BatchRunner.h \
+    ../../src/batch/CdngSequenceExport.h \
     ../../src/batch/MlvTrim.h \
     ../../src/batch/BatchLogger.h \
     ../../src/batch/ReceiptLoader.h \

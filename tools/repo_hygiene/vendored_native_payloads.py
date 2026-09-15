@@ -1317,6 +1317,96 @@ def _workflow_payload_ids(repo_root: Path, target: str) -> set[str]:
     return set(payload_ids)
 
 
+WOW64_COMPATIBILITY_MODES = {"wow64-child-process"}
+WOW64_COMPATIBILITY_STATUS = "active-release-workflow-wow64-compat"
+WOW64_COMPATIBILITY_BINARY = {"format": "pe", "machine": "x86"}
+
+
+def _validate_compatibility_group(record: dict[str, Any], consumer: dict[str, Any]) -> list[dict[str, Any]]:
+    """Admit one hash-bound WOW64 child-process launcher/dependency group.
+
+    Never relaxes the target's own architecture policy: the admitted rows are marked
+    with an explicit ``compatibility_mode`` so a caller can tell them apart from a
+    native x86_64 member, and the group must exactly equal ``selected_members`` --
+    no extra, missing, or renamed member is admitted.
+    """
+    payload_id = str(record.get("id") or "payload")
+    compatibility = consumer.get("compatibility")
+    _require(payload_id == "raw2mlv-windows-x86-compat",
+             "WOW64 compatibility is limited to the reviewed raw2mlv-windows-x86-compat payload")
+    _require(consumer.get("target") == "windows-x86_64",
+             "WOW64 compatibility requires target windows-x86_64")
+    _require(isinstance(compatibility, dict), f"{payload_id} compat consumer requires a compatibility object")
+    _require(set(compatibility) == {"mode", "payload_id", "launcher", "dependencies"},
+             f"{payload_id} compatibility fields are incomplete or unexpected")
+    _require(compatibility.get("mode") in WOW64_COMPATIBILITY_MODES,
+             f"{payload_id} compatibility mode is not a recognized WOW64 child-process mode")
+    _require(compatibility.get("payload_id") == payload_id,
+             f"{payload_id} compatibility payload_id mismatch")
+    launcher = compatibility.get("launcher")
+    _require(isinstance(launcher, str) and launcher, f"{payload_id} compatibility launcher must be non-empty text")
+    _require(launcher == "raw2mlv.exe", f"{payload_id} compatibility launcher must be raw2mlv.exe")
+    dependencies = compatibility.get("dependencies")
+    _require(
+        isinstance(dependencies, list) and dependencies
+        and all(isinstance(item, str) and item for item in dependencies),
+        f"{payload_id} compatibility dependencies must be a non-empty list of text",
+    )
+    _require(len(dependencies) == len(set(dependencies)),
+             f"{payload_id} compatibility dependencies repeat a name")
+    _require(launcher not in dependencies,
+             f"{payload_id} compatibility launcher cannot also be declared a dependency")
+    _require(dependencies == ["libraw.dll"], f"{payload_id} compatibility dependencies must be exactly libraw.dll")
+
+    selected_members = record.get("selected_members")
+    _require(isinstance(selected_members, list) and selected_members,
+             f"{payload_id} selected_members must be a non-empty list")
+    by_output: dict[str, dict[str, Any]] = {}
+    for selected in selected_members:
+        _require(isinstance(selected, dict), f"{payload_id} selected member must be an object")
+        output_name = selected.get("output_name")
+        _require(isinstance(output_name, str) and output_name,
+                 f"{payload_id} selected member output_name is invalid")
+        _require(output_name not in by_output,
+                 f"{payload_id} selected members repeat output_name {output_name!r}")
+        by_output[output_name] = selected
+
+    required_names = {launcher, *dependencies}
+    _require(
+        set(by_output) == required_names,
+        f"{payload_id} compatibility group must exactly match selected_members: "
+        f"declared {sorted(required_names)}, selected {sorted(by_output)}",
+    )
+
+    admitted: list[dict[str, Any]] = []
+
+    def _admit(output_name: str, expected_kind: str) -> None:
+        selected = by_output[output_name]
+        _require(selected.get("kind") == expected_kind,
+                 f"{payload_id} compatibility member {output_name!r} must be kind {expected_kind}")
+        binary = selected.get("binary")
+        _require(
+            binary == WOW64_COMPATIBILITY_BINARY,
+            f"{payload_id} compatibility member {output_name!r} must be an observed x86 PE {expected_kind}",
+        )
+        member_bytes = _positive_int(selected.get("bytes"), f"{payload_id} compatibility member {output_name!r} bytes")
+        member_sha256 = _hex_digest(selected.get("sha256"), f"{payload_id} compatibility member {output_name!r}")
+        admitted.append({
+            "kind": expected_kind,
+            "machine": "x86",
+            "output_name": output_name,
+            "payload_id": payload_id,
+            "compatibility_mode": compatibility["mode"],
+            "bytes": member_bytes,
+            "sha256": member_sha256,
+        })
+
+    _admit(launcher, "executable")
+    for dependency in dependencies:
+        _admit(dependency, "shared-library")
+    return admitted
+
+
 def _validate_release_target_compatibility(
     repo_root: Path,
     manifest: dict[str, Any],
@@ -1357,10 +1447,22 @@ def _validate_release_target_compatibility(
             continue
         consumer = matches[0]
         status = consumer.get("status")
+        if status == WOW64_COMPATIBILITY_STATUS and target == "windows-x86_64":
+            _require(
+                "selected_members" in record,
+                f"{record.get('id', 'payload')} compatibility group needs selected_members",
+            )
+            admitted.extend(_validate_compatibility_group(record, consumer))
+            continue
         _require(
             status == "active-release-workflow",
             f"release target {target} rejects payload {record.get('id', 'payload')}: "
             f"consumer status is {status!r}, not 'active-release-workflow'",
+        )
+        _require(
+            "compatibility" not in consumer,
+            f"release target {target} rejects payload {record.get('id', 'payload')}: "
+            "a plain active-release-workflow consumer must not declare a compatibility exception",
         )
         selected_members = record.get("selected_members")
         _require(
