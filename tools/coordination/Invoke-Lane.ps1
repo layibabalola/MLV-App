@@ -48,7 +48,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('opus', 'sonnet', 'fable', 'sol', 'luna')]
+    [ValidateSet('opus', 'sonnet', 'fable', 'sol', 'luna', 'astra')]
     [string]$Lane,
 
     [string]$Prompt,
@@ -125,6 +125,7 @@ $LANES = @{
     fable  = @{ engine = 'claude'; model = 'claude-fable-5'; effort = 'high';   role = 'review-guidance-planning' }
     sol    = @{ engine = 'codex';  model = 'gpt-5.6-sol';    effort = 'high';   role = 'adversarial-verifier' }
     luna   = @{ engine = 'codex';  model = 'gpt-5.6-luna';   effort = 'high';   role = 'breadth-recon' }
+    astra  = @{ engine = 'codex';  model = 'gpt-6-astra';    effort = 'xhigh';  role = 'judgement-design-arbiter' }
 }
 
 # Absolute launcher paths. NEITHER is on the Git Bash PATH on this host, and a
