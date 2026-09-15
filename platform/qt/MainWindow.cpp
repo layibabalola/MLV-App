@@ -28468,11 +28468,16 @@ bool MainWindow::normalizePlaybackCutRangeForLoadedClip( const char *where )
     if( !m_fileLoaded || !m_pMlvObject ) return false;
 
     const int totalFrames = getMlvFrames( m_pMlvObject );
+    // This function is only ever reached from the play path (on_actionPlay_triggered
+    // and playbackHandling), so it opts in to widening a collapsed single-frame range -
+    // unlike the receipt-load and clip-load call sites, which must leave a deliberate
+    // single-frame trim untouched.
     const playback_frame_range::CutRange normalized =
         playback_frame_range::normalizeCutRange(
             ui->spinBoxCutIn->value(),
             ui->spinBoxCutOut->value(),
-            totalFrames );
+            totalFrames,
+            true );
     if( !normalized.valid ) return false;
 
     const int cutInBefore = ui->spinBoxCutIn->value();
