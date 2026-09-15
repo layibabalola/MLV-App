@@ -122,7 +122,7 @@ Set-StrictMode -Version Latest
 $LANES = @{
     opus   = @{ engine = 'claude'; model = 'opus';           effort = 'high';   role = 'orchestrator' }
     sonnet = @{ engine = 'claude'; model = 'sonnet';         effort = '';       role = 'implementer' }
-    fable  = @{ engine = 'claude'; model = 'claude-fable-5'; effort = '';       role = 'review-guidance-planning' }
+    fable  = @{ engine = 'claude'; model = 'claude-fable-5'; effort = 'high';   role = 'review-guidance-planning' }
     sol    = @{ engine = 'codex';  model = 'gpt-5.6-sol';    effort = 'high';   role = 'adversarial-verifier' }
     luna   = @{ engine = 'codex';  model = 'gpt-5.6-luna';   effort = 'high';   role = 'breadth-recon' }
 }
@@ -514,8 +514,12 @@ $psi = [System.Diagnostics.ProcessStartInfo]::new()
 $psi.WorkingDirectory       = $WorkDir
 $psi.UseShellExecute        = $false
 $psi.CreateNoWindow         = $true
-if ($cfg.engine -eq 'claude' -and $ReasoningEffort) {
-    $psi.Environment['CLAUDE_CODE_EFFORT_LEVEL'] = $ReasoningEffort
+# $cfg.effort is already the EFFECTIVE value here (table default, overridden by -ReasoningEffort
+# a few lines up), so gating on it -- rather than only on the raw override -- makes a table
+# effort (e.g. fable/opus/sol/luna at 'high') actually reach the child instead of being recorded
+# in the receipt but never applied to the process that ran.
+if ($cfg.engine -eq 'claude' -and $cfg.effort) {
+    $psi.Environment['CLAUDE_CODE_EFFORT_LEVEL'] = $cfg.effort
 }
 # Per-run lane scratch under an MLV-owned root instead of the shared %TEMP%.
 $scratchDir = $null
