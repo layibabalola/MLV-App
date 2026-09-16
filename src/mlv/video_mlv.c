@@ -9353,13 +9353,13 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
                 }
                 if(isMlvCompressed(video))
                 {
-                    int ret = dng_decompress_image(frame_buf_unpacked, frame_size_unpacked,
-                                                   (uint16_t*)frame_buf, frame_size,
-                                                   video->RAWI.xRes, video->RAWI.yRes,
-                                                   video->RAWI.raw_info.bits_per_pixel);
-                    if(ret != LJ92_ERROR_NONE)
+                    /* Codec-neutral: isMlvCompressed() covers both LJ92 and
+                     * JPEG2000, so decode through the reader rather than calling
+                     * the LJ92 decoder directly. */
+                    int ret = getMlvRawFrameUint16(video, frame_index, frame_buf_unpacked);
+                    if(ret != 0)
                     {
-                        sprintf(error_message, "Averaging: could not decompress frame:  LJ92_ERROR %u", ret);
+                        sprintf(error_message, "Averaging: could not decompress frame #%u", frame_index);
                         DEBUG( printf("\n%s\n", error_message); )
                         free(frame_buf_unpacked);
                         free(frame_buf);
@@ -9457,11 +9457,14 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
 
                 if(!ret)
                 {
-                    int ret = dng_decompress_image(frame_buf_unpacked, frame_size_unpacked,
-                                                   (uint16_t*)frame_buf, frame_size,
-                                                   video->RAWI.xRes, video->RAWI.yRes,
-                                                   video->RAWI.raw_info.bits_per_pixel);
-                    if(ret == LJ92_ERROR_NONE)
+                    /* Codec-neutral decode, as upstream does here:
+                     * isMlvCompressed() admits JPEG2000 as well as LJ92, so route
+                     * through the reader instead of the LJ92-only decoder.
+                     * Failures stay fail-closed - unlike upstream the fork
+                     * does not fall back to emitting the original compressed
+                     * frame, which would leave a mixed-videoClass output MLV. */
+                    int decode_err = getMlvRawFrameUint16(video, frame_index, frame_buf_unpacked);
+                    if(decode_err == 0)
                     {
                         dng_pack_image_bits((uint16_t*)frame_buf, frame_buf_unpacked, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel, 0);
                         vidf_hdr.blockSize = sizeof(mlv_vidf_hdr_t) + frame_size_packed;
@@ -9470,11 +9473,11 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
                     }
                     else
                     {
-                        sprintf(error_message, "Could not decompress frame: LJ92_ERROR %d", ret);
+                        sprintf(error_message, "Could not decompress frame #%u", frame_index);
                         free(frame_buf_unpacked);
                         free(frame_buf);
                         free(block_buf);
-                        return ret ? ret : 1;
+                        return decode_err;
                     }
                 }
 
