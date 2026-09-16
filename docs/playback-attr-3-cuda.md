@@ -5,9 +5,13 @@ Bachelor cannot resolve a timing A/B below about 2x (A/A noise), so this measure
 **within one run**: the share of presented frames landing on 1, 2, or 3+ display refreshes,
 plus per-sub-region prep timing (`prep_region_setup/gpu/image/present/finish/total/unattributed`).
 
-Clips are addressed **by id only** (e.g. `M16-1243`) -- never by a host-local path, never with
-a literal file-extension token. `tools/hooks/mlv-never-authorized.py` (NA-4) fails closed on
-either.
+**Footage (NA-4).** `docs/never-authorized.json` NA-4 lets a lane open exactly one real clip:
+the single full canonical path on the `CLIP_OR_NONE:` line of that lane's own prompt
+(`MLV_LANE_PROMPT`). Agent sessions cannot write that line, so the **owner types it by hand**.
+The attribution job opens only the path passed as `-ClipPath`, which must equal that line.
+Nothing resolves a clip id to a file, scans the cache, or builds an extension. A two-part
+clip's continuation part is opened by the application itself. Adjudication:
+`.claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md`.
 
 ## 1. Build job
 
@@ -44,12 +48,21 @@ any step exits with a step-specific nonzero code and still writes a partial `res
 recording which step failed. Do not submit the attribution job (step 3) until `result.json`
 reports `exitCode = 0` and the three staged cache artifacts are present.
 
-## 3. Attribution job (clip id M16-1243)
+## 3. Attribution job (clip M16-1243, inside the owner-granted lane)
+
+Run this **only inside a lane whose prompt carries the owner-typed `CLIP_OR_NONE:` path** for
+M16-1243. `-ClipPath` must be exactly that path.
 
 ```powershell
 pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
-    -SourceCommit <same-40-hex-sha> -ClipId M16-1243 -OutFile <staging-dir>\<jobId>.job.ps1
+    -SourceCommit <same-40-hex-sha> -ClipId M16-1243 `
+    -ClipPath '<the lane prompt CLIP_OR_NONE path>' -OutFile <staging-dir>\<jobId>.job.ps1
 ```
+
+On Bachelor the emitted job refuses to run unless that path sits directly in the agent cache,
+names clip `M16-1243`, and exists. PresentMon runs as a direct child of the job, so it inherits
+the job-owned TEMP/TMP. If the agent account lacks ETW trace rights, the job fails
+`PRESENTMON_FAILED rc=6`; it never falls back to the elevated scheduled task.
 
 `-BasePackageZip` / `-BasePackageExeName` default to the package the build job just staged
 (`MLVApp-playback-attr-3-cuda-<sha12>-pkg.zip` / `MLVApp.exe`), so no override is needed as
@@ -61,9 +74,11 @@ sidecar series and the raw MLVApp log, and publishes:
 - `logs\mlvapp.log` (raw log with `playback_smoke.frame` probes)
 - `evidence-manifest.json`, `provenance.json`, `artifact-index.json`
 
-The consent receipt for this clip is on record at
-`.claude-state/coordination/dual-lane/receipts/owner-footage-consent-20260916.json`; the
-attribution job cites its file name (never a resolved path) in `evidence-manifest.json`.
+The owner's consent for this clip is recorded at
+`.claude-state/coordination/dual-lane/receipts/owner-footage-consent-20260916.json`, with its
+`-correction.json`. That receipt is evidence of consent, never an authorization. The
+authorization is the owner-typed path line. The attribution job cites the receipt's file name
+in `evidence-manifest.json`.
 
 ## 4. Extract the histogram
 

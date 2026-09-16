@@ -128,14 +128,11 @@ $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $JobId = "playback-attr-3-cuda-$($SourceCommit.Substring(0,12))-$ClipId-$Stamp"
 $Work = Join-Path 'C:\mlvtmp' $JobId
 $Pub = Join-Path $Root "outbox\$JobId.artifacts"
-$PresentMonTask = 'MLV\PresentMonSidecar'
-$PresentMonRequest = Join-Path $Root 'pm-request.json'
-$PresentMonDone = Join-Path $Root 'pm-request.done.json'
 $PresentMonTimedSeconds = 55
 
 # TEMP boundary (BLOCKER fix): job-owned scratch dir under this job's own C:\mlvtmp
 # work dir, set as TEMP/TMP at the very start -- before any child process (reg.exe,
-# the pwsh that runs run-release-gui-smoke.ps1/MLVApp.exe, dumpbin, schtasks) -- so
+# the pwsh that runs run-release-gui-smoke.ps1/MLVApp.exe, dumpbin, PresentMon) -- so
 # every one of them inherits it instead of the ambient (unconstrained) machine TEMP.
 # Mirrors tools/profiling/bachelor/playback-attr-3-cuda-compile-job.ps1's $Scratch
 # pattern. $Work is created here (not later) precisely so the scratch dir it hosts is
@@ -149,9 +146,7 @@ function Assert-UnderMlvTmp([string]$Path, [string]$Label) {
 foreach ($check in @(
     @{ path = $Root; label = 'Root' },
     @{ path = $Work; label = 'Work' },
-    @{ path = $Pub; label = 'Pub' },
-    @{ path = $PresentMonRequest; label = 'PresentMonRequest' },
-    @{ path = $PresentMonDone; label = 'PresentMonDone' }
+    @{ path = $Pub; label = 'Pub' }
 )) { Assert-UnderMlvTmp $check.path $check.label }
 
 if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
@@ -161,18 +156,12 @@ New-Item -ItemType Directory -Path $Scratch -Force | Out-Null
 $env:TEMP = $Scratch
 $env:TMP = $Scratch
 
-# PresentMon sidecar TEMP boundary: the sidecar runs as its own scheduled task
-# ($PresentMonTask), started via schtasks.exe /Run, which CANNOT inherit this
-# process's $env:TEMP/$env:TMP -- a scheduled task launches under its own
-# pre-installed task environment. Choice (b) per the card: this job's own writes are
-# proven confined to C:\mlvtmp by the Assert-UnderMlvTmp checks above (and by
-# $PresentMonRequest/$PresentMonDone/$Pub/$Work themselves all resolving under
-# C:\mlvtmp), and this fact is recorded in the evidence manifest below rather than
-# assumed away. Choice (a) -- passing the scratch dir through pm-request.json for the
-# sidecar runner to honour -- is not taken: the sidecar runner
-# (tools/profiling/ultra-magnus-agent.ps1's PresentMon task counterpart) is not in
-# this repo, so there is no source to confirm it would read or use such a field.
-$PresentMonSidecarEnvironmentNote = "PresentMon runs as scheduled task '$PresentMonTask', started via schtasks.exe /Run, which cannot inherit this job process's TEMP/TMP; it executes under its own pre-installed task environment, outside this job's control. This job's own writes are confined to C:\mlvtmp (asserted at job start for Root/Work/Pub/PresentMonRequest/PresentMonDone)."
+# PresentMon runs as a DIRECT child of this job (sol PR #131 r3): it inherits the job-owned
+# TEMP/TMP above, so every child tool is confined to C:\mlvtmp. The elevated scheduled task
+# MLV\PresentMonSidecar is NOT used: the agent account was granted ETW trace rights through
+# 'Performance Log Users' (Bachelor fix-presentmon-privilege.ps1, 2026-07-28). If that grant is
+# missing, PresentMon exits 6 (access denied) and this job fails closed; it never falls back to
+# the task.
 
 function Get-Sha([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
@@ -222,29 +211,24 @@ function Get-Stats([double[]]$Values) {
 }
 
 function Start-PresentMonCapture([string]$CsvPath) {
-    Remove-Item -LiteralPath $PresentMonDone -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $CsvPath -Force -ErrorAction SilentlyContinue
-    Save-Json ([ordered]@{
-        schema = 'mlvapp.presentmon-sidecar-request.v1'
-        processName = $ExeName
-        outputFile = $CsvPath
-        timed = $PresentMonTimedSeconds
-        requestedUtc = (Get-Date).ToUniversalTime().ToString('o')
-    }) $PresentMonRequest
-    & schtasks.exe /Run /TN $PresentMonTask | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "PresentMon scheduled task start failed rc=$LASTEXITCODE" }
+    if (Test-Path -LiteralPath $CsvPath) { throw "PresentMon output already exists: $CsvPath" }
+    $pmArgs = @('--process_name', $ExeName, '--output_file', $CsvPath, '--timed', [string]$PresentMonTimedSeconds,
+                '--terminate_after_timed', '--stop_existing_session', '--no_console_stats')
+    # Direct child: inherits this job's TEMP/TMP. -PassThru so the exit code is checked.
+    $proc = Start-Process -FilePath (Join-Path $Cache $PresentMonName) -ArgumentList $pmArgs -PassThru -WindowStyle Hidden
     Start-Sleep -Seconds 3
+    if ($proc.HasExited -and $proc.ExitCode -ne 0) {
+        throw "PRESENTMON_FAILED rc=$($proc.ExitCode) (6 = ETW access denied: the agent account needs 'Performance Log Users')"
+    }
+    return $proc
 }
 
-function Wait-PresentMonCapture([int]$TimeoutSeconds = 35) {
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-Path -LiteralPath $PresentMonDone) {
-            return Get-Content -Raw -LiteralPath $PresentMonDone | ConvertFrom-Json
-        }
-        Start-Sleep -Milliseconds 500
+function Wait-PresentMonCapture($Proc, [int]$TimeoutSeconds = 35) {
+    if (-not $Proc.WaitForExit($TimeoutSeconds * 1000)) {
+        try { $Proc.Kill() } catch { }
+        throw "PRESENTMON_TIMEOUT: did not exit within $TimeoutSeconds s after playback"
     }
-    [pscustomobject]@{ status='done_marker_timeout'; exitCode=$null }
+    [pscustomobject]@{ status = 'done'; exitCode = $Proc.ExitCode }
 }
 
 function Get-FrameRows([string]$RawLog) {
@@ -440,13 +424,13 @@ $envs = @(
 # default.
 $envList = "'" + ($envs -join "','") + "'"
 $cmd = "& '$smoke' -ExePath '$exePath' -Input '$clipPath' -Output '$resultPath' -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor 4 -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
-Start-PresentMonCapture $presentMonPath
+$presentMonProc = Start-PresentMonCapture $presentMonPath
 & "$env:ProgramFiles\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $cmd 1> (Join-Path $legOut 'smoke-stdout.txt') 2> (Join-Path $legOut 'smoke-stderr.txt')
 $smokeRc = $LASTEXITCODE
-$presentMonDoneResult = Wait-PresentMonCapture
+$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc
 if (-not (Test-Path -LiteralPath $resultPath)) { throw "smoke result missing rc=$smokeRc" }
 if ($presentMonDoneResult.status -ne 'done' -or [int]$presentMonDoneResult.exitCode -ne 0) {
-    throw "PresentMon sidecar invalid status=$($presentMonDoneResult.status) rc=$($presentMonDoneResult.exitCode)"
+    throw "PresentMon capture invalid status=$($presentMonDoneResult.status) rc=$($presentMonDoneResult.exitCode)"
 }
 
 $rawResult = [IO.File]::ReadAllText($resultPath)
@@ -533,8 +517,8 @@ $manifest = [ordered]@{
     scaleFactor = 4
     executable = [ordered]@{ name=$ExeName; sha256=$cacheExeSha }
     reconDll = [ordered]@{ name=$ReconName; sha256=(Get-Sha $reconDll) }
-    presentMon = [ordered]@{ name=$PresentMonName; sha256=$PresentMonSha; task=$PresentMonTask; positiveSamples=$pmRows.Count }
-    environmentBoundary = [ordered]@{ jobTempDir=$Scratch; presentMonSidecarNote=$PresentMonSidecarEnvironmentNote }
+    presentMon = [ordered]@{ name=$PresentMonName; sha256=$PresentMonSha; launch='direct-child-inherits-job-temp'; positiveSamples=$pmRows.Count }
+    environmentBoundary = [ordered]@{ jobTempDir=$Scratch; allChildrenInheritJobTemp=$true }
     cpuQuiescence = [ordered]@{ samples=$loads; meanPercent=$avgLoad; thresholdPercent=20.0; pass=($avgLoad -le 20.0) }
     frameRows = $rows.Count
     gpuSummary = $gpuSummary
