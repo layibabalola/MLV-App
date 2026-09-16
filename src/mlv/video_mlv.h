@@ -39,6 +39,15 @@ int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
                              size_t * packed_size,
                              size_t * allocation_size);
 
+/* The linearisation LUT is indexed by a full 16-bit sample, so it is always
+ * allocated at this entry count and a CURV block may never claim more. */
+#define MLV_LINEARISE_LUT_ENTRIES 65536u
+
+/* Bound the file-controlled CURV payload to that allocation before any read.
+ * Returns 0 for a block that is short, empty, or oversized. Exposed for sizing
+ * regression tests. */
+int mlvCurvLutEntryCount(uint32_t block_size, uint32_t * lut_entries);
+
 /* Fixed prefix of the bayer JPEG2000 VIDF payload: layout version plus an
  * offset/size pair per quarter-resolution channel. */
 #define MLV_JPEG2K_BAYER_HEADER_BYTES 36u

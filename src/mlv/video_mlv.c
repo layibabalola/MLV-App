@@ -2940,6 +2940,25 @@ int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
     return 1;
 }
 
+int mlvCurvLutEntryCount(uint32_t block_size, uint32_t * lut_entries)
+{
+    if(!lut_entries) return 0;
+    *lut_entries = 0;
+
+    /* blockSize is file-controlled and covers the header plus the payload. */
+    if(block_size < (uint32_t)sizeof(mlv_curv_hdr_t)) return 0;
+    const uint32_t payload = block_size - (uint32_t)sizeof(mlv_curv_hdr_t);
+    const uint32_t entries = payload / (uint32_t)sizeof(uint16_t);
+
+    /* The linearisation LUT is indexed by a full 16-bit sample, so it is
+     * allocated at exactly MLV_LINEARISE_LUT_ENTRIES entries. A block claiming
+     * more cannot be honoured: reject it rather than truncate the curve. */
+    if(entries == 0u || entries > MLV_LINEARISE_LUT_ENTRIES) return 0;
+
+    *lut_entries = entries;
+    return 1;
+}
+
 int mlvJpeg2kBayerLayoutIsValid(size_t frame_size, int width, int height,
                                 const uint32_t * offsets,
                                 const uint32_t * sizes,
@@ -10484,15 +10503,25 @@ int openMlvClip(mlvObject_t * video, char * mlvPath, int open_mode, char * error
                 {
                     mlv_curv_hdr_t cur_hdr;
                     fread_err &= fread(&cur_hdr, sizeof(mlv_curv_hdr_t), 1, video->file[i]);
-                    uint32_t lut_entries = (cur_hdr.blockSize - sizeof(mlv_curv_hdr_t)) / sizeof(uint16_t);
-                    if(lut_entries > 0)
+                    uint32_t lut_entries = 0;
+                    if(!mlvCurvLutEntryCount(cur_hdr.blockSize, &lut_entries))
                     {
-                        video->linearise_lut = (uint16_t *)calloc(65536, sizeof(uint16_t));
-                        if(video->linearise_lut)
-                        {
-                            fread_err &= fread(video->linearise_lut, lut_entries * sizeof(uint16_t), 1, video->file[i]);
-                        }
+                        sprintf(error_message, "CURV block declares an out-of-range curve size (%" PRIu32 " bytes):  %s", cur_hdr.blockSize, video->path);
+                        DEBUG( printf("\n%s\n", error_message); )
+                        --video->filenum;
+                        return MLV_ERR_CORRUPTED;
                     }
+                    video->linearise_lut = (uint16_t *)calloc(MLV_LINEARISE_LUT_ENTRIES, sizeof(uint16_t));
+                    if(!video->linearise_lut)
+                    {
+                        sprintf(error_message, "Could not allocate memory for the CURV linearisation table:  %s", video->path);
+                        DEBUG( printf("\n%s\n", error_message); )
+                        --video->filenum;
+                        return MLV_ERR_IO;
+                    }
+                    /* lut_entries is bounded by the allocation above, so this
+                     * read can never run past the table. */
+                    fread_err &= fread(video->linearise_lut, lut_entries * sizeof(uint16_t), 1, video->file[i]);
                     curv_read = 1;
                 }
             }
