@@ -263,6 +263,13 @@ def build_report(
         # Nominal supplied (e.g. Bachelor's panel refresh, per the runbook): bucket
         # against it directly -- no min-interval estimate, no ambiguity guard, because
         # the true refresh period is now known rather than inferred.
+        # NaN/inf must be rejected explicitly: `nan <= 0` is False and `inf <= 0` is
+        # False, so a bare positivity check silently lets both through to
+        # compute_buckets, where they would corrupt every bucket's refresh multiple.
+        if math.isnan(refresh_period_ms) or math.isinf(refresh_period_ms):
+            raise RefreshHistogramError(
+                f"refreshPeriodMs must be a finite positive number, got {refresh_period_ms!r}"
+            )
         if refresh_period_ms <= 0:
             raise RefreshHistogramError(f"refreshPeriodMs must be positive, got {refresh_period_ms!r}")
         refresh_period = {

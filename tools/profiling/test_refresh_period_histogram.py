@@ -153,6 +153,42 @@ def test_all_2_refresh_without_nominal_is_an_error(tmp_path):
         compute_refresh_period(values)
 
 
+# --- --refresh-period-ms rejects non-finite / non-positive values ------------------
+
+def test_refresh_period_ms_rejects_nan(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    with pytest.raises(RefreshHistogramError, match="finite"):
+        build_report(str(csv_path), str(log_path), refresh_period_ms=float("nan"))
+
+
+def test_refresh_period_ms_rejects_inf(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    with pytest.raises(RefreshHistogramError, match="finite"):
+        build_report(str(csv_path), str(log_path), refresh_period_ms=float("inf"))
+    with pytest.raises(RefreshHistogramError, match="finite"):
+        build_report(str(csv_path), str(log_path), refresh_period_ms=float("-inf"))
+
+
+def test_refresh_period_ms_rejects_non_positive(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    with pytest.raises(RefreshHistogramError, match="positive"):
+        build_report(str(csv_path), str(log_path), refresh_period_ms=0.0)
+    with pytest.raises(RefreshHistogramError, match="positive"):
+        build_report(str(csv_path), str(log_path), refresh_period_ms=-5.0)
+
+
 # --- missing column / empty series are errors, never zeros -------------------------
 
 def test_missing_presentmon_column_is_an_error(tmp_path):
