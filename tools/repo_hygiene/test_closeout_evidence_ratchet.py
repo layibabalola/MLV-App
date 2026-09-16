@@ -1,7 +1,7 @@
 """Validates the closeout capability ledger against its schema.
 
-.closeout-evidence/ is archive-only (NA-2); untracking any of it is
-Phase-3-gated and out of scope here.
+.closeout-evidence/ stays tracked and has no growth ratchet; see
+docs/closeout-evidence-policy.md. NA-2 denies deleting or moving it.
 """
 
 import json
