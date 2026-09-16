@@ -71,6 +71,12 @@ DLL is fine. It is therefore **recorded** (`reconBackendScript.exitCode`, `parit
 and not fatal unless the generator was run with `-RequireParityHarness`. The DLL itself is gated
 on artifact presence, architecture and exports instead.
 
+A second reason that harness fails on a default run: `-gencode=arch=compute_86,code=sm_86` emits
+SASS for `sm_86` and **no PTX**, so the DLL cannot load on Ultra-Magnus's own `sm_89` 4090 at
+all. To exercise the harness on the building host, request PTX as well --
+`-CudaArchitectures sm_86,compute_86` (or add `sm_89`) -- and only then is
+`-RequireParityHarness` meaningful. `sm_86` stays mandatory either way.
+
 ## 2. Exe and package (board host)
 
 Fetch the pair job's artifacts directory, then:
