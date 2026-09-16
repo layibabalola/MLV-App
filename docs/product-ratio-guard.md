@@ -108,6 +108,31 @@ window is `RED` with an unavailable product share. Dry runs prepare evidence but
 do not reserve or launch a provider. The loop records refused cards as skipped
 and continues to the next track.
 
+## Booking rule: a kind label must match the card's paths
+
+Under `RED`, the dispatcher admits a card by its `kind` label, while the product
+share counts a landing only when its diff touches `src/` or `platform/`. A
+`product` or `playback` card whose paths touch neither passes the gate but can
+never raise the share. That lets factory work through under a product label.
+Five landed cards had this mismatch.
+
+So the label is fixed where it is written, not at dispatch:
+- A card may be booked `product` or `playback` only when its `ALLOWED_PATHS`
+  (or `scope`) names a path under `src/` or `platform/`.
+- Anything else is booked `factory` or `gate`, and names the product PR it
+  unblocks in `unblocksProductPr`.
+- An `ALLOWED_PATHS` written as prose lists the concrete `src/` and `platform/`
+  paths it will touch.
+
+No dispatch-time path check was added. It would narrow the ratified admission
+rule above, the composer does not expose parsed fields at the gate, and it would
+refuse the only queued product card (PROD-UPSTREAM-SYNC-1, whose prose paths
+cover `src/` and `platform/`).
+
+Re-open a dispatch-time check if a new product-kind landing is missing from the
+guard's `recognizedProductPrIds`. The adjudication record is
+`fleet-runs/swarm-kind-path-20260916T1615Z/SYNTHESIS.md`.
+
 `GREEN` requires all of the following:
 - product share at least 0.50
 - dispatch rate at most 4.0
