@@ -109,6 +109,10 @@ param(
     # MLV root. The run's own scratch dir is removed when the lane exits unless -KeepScratch;
     # its size is recorded in the receipt either way.
     [string]$ScratchRoot = 'C:\mlvtmp\lane-scratch',
+    # Set only by Invoke-Workstream.ps1, which has already written the 'reserved' row for this
+    # launch. This lane then writes a 'linked' row naming its receipt instead of a second
+    # 'reserved' row, so the product-ratio guard counts the launch once.
+    [string]$DispatchReservationId = '',
     [switch]$KeepScratch
 )
 
@@ -143,6 +147,24 @@ function Get-Sha256([string]$Text) {
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
     # UTF-8 WITHOUT BOM: a BOM has broken JSON consumers on this box before.
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Add-DispatchLedgerRow([string]$Path, $Row) {
+    # One write call per row on an exclusive append handle, retried while another launcher holds
+    # the file, so concurrent launches never interleave bytes inside a line.
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Row | ConvertTo-Json -Compress -Depth 4) + "`n")
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+            try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+            return
+        } catch [IO.IOException] {
+            if ($attempt -ge 50) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
 }
 
 function Write-Utf8NoBomAtomic([string]$Path, [string]$Content) {
@@ -242,6 +264,11 @@ if ($AllowEdits) {
 # real board (mirrors Start-EditingLane.ps1's own resolution, O107).
 $RepoRoot = if ($env:MLV_BOARD_ROOT) { $env:MLV_BOARD_ROOT } else { 'C:\!Layi Wkspc\MLV-App' }
 $HookEnforcedReceipt = Join-Path $RepoRoot '.claude-state\coordination\dual-lane\receipts\0.05-hook-enforced.json'
+$DispatchLedgerPath  = Join-Path $RepoRoot '.claude-state\coordination\dual-lane\receipts\dispatch-reservations.jsonl'
+# Invoke-Workstream passes its reservation id through the environment so it also crosses
+# Start-EditingLane.ps1. It is consumed here and removed from the child's environment below, so a
+# process the lane starts can never claim the dispatcher's reservation.
+if (-not $DispatchReservationId -and $env:MLV_DISPATCH_RESERVATION_ID) { $DispatchReservationId = $env:MLV_DISPATCH_RESERVATION_ID }
 $WorkDirHookPath     = Join-Path $WorkDir 'tools\hooks\mlv-never-authorized.py'
 # hookSha256 is computed unconditionally (when the file exists) so the receipt can
 # always carry it, per 0.1's receipt-fields requirement - not only on editing lanes.
@@ -345,6 +372,9 @@ $scratchDir = $null
 # A PROVIDER REFUSAL is a third outcome beside ran/threw: the child exited cleanly and
 # the provider did no work. Detected from raw output after harvest; see lane-provider-refusal.ps1.
 $providerRefusal = $null
+# Set at the top of the try; initialised here so the finally's receipt never reads an unset variable.
+$dispatchLedgerState = $null
+$dispatchLedgerReservationId = $null
 # Harvested child stdout; initialised here so the finally can classify work evidence on every path.
 $stdout = ''
 $authority  =[ordered]@{ permissionMode = 'unset'; allowedTools = 'unset'; sandbox = 'unset'; writableRoot = $null }
@@ -400,6 +430,30 @@ $cacheCreateTokens = $null; $cacheReadTokens = $null; $outputTokens = $null
 . (Join-Path $PSScriptRoot 'lane-provider-refusal.ps1')
 
 try {
+
+# DISPATCH LEDGER ROW (plan 0.6: version-enforced all-venue accounting). Written after the receipt
+# slot exists, so the row can name it, and before any provider process starts. A direct launch
+# writes 'reserved' and counts toward the product-ratio guard's rate; a launch that
+# Invoke-Workstream already reserved writes 'linked' and does not. A row that cannot be written
+# refuses the launch, because a launch the ledger does not show breaks coverage for seven days.
+$dispatchLedgerState = if ($DispatchReservationId) { 'linked' } else { 'reserved' }
+$dispatchLedgerReservationId = if ($DispatchReservationId) { $DispatchReservationId } else { [guid]::NewGuid().ToString() }
+try {
+    Add-DispatchLedgerRow -Path $DispatchLedgerPath -Row ([ordered]@{
+        schemaVersion = 2
+        venue         = 'invoke-lane'
+        reservationId = $dispatchLedgerReservationId
+        state         = $dispatchLedgerState
+        card          = $Card
+        lane          = $Lane
+        allowEdits    = [bool]$AllowEdits
+        runDir        = $RunDir
+        receiptPath   = $rcptPath
+        recordedUtc   = (Get-Date).ToUniversalTime().ToString('o')
+    })
+} catch {
+    throw "dispatch-ledger-write-failed: $($_.Exception.Message)"
+}
 
 Write-Utf8NoBom $promptPath $Prompt
 
@@ -512,6 +566,7 @@ $psi = [System.Diagnostics.ProcessStartInfo]::new()
 $psi.WorkingDirectory       = $WorkDir
 $psi.UseShellExecute        = $false
 $psi.CreateNoWindow         = $true
+[void]$psi.Environment.Remove('MLV_DISPATCH_RESERVATION_ID')
 if ($cfg.engine -eq 'claude' -and $ReasoningEffort) {
     $psi.Environment['CLAUDE_CODE_EFFORT_LEVEL'] = $ReasoningEffort
 }
@@ -904,6 +959,7 @@ $receipt = [ordered]@{
     stdoutPath   = $outPath
     stderrPath   = $errPath
     failure      = $failure
+    dispatchLedger = [ordered]@{ state = $dispatchLedgerState; reservationId = $dispatchLedgerReservationId }
     # null when the provider did the work. Otherwise {kind, engine, match, retryAfter, remedy};
     # `complete` is false in that case even though `failure` is null -- the lane script did not
     # fail, the provider declined, and a reader must never mistake that for a verdict.

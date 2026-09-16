@@ -4,7 +4,8 @@ param(
     [string]$SourceRef = 'fork/master',
     [long]$AsOfEpoch = 0,
     [string]$ReservationsPath = '',
-    [string]$LegacyDispatchPath = ''
+    [string]$LegacyDispatchPath = '',
+    [string]$FleetRunsPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,12 +22,16 @@ function New-Decision {
         [bool]$EvidenceAvailable,
         [bool]$ProvenanceComplete,
         [bool]$HasProductLandings,
-        [int]$MalformedRows = 0
+        [int]$MalformedRows = 0,
+        [string[]]$CoverageReasons = @()
     )
 
     $reasons = [System.Collections.Generic.List[string]]::new()
     if ($null -eq $ProductShare -or [double]$ProductShare -lt 0.50) { $reasons.Add('RED_PRODUCT_SHARE') }
-    if ($Coverage -ne 'COMPLETE') { $reasons.Add('RED_DISPATCH_COVERAGE_PARTIAL') }
+    if ($Coverage -ne 'COMPLETE') {
+        $reasons.Add('RED_DISPATCH_COVERAGE_PARTIAL')
+        foreach ($code in $CoverageReasons) { $reasons.Add($code) }
+    }
     if (-not $EvidenceAvailable) { $reasons.Add('UNAVAILABLE_DISPATCH_EVIDENCE') }
     if (-not $ProvenanceComplete) { $reasons.Add('UNAVAILABLE_LANDING_PROVENANCE') }
     elseif (-not $HasProductLandings) { $reasons.Add('NO_PRODUCT_LANDINGS') }
@@ -94,11 +99,11 @@ function Read-DispatchEvidence {
             $source = 'legacy-dispatch-log'
         }
     } catch {
-        return [pscustomobject]@{ source = 'unavailable'; coverage = 'PARTIAL'; available = $false; observed = 0; malformed = 0 }
+        return [pscustomobject]@{ source = 'unavailable'; coverage = 'PARTIAL'; coverageReasons = @('COVERAGE_EVIDENCE_UNAVAILABLE'); available = $false; observed = 0; malformed = 0 }
     }
 
     if ($null -eq $path) {
-        return [pscustomobject]@{ source = 'none'; coverage = 'PARTIAL'; available = $false; observed = 0; malformed = 0 }
+        return [pscustomobject]@{ source = 'none'; coverage = 'PARTIAL'; coverageReasons = @('COVERAGE_EVIDENCE_UNAVAILABLE'); available = $false; observed = 0; malformed = 0 }
     }
 
     # Selection is final: once reservations win, any read failure is unavailable evidence.
@@ -106,11 +111,21 @@ function Read-DispatchEvidence {
     try {
         $lines = @(Get-Content -LiteralPath $path -ErrorAction Stop)
     } catch {
-        return [pscustomobject]@{ source = 'unavailable'; coverage = 'PARTIAL'; available = $false; observed = 0; malformed = 0 }
+        return [pscustomobject]@{ source = 'unavailable'; coverage = 'PARTIAL'; coverageReasons = @('COVERAGE_EVIDENCE_UNAVAILABLE'); available = $false; observed = 0; malformed = 0 }
     }
 
     $observed = 0
     $malformed = 0
+    # COVERAGE (plan 0.6: seven days of version-enforced all-venue accounting). A row with
+    # schemaVersion >= 2 is written by a launcher that records EVERY launch: Invoke-Workstream
+    # (state reserved, then charged/refunded) and Invoke-Lane (state reserved for a direct launch,
+    # state linked when Invoke-Workstream passed its reservation id). Only 'reserved' rows count
+    # toward the rate, so a linked row never double-counts. Rows without schemaVersion are legacy:
+    # they still count toward the rate as before, but they are never evidence of coverage.
+    $firstVersionedEpoch = $null
+    $unversionedEpochs = [System.Collections.Generic.List[long]]::new()
+    $ledgerReceipts = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $windowRowReceipts = [System.Collections.Generic.List[string]]::new()
     foreach ($line in $lines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         try {
@@ -118,25 +133,142 @@ function Read-DispatchEvidence {
             $document = [System.Text.Json.JsonDocument]::Parse($line)
             try {
                 $row = $document.RootElement
-                if ($reservationMode -and $row.GetProperty('state').GetString() -ne 'reserved') { continue }
                 $stamp = $row.GetProperty($(if ($reservationMode) { 'recordedUtc' } else { 'dispatchedUtc' })).GetString()
+                if ($stamp -notmatch '(Z|[+-]\d{2}:\d{2})$') { throw 'timestamp timezone missing' }
+                $dto = [datetimeoffset]::Parse($stamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+                $epoch = $dto.ToUnixTimeSeconds()
+                $version = 0L
+                $versionProperty = [System.Text.Json.JsonElement]::new()
+                if ($reservationMode -and $row.TryGetProperty('schemaVersion', [ref]$versionProperty)) {
+                    if (-not $versionProperty.TryGetInt64([ref]$version)) { throw 'schemaVersion is not an integer' }
+                }
+                $receiptPath = $null
+                $receiptProperty = [System.Text.Json.JsonElement]::new()
+                if ($reservationMode -and $row.TryGetProperty('receiptPath', [ref]$receiptProperty) -and $receiptProperty.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                    $receiptPath = $receiptProperty.GetString()
+                }
+                # A row outside the window is not evidence either way; it is never counted as malformed
+                # for a field this reader only needs inside the window.
+                $inWindow = $epoch -ge $StartEpoch -and $epoch -le $EndEpoch
+                $state = if ($reservationMode -and $inWindow) { $row.GetProperty('state').GetString() } else { $null }
             } finally { $document.Dispose() }
-            if ($stamp -notmatch '(Z|[+-]\d{2}:\d{2})$') { throw 'timestamp timezone missing' }
-            $dto = [datetimeoffset]::Parse($stamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-            $epoch = $dto.ToUnixTimeSeconds()
-            if ($epoch -ge $StartEpoch -and $epoch -le $EndEpoch) { $observed++ }
+
+            if ($version -ge 2) {
+                if ($null -eq $firstVersionedEpoch -or $epoch -lt $firstVersionedEpoch) { $firstVersionedEpoch = $epoch }
+            } elseif ($reservationMode) {
+                $unversionedEpochs.Add($epoch)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($receiptPath)) {
+                $full = Resolve-LedgerReceiptPath $receiptPath
+                [void]$ledgerReceipts.Add($full)
+                if ($inWindow -and $version -ge 2) { $windowRowReceipts.Add($full) }
+            }
+            if (-not $inWindow) { continue }
+            if ($reservationMode -and $state -ne 'reserved') { continue }
+            $observed++
         } catch {
             $malformed++
         }
     }
 
+    $coverageReasons = [System.Collections.Generic.List[string]]::new()
+    if (-not $reservationMode) {
+        $coverageReasons.Add('COVERAGE_LEGACY_SOURCE')
+    } elseif ($null -eq $firstVersionedEpoch) {
+        $coverageReasons.Add('COVERAGE_NOT_ENFORCED')
+    } else {
+        if ($firstVersionedEpoch -gt $StartEpoch) { $coverageReasons.Add('COVERAGE_WINDOW_PREDATES_ENFORCEMENT') }
+        if (@($unversionedEpochs | Where-Object { $_ -ge $firstVersionedEpoch -and $_ -ge $StartEpoch -and $_ -le $EndEpoch }).Count -gt 0) {
+            $coverageReasons.Add('COVERAGE_UNVERSIONED_ROW_AFTER_ENFORCEMENT')
+        }
+        foreach ($code in (Test-ReceiptCoverage -StartEpoch $StartEpoch -EndEpoch $EndEpoch -LedgerReceipts $ledgerReceipts -WindowRowReceipts $windowRowReceipts)) {
+            $coverageReasons.Add($code)
+        }
+    }
+
     return [pscustomobject]@{
         source = $source
-        coverage = 'PARTIAL'
+        coverage = $(if ($coverageReasons.Count -eq 0) { 'COMPLETE' } else { 'PARTIAL' })
+        coverageReasons = @($coverageReasons)
         available = $true
         observed = $observed
         malformed = $malformed
     }
+}
+
+function Resolve-LedgerReceiptPath {
+    param([Parameter(Mandatory)][string]$Path)
+    # Invoke-Workstream records receipt paths relative to the board root; Invoke-Lane records them
+    # absolute. Compare both as full, case-insensitive Windows paths.
+    $candidate = if ([System.IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path $RepoRoot $Path }
+    return [System.IO.Path]::GetFullPath($candidate)
+}
+
+function Test-ReceiptCoverage {
+    # Both directions, three outcomes each. MATCH: a lane receipt started in the window has a ledger
+    # row naming it, and a versioned in-window row's receipt exists. MISMATCH: either side is missing.
+    # CANNOT-DETERMINE: the receipt tree or a receipt cannot be read, or a receipt slot is still empty
+    # (Invoke-Lane creates it an instant before writing its row). CANNOT-DETERMINE is never COMPLETE.
+    param(
+        [long]$StartEpoch,
+        [long]$EndEpoch,
+        [System.Collections.Generic.HashSet[string]]$LedgerReceipts,
+        [System.Collections.Generic.List[string]]$WindowRowReceipts
+    )
+    $codes = [System.Collections.Generic.List[string]]::new()
+    if (-not (Test-Path -LiteralPath $FleetRunsPath -PathType Container)) {
+        $codes.Add('COVERAGE_RECEIPTS_UNAVAILABLE')
+        return @($codes)
+    }
+    $fleetRoot = [System.IO.Path]::GetFullPath($FleetRunsPath).TrimEnd('\') + '\'
+    $startUtc = [datetimeoffset]::FromUnixTimeSeconds($StartEpoch).UtcDateTime
+    $unreserved = 0; $unreadable = 0; $inFlight = 0; $missing = 0
+    try {
+        $files = @([System.IO.Directory]::EnumerateFiles($FleetRunsPath, '*.receipt.json', [System.IO.SearchOption]::AllDirectories))
+    } catch {
+        $codes.Add('COVERAGE_RECEIPTS_UNAVAILABLE')
+        return @($codes)
+    }
+    foreach ($file in $files) {
+        try {
+            # A receipt last written before the window cannot describe a launch inside it.
+            if ([System.IO.File]::GetLastWriteTimeUtc($file) -lt $startUtc) { continue }
+            $text = [System.IO.File]::ReadAllText($file)
+            if ([string]::IsNullOrWhiteSpace($text)) { $inFlight++; continue }
+            $document = [System.Text.Json.JsonDocument]::Parse($text)
+            try {
+                $root = $document.RootElement
+                $schemaProperty = [System.Text.Json.JsonElement]::new()
+                if (-not $root.TryGetProperty('schema', [ref]$schemaProperty) -or $schemaProperty.GetString() -ne 'mlv-app/fleet-lane-receipt/v1') { continue }
+                $startProperty = [System.Text.Json.JsonElement]::new()
+                if (-not ($root.TryGetProperty('startedUtc', [ref]$startProperty) -or $root.TryGetProperty('reservedUtc', [ref]$startProperty))) { throw 'receipt has no start stamp' }
+                $startStamp = $startProperty.GetString()
+                $failureProperty = [System.Text.Json.JsonElement]::new()
+                $failureText = if ($root.TryGetProperty('failure', [ref]$failureProperty) -and $failureProperty.ValueKind -eq [System.Text.Json.JsonValueKind]::String) { $failureProperty.GetString() } else { '' }
+                $receiptStateProperty = [System.Text.Json.JsonElement]::new()
+                $receiptState = if ($root.TryGetProperty('state', [ref]$receiptStateProperty) -and $receiptStateProperty.ValueKind -eq [System.Text.Json.JsonValueKind]::String) { $receiptStateProperty.GetString() } else { '' }
+            } finally { $document.Dispose() }
+            $startEpochOfReceipt = [datetimeoffset]::Parse($startStamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUnixTimeSeconds()
+            if ($startEpochOfReceipt -lt $StartEpoch -or $startEpochOfReceipt -gt $EndEpoch) { continue }
+            # Invoke-Lane refuses to launch when it cannot write its ledger row; that receipt is not a launch.
+            if ($failureText.StartsWith('dispatch-ledger-write-failed')) { continue }
+            if (-not $LedgerReceipts.Contains([System.IO.Path]::GetFullPath($file))) {
+                # A bare slot marker precedes its ledger row by an instant: cannot-determine, not a mismatch.
+                if ($receiptState -eq 'reserved') { $inFlight++ } else { $unreserved++ }
+            }
+        } catch {
+            $unreadable++
+        }
+    }
+    foreach ($path in $WindowRowReceipts) {
+        if (-not $path.StartsWith($fleetRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        if (-not [System.IO.File]::Exists($path)) { $missing++ }
+    }
+    if ($unreserved -gt 0) { $codes.Add('COVERAGE_RECEIPT_UNRESERVED') }
+    if ($missing -gt 0) { $codes.Add('COVERAGE_RESERVATION_RECEIPT_MISSING') }
+    if ($unreadable -gt 0) { $codes.Add('COVERAGE_RECEIPT_UNREADABLE') }
+    if ($inFlight -gt 0) { $codes.Add('COVERAGE_RECEIPT_IN_FLIGHT') }
+    return @($codes)
 }
 
 function Write-ErrorResult {
@@ -178,6 +310,9 @@ if (-not $ReservationsPath) {
 }
 if (-not $LegacyDispatchPath) {
     $LegacyDispatchPath = Join-Path $RepoRoot '.claude-state\coordination\dual-lane\workstream-dispatch-log.jsonl'
+}
+if (-not $FleetRunsPath) {
+    $FleetRunsPath = Join-Path $RepoRoot '.claude-state\fleet-runs'
 }
 if ($AsOfEpoch -le 0) { $AsOfEpoch = [datetimeoffset]::UtcNow.ToUnixTimeSeconds() }
 $windowStart = $AsOfEpoch - $WindowSeconds
@@ -242,7 +377,7 @@ $rate = $null
 if ($evidence.available -and $provenanceComplete -and $prIds.Count -gt 0) {
     $rate = [double]$evidence.observed / [double]$prIds.Count
 }
-$decision = New-Decision -ProductShare $productShare -DispatchRate $rate -Coverage $evidence.coverage -EvidenceAvailable $evidence.available -ProvenanceComplete $provenanceComplete -HasProductLandings $hasProductLandings -MalformedRows $evidence.malformed
+$decision = New-Decision -ProductShare $productShare -DispatchRate $rate -Coverage $evidence.coverage -EvidenceAvailable $evidence.available -ProvenanceComplete $provenanceComplete -HasProductLandings $hasProductLandings -MalformedRows $evidence.malformed -CoverageReasons @($evidence.coverageReasons)
 
 [ordered]@{
     schema = 'mlv-app/product-ratio-guard/v1'
