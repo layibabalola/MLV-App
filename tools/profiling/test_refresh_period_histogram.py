@@ -115,6 +115,44 @@ def test_refresh_period_falls_back_to_median_without_a_clear_mode(tmp_path):
     assert refresh["measurement"] == "median"
 
 
+# --- histogram ambiguity (all-2-refresh) --------------------------------------------
+
+def test_all_2_refresh_with_nominal_buckets_as_2(tmp_path):
+    # every presented frame actually took 2 refreshes; with the nominal (true) refresh
+    # period supplied, the estimator is bypassed entirely and every sample buckets "2".
+    csv_path = tmp_path / "presentmon-series.csv"
+    values = [33.34] * 20
+    _write_presentmon_csv(csv_path, values)
+
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    report = build_report(str(csv_path), str(log_path), refresh_period_ms=16.67)
+    assert report["presentMon"]["refreshPeriodSource"] == "nominal"
+    assert report["presentMon"]["refreshPeriodMeasurement"] == "nominal"
+    assert report["presentMon"]["refreshPeriodMs"] == pytest.approx(16.67)
+    assert report["presentMon"]["buckets"]["2"]["count"] == 20
+    assert report["presentMon"]["buckets"]["1"]["count"] == 0
+
+
+def test_all_2_refresh_without_nominal_is_an_error(tmp_path):
+    # without the true refresh period, an all-2-refresh capture is indistinguishable
+    # from a healthy all-1-refresh one from the interval distribution alone -- this
+    # must fail closed rather than silently report 100% "1".
+    csv_path = tmp_path / "presentmon-series.csv"
+    values = [33.34] * 20
+    _write_presentmon_csv(csv_path, values)
+
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    with pytest.raises(RefreshHistogramError, match="ambiguous"):
+        build_report(str(csv_path), str(log_path))
+
+    with pytest.raises(RefreshHistogramError, match="ambiguous"):
+        compute_refresh_period(values)
+
+
 # --- missing column / empty series are errors, never zeros -------------------------
 
 def test_missing_presentmon_column_is_an_error(tmp_path):

@@ -74,8 +74,17 @@ directory, then run:
 py -3 tools\profiling\refresh_period_histogram.py `
     --presentmon-csv <artifacts-dir>\presentmon-series.csv `
     --frame-log <artifacts-dir>\logs\mlvapp.log `
+    --refresh-period-ms <Bachelor's panel refresh period in ms> `
     --out <artifacts-dir>\refresh-period-histogram.json
 ```
+
+`--refresh-period-ms` is Bachelor's actual panel refresh period and must be supplied.
+Without it, the tool estimates the refresh period from the interval distribution's
+near-minimum cluster -- an estimate that cannot distinguish a healthy all-1-refresh
+capture from a uniformly-stalled all-2-refresh one, so it fails closed (`"ambiguous"`)
+whenever too little of the distribution falls outside that cluster to cross-check the
+assumption. `refreshPeriodSource` in the output records which path was taken:
+`"nominal"` when supplied, `"estimated-min-interval"` when not.
 
 ## 5. Reading the within-run verdict
 

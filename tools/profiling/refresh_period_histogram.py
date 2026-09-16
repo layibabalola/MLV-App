@@ -151,6 +151,17 @@ def parse_frame_log_rows(path: str, min_rows: int = 10) -> list[dict[str, float]
     return rows
 
 
+# Ambiguity guard (histogram ambiguity fix): the minimum-interval estimate assumes the
+# observed minimum IS one true refresh. That assumption is unverifiable -- and wrong --
+# when the whole capture is uniformly N refreshes per frame (an all-2-refresh capture:
+# every interval sits near the same value, so the "cluster" is the entire series and
+# nothing in the interval distribution itself distinguishes that from a healthy
+# all-1-refresh capture). The only interval-only signal available is whether a
+# meaningfully-sized population of samples sits OUTSIDE the near-minimum cluster (i.e.
+# genuinely different, higher-multiple frames) to cross-check the assumption against.
+MIN_OUTSIDE_CLUSTER_SHARE = 0.05
+
+
 def compute_refresh_period(intervals: Sequence[float]) -> dict:
     """Measure the true monitor refresh period from the interval distribution.
 
@@ -161,6 +172,13 @@ def compute_refresh_period(intervals: Sequence[float]) -> dict:
     greater than the runner-up); otherwise falls back to the cluster's MEDIAN. Which
     method was actually used is reported in `measurement` so the number is never
     presented as more certain than it is.
+
+    Raises when fewer than `MIN_OUTSIDE_CLUSTER_SHARE` of all intervals sit outside the
+    near-minimum cluster: with too little of the distribution to contrast the cluster
+    against, an all-N-refresh capture is indistinguishable from a healthy all-1-refresh
+    one (the bug this guard exists to close -- see module docstring). Callers who can
+    supply the display's actual nominal refresh period should bucket against that
+    instead of calling this estimator at all.
     """
     if not intervals:
         raise RefreshHistogramError("compute_refresh_period requires at least one interval")
@@ -168,6 +186,19 @@ def compute_refresh_period(intervals: Sequence[float]) -> dict:
     cluster = [v for v in intervals if v <= min_interval * 1.5]
     if not cluster:
         raise RefreshHistogramError("no samples found near the minimum observed interval")
+
+    outside_cluster_share = 1.0 - (len(cluster) / len(intervals))
+    if outside_cluster_share < MIN_OUTSIDE_CLUSTER_SHARE:
+        raise RefreshHistogramError(
+            f"refresh period is ambiguous: only {outside_cluster_share * 100:.1f}% of "
+            f"{len(intervals)} intervals fall outside the near-minimum cluster (< "
+            f"{MIN_OUTSIDE_CLUSTER_SHARE * 100:.0f}% required), so minObservedIntervalMs="
+            f"{min_interval!r} cannot be confirmed as one true display refresh -- this "
+            "capture may be uniformly N refreshes per frame (e.g. an all-2-refresh "
+            "capture reads as 100% 1-refresh under the minimum-interval assumption). "
+            "Pass --refresh-period-ms with the display's actual nominal refresh period "
+            "to resolve the ambiguity."
+        )
 
     rounded = [round(v, 2) for v in cluster]
     counts = Counter(rounded)
@@ -187,6 +218,7 @@ def compute_refresh_period(intervals: Sequence[float]) -> dict:
         "measurement": measurement,
         "clusterSampleCount": len(cluster),
         "minObservedIntervalMs": min_interval,
+        "outsideClusterShare": outside_cluster_share,
     }
 
 
@@ -218,11 +250,32 @@ def compute_region_stats(frame_rows: Sequence[dict[str, float]]) -> dict:
     return regions
 
 
-def build_report(presentmon_csv_path: str, frame_log_path: str, min_frame_rows: int = 10) -> dict:
+def build_report(
+    presentmon_csv_path: str,
+    frame_log_path: str,
+    min_frame_rows: int = 10,
+    refresh_period_ms: float | None = None,
+) -> dict:
     intervals = parse_presentmon_intervals(presentmon_csv_path)
     frame_rows = parse_frame_log_rows(frame_log_path, min_rows=min_frame_rows)
 
-    refresh_period = compute_refresh_period(intervals)
+    if refresh_period_ms is not None:
+        # Nominal supplied (e.g. Bachelor's panel refresh, per the runbook): bucket
+        # against it directly -- no min-interval estimate, no ambiguity guard, because
+        # the true refresh period is now known rather than inferred.
+        if refresh_period_ms <= 0:
+            raise RefreshHistogramError(f"refreshPeriodMs must be positive, got {refresh_period_ms!r}")
+        refresh_period = {
+            "refreshPeriodMs": float(refresh_period_ms),
+            "measurement": "nominal",
+            "clusterSampleCount": None,
+            "minObservedIntervalMs": None,
+            "refreshPeriodSource": "nominal",
+        }
+    else:
+        refresh_period = dict(compute_refresh_period(intervals))
+        refresh_period["refreshPeriodSource"] = "estimated-min-interval"
+
     buckets = compute_buckets(intervals, refresh_period["refreshPeriodMs"])
     regions = compute_region_stats(frame_rows)
 
@@ -233,6 +286,7 @@ def build_report(presentmon_csv_path: str, frame_log_path: str, min_frame_rows: 
             "sampleCount": len(intervals),
             "refreshPeriodMs": refresh_period["refreshPeriodMs"],
             "refreshPeriodMeasurement": refresh_period["measurement"],
+            "refreshPeriodSource": refresh_period["refreshPeriodSource"],
             "refreshPeriodClusterSampleCount": refresh_period["clusterSampleCount"],
             "minObservedIntervalMs": refresh_period["minObservedIntervalMs"],
             "roundingRule": ROUNDING_RULE,
@@ -252,10 +306,27 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--frame-log", required=True, help="Raw MLVApp log with playback_smoke.frame lines")
     parser.add_argument("--out", default="", help="Write JSON here instead of stdout")
     parser.add_argument("--min-frame-rows", type=int, default=10, help="Minimum high-resolution frame rows required")
+    parser.add_argument(
+        "--refresh-period-ms",
+        type=float,
+        default=None,
+        help=(
+            "Nominal display refresh period in ms (the runbook requires supplying "
+            "Bachelor's panel refresh). When given, buckets are computed against this "
+            "value directly. When omitted, the refresh period is estimated from the "
+            "interval distribution's near-minimum cluster, which fails closed if the "
+            "capture is too ambiguous to trust (see compute_refresh_period)."
+        ),
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     try:
-        report = build_report(args.presentmon_csv, args.frame_log, min_frame_rows=args.min_frame_rows)
+        report = build_report(
+            args.presentmon_csv,
+            args.frame_log,
+            min_frame_rows=args.min_frame_rows,
+            refresh_period_ms=args.refresh_period_ms,
+        )
     except RefreshHistogramError as exc:
         print(f"refresh_period_histogram: FAIL: {exc}", file=sys.stderr)
         return 1
