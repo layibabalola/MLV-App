@@ -130,6 +130,15 @@ New-Item -ItemType Directory -Path $Pub -Force | Out-Null
 Expand-Archive -LiteralPath $Archive -DestinationPath $Work -Force
 $StepLog['sourceExpand'] = 0
 
+# Machine-safety boundary: every file the invoked toolchain writes must live under
+# C:\mlvtmp. A job-owned scratch dir under $Work (itself under C:\mlvtmp\mlv-agent)
+# becomes TEMP/TMP for the rest of this process, so nvcc, qmake, mingw32-make and
+# windeployqt all inherit it instead of the ambient (unconstrained) machine TEMP.
+$Scratch = Join-Path $Work '.job-tmp'
+New-Item -ItemType Directory -Path $Scratch -Force | Out-Null
+$env:TEMP = $Scratch
+$env:TMP = $Scratch
+
 $Backend = Join-Path $Work 'tools\gpu\backend'
 $Src = Join-Path $Backend 'igpu_recon_cuda.cu'
 $Def = Join-Path $Backend 'igpu_recon_cuda.def'
@@ -155,7 +164,7 @@ $StepLog['cudaDiscovery'] = 0
 
 $backendDll = Join-Path $Backend 'igpu_recon_cuda.dll'
 $archFlag = "-gencode=arch=compute_$($CudaArch -replace '^sm_',''),code=$CudaArch"
-$backendCmdFile = Join-Path $env:TEMP "$JobId-backend.cmd"
+$backendCmdFile = Join-Path $Work "$JobId-backend.cmd"
 $backendCmdLines = @(
     '@echo off',
     "call `"$vcvars`" >nul",
