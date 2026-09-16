@@ -17,15 +17,21 @@ namespace async_h2d_counter_contract {
 
 /*! \brief One async H2D upload counter sample for a single frame id.
  *
- * buildIdentity is the emitting build's identity string; every record in a
- * submitted set must match the caller's expected build identity, so a
- * record from a stale or mixed build is never silently accepted alongside
- * current-build records.
+ * frameId is the RAW explicit per-frame id as passed by the playback path
+ * (open PR #72's `uint64_t frame_id`), NOT the derived `frame_id + 1`
+ * frame_token — callers must not conflate the two.
+ *
+ * buildIdentity MUST be the lowercase hex SHA-256 of the emitting binary,
+ * the same value the merged provenance model (PR #67,
+ * tools/repo_hygiene/gpu_job_result_provenance.py) records as `dllSha256`.
+ * Every record in a submitted set must match the caller's expected build
+ * identity, so a record from a stale or mixed build is never silently
+ * accepted alongside current-build records.
  */
 struct AsyncH2dCounterRecord
 {
-    int frameId = -1;
-    int fires = 0;
+    std::uint64_t frameId = 0;
+    std::uint64_t fires = 0;
     std::uint64_t bytes = 0;
     std::string buildIdentity;
 };
@@ -34,9 +40,9 @@ enum class AsyncH2dCounterVerdict
 {
     Valid,
     Empty,
-    NegativeFrameId,
     DuplicateFrameId,
     FiresZeroWithBytesPositive,
+    MalformedBuildIdentity,
     BuildIdentityMismatch,
 };
 
@@ -54,15 +60,15 @@ public:
     {
         if( records.empty() ) return AsyncH2dCounterVerdict::Empty;
 
-        std::set<int> seenFrameIds;
+        std::set<std::uint64_t> seenFrameIds;
         for( const AsyncH2dCounterRecord &record : records )
         {
-            if( record.frameId < 0 )
-                return AsyncH2dCounterVerdict::NegativeFrameId;
             if( !seenFrameIds.insert( record.frameId ).second )
                 return AsyncH2dCounterVerdict::DuplicateFrameId;
             if( record.fires == 0 && record.bytes > 0 )
                 return AsyncH2dCounterVerdict::FiresZeroWithBytesPositive;
+            if( !isWellFormedBuildIdentity( record.buildIdentity ) )
+                return AsyncH2dCounterVerdict::MalformedBuildIdentity;
             if( record.buildIdentity != expectedBuildIdentity )
                 return AsyncH2dCounterVerdict::BuildIdentityMismatch;
         }
@@ -73,6 +79,22 @@ public:
                           const std::string &expectedBuildIdentity )
     {
         return evaluate( records, expectedBuildIdentity ) == AsyncH2dCounterVerdict::Valid;
+    }
+
+private:
+    /*! \brief Shape check only: exactly 64 lowercase hex chars (a SHA-256
+     * digest), never a semantic check that the hash was actually computed
+     * over the emitting binary.
+     */
+    static bool isWellFormedBuildIdentity( const std::string &buildIdentity )
+    {
+        if( buildIdentity.size() != 64 ) return false;
+        for( char c : buildIdentity )
+        {
+            const bool isLowerHexDigit = ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' );
+            if( !isLowerHexDigit ) return false;
+        }
+        return true;
     }
 };
 

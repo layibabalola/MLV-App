@@ -9,7 +9,10 @@ using async_h2d_counter_contract::AsyncH2dCounterVerdict;
 
 namespace {
 
-const char * const kBuildIdentity = "mlvapp-test-build-1";
+const char * const kBuildIdentity =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const char * const kStaleBuildIdentity =
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 // FAKE backend: production binds an implementation that reads live CUDA
 // counters; this test binds a caller-constructed record set directly, so
@@ -67,11 +70,32 @@ TEST(AsyncH2dCounterContract, RejectsFiresZeroWithBytesPositive)
 TEST(AsyncH2dCounterContract, RejectsBuildIdentityMismatch)
 {
     std::vector<AsyncH2dCounterRecord> records = wellFormedRecords();
-    records[2].buildIdentity = "mlvapp-test-build-STALE";
+    records[2].buildIdentity = kStaleBuildIdentity;
 
     const FakeAsyncH2dCounterBackend backend( records );
 
     ASSERT_FALSE( AsyncH2dCounterValidator::accepts( backend.collectRecords(), kBuildIdentity ) );
     ASSERT_TRUE( AsyncH2dCounterValidator::evaluate( backend.collectRecords(), kBuildIdentity )
                  == AsyncH2dCounterVerdict::BuildIdentityMismatch );
+}
+
+TEST(AsyncH2dCounterContract, RejectsMalformedBuildIdentity)
+{
+    std::vector<AsyncH2dCounterRecord> records = wellFormedRecords();
+    records[0].buildIdentity = "not-a-sha256-hex-digest"; // wrong shape entirely
+
+    const FakeAsyncH2dCounterBackend backend( records );
+
+    ASSERT_FALSE( AsyncH2dCounterValidator::accepts( backend.collectRecords(), kBuildIdentity ) );
+    ASSERT_TRUE( AsyncH2dCounterValidator::evaluate( backend.collectRecords(), kBuildIdentity )
+                 == AsyncH2dCounterVerdict::MalformedBuildIdentity );
+}
+
+TEST(AsyncH2dCounterContract, EmptyRecordSetIsEmpty)
+{
+    const FakeAsyncH2dCounterBackend backend( {} );
+
+    ASSERT_FALSE( AsyncH2dCounterValidator::accepts( backend.collectRecords(), kBuildIdentity ) );
+    ASSERT_TRUE( AsyncH2dCounterValidator::evaluate( backend.collectRecords(), kBuildIdentity )
+                 == AsyncH2dCounterVerdict::Empty );
 }
