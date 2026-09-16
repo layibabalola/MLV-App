@@ -174,6 +174,9 @@ __EMBEDDED_FUNCTIONS__
 
 $StepLog = [System.Collections.Specialized.OrderedDictionary]::new()
 $Evidence = [System.Collections.Specialized.OrderedDictionary]::new()
+# Set only once this run owns a freshly created outbox. Until then a failure must not write into
+# a previous run's artifacts directory -- and -VerifyOnly must not write at all.
+$PubReady = $false
 
 # Machine-safety boundary: every path this job owns lives under the agent root, so a
 # substituted value that escaped it would fail here rather than write somewhere unexpected.
@@ -193,7 +196,7 @@ foreach ($check in @(
 function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
     $StepLog[$Step] = $Code
     Say "FAIL step=$Step exit=$Code $Message"
-    if (Test-Path -LiteralPath $Pub) {
+    if ($PubReady -and (Test-Path -LiteralPath $Pub)) {
         $partial = [ordered]@{
             schema = 'mlvapp.playback-attr-3-cuda-dll-pair.v1'
             sourceCommit = $SourceCommit
@@ -237,6 +240,7 @@ if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -For
 if (Test-Path -LiteralPath $Pub) { Remove-Item -LiteralPath $Pub -Recurse -Force }
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 New-Item -ItemType Directory -Path $Pub -Force | Out-Null
+$PubReady = $true
 Expand-Archive -LiteralPath $Archive -DestinationPath $Work -Force
 $StepLog['sourceExpand'] = 0
 

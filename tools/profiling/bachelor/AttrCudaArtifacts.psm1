@@ -187,6 +187,75 @@ function New-AttrCudaBuildInfoHeader {
 "@
 }
 
+function Assert-AttrCudaSafeArtifactName {
+    <#
+    .SYNOPSIS
+    Refuse anything that is not a plain file name, and return it.
+    .DESCRIPTION
+    The staging job used to take artifact names straight out of build.json and feed them to
+    Join-Path for cache writes and inbox deletion, while its containment check only covered the
+    DIRECTORY roots (sol, PR #133 r2). A name of `..\..\something` therefore produced a path that
+    passed the root check and still landed outside it -- on an unattended host, for a
+    Remove-Item. A basename cannot do that, so this refuses everything that is not one:
+    separators in either direction, any `..` at all, a colon (and so any drive qualifier or
+    alternate data stream), the characters Windows forbids in a file name, and surrounding
+    whitespace. Assert-AttrCudaDirectChild is the second, independent line.
+    Throws with a distinguishable ATTRCUDA_NAME_* token.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { throw 'ATTRCUDA_NAME_EMPTY an artifact was named with an empty string' }
+    if ($Name -ne $Name.Trim()) { throw "ATTRCUDA_NAME_PADDED '$Name' has leading or trailing whitespace" }
+    if ($Name.Contains('..')) { throw "ATTRCUDA_NAME_TRAVERSAL '$Name' contains '..'" }
+    foreach ($character in @('\', '/', ':')) {
+        if ($Name.Contains($character)) { throw "ATTRCUDA_NAME_NOT_A_BASENAME '$Name' contains '$character'" }
+    }
+    if ($Name -match '[<>"|?*]') { throw "ATTRCUDA_NAME_ILLEGAL_CHARACTER '$Name'" }
+    if ($Name -ne [IO.Path]::GetFileName($Name)) { throw "ATTRCUDA_NAME_NOT_A_BASENAME '$Name'" }
+    $Name
+}
+
+function Assert-AttrCudaDirectChild {
+    <#
+    .SYNOPSIS
+    Require a resolved path to be a DIRECT child of $Root, and return its full path.
+    .DESCRIPTION
+    Stronger than "starts with the root", and deliberately so: the staging job writes into and
+    deletes out of two flat directories, so anything at a deeper level is already wrong even when
+    it is technically inside. Resolution is through [IO.Path]::GetFullPath, which collapses `..`
+    and relative segments, so the comparison is made on what the filesystem would actually touch
+    rather than on the string that was passed in. Called before every Copy-Item, Move-Item and
+    Remove-Item, never after.
+    Throws ATTRCUDA_PATH_NOT_DIRECT_CHILD.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [string]$Label = 'path'
+    )
+
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $parent = [IO.Path]::GetDirectoryName($fullPath)
+    if ([string]::IsNullOrEmpty($parent)) {
+        throw "ATTRCUDA_PATH_NOT_DIRECT_CHILD $Label '$fullPath' has no parent directory"
+    }
+    if ($parent.TrimEnd('\') -ne $fullRoot) {
+        throw "ATTRCUDA_PATH_NOT_DIRECT_CHILD $Label '$fullPath' is not a direct child of '$fullRoot'"
+    }
+    $fullPath
+}
+
 function Assert-AttrCudaBuildManifest {
     <#
     .SYNOPSIS
@@ -436,6 +505,8 @@ Export-ModuleMember -Function `
     Get-AttrCudaEmbeddedFunctionSource, `
     Get-AttrCudaZipArchiveComment, `
     Assert-AttrCudaSourceArchive, `
+    Assert-AttrCudaSafeArtifactName, `
+    Assert-AttrCudaDirectChild, `
     Assert-AttrCudaBuildManifest, `
     Resolve-AttrCudaSmokeRunLog, `
     Get-AttrCudaLastEligibilityLine, `

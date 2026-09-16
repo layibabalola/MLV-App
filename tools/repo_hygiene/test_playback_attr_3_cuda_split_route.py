@@ -231,8 +231,46 @@ class StageJobTests(unittest.TestCase):
         self.assertLess(manifest, cleanup, "side-files may only be removed after the publish")
 
     def test_side_files_are_addressed_by_exact_name(self) -> None:
-        self.assertIn("$path = Join-Path $Inbox $name", self.text)
+        self.assertIn(
+            'Assert-AttrCudaDirectChild -Root $Inbox -Path (Join-Path $Inbox $name)', self.text
+        )
         self.assertNotIn("Get-ChildItem", self.text)
+
+    def test_names_are_derived_from_the_commit_not_taken_from_the_manifest(self) -> None:
+        # build.json supplies hashes; the basenames come from the convention applied to
+        # -SourceCommit, in the generator AND again on the host from the baked commit.
+        self.assertIn("$derived = Get-AttrCudaArtifactNames -SourceCommit $SourceCommit", self.text)
+        self.assertIn("$canonicalNames -cnotcontains $name", self.text)
+        self.assertIn("the canonical name for $SourceCommit", self.text)
+        self.assertIn("Names are derived, never taken from the manifest.", self.text)
+
+    def test_every_name_and_every_resolved_path_is_checked_before_any_write(self) -> None:
+        # Ordering is a property of the EMITTED job, so compare inside the template only -- the
+        # generator's header prose names these cmdlets too.
+        template = self.text[self.text.index("$template = @'") :]
+        safety = template.index("$StepLog['artifactNameSafety'] = 0")
+        for mutation in ("Copy-Item", "Move-Item", "Remove-Item -LiteralPath ([string]$item.path)"):
+            with self.subTest(mutation=mutation):
+                self.assertLess(safety, template.index(mutation))
+        for root, label in (("$Inbox", "inbox"), ("$Cache", "cache")):
+            with self.subTest(root=root):
+                self.assertIn(f"Assert-AttrCudaDirectChild -Root {root}", self.text)
+        self.assertIn("Assert-AttrCudaSafeArtifactName -Name $name", self.text)
+
+    def test_traversal_and_non_basenames_are_refused_by_the_shared_guard(self) -> None:
+        module = _read(SHARED_MODULE)
+        for token in (
+            "ATTRCUDA_NAME_TRAVERSAL",
+            "ATTRCUDA_NAME_NOT_A_BASENAME",
+            "ATTRCUDA_PATH_NOT_DIRECT_CHILD",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, module)
+
+    def test_verify_only_stops_before_anything_is_written(self) -> None:
+        stop = self.text.index("RESULT=VERIFY_ONLY_OK")
+        self.assertLess(stop, self.text.index("New-Item -ItemType Directory -Path $Work"))
+        self.assertLess(stop, self.text.index("$PubReady = $true"))
 
 
 class AttributionJobTests(unittest.TestCase):

@@ -11,11 +11,24 @@
 # beside the job and this job does the publishing, on the host, with the hashes re-checked
 # there. Nothing in this file hides a path in a variable to route around that boundary.
 #
-# WHAT IT PROVES. Every expected file name and lowercase sha256 is BAKED IN at generation time,
-# read from the assembler's build.json on this machine. On the host the job re-hashes each
-# side-file and refuses on the first mismatch, then cross-checks the arriving build.json against
-# the same baked values -- so neither a stale side-file nor an edited manifest can publish a
-# package that does not match what was assembled.
+# WHAT IT PROVES. Every expected file name and lowercase sha256 is BAKED IN at generation time.
+# On the host the job re-hashes each side-file and refuses on the first mismatch, then
+# cross-checks the arriving build.json against the same baked values -- so neither a stale
+# side-file nor an edited manifest can publish a package that does not match what was assembled.
+#
+# NAMES ARE DERIVED, NEVER TAKEN FROM THE MANIFEST (sol, PR #133 r2, BLOCKER). build.json used to
+# supply the file names that were then handed to Join-Path for cache writes and inbox deletion,
+# with containment checked only on the directory roots -- so a crafted `..\..\x` name produced a
+# path that passed the root check and still escaped it, on an unattended host, for a Remove-Item.
+# Both this generator and the emitted job now derive the expected basenames from the (baked)
+# sourceCommit through Get-AttrCudaArtifactNames and require an EXACT match; the manifest is
+# reduced to a source of hashes. Every name is additionally run through
+# Assert-AttrCudaSafeArtifactName, and every resolved cache and inbox path through
+# Assert-AttrCudaDirectChild, BEFORE any Copy-Item, Move-Item or Remove-Item. Exit 6.
+#
+# `<jobId>.job.ps1 -VerifyOnly` runs the whole read-only prefix -- name derivation, path
+# containment, side-file presence, hashes, manifest binding -- and exits without creating,
+# copying, publishing or deleting anything.
 #
 # ORDER. Artifacts are copied to <name>.partial in the cache, hash-verified there, renamed, and
 # only then is build.json published -- LAST, exactly as the attribution job assumes: its mere
@@ -42,7 +55,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutDir,
 
-    [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$')]
+    # `~` is admitted because Windows temp roots carry 8.3 short names (RUNNER~1, OBABAL~1) and
+    # the behavioural tests point -AgentRoot at one; it is inert everywhere this value is used.
+    [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
     [string]$AgentRoot = 'C:\mlvtmp\mlv-agent'
 )
 
@@ -68,23 +83,41 @@ if ($buildManifest.pendingSymbolPresence -isnot [bool]) {
 
 function Get-ShaLower([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 
-# Bake the exact artifact set from the manifest, and verify each one HERE first: a side-file
-# that does not match on this machine can never match on the host, and failing now costs a
-# generator run instead of an agent round trip.
-$expected = @(
-    [ordered]@{ name = $buildManifest.packageZip.name; sha256 = ([string]$buildManifest.packageZip.sha256).ToLowerInvariant() },
-    [ordered]@{ name = $buildManifest.exe.name; sha256 = ([string]$buildManifest.exe.sha256).ToLowerInvariant() },
-    [ordered]@{ name = $buildManifest.dll.name; sha256 = ([string]$buildManifest.dll.sha256).ToLowerInvariant() }
+# Bake the artifact set. The NAMES come from the naming convention applied to -SourceCommit, not
+# from the manifest: build.json supplies hashes and nothing else. A manifest whose names are not
+# exactly the canonical three is refused outright -- that is a manifest for a different build, or
+# a crafted one, and there is no third possibility worth guessing at.
+$canonical = @(
+    [ordered]@{ label = 'packageZip'; name = $names.packageZipName; claim = $buildManifest.packageZip },
+    [ordered]@{ label = 'exe'; name = $names.exeName; claim = $buildManifest.exe },
+    [ordered]@{ label = 'dll'; name = $names.reconName; claim = $buildManifest.dll }
 )
+$expected = @()
+foreach ($item in $canonical) {
+    [void](Assert-AttrCudaSafeArtifactName -Name ([string]$item.name))
+    $claimedName = if ($null -eq $item.claim) { '' } else { [string]$item.claim.name }
+    if ($claimedName -cne [string]$item.name) {
+        throw "build manifest names $($item.label) '$claimedName'; the canonical name for $SourceCommit is '$($item.name)'. Names are derived, never taken from the manifest."
+    }
+    $sha = if ($null -eq $item.claim) { '' } else { ([string]$item.claim.sha256).ToLowerInvariant() }
+    if ($sha -notmatch '^[0-9a-f]{64}$') { throw "build manifest sha256 for $($item.name) is not a lowercase sha256" }
+    $expected += [ordered]@{ name = [string]$item.name; sha256 = $sha }
+}
+# Verify each one HERE first: a side-file that does not match on this machine can never match on
+# the host, and failing now costs a generator run instead of an agent round trip.
 foreach ($item in $expected) {
-    if ([string]::IsNullOrWhiteSpace([string]$item.name)) { throw 'build manifest names an artifact with no file name' }
-    if ([string]$item.sha256 -notmatch '^[0-9a-f]{64}$') { throw "build manifest sha256 for $($item.name) is not a lowercase sha256" }
-    $localPath = Join-Path $BuildDir ([string]$item.name)
+    $localPath = Assert-AttrCudaDirectChild -Root $BuildDir -Path (Join-Path $BuildDir ([string]$item.name)) -Label "BuildDir/$($item.name)"
     if (-not (Test-Path -LiteralPath $localPath)) { throw "artifact named by the build manifest is missing from BuildDir: $localPath" }
     $actual = Get-ShaLower $localPath
     if ($actual -ne [string]$item.sha256) { throw "sha256 mismatch in BuildDir for $($item.name): manifest $($item.sha256), on disk $actual" }
 }
 $manifestSha256 = Get-ShaLower $buildManifestPath
+
+$embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
+    'Get-AttrCudaArtifactNames',
+    'Assert-AttrCudaSafeArtifactName',
+    'Assert-AttrCudaDirectChild'
+)
 
 if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
@@ -92,6 +125,11 @@ $jobPath = Join-Path $OutDir "$JobId.job.ps1"
 
 # --- job body template (placeholders are substituted below) ------------------------------------
 $template = @'
+# -VerifyOnly runs the read-only prefix (name derivation and safety, path containment, side-file
+# presence, hashes, manifest binding) and exits without creating, copying, publishing or deleting
+# anything. The agent never passes it; the behavioural tests do.
+param([switch]$VerifyOnly)
+
 $ErrorActionPreference = 'Stop'
 $SourceCommit = '__SOURCE_COMMIT__'
 $JobId = '__JOB_ID__'
@@ -107,12 +145,19 @@ $Pub = Join-Path $AgentRoot "outbox\$JobId.artifacts"
 function Say([string]$Message) { Write-Output "[$JobId] $Message" }
 function Get-ShaLower([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 
+# --- verifiers, embedded VERBATIM from tools/profiling/bachelor/AttrCudaArtifacts.psm1 --------
+__EMBEDDED_FUNCTIONS__
+# --- end embedded verifiers -------------------------------------------------------------------
+
 $StepLog = [System.Collections.Specialized.OrderedDictionary]::new()
+# Set only once this run owns a freshly created outbox. Until then a failure must not write into
+# a previous run's artifacts directory -- and -VerifyOnly must not write at all.
+$PubReady = $false
 
 function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
     $StepLog[$Step] = $Code
     Say "FAIL step=$Step exit=$Code $Message"
-    if (Test-Path -LiteralPath $Pub) {
+    if ($PubReady -and (Test-Path -LiteralPath $Pub)) {
         $partial = [ordered]@{
             schema = 'mlvapp.playback-attr-3-cuda-stage.v1'
             sourceCommit = $SourceCommit
@@ -144,31 +189,53 @@ foreach ($check in @(
     @{ path = $Pub; label = 'Pub' }
 )) { Assert-UnderAgentRoot $check.path $check.label }
 
-if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
-if (Test-Path -LiteralPath $Pub) { Remove-Item -LiteralPath $Pub -Recurse -Force }
-New-Item -ItemType Directory -Path $Work -Force | Out-Null
-New-Item -ItemType Directory -Path $Pub -Force | Out-Null
-New-Item -ItemType Directory -Path $Cache -Force | Out-Null
-
-# Job-owned TEMP before anything else runs.
-$Scratch = Join-Path $Work '.job-tmp'
-New-Item -ItemType Directory -Path $Scratch -Force | Out-Null
-$env:TEMP = $Scratch
-$env:TMP = $Scratch
-
 Say "START source=$SourceCommit files=$($Expected.Count)"
 
-# Each side-file is addressed by its EXACT baked name -- no directory enumeration, no pattern.
-$sideFiles = @()
-foreach ($item in $Expected) {
-    $name = [string]$item.name
-    $path = Join-Path $Inbox $name
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        Complete-Failed 3 'inboxSideFiles' "expected side-file missing from the inbox: $name"
+# --- names: DERIVED here, then matched against what was baked in ------------------------------
+# The baked set is not taken on trust either: the canonical basenames are re-derived on this host
+# from $SourceCommit through the same convention the assembler and the attribution job use, and
+# the baked names must be exactly those. Then every name is proved to be a plain basename and
+# every resolved path a direct child of the directory it belongs to -- before anything is copied,
+# renamed or removed. Exit 6 is reserved for this.
+try {
+    $derived = Get-AttrCudaArtifactNames -SourceCommit $SourceCommit
+    $canonicalNames = @($derived.packageZipName, $derived.exeName, $derived.reconName)
+    if (@($Expected).Count -ne $canonicalNames.Count) {
+        throw "the job was baked with $(@($Expected).Count) artifacts; the convention yields $($canonicalNames.Count) for $SourceCommit"
     }
-    $sideFiles += [ordered]@{ name = $name; path = $path; sha256 = [string]$item.sha256 }
+    if ($ManifestName -cne $derived.buildManifestName) {
+        throw "baked manifest name '$ManifestName' is not the canonical '$($derived.buildManifestName)' for $SourceCommit"
+    }
+    [void](Assert-AttrCudaSafeArtifactName -Name $ManifestName)
+    $sideFiles = @()
+    foreach ($item in $Expected) {
+        $name = [string]$item.name
+        [void](Assert-AttrCudaSafeArtifactName -Name $name)
+        if ($canonicalNames -cnotcontains $name) {
+            throw "baked artifact name '$name' is not one of the canonical names for ${SourceCommit}: $($canonicalNames -join ', ')"
+        }
+        $sideFiles += [ordered]@{
+            name = $name
+            path = (Assert-AttrCudaDirectChild -Root $Inbox -Path (Join-Path $Inbox $name) -Label "inbox/$name")
+            cachePath = (Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache $name) -Label "cache/$name")
+            partialPath = (Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache "$name.partial") -Label "cache/$name.partial")
+            sha256 = [string]$item.sha256
+        }
+    }
+    $manifestSide = Assert-AttrCudaDirectChild -Root $Inbox -Path (Join-Path $Inbox $ManifestName) -Label "inbox/$ManifestName"
+    $manifestCachePath = Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache $ManifestName) -Label "cache/$ManifestName"
+    $manifestPartialPath = Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache "$ManifestName.partial") -Label "cache/$ManifestName.partial"
+} catch {
+    Complete-Failed 6 'artifactNameSafety' $_.Exception.Message
 }
-$manifestSide = Join-Path $Inbox $ManifestName
+$StepLog['artifactNameSafety'] = 0
+
+# Each side-file is addressed by its EXACT derived name -- no directory enumeration, no pattern.
+foreach ($item in $sideFiles) {
+    if (-not (Test-Path -LiteralPath ([string]$item.path) -PathType Leaf)) {
+        Complete-Failed 3 'inboxSideFiles' "expected side-file missing from the inbox: $($item.name)"
+    }
+}
 if (-not (Test-Path -LiteralPath $manifestSide -PathType Leaf)) {
     Complete-Failed 3 'inboxSideFiles' "expected side-file missing from the inbox: $ManifestName"
 }
@@ -208,17 +275,38 @@ foreach ($claim in @($arrivedManifest.packageZip, $arrivedManifest.exe, $arrived
 }
 $StepLog['manifestBinding'] = 0
 
+# Everything above is read-only. -VerifyOnly stops here, having touched nothing.
+if ($VerifyOnly) {
+    Write-Output "RESULT=VERIFY_ONLY_OK SOURCE=$SourceCommit FILES=$($sideFiles.Count) MANIFEST=$ManifestName"
+    exit 0
+}
+
+if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
+if (Test-Path -LiteralPath $Pub) { Remove-Item -LiteralPath $Pub -Recurse -Force }
+New-Item -ItemType Directory -Path $Work -Force | Out-Null
+New-Item -ItemType Directory -Path $Pub -Force | Out-Null
+New-Item -ItemType Directory -Path $Cache -Force | Out-Null
+$PubReady = $true
+
+# Job-owned TEMP before anything else runs.
+$Scratch = Join-Path $Work '.job-tmp'
+New-Item -ItemType Directory -Path $Scratch -Force | Out-Null
+$env:TEMP = $Scratch
+$env:TMP = $Scratch
+
 # --- transactional publish into the cache: .partial, verify, rename, manifest LAST -------------
+# Every path below was resolved and proved a direct child of $Cache during artifactNameSafety;
+# none is reconstructed from a string here.
 $partialPaths = @()
-foreach ($item in $sideFiles) { $partialPaths += (Join-Path $Cache "$($item.name).partial") }
-$partialPaths += (Join-Path $Cache "$ManifestName.partial")
+foreach ($item in $sideFiles) { $partialPaths += [string]$item.partialPath }
+$partialPaths += $manifestPartialPath
 function Remove-JobPartials {
     foreach ($p in $script:partialPaths) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
 }
 
 try {
     foreach ($item in $sideFiles) {
-        $partial = Join-Path $Cache "$($item.name).partial"
+        $partial = [string]$item.partialPath
         Copy-Item -LiteralPath ([string]$item.path) -Destination $partial -Force
         if ((Get-ShaLower $partial) -ne [string]$item.sha256) { throw "sha256 did not round-trip into the cache for $($item.name)" }
     }
@@ -230,7 +318,7 @@ $StepLog['publishPartials'] = 0
 
 try {
     foreach ($item in $sideFiles) {
-        Move-Item -LiteralPath (Join-Path $Cache "$($item.name).partial") -Destination (Join-Path $Cache ([string]$item.name)) -Force
+        Move-Item -LiteralPath ([string]$item.partialPath) -Destination ([string]$item.cachePath) -Force
     }
 } catch {
     Remove-JobPartials
@@ -239,10 +327,9 @@ try {
 $StepLog['publishRename'] = 0
 
 try {
-    $partialManifest = Join-Path $Cache "$ManifestName.partial"
-    Copy-Item -LiteralPath $manifestSide -Destination $partialManifest -Force
-    if ((Get-ShaLower $partialManifest) -ne $ManifestSha256) { throw "sha256 did not round-trip into the cache for $ManifestName" }
-    Move-Item -LiteralPath $partialManifest -Destination (Join-Path $Cache $ManifestName) -Force
+    Copy-Item -LiteralPath $manifestSide -Destination $manifestPartialPath -Force
+    if ((Get-ShaLower $manifestPartialPath) -ne $ManifestSha256) { throw "sha256 did not round-trip into the cache for $ManifestName" }
+    Move-Item -LiteralPath $manifestPartialPath -Destination $manifestCachePath -Force
 } catch {
     Remove-JobPartials
     Complete-Failed 22 'publishManifest' $_.Exception.Message
@@ -255,6 +342,9 @@ $StepLog['publishManifest'] = 0
 foreach ($item in $sideFiles) { Remove-Item -LiteralPath ([string]$item.path) -Force -ErrorAction SilentlyContinue }
 Remove-Item -LiteralPath $manifestSide -Force -ErrorAction SilentlyContinue
 $StepLog['inboxCleanup'] = 0
+# $item.path and $manifestSide are the values Assert-AttrCudaDirectChild returned: a full path
+# already proved to sit directly in the inbox. This is the Remove-Item the traversal finding was
+# about, and it no longer has a string to reconstruct.
 
 $published = [System.Collections.Specialized.OrderedDictionary]::new()
 foreach ($item in $sideFiles) { $published[[string]$item.name] = [string]$item.sha256 }
@@ -287,6 +377,9 @@ $text = $template.
     Replace('__MANIFEST_NAME__', $names.buildManifestName).
     Replace('__MANIFEST_SHA256__', $manifestSha256).
     Replace('__EXPECTED_LITERAL__', $expectedLiteral)
+# LAST: the module text is spliced in after every other substitution, so no placeholder rule can
+# rewrite a character inside the verbatim verifier source.
+$text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
 
 [IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))
 

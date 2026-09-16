@@ -132,7 +132,21 @@ Drop the emitted job into `C:\mlvtmp\mlv-agent\inbox` together with the four pub
 their own names, as side-files. The job re-hashes each one against values baked in at generation
 time, cross-checks the arriving `build.json`, publishes into `C:\mlvtmp\mlv-agent\cache`
 transactionally with `build.json` **LAST**, and only then removes the side-files. Exit codes:
-3 side-file missing, 4 hash mismatch, 5 manifest binding, 20-22 publish.
+3 side-file missing, 4 hash mismatch, 5 manifest binding, **6 artifact name safety**,
+20-22 publish.
+
+**The file names are never taken from `build.json`.** Both the generator and the job on the host
+derive the canonical basenames from `sourceCommit` through the same convention the assembler and
+the attribution job use, and require an exact match; `build.json` supplies hashes only. Every
+name must be a plain basename (no separator, no `..`, no colon) and every resolved cache and
+inbox path must be a direct child of its root -- checked before any `Copy-Item`, `Move-Item` or
+`Remove-Item`, because those two directories are written and deleted in on an unattended host.
+
+`pwsh -File <jobId>.job.ps1 -VerifyOnly` runs that whole read-only prefix -- names, containment,
+side-file presence, hashes, manifest binding -- and exits without touching anything. An
+interrupted run leaves `build.json` unpublished by construction (it is copied last, after every
+artifact has been renamed into place), so the attribution job's requirement that it be present is
+what makes a partial stage safe: re-drop the side-files and re-run.
 
 ## 4. Attribution job (inside the owner-granted lane)
 
