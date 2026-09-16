@@ -1,4 +1,4 @@
-# playback-attr-3-cuda-build-job.ps1 -- GENERATOR (runs locally / in a lane; nothing here runs
+# playback-attr-3-cuda-compile-job.ps1 -- GENERATOR (runs locally / in a lane; nothing here runs
 # on Bachelor). Emits a self-contained <jobId>.job.ps1 plus a <jobId>-source.zip for the
 # Bachelor agent inbox (tools/profiling/ultra-magnus-agent.ps1 protocol: both files land in
 # inbox\; the agent runs the job; results land in outbox\<jobId>.artifacts). The emitted job
@@ -33,7 +33,7 @@
 #     given 480-720 line excerpt). Flags reused verbatim from tools\build-release.ps1.
 #
 # Usage:
-#   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-build-job.ps1 `
+#   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-compile-job.ps1 `
 #       -SourceCommit <40-hex> -OutDir <dir>
 
 [CmdletBinding()]

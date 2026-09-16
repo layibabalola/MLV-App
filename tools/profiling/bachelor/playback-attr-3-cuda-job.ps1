@@ -33,7 +33,7 @@
 #   - the exe/DLL under test are NOT pinned SHA256 constants (PLAYBACK-ATTR-2 already
 #     had a built artifact to pin); they are named deterministically from -SourceCommit
 #     and expected to already be staged in the Bachelor cache by
-#     tools/profiling/bachelor/playback-attr-3-cuda-build-job.ps1's job, which uses the
+#     tools/profiling/bachelor/playback-attr-3-cuda-compile-job.ps1's job, which uses the
 #     IDENTICAL naming convention. Their hashes are computed fresh at run time and
 #     recorded, not asserted against a value this generator could not have known.
 #
@@ -57,7 +57,7 @@ param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path,
 
     # Derived from -SourceCommit, not pinned to an old package: matches the package
-    # tools/profiling/bachelor/playback-attr-3-cuda-build-job.ps1's emitted job stages into the
+    # tools/profiling/bachelor/playback-attr-3-cuda-compile-job.ps1's emitted job stages into the
     # Bachelor cache as MLVApp-playback-attr-3-cuda-<sha12>-pkg.zip -- a raw zip of that job's
     # deployed release dir, so the exe inside keeps its unrenamed build name, MLVApp.exe. This
     # replaces the old default (the July MLVApp-CUDA-W4W5-4d1955f8.zip base, wrong for a build

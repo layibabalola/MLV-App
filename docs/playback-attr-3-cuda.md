@@ -14,7 +14,7 @@ either.
 Generate the Bachelor build job for the commit under test:
 
 ```powershell
-pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-build-job.ps1 `
+pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-compile-job.ps1 `
     -SourceCommit <40-hex-sha> -OutDir <staging-dir>
 ```
 
