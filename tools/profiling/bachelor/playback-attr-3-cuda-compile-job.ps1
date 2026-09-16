@@ -1,3 +1,28 @@
+# playback-attr-3-cuda-compile-job.ps1 -- RETIRED 2026-09-16. IT NO LONGER EMITS ANYTHING.
+#
+# This generator emitted a job that compiled the CUDA backend DLL and the Qt exe ON BACHELOR.
+# Bachelor cannot do either: it has Visual Studio and BuildTools installed WITHOUT the VC tools
+# component (no cl.exe) and no CUDA toolkit at all. The job
+# playback-attr-3-cuda-build-29dd4dd4ea26 exited 5 at msvcDiscovery, and so did the Aug 9
+# precedent c2-submit-2-946d8bdb-compile. Installing a toolchain on Bachelor was rejected: it is
+# a system change to the owner's laptop, and it is unnecessary.
+#
+# THE ROUTE THAT REPLACES IT (swarm ruling 2026-09-16,
+# .claude-state/fleet-runs/swarm-attr3-buildhost-20260916T2150Z/SYNTHESIS.md), in order:
+#   1. tools/profiling/ultramagnus/playback-attr-3-cuda-dll-job.ps1  -- CUDA DLL pair, sm_86
+#   2. tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1    -- exe + package, board host
+#   3. tools/profiling/bachelor/playback-attr-3-cuda-stage-job.ps1   -- into the Bachelor cache
+#   4. tools/profiling/bachelor/playback-attr-3-cuda-job.ps1         -- attribution
+# Runbook: docs/playback-attr-3-cuda.md.
+#
+# The body below is kept UNRUN as the record of the build steps the assembler inherited
+# (buildinfo injection before qmake, qmake, mingw32-make -B release, windeployqt, the MinGW
+# runtime set, the transactional cache publish). Do not re-enable it: the refusal is the point,
+# and a generator that emits a job which cannot succeed is how PR #131 lost a day.
+#
+# ---------------------------------------------------------------------------------------------
+# Historical header follows.
+#
 # playback-attr-3-cuda-compile-job.ps1 -- GENERATOR (runs locally / in a lane; nothing here runs
 # on Bachelor). Emits a self-contained <jobId>.job.ps1 plus a <jobId>-source.zip for the
 # Bachelor agent inbox (tools/profiling/ultra-magnus-agent.ps1 protocol: both files land in
@@ -51,6 +76,28 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# RETIRED: refuse before doing anything. Bachelor has no VC tools and no CUDA toolkit, so every
+# job this generator could emit exits 5 at msvcDiscovery on that host.
+throw @"
+playback-attr-3-cuda-compile-job.ps1 is RETIRED and emits nothing.
+
+Bachelor has Visual Studio without the VC tools component (no cl.exe) and no CUDA toolkit, so
+the job this generator used to emit cannot build anything there: playback-attr-3-cuda-build-
+29dd4dd4ea26 exited 5 at msvcDiscovery, as did the Aug 9 precedent c2-submit-2-946d8bdb-compile.
+
+Use the split-build route instead:
+  1. tools\profiling\ultramagnus\playback-attr-3-cuda-dll-job.ps1 -SourceCommit <40-hex> -OutDir <dir>
+       -> CUDA DLL pair (sm_86) built on Ultra-Magnus
+  2. tools\profiling\bachelor\playback-attr-3-cuda-assemble.ps1 -SourceCommit <40-hex> -DllPairDir <dir> -OutDir <dir>
+       -> Qt/MinGW exe + package, built on the board host
+  3. tools\profiling\bachelor\playback-attr-3-cuda-stage-job.ps1 -SourceCommit <40-hex> -BuildDir <dir> -OutDir <dir>
+       -> stages the package into the Bachelor agent cache
+  4. tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 -- attribution, inside the owner-granted lane
+
+Runbook: docs\playback-attr-3-cuda.md
+Ruling: .claude-state\fleet-runs\swarm-attr3-buildhost-20260916T2150Z\SYNTHESIS.md
+"@
 
 # --- resolve provenance locally, BEFORE the job ever touches Bachelor -------------
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
