@@ -124,6 +124,47 @@ $PresentMonRequest = Join-Path $Root 'pm-request.json'
 $PresentMonDone = Join-Path $Root 'pm-request.done.json'
 $PresentMonTimedSeconds = 55
 
+# TEMP boundary (BLOCKER fix): job-owned scratch dir under this job's own C:\mlvtmp
+# work dir, set as TEMP/TMP at the very start -- before any child process (reg.exe,
+# the pwsh that runs run-release-gui-smoke.ps1/MLVApp.exe, dumpbin, schtasks) -- so
+# every one of them inherits it instead of the ambient (unconstrained) machine TEMP.
+# Mirrors tools/profiling/bachelor/playback-attr-3-cuda-compile-job.ps1's $Scratch
+# pattern. $Work is created here (not later) precisely so the scratch dir it hosts is
+# never wiped out from under a live $env:TEMP by a later "recreate $Work" step.
+function Assert-UnderMlvTmp([string]$Path, [string]$Label) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full -ne 'C:\mlvtmp' -and $full -notlike 'C:\mlvtmp\*') {
+        throw "job-owned path '$Label' resolves outside C:\mlvtmp: $full"
+    }
+}
+foreach ($check in @(
+    @{ path = $Root; label = 'Root' },
+    @{ path = $Work; label = 'Work' },
+    @{ path = $Pub; label = 'Pub' },
+    @{ path = $PresentMonRequest; label = 'PresentMonRequest' },
+    @{ path = $PresentMonDone; label = 'PresentMonDone' }
+)) { Assert-UnderMlvTmp $check.path $check.label }
+
+if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
+New-Item -ItemType Directory -Path $Work -Force | Out-Null
+$Scratch = Join-Path $Work '.job-tmp'
+New-Item -ItemType Directory -Path $Scratch -Force | Out-Null
+$env:TEMP = $Scratch
+$env:TMP = $Scratch
+
+# PresentMon sidecar TEMP boundary: the sidecar runs as its own scheduled task
+# ($PresentMonTask), started via schtasks.exe /Run, which CANNOT inherit this
+# process's $env:TEMP/$env:TMP -- a scheduled task launches under its own
+# pre-installed task environment. Choice (b) per the card: this job's own writes are
+# proven confined to C:\mlvtmp by the Assert-UnderMlvTmp checks above (and by
+# $PresentMonRequest/$PresentMonDone/$Pub/$Work themselves all resolving under
+# C:\mlvtmp), and this fact is recorded in the evidence manifest below rather than
+# assumed away. Choice (a) -- passing the scratch dir through pm-request.json for the
+# sidecar runner to honour -- is not taken: the sidecar runner
+# (tools/profiling/ultra-magnus-agent.ps1's PresentMon task counterpart) is not in
+# this repo, so there is no source to confirm it would read or use such a field.
+$PresentMonSidecarEnvironmentNote = "PresentMon runs as scheduled task '$PresentMonTask', started via schtasks.exe /Run, which cannot inherit this job process's TEMP/TMP; it executes under its own pre-installed task environment, outside this job's control. This job's own writes are confined to C:\mlvtmp (asserted at job start for Root/Work/Pub/PresentMonRequest/PresentMonDone)."
+
 function Get-Sha([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
 }
@@ -327,7 +368,9 @@ foreach ($name in @($PresentMonName, 'run-release-gui-smoke.ps1')) {
 }
 $clipPath = Resolve-ClipById $Cache $ClipId
 
-if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
+# $Work and $Pub already exist (created at job start, alongside the TEMP/TMP scratch
+# dir under $Work) -- do not remove/recreate $Work here, which would delete the live
+# $env:TEMP/$env:TMP scratch dir out from under this process.
 New-Item -ItemType Directory -Path (Join-Path $Work 'out') -Force | Out-Null
 New-Item -ItemType Directory -Path $Pub -Force | Out-Null
 Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip) -DestinationPath (Join-Path $Work 'pkg') -Force
@@ -508,6 +551,7 @@ $manifest = [ordered]@{
     executable = [ordered]@{ name=$ExeName; sha256=$cacheExeSha }
     reconDll = [ordered]@{ name=$ReconName; sha256=(Get-Sha $reconDll) }
     presentMon = [ordered]@{ name=$PresentMonName; sha256=$PresentMonSha; task=$PresentMonTask; positiveSamples=$pmRows.Count }
+    environmentBoundary = [ordered]@{ jobTempDir=$Scratch; presentMonSidecarNote=$PresentMonSidecarEnvironmentNote }
     cpuQuiescence = [ordered]@{ samples=$loads; meanPercent=$avgLoad; thresholdPercent=20.0; pass=($avgLoad -le 20.0) }
     frameRows = $rows.Count
     gpuSummary = $gpuSummary
