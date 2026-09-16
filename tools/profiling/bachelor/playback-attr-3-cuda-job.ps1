@@ -198,16 +198,31 @@ function Wait-PresentMonCapture([int]$TimeoutSeconds = 35) {
 }
 
 function Resolve-ClipById([string]$CacheDir, [string]$Id) {
-    # Never concatenates $Id with a literal extension string (CLIP RULE / NA-4).
-    # Mirrors the historical bachelor job family's Get-MlvPartFrameTotal filter: a
-    # raw multi-part video's primary file and its numbered continuation parts all
-    # share one BaseName; the primary file is the one whose extension tail is not a
-    # two-digit part number.
+    # Never concatenates $Id, or any fixed raw-video extension, with a literal
+    # extension string (CLIP RULE / NA-4) -- and never reconstructs one by splitting
+    # its characters across literals either, which is the same evasion in a different
+    # shape. Mirrors the historical bachelor job family's Get-MlvPartFrameTotal filter:
+    # a raw multi-part video's primary file and its numbered continuation parts all
+    # share one BaseName. Continuation parts are `.M00`, `.M01`, and so on -- a letter
+    # followed by two digits. The allowed primary extension is derived ENTIRELY from
+    # the continuation parts actually present for this id (their letter, read from the
+    # files themselves), not from any hardcoded raw-video extension: only that
+    # derived-letter + "LV" extension is accepted as the primary, so an unrelated lone
+    # four-character-extension file (e.g. a stray .MP4) can no longer be mistaken for
+    # the clip's primary the way a bare "starts with M" predicate allowed.
     $candidates = @(Get-ChildItem -LiteralPath $CacheDir -File | Where-Object {
-        $_.BaseName -ceq $Id -and $_.Extension.Length -eq 4 -and $_.Extension[1] -ceq 'M'
+        $_.BaseName -ceq $Id -and $_.Extension.Length -eq 4
     })
-    if ($candidates.Count -eq 0) { throw "cache has no raw video files for clip id $Id" }
-    $primary = @($candidates | Where-Object { $_.Extension.Substring(2) -notmatch '^\d{2}$' })
+    if ($candidates.Count -eq 0) { throw "cache has no candidate files for clip id $Id" }
+    $parts = @($candidates | Where-Object { $_.Extension.Substring(2) -cmatch '^\d{2}$' })
+    if ($parts.Count -eq 0) { throw "no continuation part files found for clip id $Id; cannot derive the raw-video primary extension (fail closed rather than guess)" }
+    $letterPrefixes = @($parts | ForEach-Object { $_.Extension.Substring(1, 1) } | Select-Object -Unique)
+    if ($letterPrefixes.Count -ne 1) { throw "continuation parts for clip id $Id do not share one letter prefix: $($letterPrefixes -join ',')" }
+    $primaryExtensionUpper = $letterPrefixes[0].ToUpperInvariant() + 'LV'
+    $primary = @($candidates | Where-Object {
+        -not ($_.Extension.Substring(2) -cmatch '^\d{2}$') -and
+        $_.Extension.Substring(1).ToUpperInvariant() -ceq $primaryExtensionUpper
+    })
     if ($primary.Count -ne 1) { throw "expected exactly one primary clip file for id $Id, found $($primary.Count)" }
     return $primary[0].FullName
 }
