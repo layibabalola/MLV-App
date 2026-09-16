@@ -529,3 +529,47 @@ def test_final_receipt_io_failure_cannot_keep_descendants_alive(fixture_tree):
     assert q['state']=='running' and not q['complete']
     wait_absent(json.loads((fixture_tree["root"]/"child.json").read_text(encoding="utf-8-sig")))
     wait_absent(json.loads((fixture_tree["root"]/"grand.json").read_text(encoding="utf-8-sig")))
+
+
+def ledger_rows(root):
+    ledger=root/".claude-state"/"coordination"/"dual-lane"/"receipts"/"dispatch-reservations.jsonl"
+    return [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_direct_launch_writes_a_reserved_versioned_ledger_row_naming_its_receipt(fixture_tree):
+    # TOOL-GUARD-COVERAGE-ARM-UNSATISFIABLE-1: a direct Invoke-Lane launch is a dispatch the
+    # product-ratio guard must see, so it writes its own 'reserved' row.
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env.pop("MLV_DISPATCH_RESERVATION_ID",None)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=30)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    rows=ledger_rows(fixture_tree["root"])
+    assert len(rows)==1
+    row=rows[0]
+    assert row["schemaVersion"]==2 and row["venue"]=="invoke-lane" and row["state"]=="reserved"
+    assert Path(row["receiptPath"]).resolve()==receipt.resolve()
+    assert row["recordedUtc"].endswith("Z") and row["allowEdits"] is False and row["lane"]=="sonnet"
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["dispatchLedger"]=={"state":"reserved","reservationId":row["reservationId"]}
+
+
+def test_dispatcher_launch_writes_a_linked_row_not_a_second_reservation(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env["MLV_DISPATCH_RESERVATION_ID"]="11111111-2222-3333-4444-555555555555"
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=30)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    rows=ledger_rows(fixture_tree["root"])
+    assert [(x["state"],x["reservationId"]) for x in rows]==[("linked","11111111-2222-3333-4444-555555555555")]
+    assert Path(rows[0]["receiptPath"]).resolve()==receipt.resolve()
+
+
+def test_unwritable_ledger_refuses_the_launch_with_a_named_failure(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env.pop("MLV_DISPATCH_RESERVATION_ID",None)
+    # A DIRECTORY where the ledger file should be makes every append fail.
+    (fixture_tree["root"]/".claude-state"/"coordination"/"dual-lane"/"receipts"/"dispatch-reservations.jsonl").mkdir(parents=True)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=60)
+    assert r.returncode!=0
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["failure"].startswith("dispatch-ledger-write-failed") and not q["complete"]
+    assert not (fixture_tree["root"]/"child.json").exists(), "no provider may start without a ledger row"
