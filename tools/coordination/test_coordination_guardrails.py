@@ -3733,3 +3733,18 @@ for($i=0;$i -lt [int]$Count;$i++){
     assert len(lines) == 160
     for line in lines:
         json.loads(line)
+
+
+def test_loop_budget_ignores_invoke_lane_ledger_rows_and_never_halts_on_linked(tmp_path):
+    # PR #127: Invoke-Lane now writes 'reserved' (direct) and 'linked' rows for the ratio guard's
+    # coverage. Before the fix, 'linked' threw 'unknown reservation state' in the loop's reducer,
+    # halting every cycle, and direct hub/review launches would have spent the unattended budget.
+    rows = [
+        {'reservationId': 'W-1', 'state': 'reserved', 'schemaVersion': 2, 'venue': 'invoke-workstream',
+         'lane': 'sonnet', 'card': 'C', 'runDir': 'R', 'recordedUtc': '2026-09-05T09:00:00Z'},
+        {'reservationId': 'W-1', 'state': 'linked', 'schemaVersion': 2, 'venue': 'invoke-lane',
+         'lane': 'sonnet', 'card': 'C', 'runDir': 'R', 'receiptPath': 'R/sonnet-001.receipt.json', 'recordedUtc': '2026-09-05T09:00:01Z'},
+        {'reservationId': 'L-1', 'state': 'reserved', 'schemaVersion': 2, 'venue': 'invoke-lane',
+         'lane': 'sol', 'card': 'REVIEW', 'runDir': 'R2', 'receiptPath': 'R2/sol-001.receipt.json', 'recordedUtc': '2026-09-05T10:00:00Z'},
+    ]
+    assert _run_reservation_budget(tmp_path, rows) == 1
