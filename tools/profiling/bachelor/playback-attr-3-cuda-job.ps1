@@ -287,7 +287,27 @@ foreach ($item in @(
     if (-not (Test-Path -LiteralPath $item.path)) { throw "cache missing $($item.path)" }
     if ((Get-Sha $item.path) -ne $item.sha) { throw "hash mismatch $($item.path)" }
 }
-foreach ($name in @($BasePackageZip, $ExeName, $ReconName, $PresentMonName, 'run-release-gui-smoke.ps1')) {
+# Non-transactional publish fix (BLOCKER): existence of the exe/DLL/pkg alone does not
+# prove they belong together -- a compile job's publish could have been interrupted
+# between renames. The compile job's cache manifest (holding all three lowercase
+# sha256s, written LAST after the atomic rename) is REQUIRED, and every one of the
+# three cached files' sha256 is verified against it before anything is trusted.
+$buildManifestName = "playback-attr-3-cuda-$($SourceCommit.Substring(0,12))-build.json"
+$buildManifestPath = Join-Path $Cache $buildManifestName
+if (-not (Test-Path -LiteralPath $buildManifestPath)) { throw "cache missing build manifest $buildManifestName (required; existence of the exe/DLL/pkg alone is not sufficient)" }
+$buildManifest = Get-Content -Raw -LiteralPath $buildManifestPath | ConvertFrom-Json
+if ($buildManifest.sourceCommit -ne $SourceCommit) { throw "build manifest $buildManifestName sourceCommit=$($buildManifest.sourceCommit) does not match pinned $SourceCommit" }
+$manifestChecks = @(
+    @{ label = 'packageZip'; path = (Join-Path $Cache $BasePackageZip); expectedSha = $buildManifest.packageZip.sha256 },
+    @{ label = 'exe'; path = (Join-Path $Cache $ExeName); expectedSha = $buildManifest.exe.sha256 },
+    @{ label = 'dll'; path = (Join-Path $Cache $ReconName); expectedSha = $buildManifest.dll.sha256 }
+)
+foreach ($check in $manifestChecks) {
+    if (-not (Test-Path -LiteralPath $check.path)) { throw "cache missing $($check.path)" }
+    if ([string]::IsNullOrWhiteSpace($check.expectedSha)) { throw "build manifest $buildManifestName is missing a sha256 for $($check.label)" }
+    if ((Get-Sha $check.path) -ne $check.expectedSha.ToUpperInvariant()) { throw "hash mismatch (vs build manifest $buildManifestName) for $($check.path)" }
+}
+foreach ($name in @($PresentMonName, 'run-release-gui-smoke.ps1')) {
     if (-not (Test-Path -LiteralPath (Join-Path $Cache $name))) { throw "cache missing $name" }
 }
 $clipPath = Resolve-ClipById $Cache $ClipId
