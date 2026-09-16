@@ -57,6 +57,7 @@ param(
     # this generator. An absolute path directly inside the Bachelor agent cache whose
     # BaseName is -ClipId; the emitted job re-checks both on Bachelor and fails closed.
     [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$')]
     [string]$ClipPath,
 
     [Parameter(Mandatory = $true)]
@@ -331,6 +332,8 @@ foreach ($name in @($PresentMonName, 'run-release-gui-smoke.ps1')) {
 }
 # NA-4: open exactly the one authorized path baked in by the generator -- no lookup.
 $clipPath = $AuthorizedClipPath
+# Injection guard (sol PR #131 r4): the path is later embedded in a nested pwsh -Command string.
+if ($clipPath -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') { throw "authorized clip path contains characters outside the allowlist" }
 if ((Split-Path -Parent $clipPath) -ine $Cache) { throw "authorized clip path is not directly inside the agent cache" }
 if ([IO.Path]::GetFileNameWithoutExtension($clipPath) -cne $ClipId) { throw "authorized clip path does not name clip id $ClipId" }
 if (-not (Test-Path -LiteralPath $clipPath -PathType Leaf)) { throw "authorized clip path is missing on this host" }
@@ -423,7 +426,8 @@ $envs = @(
 # below for self-documentation even though it is run-release-gui-smoke.ps1's own
 # default.
 $envList = "'" + ($envs -join "','") + "'"
-$cmd = "& '$smoke' -ExePath '$exePath' -Input '$clipPath' -Output '$resultPath' -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor 4 -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
+function ConvertTo-PsSingleQuoted([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
+$cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted $exePath) -Input $(ConvertTo-PsSingleQuoted $clipPath) -Output $(ConvertTo-PsSingleQuoted $resultPath) -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor 4 -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
 $presentMonProc = Start-PresentMonCapture $presentMonPath
 & "$env:ProgramFiles\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $cmd 1> (Join-Path $legOut 'smoke-stdout.txt') 2> (Join-Path $legOut 'smoke-stderr.txt')
 $smokeRc = $LASTEXITCODE
