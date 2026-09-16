@@ -84,7 +84,7 @@ function Test-ProductDiff {
 }
 
 function Read-DispatchEvidence {
-    param([long]$StartEpoch, [long]$EndEpoch)
+    param([long]$StartEpoch, [long]$EndEpoch, [AllowNull()]$EnforcementLandedEpoch = $null)
 
     $path = $null
     $source = 'none'
@@ -117,15 +117,11 @@ function Read-DispatchEvidence {
     $observed = 0
     $malformed = 0
     # COVERAGE (plan 0.6: seven days of version-enforced all-venue accounting). A row with
-    # schemaVersion >= 2 is written by a launcher that records EVERY launch: Invoke-Workstream
-    # (state reserved, then charged/refunded) and Invoke-Lane (state reserved for a direct launch,
-    # state linked when Invoke-Workstream passed its reservation id). Only 'reserved' rows count
-    # toward the rate, so a linked row never double-counts. Rows without schemaVersion are legacy:
-    # they still count toward the rate as before, but they are never evidence of coverage.
-    $firstVersionedEpoch = $null
-    $unversionedEpochs = [System.Collections.Generic.List[long]]::new()
-    $ledgerReceipts = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $windowRowReceipts = [System.Collections.Generic.List[string]]::new()
+    # schemaVersion >= 2 comes from a launcher that records EVERY launch: Invoke-Workstream writes
+    # 'reserved' then 'charged'/'refunded'; Invoke-Lane writes 'reserved' for a direct launch and
+    # 'linked' when Invoke-Workstream handed it a reservation id. Rows without schemaVersion are
+    # legacy: they count toward the rate as before, but they are never evidence of coverage.
+    $rows = [System.Collections.Generic.List[object]]::new()
     foreach ($line in $lines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         try {
@@ -135,51 +131,76 @@ function Read-DispatchEvidence {
                 $row = $document.RootElement
                 $stamp = $row.GetProperty($(if ($reservationMode) { 'recordedUtc' } else { 'dispatchedUtc' })).GetString()
                 if ($stamp -notmatch '(Z|[+-]\d{2}:\d{2})$') { throw 'timestamp timezone missing' }
-                $dto = [datetimeoffset]::Parse($stamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-                $epoch = $dto.ToUnixTimeSeconds()
-                $version = 0L
-                $versionProperty = [System.Text.Json.JsonElement]::new()
-                if ($reservationMode -and $row.TryGetProperty('schemaVersion', [ref]$versionProperty)) {
-                    if (-not $versionProperty.TryGetInt64([ref]$version)) { throw 'schemaVersion is not an integer' }
-                }
-                $receiptPath = $null
-                $receiptProperty = [System.Text.Json.JsonElement]::new()
-                if ($reservationMode -and $row.TryGetProperty('receiptPath', [ref]$receiptProperty) -and $receiptProperty.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
-                    $receiptPath = $receiptProperty.GetString()
-                }
-                # A row outside the window is not evidence either way; it is never counted as malformed
-                # for a field this reader only needs inside the window.
+                $epoch = [datetimeoffset]::Parse($stamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUnixTimeSeconds()
                 $inWindow = $epoch -ge $StartEpoch -and $epoch -le $EndEpoch
-                $state = if ($reservationMode -and $inWindow) { $row.GetProperty('state').GetString() } else { $null }
+                $version = 0L
+                $state = $null; $reservationId = $null; $venue = $null; $receiptPath = $null
+                if ($reservationMode) {
+                    $property = [System.Text.Json.JsonElement]::new()
+                    if ($row.TryGetProperty('schemaVersion', [ref]$property) -and -not $property.TryGetInt64([ref]$version)) { throw 'schemaVersion is not an integer' }
+                    # A row outside the window is not evidence either way, so a field this reader only
+                    # needs inside the window never makes it malformed.
+                    if ($inWindow) { $state = $row.GetProperty('state').GetString() }
+                    elseif ($row.TryGetProperty('state', [ref]$property) -and $property.ValueKind -eq [System.Text.Json.JsonValueKind]::String) { $state = $property.GetString() }
+                    if ($row.TryGetProperty('reservationId', [ref]$property) -and $property.ValueKind -eq [System.Text.Json.JsonValueKind]::String) { $reservationId = $property.GetString() }
+                    if ($row.TryGetProperty('venue', [ref]$property) -and $property.ValueKind -eq [System.Text.Json.JsonValueKind]::String) { $venue = $property.GetString() }
+                    if ($row.TryGetProperty('receiptPath', [ref]$property) -and $property.ValueKind -eq [System.Text.Json.JsonValueKind]::String) { $receiptPath = $property.GetString() }
+                }
             } finally { $document.Dispose() }
-
-            if ($version -ge 2) {
-                if ($null -eq $firstVersionedEpoch -or $epoch -lt $firstVersionedEpoch) { $firstVersionedEpoch = $epoch }
-            } elseif ($reservationMode) {
-                $unversionedEpochs.Add($epoch)
-            }
-            if (-not [string]::IsNullOrWhiteSpace($receiptPath)) {
-                $full = Resolve-LedgerReceiptPath $receiptPath
-                [void]$ledgerReceipts.Add($full)
-                if ($inWindow -and $version -ge 2) { $windowRowReceipts.Add($full) }
-            }
-            if (-not $inWindow) { continue }
-            if ($reservationMode -and $state -ne 'reserved') { continue }
-            $observed++
+            $rows.Add([pscustomobject]@{ epoch = $epoch; inWindow = $inWindow; version = $version; state = $state; reservationId = $reservationId; venue = $venue; receiptPath = $receiptPath })
         } catch {
             $malformed++
         }
     }
 
-    $coverageReasons = [System.Collections.Generic.List[string]]::new()
     if (-not $reservationMode) {
-        $coverageReasons.Add('COVERAGE_LEGACY_SOURCE')
-    } elseif ($null -eq $firstVersionedEpoch) {
+        $observed = @($rows | Where-Object { $_.inWindow }).Count
+        return [pscustomobject]@{ source = $source; coverage = 'PARTIAL'; coverageReasons = @('COVERAGE_LEGACY_SOURCE'); available = $true; observed = $observed; malformed = $malformed }
+    }
+
+    # A 'linked' row is honoured only when it names a dispatcher 'reserved' row written no later than
+    # itself, and only once per reservation. Anything else is counted as a launch of its own, so a
+    # caller cannot hide a launch from the rate by claiming someone else's reservation.
+    $dispatcherReservations = @{}
+    foreach ($row in $rows) {
+        if ($row.state -eq 'reserved' -and $row.venue -eq 'invoke-workstream' -and $row.reservationId -and -not $dispatcherReservations.ContainsKey($row.reservationId)) {
+            $dispatcherReservations[$row.reservationId] = $row.epoch
+        }
+    }
+    $linksHonoured = [System.Collections.Generic.HashSet[string]]::new()
+    $unmatchedLinks = 0
+    foreach ($row in $rows) {
+        if ($row.inWindow -and $row.state -eq 'reserved') { $observed++ }
+        if ($row.state -ne 'linked') { continue }
+        $honoured = $row.reservationId -and $dispatcherReservations.ContainsKey($row.reservationId) -and
+            $dispatcherReservations[$row.reservationId] -le $row.epoch -and $linksHonoured.Add($row.reservationId)
+        if (-not $honoured -and $row.inWindow) { $observed++; $unmatchedLinks++ }
+    }
+
+    $coverageReasons = [System.Collections.Generic.List[string]]::new()
+    # The clock starts at the first versioned row written AT OR AFTER the ledger writer landed on the
+    # source ref. Rows from an unmerged candidate never start it.
+    $firstVersionedEpoch = $null
+    if ($null -ne $EnforcementLandedEpoch) {
+        foreach ($row in $rows) {
+            if ($row.version -ge 2 -and $row.epoch -ge $EnforcementLandedEpoch -and ($null -eq $firstVersionedEpoch -or $row.epoch -lt $firstVersionedEpoch)) { $firstVersionedEpoch = $row.epoch }
+        }
+    }
+    if ($null -eq $firstVersionedEpoch) {
         $coverageReasons.Add('COVERAGE_NOT_ENFORCED')
     } else {
         if ($firstVersionedEpoch -gt $StartEpoch) { $coverageReasons.Add('COVERAGE_WINDOW_PREDATES_ENFORCEMENT') }
-        if (@($unversionedEpochs | Where-Object { $_ -ge $firstVersionedEpoch -and $_ -ge $StartEpoch -and $_ -le $EndEpoch }).Count -gt 0) {
+        if (@($rows | Where-Object { $_.inWindow -and $_.version -lt 2 -and $_.epoch -ge $firstVersionedEpoch }).Count -gt 0) {
             $coverageReasons.Add('COVERAGE_UNVERSIONED_ROW_AFTER_ENFORCEMENT')
+        }
+        if ($unmatchedLinks -gt 0) { $coverageReasons.Add('COVERAGE_LINK_UNMATCHED') }
+        $ledgerReceipts = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $windowRowReceipts = [System.Collections.Generic.List[string]]::new()
+        foreach ($row in $rows) {
+            if ([string]::IsNullOrWhiteSpace($row.receiptPath)) { continue }
+            $full = Resolve-LedgerReceiptPath $row.receiptPath
+            [void]$ledgerReceipts.Add($full)
+            if ($row.inWindow -and $row.version -ge 2) { $windowRowReceipts.Add($full) }
         }
         foreach ($code in (Test-ReceiptCoverage -StartEpoch $StartEpoch -EndEpoch $EndEpoch -LedgerReceipts $ledgerReceipts -WindowRowReceipts $windowRowReceipts)) {
             $coverageReasons.Add($code)
@@ -204,11 +225,28 @@ function Resolve-LedgerReceiptPath {
     return [System.IO.Path]::GetFullPath($candidate)
 }
 
+function Get-ReceiptRoots {
+    # The board's fleet-runs tree, plus the fleet-runs tree of every registered worktree: a runner
+    # from an older checkout writes no ledger row and, by default, keeps its receipts inside its own
+    # worktree, so that is where a stale venue shows up. An unreadable worktree list is cannot-determine.
+    $roots = [System.Collections.Generic.List[string]]::new()
+    $roots.Add([System.IO.Path]::GetFullPath($FleetRunsPath).TrimEnd('\'))
+    $listing = @(& git -C $RepoRoot worktree list --porcelain 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw 'git worktree list failed' }
+    foreach ($entry in $listing) {
+        if ([string]$entry -notmatch '^worktree (.+)$') { continue }
+        $candidate = [System.IO.Path]::GetFullPath((Join-Path ($Matches[1] -replace '/', '\') '.claude-state\fleet-runs')).TrimEnd('\')
+        if ((Test-Path -LiteralPath $candidate -PathType Container) -and -not ($roots -contains $candidate)) { $roots.Add($candidate) }
+    }
+    return @($roots)
+}
+
 function Test-ReceiptCoverage {
     # Both directions, three outcomes each. MATCH: a lane receipt started in the window has a ledger
     # row naming it, and a versioned in-window row's receipt exists. MISMATCH: either side is missing.
-    # CANNOT-DETERMINE: the receipt tree or a receipt cannot be read, or a receipt slot is still empty
+    # CANNOT-DETERMINE: a receipt tree or a receipt cannot be read, or a receipt slot is still empty
     # (Invoke-Lane creates it an instant before writing its row). CANNOT-DETERMINE is never COMPLETE.
+    # Every receipt is parsed: its startedUtc decides the window, never its mutable file time.
     param(
         [long]$StartEpoch,
         [long]$EndEpoch,
@@ -220,33 +258,30 @@ function Test-ReceiptCoverage {
         $codes.Add('COVERAGE_RECEIPTS_UNAVAILABLE')
         return @($codes)
     }
-    $fleetRoot = [System.IO.Path]::GetFullPath($FleetRunsPath).TrimEnd('\') + '\'
-    $startUtc = [datetimeoffset]::FromUnixTimeSeconds($StartEpoch).UtcDateTime
     $unreserved = 0; $unreadable = 0; $inFlight = 0; $missing = 0
     try {
-        $files = @([System.IO.Directory]::EnumerateFiles($FleetRunsPath, '*.receipt.json', [System.IO.SearchOption]::AllDirectories))
+        $roots = Get-ReceiptRoots
+        $files = [System.Collections.Generic.List[string]]::new()
+        foreach ($root in $roots) {
+            foreach ($file in [System.IO.Directory]::EnumerateFiles($root, '*.receipt.json', [System.IO.SearchOption]::AllDirectories)) { $files.Add($file) }
+        }
     } catch {
         $codes.Add('COVERAGE_RECEIPTS_UNAVAILABLE')
         return @($codes)
     }
     foreach ($file in $files) {
         try {
-            # A receipt last written before the window cannot describe a launch inside it.
-            if ([System.IO.File]::GetLastWriteTimeUtc($file) -lt $startUtc) { continue }
             $text = [System.IO.File]::ReadAllText($file)
             if ([string]::IsNullOrWhiteSpace($text)) { $inFlight++; continue }
             $document = [System.Text.Json.JsonDocument]::Parse($text)
             try {
                 $root = $document.RootElement
-                $schemaProperty = [System.Text.Json.JsonElement]::new()
-                if (-not $root.TryGetProperty('schema', [ref]$schemaProperty) -or $schemaProperty.GetString() -ne 'mlv-app/fleet-lane-receipt/v1') { continue }
-                $startProperty = [System.Text.Json.JsonElement]::new()
-                if (-not ($root.TryGetProperty('startedUtc', [ref]$startProperty) -or $root.TryGetProperty('reservedUtc', [ref]$startProperty))) { throw 'receipt has no start stamp' }
-                $startStamp = $startProperty.GetString()
-                $failureProperty = [System.Text.Json.JsonElement]::new()
-                $failureText = if ($root.TryGetProperty('failure', [ref]$failureProperty) -and $failureProperty.ValueKind -eq [System.Text.Json.JsonValueKind]::String) { $failureProperty.GetString() } else { '' }
-                $receiptStateProperty = [System.Text.Json.JsonElement]::new()
-                $receiptState = if ($root.TryGetProperty('state', [ref]$receiptStateProperty) -and $receiptStateProperty.ValueKind -eq [System.Text.Json.JsonValueKind]::String) { $receiptStateProperty.GetString() } else { '' }
+                $property = [System.Text.Json.JsonElement]::new()
+                if (-not $root.TryGetProperty('schema', [ref]$property) -or $property.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or $property.GetString() -ne 'mlv-app/fleet-lane-receipt/v1') { continue }
+                if (-not ($root.TryGetProperty('startedUtc', [ref]$property) -or $root.TryGetProperty('reservedUtc', [ref]$property))) { throw 'receipt has no start stamp' }
+                $startStamp = $property.GetString()
+                $failureText = if ($root.TryGetProperty('failure', [ref]$property) -and $property.ValueKind -eq [System.Text.Json.JsonValueKind]::String) { $property.GetString() } else { '' }
+                $receiptState = if ($root.TryGetProperty('state', [ref]$property) -and $property.ValueKind -eq [System.Text.Json.JsonValueKind]::String) { $property.GetString() } else { '' }
             } finally { $document.Dispose() }
             $startEpochOfReceipt = [datetimeoffset]::Parse($startStamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUnixTimeSeconds()
             if ($startEpochOfReceipt -lt $StartEpoch -or $startEpochOfReceipt -gt $EndEpoch) { continue }
@@ -261,8 +296,8 @@ function Test-ReceiptCoverage {
         }
     }
     foreach ($path in $WindowRowReceipts) {
-        if (-not $path.StartsWith($fleetRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
-        if (-not [System.IO.File]::Exists($path)) { $missing++ }
+        $underRoot = @($roots | Where-Object { $path.StartsWith($_ + '\', [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+        if ($underRoot -and -not [System.IO.File]::Exists($path)) { $missing++ }
     }
     if ($unreserved -gt 0) { $codes.Add('COVERAGE_RECEIPT_UNRESERVED') }
     if ($missing -gt 0) { $codes.Add('COVERAGE_RESERVATION_RECEIPT_MISSING') }
@@ -368,7 +403,23 @@ try {
     Write-ErrorResult 'ERROR_GIT_HISTORY' $sourceSha
 }
 
-$evidence = Read-DispatchEvidence -StartEpoch $windowStart -EndEpoch $AsOfEpoch
+# ENFORCEMENT LANDED: the committer time of the oldest first-parent commit on the source ref from
+# which Invoke-Lane.ps1 continuously carries the ledger writer. Ledger rows written before that
+# moment (for example by an unmerged candidate) never start the seven-day clock.
+$enforcementLandedEpoch = $null
+try {
+    $laneHistory = Invoke-GitLines @('log','--first-parent','--no-show-signature','--no-color','--format=%H%x09%ct',$sourceSha,'--','tools/coordination/Invoke-Lane.ps1')
+    foreach ($line in $laneHistory) {
+        $parts = $line -split "`t"
+        $carries = @(& git -C $RepoRoot grep -l -F 'function Add-DispatchLedgerRow' $parts[0] -- 'tools/coordination/Invoke-Lane.ps1' 2>$null).Count -gt 0
+        if (-not $carries) { break }
+        $enforcementLandedEpoch = [long]$parts[1]
+    }
+} catch {
+    $enforcementLandedEpoch = $null
+}
+
+$evidence = Read-DispatchEvidence -StartEpoch $windowStart -EndEpoch $AsOfEpoch -EnforcementLandedEpoch $enforcementLandedEpoch
 $productShare = if ($population -eq 0) { $null } else { [double]$productCount / [double]$population }
 $prIds = @($recognized.Keys | ForEach-Object { [int]$_ } | Sort-Object)
 $provenanceComplete = $unknown.Count -eq 0

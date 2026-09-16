@@ -3414,18 +3414,22 @@ $row|ConvertTo-Json -Depth 6 -Compress
 # These cases drive the actual guard against a disposable repo, ledger and receipt tree.
 
 COVERAGE_WINDOW_START = RATIO_SOURCE_AS_OF - 7 * RATIO_SOURCE_DAY
+COVERAGE_LANDED = RATIO_SOURCE_AS_OF - 20 * RATIO_SOURCE_DAY
 
 
 def coverage_stamp(epoch):
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def coverage_repo(tmp_path):
+def coverage_repo(tmp_path, landed=True):
     """Share 6/10 over the window, two recognized product PRs, so only coverage and rate decide."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     repo = ratio_source_init_repo(tmp_path / "repo")
     # A root commit outside the window, so every in-window landing has a first parent.
     ratio_source_commit(repo, "base", RATIO_SOURCE_AS_OF - 30 * RATIO_SOURCE_DAY, {"docs/base.txt": "base"})
+    # The ledger writer "lands" on the source ref before the window; rows older than this commit never start the clock.
+    if landed:
+        ratio_source_commit(repo, "land ledger writer", COVERAGE_LANDED, {"tools/coordination/Invoke-Lane.ps1": "function Add-DispatchLedgerRow([string]$Path, $Row) { }\n"})
     for index in range(10):
         if index < 6:
             subject, path = f"product change {index} (#{101 + index % 2})", f"src/p{index}.txt"
@@ -3467,8 +3471,8 @@ def coverage_guard(repo, ledger, fleet):
     return json.loads(result.stdout)
 
 
-def coverage_enforced_fixture(tmp_path):
-    repo = coverage_repo(tmp_path)
+def coverage_enforced_fixture(tmp_path, landed=True):
+    repo = coverage_repo(tmp_path, landed=landed)
     fleet = tmp_path / "fleet-runs"
     fleet.mkdir()
     first = coverage_receipt(fleet, "sol-001.receipt.json", RATIO_SOURCE_AS_OF - 3600)
@@ -3477,8 +3481,9 @@ def coverage_enforced_fixture(tmp_path):
         # Enforcement began before the window: the first versioned row predates windowStart.
         coverage_row(COVERAGE_WINDOW_START - 60, state="charged"),
         coverage_row(RATIO_SOURCE_AS_OF - 3600, receipt=first),
-        coverage_row(RATIO_SOURCE_AS_OF - 1800, state="linked", receipt=second),
-        coverage_row(RATIO_SOURCE_AS_OF - 1801),
+        coverage_row(RATIO_SOURCE_AS_OF - 1800, state="linked", receipt=second, reservationId="R-1", venue="invoke-lane"),
+        # The dispatcher reservation the linked row above names.
+        coverage_row(RATIO_SOURCE_AS_OF - 1801, reservationId="R-1", venue="invoke-workstream"),
     ]
     return repo, fleet, rows, first, second
 
@@ -3488,7 +3493,7 @@ def test_ratio_coverage_complete_goes_green_through_the_real_reader(tmp_path):
     ledger = tmp_path / "ledger.jsonl"
     ledger.write_text("\n".join(rows) + "\n", encoding="utf-8")
     payload = coverage_guard(repo, ledger, fleet)
-    assert payload["dispatchCoverage"] == "COMPLETE", payload
+    assert payload["dispatchCoverage"] == "COMPLETE", payload["reasons"]
     # The linked row names a receipt but is not a second launch.
     assert payload["dispatchesObserved"] == 2
     assert payload["recognizedProductPrIds"] == [101, 102]
@@ -3581,7 +3586,7 @@ def test_ratio_coverage_ignores_other_schemas_pre_window_receipts_and_refused_la
     ledger = tmp_path / "ledger.jsonl"
     ledger.write_text("\n".join(rows) + "\n", encoding="utf-8")
     payload = coverage_guard(repo, ledger, fleet)
-    assert payload["dispatchCoverage"] == "COMPLETE", payload
+    assert payload["dispatchCoverage"] == "COMPLETE", payload["reasons"]
     assert payload["verdict"] == "GREEN"
 
 
@@ -3605,3 +3610,63 @@ def test_ratio_coverage_every_launch_venue_writes_a_versioned_ledger_row():
     for launch in ("-File $LaneRunner", "-File $StartEditingLane"):
         at = ws.index(launch)
         assert ws.rindex("$env:MLV_DISPATCH_RESERVATION_ID = $reservationId", 0, at) > ws.rindex("-State 'reserved'", 0, at)
+
+
+# --- PR #127 round 2 (sol CHANGES_REQUESTED at 7e41d5b8): four ways COMPLETE could be reached without
+# seven days of all-venue accounting. Each case must stay RED.
+
+def test_ratio_coverage_rows_from_an_unlanded_writer_never_start_the_clock(tmp_path):
+    repo, fleet, rows, _, _ = coverage_enforced_fixture(tmp_path, landed=False)
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    payload = coverage_guard(repo, ledger, fleet)
+    assert payload["verdict"] == "RED"
+    assert "COVERAGE_NOT_ENFORCED" in payload["reasons"]
+
+
+def test_ratio_coverage_rows_older_than_the_landing_commit_never_start_the_clock(tmp_path):
+    repo, fleet, rows, _, _ = coverage_enforced_fixture(tmp_path)
+    ledger = tmp_path / "ledger.jsonl"
+    # The only row that predates the window was written before the writer landed.
+    rows[0] = coverage_row(COVERAGE_LANDED - 60, state="charged")
+    ledger.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    payload = coverage_guard(repo, ledger, fleet)
+    assert "COVERAGE_WINDOW_PREDATES_ENFORCEMENT" in payload["reasons"], payload["reasons"]
+    assert payload["verdict"] == "RED"
+
+
+def test_ratio_coverage_unmatched_or_duplicate_links_count_as_launches(tmp_path):
+    repo, fleet, rows, _, second = coverage_enforced_fixture(tmp_path)
+    ledger = tmp_path / "ledger.jsonl"
+    extra = [
+        coverage_row(RATIO_SOURCE_AS_OF - 1700, state="linked", receipt=second, reservationId="R-1", venue="invoke-lane"),
+        coverage_row(RATIO_SOURCE_AS_OF - 1600, state="linked", reservationId="NO-SUCH-RESERVATION", venue="invoke-lane"),
+    ]
+    ledger.write_text("\n".join(rows + extra) + "\n", encoding="utf-8")
+    payload = coverage_guard(repo, ledger, fleet)
+    assert payload["dispatchesObserved"] == 4, "a duplicate and an unmatched link are each a launch"
+    assert "COVERAGE_LINK_UNMATCHED" in payload["reasons"]
+    assert payload["verdict"] == "RED"
+
+
+def test_ratio_coverage_a_receipt_with_an_old_file_time_is_still_judged_by_startedUtc(tmp_path):
+    repo, fleet, rows, _, _ = coverage_enforced_fixture(tmp_path)
+    stale = coverage_receipt(fleet, "opus-009.receipt.json", RATIO_SOURCE_AS_OF - 500)
+    os.utime(stale, (COVERAGE_WINDOW_START - 9999, COVERAGE_WINDOW_START - 9999))
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    payload = coverage_guard(repo, ledger, fleet)
+    assert "COVERAGE_RECEIPT_UNRESERVED" in payload["reasons"]
+    assert payload["verdict"] == "RED"
+
+
+def test_ratio_coverage_a_stale_worktree_runner_keeping_receipts_in_its_worktree_is_seen(tmp_path):
+    repo, fleet, rows, _, _ = coverage_enforced_fixture(tmp_path)
+    worktree = tmp_path / "wt"
+    ratio_source_git(repo, "worktree", "add", "-q", str(worktree))
+    coverage_receipt(worktree / ".claude-state" / "fleet-runs", "sonnet-001.receipt.json", RATIO_SOURCE_AS_OF - 300)
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    payload = coverage_guard(repo, ledger, fleet)
+    assert "COVERAGE_RECEIPT_UNRESERVED" in payload["reasons"], payload["reasons"]
+    assert payload["verdict"] == "RED"

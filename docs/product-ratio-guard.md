@@ -36,6 +36,15 @@ Only `reserved` rows count toward the dispatch rate, so a dispatcher launch coun
 once. The rate numerator is unchanged: every reserved launch counts, whatever its
 kind or `allowEdits`.
 
+A `linked` row is honoured only when it names an `invoke-workstream`
+`reserved` row written no later than itself, and only once per reservation.
+Any other `linked` row counts as a launch of its own and adds
+`COVERAGE_LINK_UNMATCHED`, so claiming someone else's reservation cannot hide a
+launch from the rate.
+
+Without `-RunDir`, `Invoke-Lane.ps1` writes its receipt under the board's
+`.claude-state/fleet-runs`.
+
 Coverage is `COMPLETE` only when every check below holds. Otherwise it is
 `PARTIAL`, and each failed check adds its reason code after
 `RED_DISPATCH_COVERAGE_PARTIAL`:
@@ -43,11 +52,12 @@ Coverage is `COMPLETE` only when every check below holds. Otherwise it is
 | Check | Reason code when it fails |
 |---|---|
 | The reservations ledger is the source | `COVERAGE_LEGACY_SOURCE` |
-| A versioned row exists | `COVERAGE_NOT_ENFORCED` |
-| The first versioned row is at or before the window start | `COVERAGE_WINDOW_PREDATES_ENFORCEMENT` |
+| The ledger writer has landed on the source ref, and a versioned row was written at or after that landing | `COVERAGE_NOT_ENFORCED` |
+| The first such row is at or before the window start | `COVERAGE_WINDOW_PREDATES_ENFORCEMENT` |
 | No unversioned row falls in the window after enforcement began | `COVERAGE_UNVERSIONED_ROW_AFTER_ENFORCEMENT` |
-| Every `mlv-app/fleet-lane-receipt/v1` receipt under `.claude-state/fleet-runs` that started in the window is named by a ledger row | `COVERAGE_RECEIPT_UNRESERVED` |
-| Every in-window versioned row naming a receipt under that tree still has that receipt | `COVERAGE_RESERVATION_RECEIPT_MISSING` |
+| Every `linked` row is honoured | `COVERAGE_LINK_UNMATCHED` |
+| Every `mlv-app/fleet-lane-receipt/v1` receipt that started in the window is named by a ledger row. The guard reads receipts under the board's `.claude-state/fleet-runs` and under that path in every registered worktree, because an older runner keeps receipts in its own worktree. Each receipt is judged by its `startedUtc`, never its file time. | `COVERAGE_RECEIPT_UNRESERVED` |
+| Every in-window versioned row naming a receipt under those trees still has that receipt | `COVERAGE_RESERVATION_RECEIPT_MISSING` |
 | Every receipt can be read | `COVERAGE_RECEIPT_UNREADABLE` or `COVERAGE_RECEIPT_IN_FLIGHT` |
 | The receipt tree can be read | `COVERAGE_RECEIPTS_UNAVAILABLE` |
 
@@ -56,9 +66,21 @@ coverage cannot-determine, and cannot-determine is never `COMPLETE`. A receipt
 whose failure is `dispatch-ledger-write-failed` records a refused launch, so it
 does not count.
 
-Coverage therefore cannot be `COMPLETE` until seven days after the first
-versioned row. That wait is the ratified seven-day enforcement window, not a
-defect.
+The landing is the committer time of the oldest first-parent commit from which
+`tools/coordination/Invoke-Lane.ps1` on the source ref continuously carries the
+ledger writer. Rows written earlier, for example by an unmerged candidate, never
+start the clock.
+
+Coverage therefore cannot be `COMPLETE` until seven days after the writer lands
+and every venue runs it. That wait is the ratified seven-day enforcement window,
+not a defect.
+
+Two limits remain:
+- A copy of the repository that is not a registered worktree, running an older
+  runner, is outside the guard's view.
+- Merging this change leaves the `execution-control-*.json` chain uncertified.
+  That chain was already stale before this change, and certifying a re-enable is
+  separate work.
 
 A row outside the window is never counted as malformed. Rows with no
 `schemaVersion` are legacy: they still count toward the rate, but they never

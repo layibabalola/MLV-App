@@ -150,14 +150,14 @@ function Write-Utf8NoBom([string]$Path, [string]$Content) {
 }
 
 function Add-DispatchLedgerRow([string]$Path, $Row) {
-    # One write call per row on an exclusive append handle, retried while another launcher holds
-    # the file, so concurrent launches never interleave bytes inside a line.
+    # One Write call per row on an append handle. Windows appends each call atomically, so rows never
+    # interleave; ReadWrite sharing lets Invoke-Workstream's Add-Content append at the same time.
     $dir = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Row | ConvertTo-Json -Compress -Depth 4) + "`n")
     for ($attempt = 1; ; $attempt++) {
         try {
-            $stream = [IO.File]::Open($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
             try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
             return
         } catch [IO.IOException] {
@@ -299,7 +299,9 @@ if ([string]::IsNullOrWhiteSpace($BaseSha)) { $BaseSha = $null }
 
 if (-not $RunDir) {
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
-    $RunDir = Join-Path $WorkDir ".claude-state\fleet-runs\$stamp"
+    # The BOARD's fleet-runs, not the worktree's: a receipt inside a worktree vanishes with it, and the
+    # product-ratio guard's coverage check reads the board tree first.
+    $RunDir = Join-Path $RepoRoot ".claude-state\fleet-runs\$stamp"
 }
 if (-not (Test-Path -LiteralPath $RunDir)) { New-Item -ItemType Directory -Path $RunDir -Force | Out-Null }
 $RunDir = (Resolve-Path -LiteralPath $RunDir).Path
