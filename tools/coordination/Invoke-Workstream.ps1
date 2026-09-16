@@ -340,7 +340,18 @@ function Write-DispatchReservation {
         # Unknown spend remains charged; success at zero cost remains charged.
         $row.state = if ($evidence.laneCostReported -and $evidence.laneCostUsd -eq 0 -and $null -ne $ObservedExit -and $ObservedExit -ne 0) { 'refunded' } else { 'charged' }
     }
-    Add-Content -LiteralPath $ReservationsPath -Value ($row | ConvertTo-Json -Compress -Depth 6) -Encoding UTF8
+    # Same machine-wide mutex as Invoke-Lane.ps1's Add-DispatchLedgerRow: unserialized appends can
+    # overwrite each other's row.
+    $ledgerMutex = [Threading.Mutex]::new($false, 'Global\MLV-App-DispatchLedger')
+    $ledgerHeld = $false
+    try {
+        try { $ledgerHeld = $ledgerMutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $ledgerHeld = $true }
+        if (-not $ledgerHeld) { throw 'dispatch ledger lock timeout' }
+        Add-Content -LiteralPath $ReservationsPath -Value ($row | ConvertTo-Json -Compress -Depth 6) -Encoding UTF8
+    } finally {
+        if ($ledgerHeld) { $ledgerMutex.ReleaseMutex() }
+        $ledgerMutex.Dispose()
+    }
     return [pscustomobject]$row
 }
 

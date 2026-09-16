@@ -150,20 +150,22 @@ function Write-Utf8NoBom([string]$Path, [string]$Content) {
 }
 
 function Add-DispatchLedgerRow([string]$Path, $Row) {
-    # One Write call per row on an append handle. Windows appends each call atomically, so rows never
-    # interleave; ReadWrite sharing lets Invoke-Workstream's Add-Content append at the same time.
+    # SERIALIZED with every other ledger writer by one machine-wide mutex. FileMode.Append records EOF
+    # as each stream's private offset, so two unserialized writers can overwrite each other's row.
+    # Invoke-Workstream.ps1's Write-DispatchReservation takes the SAME mutex name; keep them equal.
     $dir = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Row | ConvertTo-Json -Compress -Depth 4) + "`n")
-    for ($attempt = 1; ; $attempt++) {
-        try {
-            $stream = [IO.File]::Open($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
-            try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
-            return
-        } catch [IO.IOException] {
-            if ($attempt -ge 50) { throw }
-            Start-Sleep -Milliseconds 100
-        }
+    $mutex = [Threading.Mutex]::new($false, 'Global\MLV-App-DispatchLedger')
+    $held = $false
+    try {
+        try { $held = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $held = $true }
+        if (-not $held) { throw 'dispatch ledger lock timeout' }
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    } finally {
+        if ($held) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
     }
 }
 

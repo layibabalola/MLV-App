@@ -31,6 +31,9 @@ Every launch venue writes a ledger row with `schemaVersion` 2:
   `MLV_DISPATCH_RESERVATION_ID` (which also crosses `Start-EditingLane.ps1`),
   the lane writes `linked` instead.
 - If a lane cannot write its row, it refuses to launch.
+- Both launchers append under one machine-wide mutex,
+  `Global\MLV-App-DispatchLedger`. `FileMode.Append` records end-of-file per
+  stream, so unserialized concurrent appends could overwrite each other's rows.
 
 Only `reserved` rows count toward the dispatch rate, so a dispatcher launch counts
 once. The rate numerator is unchanged: every reserved launch counts, whatever its
@@ -58,6 +61,8 @@ Coverage is `COMPLETE` only when every check below holds. Otherwise it is
 | Every `linked` row is honoured | `COVERAGE_LINK_UNMATCHED` |
 | Every `mlv-app/fleet-lane-receipt/v1` receipt that started in the window is named by a ledger row. The guard reads receipts under the board's `.claude-state/fleet-runs` and under that path in every registered worktree, because an older runner keeps receipts in its own worktree. Each receipt is judged by its `startedUtc`, never its file time. | `COVERAGE_RECEIPT_UNRESERVED` |
 | Every in-window versioned row naming a receipt under those trees still has that receipt | `COVERAGE_RESERVATION_RECEIPT_MISSING` |
+| No registered checkout (the main worktree included) has an `Invoke-Lane.ps1` without the ledger writer. `-RunDir` can point anywhere, so an older runner's receipt may never be scanned; the runner itself can be. | `COVERAGE_STALE_RUNNER_PRESENT` |
+| No registered checkout's runner file was replaced inside the window, since it may have been an older runner earlier in the window | `COVERAGE_RUNNER_UPDATED_IN_WINDOW` |
 | Every receipt can be read | `COVERAGE_RECEIPT_UNREADABLE` or `COVERAGE_RECEIPT_IN_FLIGHT` |
 | The receipt tree can be read | `COVERAGE_RECEIPTS_UNAVAILABLE` |
 
@@ -76,8 +81,9 @@ and every venue runs it. That wait is the ratified seven-day enforcement window,
 not a defect.
 
 Two limits remain:
-- A copy of the repository that is not a registered worktree, running an older
-  runner, is outside the guard's view.
+- An older runner outside every registered worktree is outside the guard's view.
+  That covers a plain copy of the repository, and a worktree that was removed
+  during the window.
 - Merging this change leaves the `execution-control-*.json` chain uncertified.
   That chain was already stale before this change, and certifying a re-enable is
   separate work.

@@ -3670,3 +3670,66 @@ def test_ratio_coverage_a_stale_worktree_runner_keeping_receipts_in_its_worktree
     payload = coverage_guard(repo, ledger, fleet)
     assert "COVERAGE_RECEIPT_UNRESERVED" in payload["reasons"], payload["reasons"]
     assert payload["verdict"] == "RED"
+
+
+# --- PR #127 round 3 (sol CHANGES_REQUESTED at 84ad327b).
+
+def test_ratio_coverage_a_registered_checkout_with_a_stale_runner_is_never_complete(tmp_path):
+    # -RunDir can point anywhere, so a stale runner's receipt may never be scanned; the runner itself is.
+    repo, fleet, rows, _, _ = coverage_enforced_fixture(tmp_path)
+    worktree = tmp_path / "old"
+    ratio_source_git(repo, "worktree", "add", "-q", str(worktree))
+    (worktree / "tools" / "coordination" / "Invoke-Lane.ps1").write_text("# a runner from before the ledger writer\n", encoding="utf-8")
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    payload = coverage_guard(repo, ledger, fleet)
+    assert "COVERAGE_STALE_RUNNER_PRESENT" in payload["reasons"], payload["reasons"]
+    assert payload["verdict"] == "RED"
+
+
+def test_ratio_coverage_a_runner_replaced_inside_the_window_is_never_complete(tmp_path):
+    repo, fleet, rows, _, _ = coverage_enforced_fixture(tmp_path)
+    runner = repo / "tools" / "coordination" / "Invoke-Lane.ps1"
+    os.utime(runner, (RATIO_SOURCE_AS_OF - 3600, RATIO_SOURCE_AS_OF - 3600))
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    payload = coverage_guard(repo, ledger, fleet)
+    assert "COVERAGE_RUNNER_UPDATED_IN_WINDOW" in payload["reasons"], payload["reasons"]
+    assert payload["verdict"] == "RED"
+
+
+def test_ratio_ledger_writers_in_both_launchers_never_lose_a_row_under_contention(tmp_path):
+    # FileMode.Append snapshots EOF per stream, so unserialized concurrent appends can overwrite rows.
+    # Both writers must take the same machine-wide mutex: 4 processes x 40 rows, mixed writers.
+    ledger = tmp_path / "ledger.jsonl"
+    harness = tmp_path / "writer.ps1"
+    harness.write_text('''param($Lane,$Workstream,$Ledger,$Which,$Count)
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+$ReservationsPath=$Ledger
+$tokens=$null;$errors=$null
+foreach($pair in @(@($Lane,'Add-DispatchLedgerRow'),@($Workstream,'Write-DispatchReservation'))) {
+    $ast=[Management.Automation.Language.Parser]::ParseFile($pair[0],[ref]$tokens,[ref]$errors)
+    if($errors.Count){throw 'source parse failed'}
+    $found=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $pair[1]},$true))
+    if($found.Count -ne 1){throw "missing $($pair[1])"}
+    Invoke-Expression $found[0].Extent.Text
+}
+for($i=0;$i -lt [int]$Count;$i++){
+    if($Which -eq 'lane'){ Add-DispatchLedgerRow -Path $Ledger -Row ([ordered]@{schemaVersion=2;state='reserved';n=$i;pad=('x'*512);recordedUtc=(Get-Date).ToUniversalTime().ToString('o')}) }
+    else { $null = Write-DispatchReservation -ReservationId "W-$PID-$i" -State reserved -Card C -Kind product -Lane sonnet -RunDir R }
+}
+''', encoding="utf-8")
+    procs = [
+        subprocess.Popen(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(harness), "-Lane", str(LANE_RUNNER),
+                          "-Workstream", str(RATIO_WORKSTREAM), "-Ledger", str(ledger), "-Which", which, "-Count", "40"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for which in ("lane", "workstream", "lane", "workstream")
+    ]
+    for proc in procs:
+        out, err = proc.communicate(timeout=300)
+        assert proc.returncode == 0, out + err
+    lines = [line for line in ledger.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+    assert len(lines) == 160
+    for line in lines:
+        json.loads(line)

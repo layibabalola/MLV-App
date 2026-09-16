@@ -231,14 +231,37 @@ function Get-ReceiptRoots {
     # worktree, so that is where a stale venue shows up. An unreadable worktree list is cannot-determine.
     $roots = [System.Collections.Generic.List[string]]::new()
     $roots.Add([System.IO.Path]::GetFullPath($FleetRunsPath).TrimEnd('\'))
-    $listing = @(& git -C $RepoRoot worktree list --porcelain 2>$null)
-    if ($LASTEXITCODE -ne 0) { throw 'git worktree list failed' }
-    foreach ($entry in $listing) {
-        if ([string]$entry -notmatch '^worktree (.+)$') { continue }
-        $candidate = [System.IO.Path]::GetFullPath((Join-Path ($Matches[1] -replace '/', '\') '.claude-state\fleet-runs')).TrimEnd('\')
+    foreach ($worktree in (Get-RegisteredWorktreePaths)) {
+        $candidate = [System.IO.Path]::GetFullPath((Join-Path $worktree '.claude-state\fleet-runs')).TrimEnd('\')
         if ((Test-Path -LiteralPath $candidate -PathType Container) -and -not ($roots -contains $candidate)) { $roots.Add($candidate) }
     }
     return @($roots)
+}
+
+function Get-RegisteredWorktreePaths {
+    $listing = @(& git -C $RepoRoot worktree list --porcelain 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw 'git worktree list failed' }
+    return @($listing | Where-Object { [string]$_ -match '^worktree (.+)$' } | ForEach-Object { ([string]$_).Substring(9) -replace '/', '\' })
+}
+
+function Get-StaleRunnerCodes {
+    # A receipt can only be scanned where it lands, and -RunDir can point anywhere. So coverage also
+    # requires that no registered checkout can START an unaccounted launch: every checkout's
+    # Invoke-Lane.ps1 must carry the ledger writer, and must not have been replaced inside the window
+    # (it may have been a stale runner earlier in it). A checkout without the file cannot launch a lane.
+    param([long]$StartEpoch)
+    $codes = [System.Collections.Generic.List[string]]::new()
+    $startUtc = [datetimeoffset]::FromUnixTimeSeconds($StartEpoch).UtcDateTime
+    $stale = 0; $updated = 0
+    foreach ($worktree in (Get-RegisteredWorktreePaths)) {
+        $runner = Join-Path $worktree 'tools\coordination\Invoke-Lane.ps1'
+        if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { continue }
+        if (-not ([System.IO.File]::ReadAllText($runner)).Contains('function Add-DispatchLedgerRow')) { $stale++ }
+        elseif ([System.IO.File]::GetLastWriteTimeUtc($runner) -ge $startUtc) { $updated++ }
+    }
+    if ($stale -gt 0) { $codes.Add('COVERAGE_STALE_RUNNER_PRESENT') }
+    if ($updated -gt 0) { $codes.Add('COVERAGE_RUNNER_UPDATED_IN_WINDOW') }
+    return @($codes)
 }
 
 function Test-ReceiptCoverage {
@@ -261,6 +284,7 @@ function Test-ReceiptCoverage {
     $unreserved = 0; $unreadable = 0; $inFlight = 0; $missing = 0
     try {
         $roots = Get-ReceiptRoots
+        foreach ($code in (Get-StaleRunnerCodes -StartEpoch $StartEpoch)) { $codes.Add($code) }
         $files = [System.Collections.Generic.List[string]]::new()
         foreach ($root in $roots) {
             foreach ($file in [System.IO.Directory]::EnumerateFiles($root, '*.receipt.json', [System.IO.SearchOption]::AllDirectories)) { $files.Add($file) }
