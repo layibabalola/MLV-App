@@ -50,22 +50,19 @@ Run only the console/pipeline suite the acceptance test lives in (`tests/README.
 6. {{PR_STEP}}
 
 ## Shell rules and known environment (read before your first command)
-Every rule in this section was paid for by a lane on this board that died without it.
-- Run builds and tests in the FOREGROUND, in ONE call, with a long timeout. Never background them, never use
+- Run builds and tests in the FOREGROUND, in one call, with a long timeout. Never background them, never use
   Monitor, and never end your turn waiting for a notification: when your turn ends your process tree is killed and
   background work is lost, while your receipt can still read complete.
-- Run ONLY the test your ACCEPTANCE section names. Do not run the whole suite unless ACCEPTANCE says to. Unrequested
-  verification is the most common way lanes here have exhausted their turns with the work already written.
-- No output redirection (`>`, `>>`, `2>`), no `tee`, no heredocs, no `Out-File`. The board's command guard
-  treats these as file writes and denies the call - and it also denies a command whose TEXT merely mentions one.
+- Write long text - a commit message, a report, a receipt - to a file with the Write tool and pass the file (for
+  example `git commit -F <file>`). Do not embed it in a shell command. The board's command guard parses
+  the whole text of a command, including text that is only data such as a heredoc or a quoted message: a path,
+  a `..`, a redirect target, or a delete-like or move-like word inside that data can get the command refused.
+  Real redirection is allowed: `2>&1`, `>>`, and `>` to a file in your worktree or run directory.
 - Prefer the Read and Grep tools over shell `grep` or `cat` for reading files.
-- Environment facts that are already known; do not spend turns rediscovering them: a Qt GUI build needs the Qt
-  plugins and `libgomp-1.dll` deployed beside the exe or it exits silently with no error; the build recipe for the
-  console and pipeline tests is in `.github/workflows/tests.yml`.
-- If this packet CONTRADICTS ITSELF - an ALLOWED_PATHS entry that does not exist at `{{BASE_SHA}}`, a DELIVERABLE that
-  points at files outside ALLOWED_PATHS, or two instructions you cannot both obey - do NOT resolve it yourself. Print
-  `STOP: packet-contradiction: <what contradicts what>` as your last line and exit. Adjudicating it costs your whole
-  budget, and the call is the dispatcher's, not yours.
+- If a Qt test or the app exits immediately with no output, the Qt platform plugins were not found. Put the Qt and
+  MinGW `bin` directories on `PATH` and set `QT_PLUGIN_PATH` and `QT_QPA_PLATFORM_PLUGIN_PATH`, exactly as
+  `.github/workflows/tests.yml` does for its GUI tests. A missing `libgomp-1.dll` is different: it reports a
+  'not found' error rather than exiting silently (`docs/10-build-windows.md`).
 
 ## STOP conditions (print `STOP: <reason>` as your last line and exit)
 Build red after two attempts. The test cannot be made to fail-then-pass. A change is needed outside: {{ALLOWED_PATHS}}.
