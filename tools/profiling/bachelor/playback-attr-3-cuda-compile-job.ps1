@@ -256,14 +256,25 @@ $windeployOutput | Set-Content -LiteralPath (Join-Path $Pub 'windeployqt.log') -
 if ($windeployRc -ne 0) { Complete-Failed 18 'windeployqt' "windeployqt exit=$windeployRc" }
 $StepLog['windeployqt'] = 0
 
+# Self-contained package fix (MAJOR): --compiler-runtime does not cover libgomp-1
+# (OpenMP), so copy the exact MinGW runtime set tools/build-release.ps1 copies
+# explicitly. Missing any one is a 0xC0000135 (STATUS_DLL_NOT_FOUND) at launch.
+$mingwRuntimeDlls = @('libgomp-1.dll', 'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')
+foreach ($dllName in $mingwRuntimeDlls) {
+    $mingwSrc = Join-Path $MingwBin $dllName
+    if (-not (Test-Path -LiteralPath $mingwSrc)) { Complete-Failed 21 'mingwRuntimeDeploy' "required MinGW runtime DLL not found: $mingwSrc" }
+    Copy-Item -LiteralPath $mingwSrc -Destination (Join-Path $releaseDir $dllName) -Force
+}
+$StepLog['mingwRuntimeDeploy'] = 0
+
 $deployTargets = @(
     [ordered]@{ source = $backendDll; destination = (Join-Path $releaseDir 'igpu_recon_cuda.dll') }
 )
 $cudart = Get-ChildItem -LiteralPath (Join-Path $cudaRoot.FullName 'bin') -Filter 'cudart64_*.dll' -File -ErrorAction SilentlyContinue |
     Sort-Object Name -Descending | Select-Object -First 1
-if ($cudart) {
-    $deployTargets += [ordered]@{ source = $cudart.FullName; destination = (Join-Path $releaseDir $cudart.Name) }
-}
+if (-not $cudart) { Complete-Failed 22 'cudaRuntimeRequired' "cudart64_*.dll not found under $(Join-Path $cudaRoot.FullName 'bin'); the CUDA runtime is required for a self-contained package" }
+$deployTargets += [ordered]@{ source = $cudart.FullName; destination = (Join-Path $releaseDir $cudart.Name) }
+$StepLog['cudaRuntimeRequired'] = 0
 foreach ($target in $deployTargets) {
     Copy-Item -LiteralPath ([string]$target.source) -Destination ([string]$target.destination) -Force
 }
