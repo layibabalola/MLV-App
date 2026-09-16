@@ -44,7 +44,8 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_rendered_video_runner.cpp \
     $$REPO_ROOT/tests/console/test_sync_download_waiter.cpp \
     $$REPO_ROOT/tests/console/test_download_manager.cpp \
-    $$REPO_ROOT/tests/console/test_playback_gate_policy.cpp
+    $$REPO_ROOT/tests/console/test_playback_gate_policy.cpp \
+    $$REPO_ROOT/tests/console/test_async_h2d_counter_contract.cpp
 
 HEADERS += \
     $$REPO_ROOT/platform/qt/FpmNameValidator.h \
@@ -68,7 +69,8 @@ HEADERS += \
     $$REPO_ROOT/platform/qt/DualIsoLevelSyncPolicy.h \
     $$REPO_ROOT/platform/qt/PlaybackFrameRange.h \
     $$REPO_ROOT/platform/qt/PlaybackPrepPresentationPolicy.h \
-    $$REPO_ROOT/platform/qt/PlaybackGatePolicy.h
+    $$REPO_ROOT/platform/qt/PlaybackGatePolicy.h \
+    $$REPO_ROOT/platform/qt/AsyncH2dCounterContract.h
 
 win32{
     WINDOWS_TEST_RUNTIME_DEPLOY = $$relative_path($$REPO_ROOT/tools/testing/deploy-windows-test-runtime.ps1, $$OUT_PWD)
