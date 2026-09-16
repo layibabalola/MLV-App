@@ -1190,18 +1190,19 @@ $fence
             exit 3
         }
         $unique = @($uniqueOut | Where-Object { $_ })
-        if ($unique.Count -gt 0) {
+        # sol PR #122 R1 BLOCKER: this arm used to be entered on $unique.Count alone, so a
+        # -ContinueFromSha whose branch happened to carry NOTHING beyond baseSha fell through to
+        # the rewind arm below - the named sha never compared, a continuation silently converted
+        # into a fresh dispatch, and `git branch -f` reachable from a continuation invocation.
+        # The gate is now on the INTENT (-ContinueFromSha was passed), never on the branch's
+        # incidental shape, so a continuation can never reach the rewind.
+        if ($ContinueFromSha) {
             # A branch with commits not in baseSha holds work. Historically that was always a
             # refusal - which made the board's own two-stage packet rule undispatchable, because a
             # stage-2 lane starts from stage 1's commit BY CONSTRUCTION. Every stage 2 therefore
             # went direct via Invoke-Lane, wrote no dispatch-attempt row, and the missing rows are
             # what make Test-ProductRatioGuard report dispatchCoverage=PARTIAL - one of the two
             # reasons that guard reads RED. The guard was partly RED because of THIS refusal.
-            if (-not $ContinueFromSha) {
-                Write-Output "WORKSTREAM: REFUSED existing-branch-has-work card=$cardId branch=$branch commits=$($unique.Count)"
-                Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'existing-branch-has-work' -ExitCode 6 -Detail "branch=$branch commits=$($unique.Count)"
-                exit 6
-            }
             $branchTip = (& git -C $RepoRoot rev-parse --verify "refs/heads/$branch^{commit}" 2>$null)
             if ($LASTEXITCODE -ne 0 -or -not $branchTip) {
                 Write-Output "WORKSTREAM: CANNOT-DETERMINE - could not resolve tip of $branch"
@@ -1236,6 +1237,30 @@ $fence
                 elseif ($line -eq "branch refs/heads/$branch") { $existingWt = $wtPath; break }
             }
             if ($existingWt) {
+                # sol PR #122 R1 MAJOR: reuse used to hand the directory straight to the lane. A
+                # tree someone else left dirty carries staged, tracked or untracked changes the
+                # lane did not make and will commit as if it had. Refuse and name the paths; the
+                # owner of that work decides, never this dispatch.
+                $dirty = @(& git -C $existingWt status --porcelain 2>$null | Where-Object { $_ })
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Output "WORKSTREAM: CANNOT-DETERMINE - status failed in existing worktree $existingWt"
+                    Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'cannot-determine-worktree-status' -ExitCode 3 -Detail "workDir=$existingWt branch=$branch"
+                    exit 3
+                }
+                if ($dirty.Count -gt 0) {
+                    $names = ($dirty | Select-Object -First 10) -join '; '
+                    Write-Output "WORKSTREAM: REFUSED continuation-worktree-dirty card=$cardId workDir=$existingWt entries=$($dirty.Count) $names"
+                    Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'continuation-worktree-dirty' -ExitCode 6 -Detail "workDir=$existingWt entries=$($dirty.Count)"
+                    exit 6
+                }
+                # The worktree must also actually BE at the tip we verified; a detached or stale
+                # HEAD there would give the lane a different tree from the one reviewed.
+                $wtHead = (& git -C $existingWt rev-parse --verify 'HEAD^{commit}' 2>$null)
+                if ($LASTEXITCODE -ne 0 -or -not $wtHead -or $wtHead.Trim() -ne $branchTip) {
+                    Write-Output "WORKSTREAM: REFUSED continuation-worktree-head-mismatch card=$cardId workDir=$existingWt head=$($wtHead) tip=$branchTip"
+                    Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'continuation-worktree-head-mismatch' -ExitCode 6 -Detail "workDir=$existingWt head=$($wtHead) tip=$branchTip"
+                    exit 6
+                }
                 $laneWorkDir = $existingWt
                 Write-Output "WORKSTREAM: CONTINUATION card=$cardId branch=$branch tip=$branchTip reusing-worktree=$laneWorkDir"
             } else {
@@ -1245,6 +1270,11 @@ $fence
             $script:IsContinuation = $true
             $script:ContinuationTip = $branchTip
         } else {
+            if ($unique.Count -gt 0) {
+                Write-Output "WORKSTREAM: REFUSED existing-branch-has-work card=$cardId branch=$branch commits=$($unique.Count)"
+                Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'existing-branch-has-work' -ExitCode 6 -Detail "branch=$branch commits=$($unique.Count)"
+                exit 6
+            }
             # Fails (and is reported) if the branch is checked out in another worktree.
             & git -C $RepoRoot branch -f $branch $baseSha 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) {

@@ -1829,6 +1829,85 @@ def test_continuation_refuses_when_the_branch_does_not_exist(tmp_path):
         cleanup_lane_worktree(tmp_path, "TEST-EDIT-CONT-4")
 
 
+def test_continuation_on_a_branch_with_no_extra_commits_still_checks_the_sha(tmp_path):
+    """sol PR #122 R1 BLOCKER. The continuation gate was keyed on the branch carrying commits
+    beyond baseSha. A -ContinueFromSha whose branch happened to carry NOTHING beyond base fell
+    through to the fresh-dispatch arm: the named sha was never compared and `git branch -f` was
+    reached from a continuation invocation. A continuation must never be silently downgraded into
+    a fresh dispatch, and must never reach the rewind."""
+    dual, first = editing_board(tmp_path)
+    subprocess.run(["git", "branch", "product/TEST-EDIT-CONT-5", first], cwd=tmp_path, check=True)
+    (tmp_path / "seed2.txt").write_text("more\n")
+    subprocess.run(["git", "add", "seed2.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "second"], cwd=tmp_path, check=True)
+    head = git(tmp_path, "rev-parse", "HEAD")
+    subprocess.run(["git", "update-ref", "refs/remotes/fork/master", head], cwd=tmp_path, check=True)
+    # The branch sits at an ANCESTOR of baseSha, so it carries nothing beyond base - the exact
+    # shape that used to bypass the sha comparison.
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-CONT-5")],
+                                      "TEST-EDIT-CONT-5", extra=("-ContinueFromSha", "0" * 40))
+        assert result.returncode == 6, result.stdout + result.stderr
+        assert "REFUSED continuation-sha-mismatch" in result.stdout, result.stdout
+        # And the rewind must NOT have happened: the branch is still where it was.
+        assert git(tmp_path, "rev-parse", "refs/heads/product/TEST-EDIT-CONT-5") == first
+        assert "reusing existing branch" not in result.stdout, result.stdout
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-CONT-5")
+
+
+def test_continuation_refuses_a_dirty_existing_worktree(tmp_path):
+    """sol PR #122 R1 MAJOR. Reuse handed the directory straight to the lane. A tree someone else
+    left dirty carries changes the lane did not make and would commit as its own."""
+    dual, head = editing_board(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "product/TEST-EDIT-CONT-6"], cwd=tmp_path, check=True)
+    (tmp_path / "stage1.txt").write_text("stage one\n")
+    subprocess.run(["git", "add", "stage1.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "stage one"], cwd=tmp_path, check=True)
+    tip = git(tmp_path, "rev-parse", "HEAD")
+    subprocess.run(["git", "checkout", "-q", "--detach", head], cwd=tmp_path, check=True)
+    wt = tmp_path / "wt-cont-6"
+    subprocess.run(["git", "worktree", "add", str(wt), "product/TEST-EDIT-CONT-6"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    (wt / "someone-elses-work.txt").write_text("uncommitted\n")
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-CONT-6")],
+                                      "TEST-EDIT-CONT-6", extra=("-ContinueFromSha", tip))
+        assert result.returncode == 6, result.stdout + result.stderr
+        assert "REFUSED continuation-worktree-dirty" in result.stdout, result.stdout
+        assert (wt / "someone-elses-work.txt").exists()
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=tmp_path,
+                       check=False, capture_output=True)
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-CONT-6")
+
+
+def test_continuation_reuses_a_clean_existing_worktree(tmp_path):
+    """The arm none of the round-1 tests exercised: the branch IS checked out somewhere. Stage 1's
+    tree carries its build outputs, and making stage 2 rebuild from scratch is most of why the wide
+    packets ran out of turns - so a clean, on-tip worktree must be reused, not duplicated."""
+    dual, head = editing_board(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "product/TEST-EDIT-CONT-7"], cwd=tmp_path, check=True)
+    (tmp_path / "stage1.txt").write_text("stage one\n")
+    subprocess.run(["git", "add", "stage1.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "stage one"], cwd=tmp_path, check=True)
+    tip = git(tmp_path, "rev-parse", "HEAD")
+    subprocess.run(["git", "checkout", "-q", "--detach", head], cwd=tmp_path, check=True)
+    wt = tmp_path / "wt-cont-7"
+    subprocess.run(["git", "worktree", "add", str(wt), "product/TEST-EDIT-CONT-7"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-CONT-7")],
+                                      "TEST-EDIT-CONT-7", extra=("-ContinueFromSha", tip))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "reusing-worktree=" in result.stdout, result.stdout
+        assert git(tmp_path, "rev-parse", "refs/heads/product/TEST-EDIT-CONT-7") == tip
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=tmp_path,
+                       check=False, capture_output=True)
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-CONT-7")
+
+
 def test_a_real_refused_dispatch_leaves_a_typed_attempt_receipt(tmp_path):
     """2026-09-14: ~90 PLAY-COUNTERS-CPU run dirs held only lane-prompt.md because a pre-launch
     refusal reached stdout alone. A NON-dry-run refusal must leave dispatch-attempt.json naming
