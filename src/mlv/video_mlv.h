@@ -44,8 +44,8 @@ int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
 #define MLV_LINEARISE_LUT_ENTRIES 65536u
 
 /* Bound the file-controlled CURV payload to that allocation before any read.
- * Returns 0 for a block that is short, empty, or oversized. Exposed for sizing
- * regression tests. */
+ * Returns 0 for a block that is short, empty, oversized, or whose payload is
+ * not a whole number of uint16 samples. Exposed for sizing regression tests. */
 int mlvCurvLutEntryCount(uint32_t block_size, uint32_t * lut_entries);
 
 /* Fixed prefix of the bayer JPEG2000 VIDF payload: layout version plus an

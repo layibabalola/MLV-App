@@ -491,6 +491,21 @@ TEST(SecuritySizing, CurvBlockCannotOverrunTheLinearisationTable)
     ASSERT_FALSE(mlvCurvLutEntryCount(headerBytes, &lutEntries));
     ASSERT_FALSE(mlvCurvLutEntryCount(headerBytes + 1u, &lutEntries));
 
+    /* The payload is an array of uint16 samples: every odd size is rejected
+     * outright, never divided down to the entry count below it. The +3 case is
+     * the one that used to be accepted as a single entry with a stray byte. */
+    lutEntries = 0xdeadbeefu;
+    ASSERT_FALSE(mlvCurvLutEntryCount(headerBytes + 3u, &lutEntries));
+    ASSERT_EQ(static_cast<uint32_t>(0), lutEntries);
+    ASSERT_FALSE(mlvCurvLutEntryCount(headerBytes + 5u, &lutEntries));
+    ASSERT_FALSE(mlvCurvLutEntryCount(headerBytes + 8191u, &lutEntries));
+    ASSERT_FALSE(mlvCurvLutEntryCount(
+        headerBytes + MLV_LINEARISE_LUT_ENTRIES * 2u - 1u, &lutEntries));
+    ASSERT_EQ(static_cast<uint32_t>(0), lutEntries);
+    /* One odd byte past the allocation stays rejected for both reasons. */
+    ASSERT_FALSE(mlvCurvLutEntryCount(
+        headerBytes + MLV_LINEARISE_LUT_ENTRIES * 2u + 1u, &lutEntries));
+
     /* Partial curves stay admissible; the table is zero-padded past them. */
     ASSERT_TRUE(mlvCurvLutEntryCount(headerBytes + 2u, &lutEntries));
     ASSERT_EQ(static_cast<uint32_t>(1), lutEntries);

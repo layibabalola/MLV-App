@@ -2948,12 +2948,18 @@ int mlvCurvLutEntryCount(uint32_t block_size, uint32_t * lut_entries)
     /* blockSize is file-controlled and covers the header plus the payload. */
     if(block_size < (uint32_t)sizeof(mlv_curv_hdr_t)) return 0;
     const uint32_t payload = block_size - (uint32_t)sizeof(mlv_curv_hdr_t);
+
+    /* The payload is an array of uint16 samples and nothing else. A size that
+     * is not a whole number of samples describes a block this reader cannot
+     * account for, so fail the open instead of dividing the odd byte away and
+     * silently ignoring it. An empty payload is likewise no curve at all. */
+    if(payload == 0u || (payload % (uint32_t)sizeof(uint16_t)) != 0u) return 0;
     const uint32_t entries = payload / (uint32_t)sizeof(uint16_t);
 
     /* The linearisation LUT is indexed by a full 16-bit sample, so it is
      * allocated at exactly MLV_LINEARISE_LUT_ENTRIES entries. A block claiming
      * more cannot be honoured: reject it rather than truncate the curve. */
-    if(entries == 0u || entries > MLV_LINEARISE_LUT_ENTRIES) return 0;
+    if(entries > MLV_LINEARISE_LUT_ENTRIES) return 0;
 
     *lut_entries = entries;
     return 1;
