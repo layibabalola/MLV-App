@@ -178,5 +178,5 @@ Run the test suites before trusting a new extraction or a new job:
 
 ```powershell
 py -3 -m pytest -q tools\profiling\test_refresh_period_histogram.py
-py -3 -m pytest -q tools\repo_hygiene\test_playback_attr_3_cuda_split_build.py
+py -3 -m pytest -q tools\repo_hygiene\test_playback_attr_3_cuda_split_route.py
 ```
