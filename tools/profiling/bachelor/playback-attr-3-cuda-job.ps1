@@ -56,13 +56,16 @@ param(
 
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path,
 
-    # INFERRED: no per-card base runtime package was specified. Reused verbatim from
-    # PLAYBACK-ATTR-2's job, which is the most recent known-good CUDA-capable
-    # windeployqt-deployed runtime tree staged in the Bachelor cache. The hub must
-    # verify this zip (and the base exe name below, which is its internal layout) is
-    # still present and still the right CUDA runtime baseline before submitting.
-    [string]$BasePackageZip = 'MLVApp-CUDA-W4W5-4d1955f8.zip',
-    [string]$BasePackageExeName = 'MLVApp-4d1955f81531.exe',
+    # Derived from -SourceCommit, not pinned to an old package: matches the package
+    # tools/profiling/bachelor/playback-attr-3-cuda-build-job.ps1's emitted job stages into the
+    # Bachelor cache as MLVApp-playback-attr-3-cuda-<sha12>-pkg.zip -- a raw zip of that job's
+    # deployed release dir, so the exe inside keeps its unrenamed build name, MLVApp.exe. This
+    # replaces the old default (the July MLVApp-CUDA-W4W5-4d1955f8.zip base, wrong for a build
+    # of current master since its Qt runtime may not match). The hub must still verify the
+    # derived package is actually staged in the Bachelor cache (built from -SourceCommit, not a
+    # stale one) before submitting.
+    [string]$BasePackageZip = "MLVApp-playback-attr-3-cuda-$($SourceCommit.Substring(0,12))-pkg.zip",
+    [string]$BasePackageExeName = 'MLVApp.exe',
 
     [string]$PresentMonName = 'PresentMon-2.5.1-x64.exe',
     [string]$PresentMonSha256 = '9BEC3083069F58F911E6A512F4806DB51A27BD096103087BC1D05EF54C80A191',
