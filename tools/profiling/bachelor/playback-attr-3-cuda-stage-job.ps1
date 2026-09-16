@@ -301,7 +301,12 @@ $partialPaths = @()
 foreach ($item in $sideFiles) { $partialPaths += [string]$item.partialPath }
 $partialPaths += $manifestPartialPath
 function Remove-JobPartials {
-    foreach ($p in $script:partialPaths) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+    # -Recurse -Confirm:$false, not just -Force: if a .partial path is occupied by a DIRECTORY
+    # (a corrupt cache, and the state that makes the manifest copy fail in the first place),
+    # Remove-Item would otherwise PROMPT -- which on an unattended agent is a terminating error
+    # inside the catch block, turning a clean exit 22 into an unexplained exit 1. Every path here
+    # was proved a direct child of the cache during artifactNameSafety.
+    foreach ($p in $script:partialPaths) { Remove-Item -LiteralPath $p -Force -Recurse -Confirm:$false -ErrorAction SilentlyContinue }
 }
 
 try {

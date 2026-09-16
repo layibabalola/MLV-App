@@ -404,8 +404,11 @@ if (Test-Path -LiteralPath $archSidecar) {
 
 $partials = @()
 function Remove-JobPartials {
-    foreach ($p in $script:partials) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
-    Remove-Item -LiteralPath (Join-Path $Pub "$ManifestName.partial") -Force -ErrorAction SilentlyContinue
+    # -Recurse -Confirm:$false: a .partial path occupied by a directory would otherwise make
+    # Remove-Item PROMPT, which on an unattended agent is a terminating error inside the catch
+    # block and turns a clean publish failure into an unexplained exit 1.
+    foreach ($p in $script:partials) { Remove-Item -LiteralPath $p -Force -Recurse -Confirm:$false -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath (Join-Path $Pub "$ManifestName.partial") -Force -Recurse -Confirm:$false -ErrorAction SilentlyContinue
 }
 
 $files = [System.Collections.Specialized.OrderedDictionary]::new()

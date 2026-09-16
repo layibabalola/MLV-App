@@ -320,10 +320,13 @@ $publishSet = @(
 )
 $partialManifestPath = Join-Path $OutDir "$($names.buildManifestName).partial"
 function Remove-RunPartials {
+    # -Recurse -Confirm:$false: a .partial path occupied by a directory would otherwise make
+    # Remove-Item PROMPT, and a prompt inside the catch block is a terminating error that hides
+    # the real publish failure behind exit 1.
     foreach ($item in $script:publishSet) {
-        Remove-Item -LiteralPath (Join-Path $OutDir "$($item.name).partial") -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $OutDir "$($item.name).partial") -Force -Recurse -Confirm:$false -ErrorAction SilentlyContinue
     }
-    Remove-Item -LiteralPath $script:partialManifestPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:partialManifestPath -Force -Recurse -Confirm:$false -ErrorAction SilentlyContinue
 }
 
 try {
