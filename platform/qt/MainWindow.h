@@ -176,31 +176,6 @@ public:
         int stressSeekFrame = 8;
     };
 
-    /* Progress-only callback for exportCdngSequence.
-     * framesDone:   frames completed so far (exported + skipped)
-     * totalFrames:  total frames to export
-     * Return true to continue, false to abort (e.g. user pressed abort). */
-    using ProgressCallback = std::function<bool(int framesDone, int totalFrames)>;
-
-    /* Static CDNG export helper — callable from both GUI and batch mode.
-     * Error decisions go through BatchPrompts directly.
-     * ProgressCallback is for progress updates and abort-polling only. */
-    static ProcessResult exportCdngSequence(
-        mlvObject_t *mlvObject,
-        const QString &outDir,
-        const QString &clipBaseName,
-        int codecProfile,
-        int codecOption,
-        uint32_t cutIn,
-        uint32_t cutOut,
-        double stretchX,
-        double stretchY,
-        bool audioExport,
-        bool rawFixEnabled,
-        ProgressCallback progressCallback = nullptr,
-        bool applyLookAssistDngDefaults = false,
-        int lookAssistExposure = 0);
-
     int runHeadlessPlaybackProfile(const PlaybackProfileOptions & options);
     int runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options);
 
@@ -1030,12 +1005,14 @@ private:
     int m_playbackSmokeStartQualityMode = 0;
     int m_playbackSmokeStartWorkerThreads = 0;
     int m_playbackSmokePresentedFrames = 0;
+    int m_playbackSmokeParityMatchCount = 0;
     int m_playbackSmokeTargetPresentedFrames = 0;
     int m_playbackSmokeFirstPresentedFrame = -1;
     int m_playbackSmokeLastPresentedFrame = -1;
     uint64_t m_dualIsoWarmupTelemetryPresentationGeneration = 0;
     int m_dualIsoWarmupTelemetryPresentedFrames = 0;
     uint64_t m_playbackSmokeStartRequestSerial = 0;
+    uint64_t m_playbackSmokeStartDecodeRequestsIssued = 0;
     uint64_t m_playbackSmokeStartPrepStaleDrops = 0;
     uint64_t m_playbackSmokeStartPrepGenerationDrops = 0;
     uint64_t m_playbackSmokeStartPrepReplacedBefore = 0;

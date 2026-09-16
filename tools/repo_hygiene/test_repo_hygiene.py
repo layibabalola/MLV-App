@@ -2633,9 +2633,18 @@ class RepoHygieneTests(unittest.TestCase):
                 pattern_noise.replace("end: ;\n}", "end:\n/* no statement */\n\n}", 1)
             )
 
-        batch_types = (ROOT / "src" / "batch" / "BatchTypes.h").read_text(encoding="utf-8")
+        batch_types_path = ROOT / "src" / "batch" / "BatchTypes.h"
+        batch_types = batch_types_path.read_text(encoding="utf-8")
+        rendered_video_plan_path = ROOT / "src" / "batch" / "BatchRenderedVideoPlan.h"
+        rendered_video_plan = rendered_video_plan_path.read_text(encoding="utf-8")
+        self.assertLess(len(batch_types.splitlines()), 1500)
+        self.assertNotIn("#include <QDir>", batch_types)
+        self.assertNotIn("#include <QRegularExpression>", batch_types)
+        self.assertIn("BatchRenderedVideoCodec", rendered_video_plan)
+        self.assertIn("BatchRenderedVideoJobPlan", rendered_video_plan)
+        rendered_video_implementation = rendered_video_plan_path.with_suffix(".cpp").read_text(encoding="utf-8")
         self.assertRegex(
-            batch_types,
+            rendered_video_implementation,
             r"(?s)while\( remainder != 0 \).*?divisor % remainder.*?divisor = remainder.*?remainder = next",
             "rendered-video aspect reduction must retain a C++14-compatible Euclidean divisor",
         )

@@ -353,6 +353,7 @@ public:
                                                    uint64_t activeGeneration );
     bool hasGpuTextureNoReadbackReadyFrame( void );
     int gpuTextureNoReadbackReadyFrameCount( void );
+    uint64_t decodeRequestsIssuedCount( void ) const;
     bool hasPlaybackLookaheadRequest( uint32_t frameNumber,
                                       uint64_t activeGeneration );
     bool hasReadyPlaybackLookaheadFrame( uint32_t frameNumber,
@@ -600,6 +601,7 @@ private:
     bool m_decodeWorkerStop;
     bool m_reconWorkerStop;
     std::deque<DecodeQueueEntry> m_decodeRequests;
+    std::atomic<uint64_t> m_decodeRequestsIssuedCount{ 0 };
     std::deque<ReconQueueEntry> m_reconRequests;
     std::deque<int> m_decodeReadySlots;
     std::deque<int> m_processReadySlots;

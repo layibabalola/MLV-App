@@ -37,7 +37,12 @@ inline bool isValidFrameNumber( uint32_t frameNumber, int totalFrames )
     return totalFrames > 0 && frameNumber < static_cast<uint32_t>( totalFrames );
 }
 
-inline CutRange normalizeCutRange( int cutIn, int cutOut, int totalFrames )
+// repairCollapsedRangeForPlay widens a genuinely one-frame-wide range (cutIn == cutOut)
+// out to the end of the clip. Left false (the default) a collapsed range is a valid,
+// deliberate single-frame trim and must pass through untouched; callers on the actual
+// play path opt in so pressing Play on a locked single frame still plays something.
+inline CutRange normalizeCutRange( int cutIn, int cutOut, int totalFrames,
+                                    bool repairCollapsedRangeForPlay = false )
 {
     CutRange result;
     if( totalFrames <= 0 )
@@ -59,6 +64,13 @@ inline CutRange normalizeCutRange( int cutIn, int cutOut, int totalFrames )
     if( result.cutOut < result.cutIn )
     {
         result.cutOut = result.cutIn;
+    }
+
+    if( repairCollapsedRangeForPlay
+     && result.cutOut == result.cutIn
+     && result.cutIn < totalFrames )
+    {
+        result.cutOut = totalFrames;
     }
 
     result.changed = result.cutIn != cutIn || result.cutOut != cutOut;

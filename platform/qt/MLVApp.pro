@@ -291,8 +291,10 @@ SOURCES += \
     ../../src/librtprocess/src/include/librtprocesswrapper.cpp \
     ../../src/debayer/ahdOld.c \
     ../../src/batch/BatchContext.cpp \
+    ../../src/batch/BatchRenderedVideoPlan.cpp \
     ../../src/batch/BatchPrompts.cpp \
     ../../src/batch/BatchRunner.cpp \
+    ../../src/batch/CdngSequenceExport.cpp \
     ../../src/batch/MlvTrim.cpp \
     ../../src/batch/BatchLogger.cpp \
     ../../src/batch/ReceiptLoader.cpp \
@@ -307,6 +309,7 @@ HEADERS += MainWindow.h \
            ClipLifecycleBarrier.h \
            CrashForensics.h \
            PlaybackFrameRange.h \
+           PlaybackGatePolicy.h \
            Phase3Breadcrumbs.h \
            Phase3Checksums.h \
            Phase3Mode.h \
@@ -449,9 +452,11 @@ HEADERS += MainWindow.h \
     ../../src/librtprocess/src/include/sleef.h \
     ../../src/librtprocess/src/include/sleefsseavx.h \
     ../../src/batch/BatchTypes.h \
+    ../../src/batch/BatchRenderedVideoPlan.h \
     ../../src/batch/BatchContext.h \
     ../../src/batch/BatchPrompts.h \
     ../../src/batch/BatchRunner.h \
+    ../../src/batch/CdngSequenceExport.h \
     ../../src/batch/MlvTrim.h \
     ../../src/batch/BatchLogger.h \
     ../../src/batch/ReceiptLoader.h \

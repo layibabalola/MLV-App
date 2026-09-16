@@ -70,8 +70,43 @@ suite. The `perf_tests` workflow specifically is documented separately in
 
 ### `pipeline_tests`
 
-- `pipeline_tests --check-golden --hash-output <path>` compares direct frame
-  hashes against `tests/fixtures/golden/pipeline_hashes.json`.
+- Run the complete pipeline suite without `--check-golden`. It emits diagnostic
+  artifact keys beyond the 15 frozen keys, so an unfiltered golden comparison
+  reports unexpected keys even when every test passes.
+- Run the seven golden producers separately with the exact filter below,
+  matching the key-to-producer map in `.github/workflows/tests.yml`. This checks
+  the unchanged `tests/fixtures/golden/pipeline_hashes.json`; it is not permission
+  to regenerate that file or to ignore missing, mismatched, or unexpected keys.
+- `CdngSequenceExport.cpp` and `BatchRunner.cpp` compile into the pipeline target
+  with Qt Core, Gui and OpenGL. QtWidgets is excluded. Export prompt tests cover
+  batch skip/abort policy and fail closed when a GUI prompt is unavailable;
+  the GUI build retains the original dialogs.
+
+```powershell
+$pipelineExe = 'tests\build-ci-pipeline\release\pipeline_tests.exe'
+& $pipelineExe
+if ($LASTEXITCODE -ne 0) { throw 'Full pipeline suite failed' }
+$goldenProducers = @(
+    'BackendParametricDebayerShell.CpuRenderDebayerAmazeProducesStableHash'
+    'BackendParametricDebayerShell.CpuRenderDebayerBilinearProducesStableHash'
+    'DualIsoPipeline.TinyDualIsoFullFramesMatchGolden'
+    'GpuPreviewProcessing.ExposureStopsChangesSubsetConfigAndStableOutput'
+    'GpuPreviewProcessing.TinyDualIsoReceiptSubsetGoldenOutputIsStable'
+    'DualIsoPipeline.TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull'
+    'BackendParametricShell.CpuRenderPreviewProcessingSubsetProducesStableHash'
+) -join ':'
+New-Item -ItemType Directory -Force .claude-state\validation | Out-Null
+& $pipelineExe "--gtest_filter=$goldenProducers" --check-golden `
+    --hash-output .claude-state\validation\pipeline-golden-actual.json
+if ($LASTEXITCODE -ne 0) { throw 'Pipeline golden producer check failed' }
+```
+
+Use a fresh artifact path for each validation run and retain stdout, stderr,
+exit code and executable identity. A filter containing only CDNG helper tests
+does not execute the golden producers and must not be combined with
+`--check-golden`. The direct-frame golden check also does not replace the required
+known-good application comparison on real footage for an export refactor.
+
 - `pipeline_tests` also pins current processing-reuse behavior: Dual ISO
   exact-frame reuse after runtime solve, chroma-smooth scratch reuse,
   median/RBF reuse stability, Sobel scratch parity, and no-reset cache
@@ -84,7 +119,7 @@ suite. The `perf_tests` workflow specifically is documented separately in
   llrawproc: repeated renders with unchanged pixel maps stop recopies on the
   steady path, and the new dark-frame worker snapshot reuses its copied
   payload across frames.
-- `pipeline_tests --check-golden` now also includes a forced-rerender
+- The full `pipeline_tests` suite also includes a forced-rerender
   llrawproc guard,
   `DualIsoPipeline.StablePixelMapsReuseWorkerCopiesAcrossForcedReprocess`,
   which invalidates processed preview caches between renders and verifies
@@ -149,7 +184,8 @@ tree. Properties:
 
 - Windows-only for now.
 - Provisions Qt 6.10.2 + MinGW 13.1 via `aqtinstall`.
-- Runs `console_tests --check-golden` and `pipeline_tests --check-golden`.
+- Runs `console_tests --check-golden`, the full pipeline suite, and the separate
+  filtered pipeline golden producers described above.
 - Runs `gui_tests` in the independent `windows-gui-pilot` job. The current
   promotion record and hosted evidence live in the CI-1 section of
   [`docs/roadmap.md`](roadmap.md); this guide intentionally does not duplicate

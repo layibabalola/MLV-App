@@ -27,6 +27,41 @@ TEST( PlaybackFrameRange, CutInAboveClipClampsToLastFrame )
     ASSERT_EQ( 59, playback_frame_range::lastFrameIndex( range ) );
 }
 
+TEST( PlaybackFrameRange, CollapsedSingleFrameRangeStaysCollapsedByDefault )
+{
+    const playback_frame_range::CutRange range =
+        playback_frame_range::normalizeCutRange( 1, 1, 60 );
+
+    ASSERT_TRUE( range.valid );
+    ASSERT_FALSE( range.changed );
+    ASSERT_EQ( 1, range.cutIn );
+    ASSERT_EQ( 1, range.cutOut );
+}
+
+TEST( PlaybackFrameRange, PlayPathRepairsCollapsedSingleFrameRange )
+{
+    const playback_frame_range::CutRange range =
+        playback_frame_range::normalizeCutRange( 1, 1, 60, true );
+
+    ASSERT_TRUE( range.valid );
+    ASSERT_TRUE( range.changed );
+    ASSERT_EQ( 1, range.cutIn );
+    ASSERT_EQ( 60, range.cutOut );
+    ASSERT_EQ( 0, playback_frame_range::firstFrameIndex( range ) );
+    ASSERT_EQ( 59, playback_frame_range::lastFrameIndex( range ) );
+}
+
+TEST( PlaybackFrameRange, PlayPathLeavesLastFrameCollapseAtClipEndAlone )
+{
+    const playback_frame_range::CutRange range =
+        playback_frame_range::normalizeCutRange( 60, 60, 60, true );
+
+    ASSERT_TRUE( range.valid );
+    ASSERT_FALSE( range.changed );
+    ASSERT_EQ( 60, range.cutIn );
+    ASSERT_EQ( 60, range.cutOut );
+}
+
 TEST( PlaybackFrameRange, NegativeRequestedFrameClampsBeforeUnsignedRenderRequest )
 {
     bool changed = false;
