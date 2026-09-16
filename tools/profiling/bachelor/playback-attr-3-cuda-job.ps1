@@ -34,10 +34,22 @@
 #     tools/repo_hygiene/gpu_job_result_provenance.py.
 #   - the exe/DLL under test are NOT pinned SHA256 constants (PLAYBACK-ATTR-2 already
 #     had a built artifact to pin); they are named deterministically from -SourceCommit
-#     and expected to already be staged in the Bachelor cache by
-#     tools/profiling/bachelor/playback-attr-3-cuda-compile-job.ps1's job, which uses the
-#     IDENTICAL naming convention. Their hashes are computed fresh at run time and
-#     recorded, not asserted against a value this generator could not have known.
+#     and expected to already be staged in the Bachelor cache by the split-build route's
+#     staging job (tools/profiling/bachelor/playback-attr-3-cuda-stage-job.ps1), which uses
+#     the IDENTICAL naming convention. Their hashes are computed fresh at run time and
+#     verified against the staged build manifest, not asserted against a value this
+#     generator could not have known.
+#
+# SPLIT BUILD (swarm ruling 2026-09-16,
+# .claude-state/fleet-runs/swarm-attr3-buildhost-20260916T2150Z/SYNTHESIS.md). Bachelor has
+# no VC tools and no CUDA toolkit, so NOTHING is compiled or inspected with MSVC tooling
+# here. The CUDA DLL pair is built on Ultra-Magnus, the exe on the board host, and the
+# package is staged into the Bachelor cache by a staging job. Two consequences in this file:
+#   - pendingSymbolPresence is READ from the staged build manifest (the old on-Bachelor
+#     MSVC export-inspection probe is gone; it could only ever throw here);
+#   - the run's own gpu_playback_recon.eligibility diagnostics are parsed BEFORE any
+#     verdict, and the job exits 15 (BACKEND_NOT_AVAILABLE) unless
+#     cuda_backend_available=1 and r16_available=1, recording both plus r16_reason.
 #
 # Usage:
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
@@ -66,8 +78,9 @@ param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path,
 
     # Derived from -SourceCommit, not pinned to an old package: matches the package
-    # tools/profiling/bachelor/playback-attr-3-cuda-compile-job.ps1's emitted job stages into the
-    # Bachelor cache as MLVApp-playback-attr-3-cuda-<sha12>-pkg.zip -- a raw zip of that job's
+    # tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1 builds on the board host and
+    # tools/profiling/bachelor/playback-attr-3-cuda-stage-job.ps1's emitted job stages into the
+    # Bachelor cache as MLVApp-playback-attr-3-cuda-<sha12>-pkg.zip -- a raw zip of that build's
     # deployed release dir, so the exe inside keeps its unrenamed build name, MLVApp.exe. This
     # replaces the old default (the July MLVApp-CUDA-W4W5-4d1955f8.zip base, wrong for a build
     # of current master since its Qt runtime may not match). The hub must still verify the
@@ -133,9 +146,9 @@ $PresentMonTimedSeconds = 55
 
 # TEMP boundary (BLOCKER fix): job-owned scratch dir under this job's own C:\mlvtmp
 # work dir, set as TEMP/TMP at the very start -- before any child process (reg.exe,
-# the pwsh that runs run-release-gui-smoke.ps1/MLVApp.exe, dumpbin, PresentMon) -- so
-# every one of them inherits it instead of the ambient (unconstrained) machine TEMP.
-# Mirrors tools/profiling/bachelor/playback-attr-3-cuda-compile-job.ps1's $Scratch
+# the pwsh that runs run-release-gui-smoke.ps1/MLVApp.exe, PresentMon) -- so every one
+# of them inherits it instead of the ambient (unconstrained) machine TEMP.
+# Mirrors tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1's $Scratch
 # pattern. $Work is created here (not later) precisely so the scratch dir it hosts is
 # never wiped out from under a live $env:TEMP by a later "recreate $Work" step.
 function Assert-UnderMlvTmp([string]$Path, [string]$Label) {
@@ -287,18 +300,29 @@ function Get-LastGpuSummary([string]$RawLog) {
     }
 }
 
-function Test-DllExportsIgpuRecon([string]$DllPath) {
-    # gpu_job_result_provenance.py requires pendingSymbolPresence to be a real boolean
-    # -- an inconclusive check must fail the job closed, never be recorded as null.
-    $vswhereExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    if (-not (Test-Path -LiteralPath $vswhereExe)) { throw "vswhere not found: $vswhereExe (cannot prove pendingSymbolPresence)" }
-    $vsInstallPath = & $vswhereExe -latest -property installationPath
-    if ([string]::IsNullOrWhiteSpace($vsInstallPath)) { throw 'vswhere found no VS install (cannot prove pendingSymbolPresence)' }
-    $dumpbinExe = Get-ChildItem -Path (Join-Path $vsInstallPath 'VC\Tools\MSVC') -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
-    if (-not $dumpbinExe) { throw 'dumpbin.exe not found under the VS install (cannot prove pendingSymbolPresence)' }
-    $exportLines = @(& $dumpbinExe.FullName /EXPORTS $DllPath 2>$null | Select-String 'igpu_recon_')
-    return [bool]($exportLines.Count -gt 0)
+function Get-LastEligibilityDiagnostic([string]$RawLog) {
+    # The gpu_playback_recon.eligibility line (platform/qt/MainWindow.cpp, emitted when
+    # MLVAPP_GPU_PLAYBACK_RECON_ELIGIBILITY_DIAG=1) carries both bare (key=1) and quoted
+    # (key="some text") values, so the value alternation below must handle quotes --
+    # r16_reason is quoted and routinely contains spaces. The LAST line wins: the probe
+    # re-runs per render policy evaluation and the final one describes the run's state.
+    $last = $null
+    foreach ($line in ($RawLog -split "`r?`n")) {
+        if ($line -notmatch 'gpu_playback_recon\.eligibility ') { continue }
+        $values = @{}
+        foreach ($match in [regex]::Matches($line, '(?<key>[A-Za-z0-9_]+)=(?:"(?<quoted>[^"]*)"|(?<bare>[^\s]+))')) {
+            $key = $match.Groups['key'].Value
+            if ($match.Groups['quoted'].Success) { $values[$key] = $match.Groups['quoted'].Value }
+            else { $values[$key] = $match.Groups['bare'].Value }
+        }
+        $last = $values
+    }
+    return $last
+}
+
+function Get-DiagnosticField($Values, [string]$Key) {
+    if ($null -eq $Values -or -not $Values.ContainsKey($Key)) { return $null }
+    [string]$Values[$Key]
 }
 
 foreach ($item in @(
@@ -317,6 +341,17 @@ $buildManifestPath = Join-Path $Cache $buildManifestName
 if (-not (Test-Path -LiteralPath $buildManifestPath)) { throw "cache missing build manifest $buildManifestName (required; existence of the exe/DLL/pkg alone is not sufficient)" }
 $buildManifest = Get-Content -Raw -LiteralPath $buildManifestPath | ConvertFrom-Json
 if ($buildManifest.sourceCommit -ne $SourceCommit) { throw "build manifest $buildManifestName sourceCommit=$($buildManifest.sourceCommit) does not match pinned $SourceCommit" }
+# pendingSymbolPresence is READ, never re-derived here (swarm ruling
+# .claude-state/fleet-runs/swarm-attr3-buildhost-20260916T2150Z/SYNTHESIS.md): this host has no
+# VC tools at all, so the old on-Bachelor MSVC export-inspection probe could only ever throw.
+# The symbol test now runs on the host that built the DLL
+# (tools/profiling/ultramagnus/playback-attr-3-cuda-dll-job.ps1) and is carried in the build
+# manifest. gpu_job_result_provenance.py requires a real boolean, so an absent or non-boolean
+# field fails this job closed rather than being recorded as null.
+$pendingSymbolPresence = $buildManifest.pendingSymbolPresence
+if ($pendingSymbolPresence -isnot [bool]) {
+    throw "build manifest $buildManifestName is missing a boolean pendingSymbolPresence (got '$pendingSymbolPresence'); the building host must record the igpu_recon_ export test"
+}
 $manifestChecks = @(
     @{ label = 'packageZip'; path = (Join-Path $Cache $BasePackageZip); expectedSha = $buildManifest.packageZip.sha256 },
     @{ label = 'exe'; path = (Join-Path $Cache $ExeName); expectedSha = $buildManifest.exe.sha256 },
@@ -447,6 +482,35 @@ $rawLog = [IO.File]::ReadAllText($logPath)
 $rows = Get-FrameRows $rawLog
 $rows | Export-Csv -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -NoTypeInformation
 
+# Backend-availability gate (swarm ruling, 2026-09-16): parse the run's own diagnostic
+# fields BEFORE any verdict. A run where the CUDA backend never loaded, or where the R16
+# texture path was not admitted, cannot produce a CUDA attribution -- the frame counters
+# alone would happily describe some other path. Both fields and r16_reason are recorded
+# either way, so a refusal says WHY.
+$eligibility = Get-LastEligibilityDiagnostic $rawLog
+$cudaBackendAvailable = Get-DiagnosticField $eligibility 'cuda_backend_available'
+$r16Available = Get-DiagnosticField $eligibility 'r16_available'
+$r16Reason = Get-DiagnosticField $eligibility 'r16_reason'
+$diagnostics = [ordered]@{
+    source = 'gpu_playback_recon.eligibility'
+    linePresent = [bool]($null -ne $eligibility)
+    cudaBackendAvailable = $cudaBackendAvailable
+    r16Available = $r16Available
+    r16Reason = $r16Reason
+    cudaBackendAttempted = Get-DiagnosticField $eligibility 'cuda_backend_attempted'
+    cudaBackendResolved = Get-DiagnosticField $eligibility 'cuda_backend_resolved'
+    r16ProbeRan = Get-DiagnosticField $eligibility 'r16_probe_ran'
+}
+if ($cudaBackendAvailable -ne '1' -or $r16Available -ne '1') {
+    $refusal = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='BACKEND_NOT_AVAILABLE'
+        diagnostics=$diagnostics; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $refusal (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=BACKEND_NOT_AVAILABLE CUDA_BACKEND_AVAILABLE=$cudaBackendAvailable R16_AVAILABLE=$r16Available R16_REASON=`"$r16Reason`" ARTIFACTS=$Pub"
+    exit 15
+}
+
 $gpuSummary = Get-LastGpuSummary $rawLog
 # CUDA gate fix (MAJOR): gpu_preview_frames is not CUDA reconstruction -- a run with
 # only preview frames and zero recon/readback/texture frames must not pass as CUDA-
@@ -495,7 +559,8 @@ $pmRows | Export-Csv -LiteralPath (Join-Path $legOut 'presentmon-series.csv') -N
 $pmStats = Get-Stats @($pmRows | ForEach-Object { [double]$_.msBetweenDisplayChange })
 
 $dllSha256Lower = (Get-Sha $reconDll).ToLowerInvariant()
-$pendingSymbolPresence = Test-DllExportsIgpuRecon $reconDll
+# $pendingSymbolPresence came from the build manifest above, whose dll.sha256 was verified
+# against this exact DLL before it was deployed -- so the export claim is bound to these bytes.
 $provenance = [ordered]@{
     rangeHeadSha = $RangeHeadSha
     llrawprocBlobId = $LlrawprocBlobId
@@ -525,6 +590,7 @@ $manifest = [ordered]@{
     environmentBoundary = [ordered]@{ jobTempDir=$Scratch; allChildrenInheritJobTemp=$true }
     cpuQuiescence = [ordered]@{ samples=$loads; meanPercent=$avgLoad; thresholdPercent=20.0; pass=($avgLoad -le 20.0) }
     frameRows = $rows.Count
+    diagnostics = $diagnostics
     gpuSummary = $gpuSummary
     gpuFramesTotal = $gpuFramesTotal
     regions = $stats
