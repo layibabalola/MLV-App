@@ -39,6 +39,20 @@ int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
                              size_t * packed_size,
                              size_t * allocation_size);
 
+/* Fixed prefix of the bayer JPEG2000 VIDF payload: layout version plus an
+ * offset/size pair per quarter-resolution channel. */
+#define MLV_JPEG2K_BAYER_HEADER_BYTES 36u
+
+/* Validate the file-controlled JPEG2000 bayer channel table against the frame
+ * bytes actually read and against the RAWI geometry, before any pointer
+ * arithmetic or decode. Returns the quarter-frame dimensions every channel must
+ * decode to. Exposed for sizing regression tests. */
+int mlvJpeg2kBayerLayoutIsValid(size_t frame_size, int width, int height,
+                                const uint32_t * offsets,
+                                const uint32_t * sizes,
+                                uint32_t * quarter_width,
+                                uint32_t * quarter_height);
+
 /* Validate CinemaDNG folder metadata before it is narrowed into RAWI's
  * uint16 geometry or used by legacy int-indexed processing paths. */
 int mlvDngSequenceGeometryIsRepresentable(uint32_t width, uint32_t height,

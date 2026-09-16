@@ -2940,6 +2940,45 @@ int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
     return 1;
 }
 
+int mlvJpeg2kBayerLayoutIsValid(size_t frame_size, int width, int height,
+                                const uint32_t * offsets,
+                                const uint32_t * sizes,
+                                uint32_t * quarter_width,
+                                uint32_t * quarter_height)
+{
+    if(!offsets || !sizes || !quarter_width || !quarter_height) return 0;
+    *quarter_width = 0;
+    *quarter_height = 0;
+
+    /* The 2x2 bayer channel split the layout encodes is only defined for even
+     * geometry; odd dimensions would silently drop a row/column instead of
+     * round-tripping, so reject them rather than clamp. */
+    if(width < 4 || height < 4 || (width & 1) != 0 || (height & 1) != 0)
+        return 0;
+    if(frame_size < MLV_JPEG2K_BAYER_HEADER_BYTES) return 0;
+
+    const uint32_t hw = (uint32_t)width / 2u;
+    const uint32_t hh = (uint32_t)height / 2u;
+    const size_t quarter_pixels = (size_t)hw * (size_t)hh;
+    if(quarter_pixels == 0 || quarter_pixels > SIZE_MAX / sizeof(int32_t))
+        return 0;
+
+    for(int c = 0; c < 4; c++)
+    {
+        /* Every channel payload must start past the fixed header and lie
+         * wholly inside the frame that was actually read. The subtraction is
+         * overflow-free because offsets[c] <= frame_size is checked first. */
+        if(sizes[c] == 0u) return 0;
+        if(offsets[c] < MLV_JPEG2K_BAYER_HEADER_BYTES) return 0;
+        if((size_t)offsets[c] > frame_size) return 0;
+        if((size_t)sizes[c] > frame_size - (size_t)offsets[c]) return 0;
+    }
+
+    *quarter_width = hw;
+    *quarter_height = hh;
+    return 1;
+}
+
 int mlvDngSequenceGeometryIsRepresentable(uint32_t width, uint32_t height,
                                           uint32_t bits_per_sample,
                                           size_t * pixel_count)
@@ -3150,8 +3189,11 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
     uint64_t frame_offset = video->video_index[frameIndex].frame_offset;
     uint64_t frame_header_offset = video->video_index[frameIndex].block_offset;
 
+    /* Every encoded class must size raw_frame from the encoded frame size, not
+     * from the packed RAW size: the codec branches read frame_size bytes. */
     const int compressed_input = (isMcrawLoaded(video))
-        || (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92);
+        || (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92)
+        || (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_JPEG2K);
     if(compressed_input && !(isMcrawLoaded(video))
        && !mlvRawFrameInputCapacity(width, height, bitdepth, frame_size,
                                     &packed_frame_size, &raw_frame_capacity))
@@ -3445,7 +3487,11 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
         else if (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_JPEG2K)
         {
 #ifdef ENABLE_JPEG2K
-            if(fread(raw_frame, frame_size, 1, file) != 1)
+            /* frame_size is file-controlled: never read past the capacity that
+             * mlvRawFrameInputCapacity admitted for this encoded frame. */
+            if((size_t)frame_size > raw_frame_capacity - 4u
+               || (size_t)frame_size < MLV_JPEG2K_BAYER_HEADER_BYTES
+               || fread(raw_frame, frame_size, 1, file) != 1)
             {
                 DEBUG( printf("Frame data read error jpeg2k\n"); )
                 free(raw_frame);
@@ -3456,7 +3502,8 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             pthread_mutex_unlock(video->main_file_mutex + chunk);
 
             /* Parse bayer JPEG2K header: version + 8 u32s (offset/size for 4 channels) */
-            uint32_t *hdr = (uint32_t *)raw_frame;
+            uint32_t hdr[9];
+            memcpy(hdr, raw_frame, sizeof(hdr));
             if(hdr[0] != 1)
             {
                 DEBUG( printf("JPEG2K decoder: unsupported version of JPEG2K MLV layout.\n"); )
@@ -3466,8 +3513,15 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             uint32_t sizes[4]  = { hdr[2], hdr[4], hdr[6], hdr[8] };
             uint32_t offsets[4] = { hdr[1], hdr[3], hdr[5], hdr[7] };
 
-            uint32_t hw = width / 2;
-            uint32_t hh = height / 2;
+            uint32_t hw = 0;
+            uint32_t hh = 0;
+            if(!mlvJpeg2kBayerLayoutIsValid((size_t)frame_size, width, height,
+                                            offsets, sizes, &hw, &hh))
+            {
+                DEBUG( printf("JPEG2K decoder: malformed channel table or geometry.\n"); )
+                free(raw_frame);
+                return 1;
+            }
             size_t quarter_pixels = (size_t)hw * hh;
 
             /* Allocate 4 separate quarter buffers */
@@ -3518,11 +3572,25 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
                     continue;
                 }
 
-                size_t pix_count = (size_t)dw * dh;
+                /* The probed geometry is attacker-controlled. It must match the
+                 * quarter frame derived from RAWI exactly - decoding a larger
+                 * image into quarter_bufs[c] would write out of bounds, and a
+                 * smaller one would leave the scatter reading uninitialised
+                 * samples. Reject either, never clamp. */
+                if(dw != hw || dh != hh || nc != 1u)
+                {
+                    DEBUG( printf("JPEG2K decoder: channel %d geometry mismatch\n", c); )
+                    ojph_decoder_free(decoder);
+                    decode_errors[c] = 1;
+                    continue;
+                }
+
+                size_t pix_count = quarter_pixels;
                 size_t decoded = ojph_decoder_decode_into(decoder, encoded, enc_size,
-                                                           quarter_bufs[c], pix_count,
+                                                           quarter_bufs[c], quarter_pixels,
                                                            &dw, &dh, &nc);
-                if(decoded == 0 || decoded != pix_count)
+                if(decoded == 0 || decoded != pix_count
+                   || dw != hw || dh != hh || nc != 1u)
                 {
                     DEBUG( printf("JPEG2K decoder: decode failed channel %d\n", c); )
                     ojph_decoder_free(decoder);
