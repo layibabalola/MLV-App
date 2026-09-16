@@ -53,16 +53,11 @@ Run only the console/pipeline suite the acceptance test lives in (`tests/README.
 - Run builds and tests in the FOREGROUND, in one call, with a long timeout. Never background them, never use
   Monitor, and never end your turn waiting for a notification: when your turn ends your process tree is killed and
   background work is lost, while your receipt can still read complete.
-- Write long text - a commit message, a report, a receipt - to a file with the Write tool and pass the file (for
-  example `git commit -F <file>`). Do not embed it in a shell command. The board's command guard parses
-  the whole text of a command, including text that is only data such as a heredoc or a quoted message: a path,
-  a `..`, a redirect target, or a delete-like or move-like word inside that data can get the command refused.
-  Real redirection is allowed: `2>&1`, `>>`, and `>` to a file in your worktree or run directory.
 - Prefer the Read and Grep tools over shell `grep` or `cat` for reading files.
-- If a Qt test or the app exits immediately with no output, the Qt platform plugins were not found. Put the Qt and
-  MinGW `bin` directories on `PATH` and set `QT_PLUGIN_PATH` and `QT_QPA_PLATFORM_PLUGIN_PATH`, exactly as
-  `.github/workflows/tests.yml` does for its GUI tests. A missing `libgomp-1.dll` is different: it reports a
-  'not found' error rather than exiting silently (`docs/10-build-windows.md`).
+- `.github/workflows/tests.yml` is the source of truth for building and running the console, pipeline and GUI
+  tests, including every environment variable its GUI test job sets. Copy from it rather than reconstructing it.
+  If a Qt test or the app exits immediately with no output, compare your environment against that job: the Qt
+  platform plugins were not found. A missing `libgomp-1.dll` is different - it reports a 'not found' error.
 
 ## STOP conditions (print `STOP: <reason>` as your last line and exit)
 Build red after two attempts. The test cannot be made to fail-then-pass. A change is needed outside: {{ALLOWED_PATHS}}.
