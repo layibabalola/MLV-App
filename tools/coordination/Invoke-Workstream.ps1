@@ -316,16 +316,20 @@ function Write-DispatchReservation {
         [string]$Kind = '',
         [string]$Lane = '',
         [string]$RunDir = '',
-        $ObservedExit = $null
+        $ObservedExit = $null,
+        [AllowNull()]$LaneAllowEdits = $null
     )
     $dir = Split-Path -Parent $ReservationsPath
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $row = [ordered]@{
+        schemaVersion = 2
+        venue         = 'invoke-workstream'
         reservationId = $ReservationId
         state         = $State
         card          = $Card
         kind          = $Kind
         lane          = $Lane
+        allowEdits    = $LaneAllowEdits
         runDir        = $RunDir
         recordedUtc   = (Get-Date).ToUniversalTime().ToString('o')
     }
@@ -336,7 +340,19 @@ function Write-DispatchReservation {
         # Unknown spend remains charged; success at zero cost remains charged.
         $row.state = if ($evidence.laneCostReported -and $evidence.laneCostUsd -eq 0 -and $null -ne $ObservedExit -and $ObservedExit -ne 0) { 'refunded' } else { 'charged' }
     }
-    Add-Content -LiteralPath $ReservationsPath -Value ($row | ConvertTo-Json -Compress -Depth 6) -Encoding UTF8
+    # MLV-DISPATCH-LEDGER-WRITER-V3-SERIALIZED (see Invoke-Lane.ps1 Add-DispatchLedgerRow; the guard checks both files).
+    # Same machine-wide mutex as Invoke-Lane.ps1's Add-DispatchLedgerRow: unserialized appends can
+    # overwrite each other's row.
+    $ledgerMutex = [Threading.Mutex]::new($false, 'Global\MLV-App-DispatchLedger')
+    $ledgerHeld = $false
+    try {
+        try { $ledgerHeld = $ledgerMutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $ledgerHeld = $true }
+        if (-not $ledgerHeld) { throw 'dispatch ledger lock timeout' }
+        Add-Content -LiteralPath $ReservationsPath -Value ($row | ConvertTo-Json -Compress -Depth 6) -Encoding UTF8
+    } finally {
+        if ($ledgerHeld) { $ledgerMutex.ReleaseMutex() }
+        $ledgerMutex.Dispose()
+    }
     return [pscustomobject]$row
 }
 
@@ -1038,12 +1054,15 @@ $fence
     # written before launch. The budget counts reservations and refunds only verified
     # zero-spend terminal events; absent/ambiguous outcomes stay spent.
     $reservationId = [guid]::NewGuid().ToString()
-    $null = Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir
+    $null = Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir -LaneAllowEdits ([bool]$AllowEdits)
 
     Write-DispatchAttempt -Outcome 'launching' -Cause 'lane-starting' -ExitCode 0
     $script:LaneStarting = $true
     $laneExit = $null
     $reservationOutcome = 'charged'
+    # Invoke-Lane reads this and writes a 'linked' ledger row naming its receipt instead of a second
+    # 'reserved' row. An environment variable, not a parameter, so it also crosses Start-EditingLane.ps1.
+    $env:MLV_DISPATCH_RESERVATION_ID = $reservationId
     try {
         & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $LaneRunner `
             -Lane $Lane -PromptFile $promptPath -Card $cardId -RunDir $runDir -TimeoutSec $TimeoutSec
@@ -1051,6 +1070,7 @@ $fence
         $script:LaneLaunched = $true
         $reservationOutcome = 'charged'
     } finally {
+        Remove-Item Env:\MLV_DISPATCH_RESERVATION_ID -ErrorAction SilentlyContinue
         $reservationRecord = Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir -ObservedExit $laneExit
     }
 
@@ -1368,12 +1388,15 @@ $fence
     # written before launch. Zero-spend refunds require a bound terminal receipt;
     # uncertain launch failures cannot create budget.
     $reservationId = [guid]::NewGuid().ToString()
-    $null = Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir
+    $null = Write-DispatchReservation -ReservationId $reservationId -State 'reserved' -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir -LaneAllowEdits ([bool]$AllowEdits)
 
     Write-DispatchAttempt -Outcome 'launching' -Cause 'lane-starting' -ExitCode 0
     $script:LaneStarting = $true
     $laneExit = $null
     $reservationOutcome = 'charged'
+    # Invoke-Lane reads this and writes a 'linked' ledger row naming its receipt instead of a second
+    # 'reserved' row. An environment variable, not a parameter, so it also crosses Start-EditingLane.ps1.
+    $env:MLV_DISPATCH_RESERVATION_ID = $reservationId
     try {
         & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $StartEditingLane `
             -Lane $Lane -PromptFile $promptPath -WorkDir $laneWorkDir -Card $cardId -RunDir $runDir `
@@ -1383,6 +1406,7 @@ $fence
         # The terminal writer derives any refund from the actual receipt bytes.
         $reservationOutcome = 'charged'
     } finally {
+        Remove-Item Env:\MLV_DISPATCH_RESERVATION_ID -ErrorAction SilentlyContinue
         $reservationRecord = Write-DispatchReservation -ReservationId $reservationId -State $reservationOutcome -Card $cardId -Kind $cardKind -Lane $Lane -RunDir $runDir -ObservedExit $laneExit
     }
 
