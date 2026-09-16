@@ -10,16 +10,18 @@
 #     .claude-state/fleet-runs/lane-PLAYBACK-ATTR-3-CUDA-S1-20260916T165824Z/inputs/playback-attr-2.job.ps1.txt
 #   - the provenance sidecar contract in tools/repo_hygiene/gpu_job_result_provenance.py
 #     (rangeHeadSha, llrawprocBlobId, dllSha256 lowercase, pendingSymbolPresence)
-#   - the clip-by-id resolution mechanism used by the historical bachelor-4ca93e8d-*
-#     job family's invoke-stage.ps1 (Get-MlvPartFrameTotal there filters cached raw
-#     video files by BaseName plus a part-number-or-primary extension regex; this
-#     generator reuses that same "match by BaseName, discriminate the primary file
-#     from numbered continuation parts via the extension's tail" approach instead of
-#     ever concatenating -ClipId with a literal extension string). The clip is
-#     addressed ONLY by id (CLIP RULE); no host-local path and no literal
-#     extension-suffixed token is ever written by this generator or emitted into the
-#     job body -- tools/hooks/mlv-never-authorized.py (NA-4) fails closed on either,
-#     and this card's CLIP_OR_NONE is `none`.
+#
+# FOOTAGE (NA-4, docs/never-authorized.json): the job opens exactly ONE clip, the exact
+# canonical path passed as -ClipPath. There is NO id-to-file resolution anywhere; an
+# earlier resolver was ruled an NA-4 evasion (sol, PR #131 r2) and removed. NA-4 admits
+# a real clip only as the single path on the CLIP_OR_NONE line of the running lane's own
+# MLV_LANE_PROMPT, which the owner types by hand (agents cannot write it). Run this
+# generator INSIDE that owner-granted lane with -ClipPath equal to that line, so the hook
+# sees the path in the lane's tool input. A two-part clip's continuation part is opened
+# by the application itself, never named by this code. The owner's consent record
+# (receipts/owner-footage-consent-20260916.json and its -correction.json) is evidence of
+# consent, never an authorization. Adjudication:
+# .claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md.
 #
 # Differences from PLAYBACK-ATTR-2:
 #   - shipping-default scale (4), NOT forced to 1: no MLVAPP_PLAYBACK_SCALE_FACTOR
@@ -39,7 +41,7 @@
 #
 # Usage:
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
-#       -SourceCommit <40-hex> -ClipId M16-1243 -OutFile <path>\<jobId>.job.ps1
+#       -SourceCommit <40-hex> -ClipId M16-1243 -ClipPath <the lane's CLIP_OR_NONE path> -OutFile <path>\<jobId>.job.ps1
 
 [CmdletBinding()]
 param(
@@ -50,6 +52,12 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[A-Za-z]\d{2}-\d{3,4}$')]
     [string]$ClipId,
+
+    # The ONE authorized clip (NA-4): must equal the CLIP_OR_NONE line of the lane running
+    # this generator. An absolute path directly inside the Bachelor agent cache whose
+    # BaseName is -ClipId; the emitted job re-checks both on Bachelor and fails closed.
+    [Parameter(Mandatory = $true)]
+    [string]$ClipPath,
 
     [Parameter(Mandatory = $true)]
     [string]$OutFile,
@@ -104,6 +112,7 @@ $template = @'
 $ErrorActionPreference = 'Stop'
 $SourceCommit = '__SOURCE_COMMIT__'
 $ClipId = '__CLIP_ID__'
+$AuthorizedClipPath = '__CLIP_PATH__'
 $RangeHeadSha = '__RANGE_HEAD_SHA__'
 $LlrawprocBlobId = '__LLRAWPROC_BLOB_ID__'
 $ExeName = '__EXE_NAME__'
@@ -238,36 +247,6 @@ function Wait-PresentMonCapture([int]$TimeoutSeconds = 35) {
     [pscustomobject]@{ status='done_marker_timeout'; exitCode=$null }
 }
 
-function Resolve-ClipById([string]$CacheDir, [string]$Id) {
-    # Never concatenates $Id, or any fixed raw-video extension, with a literal
-    # extension string (CLIP RULE / NA-4) -- and never reconstructs one by splitting
-    # its characters across literals either, which is the same evasion in a different
-    # shape. Mirrors the historical bachelor job family's Get-MlvPartFrameTotal filter:
-    # a raw multi-part video's primary file and its numbered continuation parts all
-    # share one BaseName. Continuation parts are `.M00`, `.M01`, and so on -- a letter
-    # followed by two digits. The allowed primary extension is derived ENTIRELY from
-    # the continuation parts actually present for this id (their letter, read from the
-    # files themselves), not from any hardcoded raw-video extension: only that
-    # derived-letter + "LV" extension is accepted as the primary, so an unrelated lone
-    # four-character-extension file (e.g. a stray .MP4) can no longer be mistaken for
-    # the clip's primary the way a bare "starts with M" predicate allowed.
-    $candidates = @(Get-ChildItem -LiteralPath $CacheDir -File | Where-Object {
-        $_.BaseName -ceq $Id -and $_.Extension.Length -eq 4
-    })
-    if ($candidates.Count -eq 0) { throw "cache has no candidate files for clip id $Id" }
-    $parts = @($candidates | Where-Object { $_.Extension.Substring(2) -cmatch '^\d{2}$' })
-    if ($parts.Count -eq 0) { throw "no continuation part files found for clip id $Id; cannot derive the raw-video primary extension (fail closed rather than guess)" }
-    $letterPrefixes = @($parts | ForEach-Object { $_.Extension.Substring(1, 1) } | Select-Object -Unique)
-    if ($letterPrefixes.Count -ne 1) { throw "continuation parts for clip id $Id do not share one letter prefix: $($letterPrefixes -join ',')" }
-    $primaryExtensionUpper = $letterPrefixes[0].ToUpperInvariant() + 'LV'
-    $primary = @($candidates | Where-Object {
-        -not ($_.Extension.Substring(2) -cmatch '^\d{2}$') -and
-        $_.Extension.Substring(1).ToUpperInvariant() -ceq $primaryExtensionUpper
-    })
-    if ($primary.Count -ne 1) { throw "expected exactly one primary clip file for id $Id, found $($primary.Count)" }
-    return $primary[0].FullName
-}
-
 function Get-FrameRows([string]$RawLog) {
     $rows = [System.Collections.Generic.List[object]]::new()
     $keys = @(
@@ -366,7 +345,11 @@ foreach ($check in $manifestChecks) {
 foreach ($name in @($PresentMonName, 'run-release-gui-smoke.ps1')) {
     if (-not (Test-Path -LiteralPath (Join-Path $Cache $name))) { throw "cache missing $name" }
 }
-$clipPath = Resolve-ClipById $Cache $ClipId
+# NA-4: open exactly the one authorized path baked in by the generator -- no lookup.
+$clipPath = $AuthorizedClipPath
+if ((Split-Path -Parent $clipPath) -ine $Cache) { throw "authorized clip path is not directly inside the agent cache" }
+if ([IO.Path]::GetFileNameWithoutExtension($clipPath) -cne $ClipId) { throw "authorized clip path does not name clip id $ClipId" }
+if (-not (Test-Path -LiteralPath $clipPath -PathType Leaf)) { throw "authorized clip path is missing on this host" }
 
 # $Work and $Pub already exist (created at job start, alongside the TEMP/TMP scratch
 # dir under $Work) -- do not remove/recreate $Work here, which would delete the live
@@ -572,6 +555,7 @@ exit 0
 $text = $template.
     Replace('__SOURCE_COMMIT__', $SourceCommit).
     Replace('__CLIP_ID__', $ClipId).
+    Replace('__CLIP_PATH__', $ClipPath.Replace("'", "''")).
     Replace('__RANGE_HEAD_SHA__', $SourceCommit).
     Replace('__LLRAWPROC_BLOB_ID__', $llrawprocBlobId).
     Replace('__EXE_NAME__', $exeName).
