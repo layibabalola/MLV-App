@@ -47,6 +47,13 @@ Writes `<jobId>-source.zip` (a `git archive` of the commit) and `<jobId>.job.ps1
 (`jobId = playback-attr-3-cuda-dllpair-<sha12>`). Drop both into the Ultra-Magnus agent inbox
 (`G:\Temp\mlv-gpu-profile\agent\inbox`). On that host the job:
 
+0. **verifies the source archive before expanding it.** The generator prints
+   `sourceArchiveSha256` and bakes it in; the job refuses at **exit 8** unless the arriving bytes
+   hash to it *and* the commit id `git archive` stamps into the zip's EOCD comment equals
+   `-SourceCommit`. Everything below is a claim about the extracted source, so the claim is
+   pinned first. The verified sha is recorded as `dll-pair-manifest.json`'s
+   `sourceArchiveSha256`. `pwsh -File <jobId>.job.ps1 -VerifyOnly` runs exactly this prefix and
+   exits, writing nothing -- use it to confirm a drop landed intact before the agent picks it up;
 1. builds **both** DLLs with the tracked backend scripts from the extracted source --
    `tools/gpu/backend/build-backend-dll.ps1` (`igpu_recon_cuda.dll`) and
    `tools/gpu/backend/amaze-debayer-dll.ps1` (`igpu_amaze_debayer_cuda.dll`);
@@ -61,7 +68,8 @@ Writes `<jobId>-source.zip` (a `git archive` of the commit) and `<jobId>.job.ps1
    `{sourceCommit, cudaArch, nvccVersion, files{name: lowercase sha256}, pendingSymbolPresence,
    builtOnHost}`.
 
-Per-step exit codes: 3 source archive, 4 backend sources, 5 MSVC, 6 CUDA toolkit, 7 CUDA runtime,
+Per-step exit codes: 3 source archive missing, **8 source archive does not bind**, 4 backend
+sources, 5 MSVC, 6 CUDA toolkit, 7 CUDA runtime,
 11 recon build, 12 AMaZE build/exports, 13 parity harness (only with `-RequireParityHarness`),
 14 architecture proof, 15 export inspection, 16 recon exports absent, 20-22 publish.
 
@@ -88,7 +96,10 @@ pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-assemble.ps1
 
 It verifies the pair manifest (`sourceCommit` equal to `-SourceCommit`, every file's sha256
 matching the bytes on disk, a boolean `pendingSymbolPresence`) **before** deploying anything,
-then builds the Release exe from a clean `git archive`: `build_buildinfo.h` injected into the
+then builds the Release exe from a clean `git archive` -- verified through the same
+`Assert-AttrCudaSourceArchive` the Ultra-Magnus job uses, so the zip's EOCD comment has to
+declare `-SourceCommit` and the verified sha lands in `build.json` as `sourceArchiveSha256`.
+Then: `build_buildinfo.h` injected into the
 build dir before `qmake` (an archive has no `.git`, so the qmake-time probe would stamp
 "unknown"), `qmake`, `mingw32-make -B release`, `windeployqt --release --no-translations
 --compiler-runtime`, plus the four MinGW runtime DLLs `--compiler-runtime` misses (`libgomp-1`
@@ -103,7 +114,12 @@ Published into `<build-dir>`, `build.json` **LAST**:
 - `MLVApp-playback-attr-3-cuda-<sha12>.exe`
 - `igpu_recon_cuda-playback-attr-3-cuda-<sha12>.dll`
 - `playback-attr-3-cuda-<sha12>-build.json` -- the layout the attribution job verifies, plus
-  `pendingSymbolPresence`, `dllPairManifestSha256` and `exeBuiltOnHost`.
+  `pendingSymbolPresence`, `dllPairManifestSha256`, `sourceArchiveSha256` and `exeBuiltOnHost`.
+
+**Keep the `MANIFEST_SHA256=` value off the `RESULT=ASSEMBLE_OK` line.** It is the lowercase
+sha256 of the published `build.json`, and step 4 will not run without it. The staging generator
+in step 3 echoes the same value as `buildManifestSha256`, so either receipt will do -- but it
+must come from a step that ran, never from re-hashing a file someone dropped into the cache.
 
 ## 3. Stage into the Bachelor cache
 
@@ -125,23 +141,43 @@ Run this **only inside a lane whose prompt carries the owner-typed `CLIP_OR_NONE
 
 ```powershell
 pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
-    -SourceCommit <same-40-hex-sha> -ClipId <id> `
+    -SourceCommit <same-40-hex-sha> -BuildManifestSha256 <64-lowercase-hex> -ClipId <id> `
     -ClipPath '<the lane prompt CLIP_OR_NONE path>' -OutFile <staging-dir>\<jobId>.job.ps1
 ```
 
-On Bachelor the emitted job refuses to run unless that path sits directly in the agent cache,
-names that clip id, and exists. It requires the staged `build.json`, verifies all three cache
-artifacts against it, and **reads `pendingSymbolPresence` from it** -- an absent or non-boolean
-field is a refusal. PresentMon runs as a direct child, inheriting the job-owned TEMP; if the
-agent account lacks ETW trace rights the job fails `PRESENTMON_FAILED rc=6` and never falls back
-to the elevated scheduled task.
+**`-BuildManifestSha256` is mandatory, and the hub passes the sha the assembler printed**
+(`MANIFEST_SHA256=` on its `RESULT=ASSEMBLE_OK` line, echoed by the staging generator as
+`buildManifestSha256`). The Bachelor cache is mutable and the job does not own it: without this
+value the job would believe whichever same-named `build.json` is sitting there, and replacing it
+together with matching artifacts forges `pendingSymbolPresence` and the whole DLL association in
+one move. The job hashes the cached manifest and refuses **before `ConvertFrom-Json`** -- a
+parsed field is already a trusted field -- and then requires its `sourceCommit` to equal
+`-SourceCommit`, its `dllPairManifestSha256` to be present and well formed, and its
+`pendingSymbolPresence` to be a real boolean. Both hashes land in `evidence-manifest.json` under
+`buildManifest`.
 
-Before any verdict the job parses the run's own `gpu_playback_recon.eligibility` line and exits
-**15 `BACKEND_NOT_AVAILABLE`** unless `cuda_backend_available=1` **and** `r16_available=1`,
-recording both plus `r16_reason`. Other outcomes: 12 `VENUE_NOT_QUIESCENT`, 13
-`GPU_RECON_FRAMES_ZERO`, 14 `CPU_FALLBACK_DETECTED`, 0 `MEASUREMENT_CAPTURED`. It publishes
-`presentmon-series.csv`, `logs\mlvapp.log`, `evidence-manifest.json`, `provenance.json` and
-`artifact-index.json`.
+On Bachelor the emitted job refuses to run unless the clip path sits directly in the agent cache,
+names that clip id, and exists. It verifies all three cache artifacts against the authenticated
+`build.json` and **reads `pendingSymbolPresence` from it**. PresentMon runs as a direct child,
+inheriting the job-owned TEMP; if the agent account lacks ETW trace rights the job fails
+`PRESENTMON_FAILED rc=6` and never falls back to the elevated scheduled task.
+
+**Which log the gate reads.** `run-release-gui-smoke.ps1` does not write into
+`<output dir>\logs`; it creates a GUID-nonced `logs-<stem>-<nonce>` directory and publishes the
+per-run snapshot as `"$outputPath.run.log"`, exposed as `result.json` `log.path` and bound by
+`evidence.runLogSnapshot.sha256`. The job reads **that** file -- resolved from the result of the
+run it just executed, required to sit inside its own work tree, and required to hash to the
+declared value -- and exits **16 `SMOKE_LOG_UNAVAILABLE`** if it is absent, unbound or
+elsewhere. The aggregate rotating app log is recorded as `aggregateSourcePath` and never read:
+the runner's own comment says it may grow after the run and carries no comparison authority.
+
+Before any verdict the job takes the run's own `gpu_playback_recon.eligibility` line from that
+snapshot and exits **15 `BACKEND_NOT_AVAILABLE`** unless `cuda_backend_available=1` **and**
+`r16_available=1`, recording both plus `r16_reason`. A log with no eligibility line at all is
+refused the same way: absence of the diagnostic is not evidence of eligibility. Other outcomes:
+12 `VENUE_NOT_QUIESCENT`, 13 `GPU_RECON_FRAMES_ZERO`, 14 `CPU_FALLBACK_DETECTED`, 0
+`MEASUREMENT_CAPTURED`. It publishes `presentmon-series.csv`, `logs\smoke-run.log`,
+`evidence-manifest.json`, `provenance.json` and `artifact-index.json`.
 
 The owner's consent for the clip on this card is recorded at
 `.claude-state/coordination/dual-lane/receipts/owner-footage-consent-20260916.json`, with its
@@ -151,12 +187,12 @@ authorization is the owner-typed path line. The job cites the receipt's file nam
 
 ## 5. Extract the histogram
 
-Pull `presentmon-series.csv` and `logs\mlvapp.log` from the attribution artifacts, then:
+Pull `presentmon-series.csv` and `logs\smoke-run.log` from the attribution artifacts, then:
 
 ```powershell
 py -3 tools\profiling\refresh_period_histogram.py `
     --presentmon-csv <artifacts-dir>\presentmon-series.csv `
-    --frame-log <artifacts-dir>\logs\mlvapp.log `
+    --frame-log <artifacts-dir>\logs\smoke-run.log `
     --refresh-period-ms <Bachelor's panel refresh period in ms> `
     --out <artifacts-dir>\refresh-period-histogram.json
 ```

@@ -62,7 +62,11 @@
 #
 # Usage:
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
-#       -SourceCommit <40-hex> -ClipId M16-1243 -ClipPath <the lane's CLIP_OR_NONE path> -OutFile <path>\<jobId>.job.ps1
+#       -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> `
+#       -ClipId M16-1243 -ClipPath <the lane's CLIP_OR_NONE path> -OutFile <path>\<jobId>.job.ps1
+#
+# -BuildManifestSha256 is the sha the assembler printed (MANIFEST_SHA256= on its RESULT line)
+# and the staging generator echoed as buildManifestSha256; see docs/playback-attr-3-cuda.md.
 
 [CmdletBinding()]
 param(
@@ -83,6 +87,17 @@ param(
 
     [Parameter(Mandatory = $true)]
     [string]$OutFile,
+
+    # The lowercase sha256 of the build.json that the staging job published into the Bachelor
+    # cache -- printed by tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1
+    # (MANIFEST_SHA256= on its RESULT line) and echoed as buildManifestSha256 by
+    # tools/profiling/bachelor/playback-attr-3-cuda-stage-job.ps1. MANDATORY (sol, PR #133 r2):
+    # without it the job trusts whichever same-named manifest sits in the mutable cache, and
+    # replacing build.json plus matching artifacts forges pendingSymbolPresence and the DLL
+    # association in one move.
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-f]{64}$')]
+    [string]$BuildManifestSha256,
 
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path,
 
@@ -115,6 +130,7 @@ Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
 # functions are spliced into its text VERBATIM at generation time. The test suite executes the
 # module copy, so the code under test is the code that runs on Bachelor.
 $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
+    'Assert-AttrCudaBuildManifest',
     'Resolve-AttrCudaSmokeRunLog',
     'Get-AttrCudaLastEligibilityLine',
     'Get-AttrCudaEligibilityVerdict'
@@ -145,6 +161,7 @@ $template = @'
 $ErrorActionPreference = 'Stop'
 $SourceCommit = '__SOURCE_COMMIT__'
 $ClipId = '__CLIP_ID__'
+$BuildManifestSha256 = '__BUILD_MANIFEST_SHA256__'
 $AuthorizedClipPath = '__CLIP_PATH__'
 $RangeHeadSha = '__RANGE_HEAD_SHA__'
 $LlrawprocBlobId = '__LLRAWPROC_BLOB_ID__'
@@ -336,20 +353,23 @@ foreach ($item in @(
 # three cached files' sha256 is verified against it before anything is trusted.
 $buildManifestName = "playback-attr-3-cuda-$($SourceCommit.Substring(0,12))-build.json"
 $buildManifestPath = Join-Path $Cache $buildManifestName
-if (-not (Test-Path -LiteralPath $buildManifestPath)) { throw "cache missing build manifest $buildManifestName (required; existence of the exe/DLL/pkg alone is not sufficient)" }
-$buildManifest = Get-Content -Raw -LiteralPath $buildManifestPath | ConvertFrom-Json
-if ($buildManifest.sourceCommit -ne $SourceCommit) { throw "build manifest $buildManifestName sourceCommit=$($buildManifest.sourceCommit) does not match pinned $SourceCommit" }
+# AUTHENTICATE THE MANIFEST BEFORE READING A SINGLE FIELD OF IT (sol, PR #133 r2). The cache is
+# mutable and this job does not own it; a same-named build.json with matching artifacts would
+# otherwise forge pendingSymbolPresence and the whole DLL association. $BuildManifestSha256 was
+# baked in by the generator from the sha the assembler/staging step printed, and the check runs
+# BEFORE ConvertFrom-Json -- a parsed field is already a trusted field. The same call also
+# requires sourceCommit to equal the pinned commit, dllPairManifestSha256 to be present (so the
+# exe's DLL pair is chained back to the Ultra-Magnus manifest rather than merely asserted), and
+# pendingSymbolPresence to be a real boolean.
+$buildManifest = Assert-AttrCudaBuildManifest -Path $buildManifestPath -ExpectedSha256 $BuildManifestSha256 -ExpectedSourceCommit $SourceCommit
 # pendingSymbolPresence is READ, never re-derived here (swarm ruling
 # .claude-state/fleet-runs/swarm-attr3-buildhost-20260916T2150Z/SYNTHESIS.md): this host has no
 # VC tools at all, so the old on-Bachelor MSVC export-inspection probe could only ever throw.
-# The symbol test now runs on the host that built the DLL
+# The symbol test runs on the host that built the DLL
 # (tools/profiling/ultramagnus/playback-attr-3-cuda-dll-job.ps1) and is carried in the build
-# manifest. gpu_job_result_provenance.py requires a real boolean, so an absent or non-boolean
-# field fails this job closed rather than being recorded as null.
-$pendingSymbolPresence = $buildManifest.pendingSymbolPresence
-if ($pendingSymbolPresence -isnot [bool]) {
-    throw "build manifest $buildManifestName is missing a boolean pendingSymbolPresence (got '$pendingSymbolPresence'); the building host must record the igpu_recon_ export test"
-}
+# manifest, whose bytes are now authenticated above.
+$pendingSymbolPresence = [bool]$buildManifest.pendingSymbolPresence
+$dllPairManifestSha256 = ([string]$buildManifest.dllPairManifestSha256).ToLowerInvariant()
 $manifestChecks = @(
     @{ label = 'packageZip'; path = (Join-Path $Cache $BasePackageZip); expectedSha = $buildManifest.packageZip.sha256 },
     @{ label = 'exe'; path = (Join-Path $Cache $ExeName); expectedSha = $buildManifest.exe.sha256 },
@@ -614,6 +634,9 @@ $manifest = [ordered]@{
     clipId = $ClipId
     consentReceipt = $ConsentReceiptFileName
     scaleFactor = 4
+    # The authenticated chain, end to end: this manifest's own bytes, and the DLL-pair manifest
+    # it names. Neither is a claim the measurement host had to take on trust.
+    buildManifest = [ordered]@{ name=$buildManifestName; sha256=$BuildManifestSha256; dllPairManifestSha256=$dllPairManifestSha256 }
     executable = [ordered]@{ name=$ExeName; sha256=$cacheExeSha }
     reconDll = [ordered]@{ name=$ReconName; sha256=(Get-Sha $reconDll) }
     presentMon = [ordered]@{ name=$PresentMonName; sha256=$PresentMonSha; launch='direct-child-inherits-job-temp'; positiveSamples=$pmRows.Count }
@@ -640,6 +663,7 @@ exit 0
 $text = $template.
     Replace('__SOURCE_COMMIT__', $SourceCommit).
     Replace('__CLIP_ID__', $ClipId).
+    Replace('__BUILD_MANIFEST_SHA256__', $BuildManifestSha256.ToLowerInvariant()).
     Replace('__CLIP_PATH__', $ClipPath.Replace("'", "''")).
     Replace('__RANGE_HEAD_SHA__', $SourceCommit).
     Replace('__LLRAWPROC_BLOB_ID__', $llrawprocBlobId).
@@ -661,6 +685,7 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Dir
 [pscustomobject]@{
     outFile = $OutFile
     sourceCommit = $SourceCommit
+    buildManifestSha256 = $BuildManifestSha256.ToLowerInvariant()
     clipId = $ClipId
     exeName = $exeName
     reconName = $reconName

@@ -187,6 +187,68 @@ function New-AttrCudaBuildInfoHeader {
 "@
 }
 
+function Assert-AttrCudaBuildManifest {
+    <#
+    .SYNOPSIS
+    Authenticate a staged build.json before a single one of its fields is trusted, and return it.
+    .DESCRIPTION
+    The hash chain used to stop at staging (sol, PR #133 r2): the attribution job took whichever
+    same-named build.json happened to be in the MUTABLE agent cache and believed its
+    pendingSymbolPresence, its artifact sha256s and its sourceCommit. Replacing build.json plus
+    the matching artifacts forged all three at once.
+    So: the file's own sha256 is checked against a value baked in by the generator BEFORE
+    ConvertFrom-Json runs -- parse order matters, because a parsed field is already a trusted
+    field. Then three claims the downstream evidence rests on:
+      - sourceCommit must equal the commit the job was generated for;
+      - dllPairManifestSha256 must be present and well formed, so the exe's DLL pair is itself
+        chained back to the Ultra-Magnus manifest rather than merely asserted;
+      - pendingSymbolPresence must be a real boolean, because gpu_job_result_provenance.py
+        rejects null/omitted and this host cannot re-derive it.
+    Throws with a distinguishable ATTRCUDA_BUILD_MANIFEST_* token; returns the parsed manifest.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSha256,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSourceCommit
+    )
+
+    if ($ExpectedSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "ATTRCUDA_BUILD_MANIFEST_SHA_MALFORMED expected sha256 is not 64 lowercase hex: '$ExpectedSha256'"
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "ATTRCUDA_BUILD_MANIFEST_MISSING $Path"
+    }
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $ExpectedSha256) {
+        throw "ATTRCUDA_BUILD_MANIFEST_SHA_MISMATCH $Path expected=$ExpectedSha256 actual=$actual"
+    }
+
+    $manifest = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+    if ($null -eq $manifest) { throw "ATTRCUDA_BUILD_MANIFEST_UNPARSEABLE $Path" }
+    $commitProperty = $manifest.PSObject.Properties['sourceCommit']
+    $commit = if ($null -eq $commitProperty) { '' } else { [string]$commitProperty.Value }
+    if ($commit -ne $ExpectedSourceCommit) {
+        throw "ATTRCUDA_BUILD_MANIFEST_COMMIT_MISMATCH $Path declares '$commit', expected '$ExpectedSourceCommit'"
+    }
+    $dllPairProperty = $manifest.PSObject.Properties['dllPairManifestSha256']
+    $dllPairSha = if ($null -eq $dllPairProperty) { '' } else { ([string]$dllPairProperty.Value).ToLowerInvariant() }
+    if ($dllPairSha -notmatch '^[0-9a-f]{64}$') {
+        throw "ATTRCUDA_BUILD_MANIFEST_DLLPAIR_UNBOUND $Path carries no well-formed dllPairManifestSha256 (got '$dllPairSha')"
+    }
+    $symbolProperty = $manifest.PSObject.Properties['pendingSymbolPresence']
+    if ($null -eq $symbolProperty -or $symbolProperty.Value -isnot [bool]) {
+        $observed = if ($null -eq $symbolProperty) { '<absent>' } else { [string]$symbolProperty.Value }
+        throw "ATTRCUDA_BUILD_MANIFEST_SYMBOL_PRESENCE_INVALID $Path pendingSymbolPresence is not a boolean (got '$observed')"
+    }
+    $manifest
+}
+
 function Resolve-AttrCudaSmokeRunLog {
     <#
     .SYNOPSIS
@@ -374,6 +436,7 @@ Export-ModuleMember -Function `
     Get-AttrCudaEmbeddedFunctionSource, `
     Get-AttrCudaZipArchiveComment, `
     Assert-AttrCudaSourceArchive, `
+    Assert-AttrCudaBuildManifest, `
     Resolve-AttrCudaSmokeRunLog, `
     Get-AttrCudaLastEligibilityLine, `
     Get-AttrCudaEligibilityVerdict

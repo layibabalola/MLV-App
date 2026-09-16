@@ -250,13 +250,39 @@ class AttributionJobTests(unittest.TestCase):
                 self.assertNotIn(token, lowered)
 
     def test_pending_symbol_presence_is_read_from_the_build_manifest(self) -> None:
-        self.assertIn("$pendingSymbolPresence = $buildManifest.pendingSymbolPresence", self.text)
+        self.assertIn("$pendingSymbolPresence = [bool]$buildManifest.pendingSymbolPresence", self.text)
 
     def test_a_missing_or_non_boolean_pending_symbol_presence_is_refused(self) -> None:
-        self.assertRegex(
-            self.text,
-            r"if \(\$pendingSymbolPresence -isnot \[bool\]\) \{\s*\n\s*throw",
+        # The check moved into the shared authentication call, which the job cannot get past.
+        self.assertIn(
+            "ATTRCUDA_BUILD_MANIFEST_SYMBOL_PRESENCE_INVALID", _read(SHARED_MODULE)
         )
+
+    def test_the_build_manifest_is_authenticated_before_it_is_parsed(self) -> None:
+        # The cache is mutable and this job does not own it: a same-named build.json with
+        # matching artifacts would otherwise forge pendingSymbolPresence and the DLL association.
+        self.assertIn("[ValidatePattern('^[0-9a-f]{64}$')]\n    [string]$BuildManifestSha256", self.text)
+        self.assertIn(
+            "$buildManifest = Assert-AttrCudaBuildManifest -Path $buildManifestPath "
+            "-ExpectedSha256 $BuildManifestSha256 -ExpectedSourceCommit $SourceCommit",
+            self.text,
+        )
+        module = _read(SHARED_MODULE)
+        function = module[module.index("function Assert-AttrCudaBuildManifest") :]
+        function = function[: function.index("\nfunction ")]
+        # Statement positions, not prose: the doc comment names ConvertFrom-Json too.
+        self.assertLess(
+            function.index('throw "ATTRCUDA_BUILD_MANIFEST_SHA_MISMATCH'),
+            function.index("$manifest = [IO.File]::ReadAllText($Path) | ConvertFrom-Json"),
+            "the hash must be checked before the manifest is parsed",
+        )
+
+    def test_the_build_manifest_must_chain_to_the_dll_pair_manifest(self) -> None:
+        self.assertIn("ATTRCUDA_BUILD_MANIFEST_DLLPAIR_UNBOUND", _read(SHARED_MODULE))
+        self.assertIn("dllPairManifestSha256=$dllPairManifestSha256", self.text)
+
+    def test_the_build_manifest_source_commit_must_equal_the_generators(self) -> None:
+        self.assertIn("ATTRCUDA_BUILD_MANIFEST_COMMIT_MISMATCH", _read(SHARED_MODULE))
 
     def test_backend_availability_gate_is_present(self) -> None:
         # The parse and the decision live in the shared module (and are embedded verbatim into

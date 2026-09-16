@@ -388,5 +388,9 @@ try {
 }
 $StepLog['publishManifest'] = 0
 
-Write-Output "RESULT=ASSEMBLE_OK SOURCE=$SourceCommit EXE=$($names.exeName) DLL=$($names.reconName) PKG=$($names.packageZipName) MANIFEST=$($names.buildManifestName) OUT=$OutDir"
+# MANIFEST_SHA256 is the value the hub hands to the attribution generator as
+# -BuildManifestSha256; without it that job would trust whichever same-named build.json is in
+# the mutable Bachelor cache. Hashed after the atomic rename, so it describes the published file.
+$publishedManifestSha256 = Get-ShaLower (Join-Path $OutDir $names.buildManifestName)
+Write-Output "RESULT=ASSEMBLE_OK SOURCE=$SourceCommit EXE=$($names.exeName) DLL=$($names.reconName) PKG=$($names.packageZipName) MANIFEST=$($names.buildManifestName) MANIFEST_SHA256=$publishedManifestSha256 OUT=$OutDir"
 exit 0
