@@ -419,7 +419,10 @@ $rows = Get-FrameRows $rawLog
 $rows | Export-Csv -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -NoTypeInformation
 
 $gpuSummary = Get-LastGpuSummary $rawLog
-$gpuFramesTotal = $gpuSummary.gpuPreviewFrames + $gpuSummary.gpuReconReadbackFrames + $gpuSummary.gpuTextureReadbackFrames + $gpuSummary.gpuTextureNoReadbackFrames
+# CUDA gate fix (MAJOR): gpu_preview_frames is not CUDA reconstruction -- a run with
+# only preview frames and zero recon/readback/texture frames must not pass as CUDA-
+# exercised. Only recon/texture readback and no-readback frames count toward the gate.
+$gpuFramesTotal = $gpuSummary.gpuReconReadbackFrames + $gpuSummary.gpuTextureReadbackFrames + $gpuSummary.gpuTextureNoReadbackFrames
 if ($gpuFramesTotal -le 0) {
     $fallback = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='GPU_RECON_FRAMES_ZERO'
