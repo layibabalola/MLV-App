@@ -340,6 +340,7 @@ function Write-DispatchReservation {
         # Unknown spend remains charged; success at zero cost remains charged.
         $row.state = if ($evidence.laneCostReported -and $evidence.laneCostUsd -eq 0 -and $null -ne $ObservedExit -and $ObservedExit -ne 0) { 'refunded' } else { 'charged' }
     }
+    # MLV-DISPATCH-LEDGER-WRITER-V3-SERIALIZED (see Invoke-Lane.ps1 Add-DispatchLedgerRow; the guard checks both files).
     # Same machine-wide mutex as Invoke-Lane.ps1's Add-DispatchLedgerRow: unserialized appends can
     # overwrite each other's row.
     $ledgerMutex = [Threading.Mutex]::new($false, 'Global\MLV-App-DispatchLedger')

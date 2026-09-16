@@ -3429,7 +3429,7 @@ def coverage_repo(tmp_path, landed=True):
     ratio_source_commit(repo, "base", RATIO_SOURCE_AS_OF - 30 * RATIO_SOURCE_DAY, {"docs/base.txt": "base"})
     # The ledger writer "lands" on the source ref before the window; rows older than this commit never start the clock.
     if landed:
-        ratio_source_commit(repo, "land ledger writer", COVERAGE_LANDED, {"tools/coordination/Invoke-Lane.ps1": "function Add-DispatchLedgerRow([string]$Path, $Row) { }\n"})
+        ratio_source_commit(repo, "land ledger writer", COVERAGE_LANDED, {"tools/coordination/Invoke-Lane.ps1": "function Add-DispatchLedgerRow([string]$Path, $Row) { } # MLV-DISPATCH-LEDGER-WRITER-V3-SERIALIZED\n"})
     for index in range(10):
         if index < 6:
             subject, path = f"product change {index} (#{101 + index % 2})", f"src/p{index}.txt"
@@ -3748,3 +3748,28 @@ def test_loop_budget_ignores_invoke_lane_ledger_rows_and_never_halts_on_linked(t
          'lane': 'sol', 'card': 'REVIEW', 'runDir': 'R2', 'receiptPath': 'R2/sol-001.receipt.json', 'recordedUtc': '2026-09-05T10:00:00Z'},
     ]
     assert _run_reservation_budget(tmp_path, rows) == 1
+
+
+@pytest.mark.parametrize("writer,text", [
+    # The unserialized round-2 runner already had the writer function but no mutex (sol, PR #127 r3).
+    ("Invoke-Lane.ps1", "function Add-DispatchLedgerRow([string]$Path, $Row) { [IO.File]::Open($Path, 'Append') }\n"),
+    ("Invoke-Workstream.ps1", "function Write-DispatchReservation { Add-Content -LiteralPath $ReservationsPath -Value $row }\n"),
+])
+def test_ratio_coverage_a_writer_without_the_serialized_marker_is_stale_even_with_an_old_file_time(tmp_path, writer, text):
+    repo, fleet, rows, _, _ = coverage_enforced_fixture(tmp_path)
+    worktree = tmp_path / "unsafe"
+    ratio_source_git(repo, "worktree", "add", "-q", str(worktree))
+    target = worktree / "tools" / "coordination" / writer
+    target.write_text(text, encoding="utf-8")
+    os.utime(target, (COVERAGE_WINDOW_START - 9999, COVERAGE_WINDOW_START - 9999))
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    payload = coverage_guard(repo, ledger, fleet)
+    assert "COVERAGE_STALE_RUNNER_PRESENT" in payload["reasons"], payload["reasons"]
+    assert payload["verdict"] == "RED"
+
+
+def test_ratio_coverage_marker_is_carried_by_both_shipped_writers_and_the_guard():
+    marker = "MLV-DISPATCH-LEDGER-WRITER-V3-SERIALIZED"
+    for path in (LANE_RUNNER, RATIO_WORKSTREAM, RATIO_SOURCE_GUARD):
+        assert marker in path.read_text(encoding="utf-8"), path

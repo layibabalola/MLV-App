@@ -48,6 +48,10 @@ launch from the rate.
 Without `-RunDir`, `Invoke-Lane.ps1` writes its receipt under the board's
 `.claude-state/fleet-runs`.
 
+Rows with venue `invoke-lane` exist only for this coverage accounting.
+`Invoke-WorkstreamLoop.ps1` skips them when it computes its daily dispatch
+budget, so hub reviews and swarms never spend the unattended loop's budget.
+
 Coverage is `COMPLETE` only when every check below holds. Otherwise it is
 `PARTIAL`, and each failed check adds its reason code after
 `RED_DISPATCH_COVERAGE_PARTIAL`:
@@ -61,8 +65,8 @@ Coverage is `COMPLETE` only when every check below holds. Otherwise it is
 | Every `linked` row is honoured | `COVERAGE_LINK_UNMATCHED` |
 | Every `mlv-app/fleet-lane-receipt/v1` receipt that started in the window is named by a ledger row. The guard reads receipts under the board's `.claude-state/fleet-runs` and under that path in every registered worktree, because an older runner keeps receipts in its own worktree. Each receipt is judged by its `startedUtc`, never its file time. | `COVERAGE_RECEIPT_UNRESERVED` |
 | Every in-window versioned row naming a receipt under those trees still has that receipt | `COVERAGE_RESERVATION_RECEIPT_MISSING` |
-| No registered checkout (the main worktree included) has an `Invoke-Lane.ps1` without the ledger writer. `-RunDir` can point anywhere, so an older runner's receipt may never be scanned; the runner itself can be. | `COVERAGE_STALE_RUNNER_PRESENT` |
-| No registered checkout's runner file was replaced inside the window, since it may have been an older runner earlier in the window | `COVERAGE_RUNNER_UPDATED_IN_WINDOW` |
+| In every registered checkout (the main worktree included), both ledger writers, `Invoke-Lane.ps1` and `Invoke-Workstream.ps1`, carry the token `MLV-DISPATCH-LEDGER-WRITER-V3-SERIALIZED`. The function name alone is not enough, because an earlier writer had it without the mutex. `-RunDir` can point anywhere, so an older runner's receipt may never be scanned, but the runner itself can be. The same token marks when enforcement landed. | `COVERAGE_STALE_RUNNER_PRESENT` |
+| No registered checkout's writer file was replaced inside the window, since it may have been an older runner earlier in the window | `COVERAGE_RUNNER_UPDATED_IN_WINDOW` |
 | Every receipt can be read | `COVERAGE_RECEIPT_UNREADABLE` or `COVERAGE_RECEIPT_IN_FLIGHT` |
 | The receipt tree can be read | `COVERAGE_RECEIPTS_UNAVAILABLE` |
 
@@ -73,7 +77,7 @@ does not count.
 
 The landing is the committer time of the oldest first-parent commit from which
 `tools/coordination/Invoke-Lane.ps1` on the source ref continuously carries the
-ledger writer. Rows written earlier, for example by an unmerged candidate, never
+serialized-writer token. Rows written earlier, for example by an unmerged candidate, never
 start the clock.
 
 Coverage therefore cannot be `COMPLETE` until seven days after the writer lands

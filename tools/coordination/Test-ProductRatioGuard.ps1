@@ -13,6 +13,8 @@ Set-StrictMode -Version Latest
 
 $WindowSeconds = 7 * 24 * 60 * 60
 $EmptyTreeSha = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+# Token both ledger writers carry once they append under the shared mutex. Enforcement is bound to it.
+$LedgerWriterMarker = 'MLV-DISPATCH-LEDGER-WRITER-V3-SERIALIZED'
 
 function New-Decision {
     param(
@@ -254,10 +256,14 @@ function Get-StaleRunnerCodes {
     $startUtc = [datetimeoffset]::FromUnixTimeSeconds($StartEpoch).UtcDateTime
     $stale = 0; $updated = 0
     foreach ($worktree in (Get-RegisteredWorktreePaths)) {
-        $runner = Join-Path $worktree 'tools\coordination\Invoke-Lane.ps1'
-        if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { continue }
-        if (-not ([System.IO.File]::ReadAllText($runner)).Contains('function Add-DispatchLedgerRow')) { $stale++ }
-        elseif ([System.IO.File]::GetLastWriteTimeUtc($runner) -ge $startUtc) { $updated++ }
+        # BOTH ledger writers must carry the serialized-writer marker: a runner that merely has the
+        # writer function may predate the mutex and lose rows under contention.
+        foreach ($writer in @('tools\coordination\Invoke-Lane.ps1', 'tools\coordination\Invoke-Workstream.ps1')) {
+            $file = Join-Path $worktree $writer
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+            if (-not ([System.IO.File]::ReadAllText($file)).Contains($LedgerWriterMarker)) { $stale++ }
+            elseif ([System.IO.File]::GetLastWriteTimeUtc($file) -ge $startUtc) { $updated++ }
+        }
     }
     if ($stale -gt 0) { $codes.Add('COVERAGE_STALE_RUNNER_PRESENT') }
     if ($updated -gt 0) { $codes.Add('COVERAGE_RUNNER_UPDATED_IN_WINDOW') }
@@ -435,7 +441,7 @@ try {
     $laneHistory = Invoke-GitLines @('log','--first-parent','--no-show-signature','--no-color','--format=%H%x09%ct',$sourceSha,'--','tools/coordination/Invoke-Lane.ps1')
     foreach ($line in $laneHistory) {
         $parts = $line -split "`t"
-        $carries = @(& git -C $RepoRoot grep -l -F 'function Add-DispatchLedgerRow' $parts[0] -- 'tools/coordination/Invoke-Lane.ps1' 2>$null).Count -gt 0
+        $carries = @(& git -C $RepoRoot grep -l -F $LedgerWriterMarker $parts[0] -- 'tools/coordination/Invoke-Lane.ps1' 2>$null).Count -gt 0
         if (-not $carries) { break }
         $enforcementLandedEpoch = [long]$parts[1]
     }

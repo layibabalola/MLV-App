@@ -150,6 +150,8 @@ function Write-Utf8NoBom([string]$Path, [string]$Content) {
 }
 
 function Add-DispatchLedgerRow([string]$Path, $Row) {
+    # MLV-DISPATCH-LEDGER-WRITER-V3-SERIALIZED - the product-ratio guard requires this exact token in BOTH ledger writer files of every
+    # registered checkout. Change it only together with a change to how rows are serialized.
     # SERIALIZED with every other ledger writer by one machine-wide mutex. FileMode.Append records EOF
     # as each stream's private offset, so two unserialized writers can overwrite each other's row.
     # Invoke-Workstream.ps1's Write-DispatchReservation takes the SAME mutex name; keep them equal.
