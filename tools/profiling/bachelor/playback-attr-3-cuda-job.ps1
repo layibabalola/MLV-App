@@ -51,6 +51,15 @@
 #     verdict, and the job exits 15 (BACKEND_NOT_AVAILABLE) unless
 #     cuda_backend_available=1 and r16_available=1, recording both plus r16_reason.
 #
+# WHICH LOG (sol, PR #133 r2, BLOCKER). The eligibility line is read from the log
+# run-release-gui-smoke.ps1 itself designates for the run just executed --
+# result.json's `log.path`, the "$outputPath.run.log" per-run snapshot it calls the
+# comparison authority -- bound to `evidence.runLogSnapshot.sha256`. NEVER from a glob
+# over out\diagnostic\logs, which cannot match anything: that runner writes into a
+# GUID-nonced logs-<stem>-<nonce> directory. The exact lines relied on are quoted beside
+# the call. A log that is absent, unbound or outside this job's work tree exits 16
+# (SMOKE_LOG_UNAVAILABLE) -- a missing gate is never a passed gate.
+#
 # Usage:
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
 #       -SourceCommit <40-hex> -ClipId M16-1243 -ClipPath <the lane's CLIP_OR_NONE path> -OutFile <path>\<jobId>.job.ps1
@@ -100,6 +109,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
+
+# The emitted job runs on a host with no checkout, so it cannot Import-Module: the verification
+# functions are spliced into its text VERBATIM at generation time. The test suite executes the
+# module copy, so the code under test is the code that runs on Bachelor.
+$embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
+    'Resolve-AttrCudaSmokeRunLog',
+    'Get-AttrCudaLastEligibilityLine',
+    'Get-AttrCudaEligibilityVerdict'
+)
 
 # --- resolve provenance locally, BEFORE the job ever touches Bachelor -------------
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
@@ -180,6 +199,10 @@ $env:TMP = $Scratch
 function Get-Sha([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
 }
+
+# --- verifiers, embedded VERBATIM from tools/profiling/bachelor/AttrCudaArtifacts.psm1 --------
+__EMBEDDED_FUNCTIONS__
+# --- end embedded verifiers -------------------------------------------------------------------
 
 function Save-Json($Object, [string]$Path) {
     $Object | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $Path -Encoding utf8
@@ -298,31 +321,6 @@ function Get-LastGpuSummary([string]$RawLog) {
         gpuTextureReadbackFrames = [int]$last['gpu_texture_readback_frames']
         gpuTextureNoReadbackFrames = [int]$last['gpu_texture_no_readback_frames']
     }
-}
-
-function Get-LastEligibilityDiagnostic([string]$RawLog) {
-    # The gpu_playback_recon.eligibility line (platform/qt/MainWindow.cpp, emitted when
-    # MLVAPP_GPU_PLAYBACK_RECON_ELIGIBILITY_DIAG=1) carries both bare (key=1) and quoted
-    # (key="some text") values, so the value alternation below must handle quotes --
-    # r16_reason is quoted and routinely contains spaces. The LAST line wins: the probe
-    # re-runs per render policy evaluation and the final one describes the run's state.
-    $last = $null
-    foreach ($line in ($RawLog -split "`r?`n")) {
-        if ($line -notmatch 'gpu_playback_recon\.eligibility ') { continue }
-        $values = @{}
-        foreach ($match in [regex]::Matches($line, '(?<key>[A-Za-z0-9_]+)=(?:"(?<quoted>[^"]*)"|(?<bare>[^\s]+))')) {
-            $key = $match.Groups['key'].Value
-            if ($match.Groups['quoted'].Success) { $values[$key] = $match.Groups['quoted'].Value }
-            else { $values[$key] = $match.Groups['bare'].Value }
-        }
-        $last = $values
-    }
-    return $last
-}
-
-function Get-DiagnosticField($Values, [string]$Key) {
-    if ($null -eq $Values -or -not $Values.ContainsKey($Key)) { return $null }
-    [string]$Values[$Key]
 }
 
 foreach ($item in @(
@@ -475,9 +473,38 @@ if ($presentMonDoneResult.status -ne 'done' -or [int]$presentMonDoneResult.exitC
 $rawResult = [IO.File]::ReadAllText($resultPath)
 $resultJson = $rawResult | ConvertFrom-Json -Depth 100
 if ($rawResult -notmatch [regex]::Escape($SourceCommit)) { throw "result does not report pinned source commit $SourceCommit" }
-$logPath = Get-ChildItem -LiteralPath (Join-Path $Work 'out\diagnostic\logs') -Filter 'mlvapp-*.log' -File -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime | Select-Object -Last 1 -ExpandProperty FullName
-if (-not $logPath -or -not (Test-Path -LiteralPath $logPath)) { throw 'MLVApp log missing for high-resolution frame evidence' }
+
+# THE LOG COMES FROM THE RESULT, NOT FROM A GLOB (sol, PR #133 r2). The previous
+# `out\diagnostic\logs\mlvapp-*.log` search could never match: run-release-gui-smoke.ps1 writes
+# into a GUID-nonced `logs-<stem>-<nonce>` directory and publishes the authoritative per-run
+# snapshot separately --
+#
+#     $runNonce = [Guid]::NewGuid().ToString("N")
+#     $logRoot = Join-Path $outputDir ("logs-{0}-{1}" -f $outputStem, $runNonce)
+#     # Preserve the exact lines consumed by this result in a per-run immutable
+#     # snapshot.  The aggregate rotating app log is allowed to grow later and is
+#     # therefore diagnostic only; comparison authority comes from this snapshot.
+#     $runLogSnapshotPath = "$outputPath.run.log"
+#     log = [pscustomobject]@{ path = $runLogSnapshotPath; aggregateSourcePath = ... }
+#     evidence = [pscustomobject]@{ runNonce = $runNonce; runLogSnapshot = $runLogSnapshotBinding }
+#
+# so the job threw "MLVApp log missing" before it could ever reach the eligibility gate below.
+# Resolve-AttrCudaSmokeRunLog reads log.path, requires it to sit inside this job's own work tree
+# and to hash to evidence.runLogSnapshot.sha256, and fails closed at exit 16 otherwise -- absent
+# evidence is never treated as passing evidence.
+try {
+    $runLog = Resolve-AttrCudaSmokeRunLog -ResultJsonPath $resultPath -ContainingRoot $Work
+} catch {
+    $unavailable = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='SMOKE_LOG_UNAVAILABLE'
+        message=$_.Exception.Message; smokeExitCode=$smokeRc; resultJson=$resultPath
+        sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $unavailable (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=SMOKE_LOG_UNAVAILABLE MESSAGE=`"$($_.Exception.Message)`" ARTIFACTS=$Pub"
+    exit 16
+}
+$logPath = $runLog.path
 $rawLog = [IO.File]::ReadAllText($logPath)
 $rows = Get-FrameRows $rawLog
 $rows | Export-Csv -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -NoTypeInformation
@@ -487,28 +514,28 @@ $rows | Export-Csv -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -NoType
 # texture path was not admitted, cannot produce a CUDA attribution -- the frame counters
 # alone would happily describe some other path. Both fields and r16_reason are recorded
 # either way, so a refusal says WHY.
-$eligibility = Get-LastEligibilityDiagnostic $rawLog
-$cudaBackendAvailable = Get-DiagnosticField $eligibility 'cuda_backend_available'
-$r16Available = Get-DiagnosticField $eligibility 'r16_available'
-$r16Reason = Get-DiagnosticField $eligibility 'r16_reason'
+$verdict = Get-AttrCudaEligibilityVerdict -LogText $rawLog
 $diagnostics = [ordered]@{
-    source = 'gpu_playback_recon.eligibility'
-    linePresent = [bool]($null -ne $eligibility)
-    cudaBackendAvailable = $cudaBackendAvailable
-    r16Available = $r16Available
-    r16Reason = $r16Reason
-    cudaBackendAttempted = Get-DiagnosticField $eligibility 'cuda_backend_attempted'
-    cudaBackendResolved = Get-DiagnosticField $eligibility 'cuda_backend_resolved'
-    r16ProbeRan = Get-DiagnosticField $eligibility 'r16_probe_ran'
+    source = $verdict.source
+    linePresent = $verdict.linePresent
+    cudaBackendAvailable = $verdict.cudaBackendAvailable
+    r16Available = $verdict.r16Available
+    r16Reason = $verdict.r16Reason
+    cudaBackendAttempted = $verdict.cudaBackendAttempted
+    cudaBackendResolved = $verdict.cudaBackendResolved
+    r16ProbeRan = $verdict.r16ProbeRan
+    admitted = $verdict.admitted
+    # Which bytes the verdict was read from, and the binding that proves they are this run's.
+    log = [ordered]@{ path = $runLog.path; sha256 = $runLog.sha256; bytes = $runLog.bytes; runNonce = $runLog.runNonce; source = $runLog.source; aggregateSourcePath = $runLog.aggregateSourcePath }
 }
-if ($cudaBackendAvailable -ne '1' -or $r16Available -ne '1') {
+if (-not $verdict.admitted) {
     $refusal = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='BACKEND_NOT_AVAILABLE'
         diagnostics=$diagnostics; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $refusal (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=BACKEND_NOT_AVAILABLE CUDA_BACKEND_AVAILABLE=$cudaBackendAvailable R16_AVAILABLE=$r16Available R16_REASON=`"$r16Reason`" ARTIFACTS=$Pub"
-    exit 15
+    Write-Output "RESULT=BACKEND_NOT_AVAILABLE CUDA_BACKEND_AVAILABLE=$($verdict.cudaBackendAvailable) R16_AVAILABLE=$($verdict.r16Available) R16_REASON=`"$($verdict.r16Reason)`" ARTIFACTS=$Pub"
+    exit $verdict.exitCode
 }
 
 $gpuSummary = Get-LastGpuSummary $rawLog
@@ -576,7 +603,10 @@ Copy-Item -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -Destination (Jo
 Copy-Item -LiteralPath $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv') -Force
 Copy-Item -LiteralPath (Join-Path $legOut 'presentmon-series.csv') -Destination (Join-Path $Pub 'presentmon-series.csv') -Force
 New-Item -ItemType Directory -Path (Join-Path $Pub 'logs') -Force | Out-Null
-Copy-Item -LiteralPath $logPath -Destination (Join-Path $Pub 'logs\mlvapp.log') -Force
+# The per-run snapshot, under the name that says what it is. The aggregate rotating app log is
+# NOT published: the smoke runner is explicit that it may grow after the run and carries no
+# comparison authority.
+Copy-Item -LiteralPath $logPath -Destination (Join-Path $Pub 'logs\smoke-run.log') -Force
 
 $manifest = [ordered]@{
     schema = 'playback-attr-3-cuda-evidence-manifest.v1'
@@ -590,6 +620,7 @@ $manifest = [ordered]@{
     environmentBoundary = [ordered]@{ jobTempDir=$Scratch; allChildrenInheritJobTemp=$true }
     cpuQuiescence = [ordered]@{ samples=$loads; meanPercent=$avgLoad; thresholdPercent=20.0; pass=($avgLoad -le 20.0) }
     frameRows = $rows.Count
+    smokeRunLog = [ordered]@{ path=$runLog.path; sha256=$runLog.sha256; bytes=$runLog.bytes; runNonce=$runLog.runNonce; source=$runLog.source }
     diagnostics = $diagnostics
     gpuSummary = $gpuSummary
     gpuFramesTotal = $gpuFramesTotal
@@ -619,6 +650,9 @@ $text = $template.
     Replace('__PRESENTMON_NAME__', $PresentMonName).
     Replace('__PRESENTMON_SHA256__', $PresentMonSha256).
     Replace('__CONSENT_RECEIPT__', $ConsentReceiptFileName)
+# LAST: the module text is spliced in after every other substitution, so no placeholder rule can
+# rewrite a character inside the verbatim verifier source.
+$text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
 
 $outDir = Split-Path -Parent $OutFile
 if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }

@@ -259,14 +259,22 @@ class AttributionJobTests(unittest.TestCase):
         )
 
     def test_backend_availability_gate_is_present(self) -> None:
+        # The parse and the decision live in the shared module (and are embedded verbatim into
+        # the emitted job); the job wires them to its refusal path.
+        module = _read(SHARED_MODULE)
         for token in ("cuda_backend_available", "r16_available", "r16_reason"):
             with self.subTest(token=token):
-                self.assertIn(token, self.text)
+                self.assertIn(token, module)
         self.assertIn("BACKEND_NOT_AVAILABLE", self.text)
-        self.assertIn("exit 15", self.text)
+        self.assertIn("exit $verdict.exitCode", self.text)
 
     def test_the_gate_requires_both_fields_to_be_one(self) -> None:
-        self.assertIn("if ($cudaBackendAvailable -ne '1' -or $r16Available -ne '1')", self.text)
+        module = _read(SHARED_MODULE)
+        self.assertIn(
+            "$admitted = ($cudaBackendAvailable -eq '1' -and $r16Available -eq '1')", module
+        )
+        self.assertIn("exitCode = $(if ($admitted) { 0 } else { 15 })", module)
+        self.assertIn("if (-not $verdict.admitted)", self.text)
 
     def test_the_gate_runs_before_every_verdict(self) -> None:
         gate = self.text.index("RESULT=BACKEND_NOT_AVAILABLE")
@@ -279,10 +287,27 @@ class AttributionJobTests(unittest.TestCase):
                 self.assertLess(gate, self.text.index(later_verdict))
 
     def test_both_fields_and_the_reason_are_recorded(self) -> None:
-        self.assertIn("cudaBackendAvailable = $cudaBackendAvailable", self.text)
-        self.assertIn("r16Available = $r16Available", self.text)
-        self.assertIn("r16Reason = $r16Reason", self.text)
+        self.assertIn("cudaBackendAvailable = $verdict.cudaBackendAvailable", self.text)
+        self.assertIn("r16Available = $verdict.r16Available", self.text)
+        self.assertIn("r16Reason = $verdict.r16Reason", self.text)
         self.assertIn("diagnostics = $diagnostics", self.text)
+
+    def test_the_log_comes_from_the_smoke_result_not_a_glob(self) -> None:
+        # run-release-gui-smoke.ps1 writes into logs-<stem>-<GUID>, so the old search could
+        # never match and the job threw before reaching any gate.
+        self.assertIn(
+            "Resolve-AttrCudaSmokeRunLog -ResultJsonPath $resultPath -ContainingRoot $Work",
+            self.text,
+        )
+        self.assertNotIn("-Filter 'mlvapp-*.log'", self.text)
+
+    def test_an_unavailable_log_fails_closed_with_its_own_code(self) -> None:
+        self.assertIn("RESULT=SMOKE_LOG_UNAVAILABLE", self.text)
+        self.assertIn("exit 16", self.text)
+        refusal = self.text.index("RESULT=SMOKE_LOG_UNAVAILABLE")
+        for later_verdict in ("RESULT=BACKEND_NOT_AVAILABLE", "RESULT=MEASUREMENT_CAPTURED"):
+            with self.subTest(verdict=later_verdict):
+                self.assertLess(refusal, self.text.index(later_verdict))
 
 
 class RetiredCompileJobTests(unittest.TestCase):
@@ -369,10 +394,10 @@ class SharedNamingContractTests(unittest.TestCase):
 
     def test_module_exports_the_naming_helper(self) -> None:
         text = _read(SHARED_MODULE)
-        self.assertIn(
-            "Export-ModuleMember -Function Get-AttrCudaArtifactNames, New-AttrCudaBuildInfoHeader",
-            text,
-        )
+        export = text[text.index("Export-ModuleMember") :]
+        for name in ("Get-AttrCudaArtifactNames", "New-AttrCudaBuildInfoHeader"):
+            with self.subTest(name=name):
+                self.assertIn(name, export)
 
     def test_consumers_import_the_module_rather_than_restating_the_convention(self) -> None:
         for path in (ASSEMBLE, STAGE_JOB):

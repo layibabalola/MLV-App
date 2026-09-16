@@ -187,9 +187,193 @@ function New-AttrCudaBuildInfoHeader {
 "@
 }
 
+function Resolve-AttrCudaSmokeRunLog {
+    <#
+    .SYNOPSIS
+    Return the authoritative log of the smoke run that produced $ResultJsonPath, or throw.
+    .DESCRIPTION
+    tools/profiling/run-release-gui-smoke.ps1 does NOT write into <output dir>\logs. It creates a
+    GUID-nonced directory per run and then snapshots the exact lines its own result consumed:
+
+        $runNonce = [Guid]::NewGuid().ToString("N")
+        $outputStem = [IO.Path]::GetFileNameWithoutExtension($outputPath)
+        $logRoot = Join-Path $outputDir ("logs-{0}-{1}" -f $outputStem, $runNonce)
+        ...
+        # Preserve the exact lines consumed by this result in a per-run immutable
+        # snapshot.  The aggregate rotating app log is allowed to grow later and is
+        # therefore diagnostic only; comparison authority comes from this snapshot.
+        $runLogSnapshotPath = "$outputPath.run.log"
+        [System.IO.File]::WriteAllLines($runLogSnapshotPath, [string[]]$recentLines, $utf8NoBom)
+        $runLogSnapshotBinding = Get-EvidenceFileBinding `
+            -Path $runLogSnapshotPath -Label "run log snapshot"
+
+    and exposes both through result.json:
+
+        log = [pscustomobject]@{
+            path = $runLogSnapshotPath
+            aggregateSourcePath = if ($logFile) { $logFile.FullName } else { $null }
+        ...
+        evidence = [pscustomobject]@{
+            runNonce = $runNonce
+            inputs = $captureInputBindings
+            runLogSnapshot = $runLogSnapshotBinding
+
+    So `logs\mlvapp-*.log` under the job's own output directory NEVER EXISTS, and a glob for it
+    cannot reach any gate behind it (sol, PR #133 r2). This resolves `log.path`, the snapshot the
+    runner itself calls the comparison authority, and binds it to
+    `evidence.runLogSnapshot.sha256` so a log swapped after the run is refused rather than read.
+    `log.aggregateSourcePath` is returned for the record but never read: the runner's own comment
+    says the aggregate rotating log may grow after the run and is diagnostic only.
+    Throws with a distinguishable ATTRCUDA_SMOKE_* token.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResultJsonPath,
+
+        # When set, the resolved log must live under this directory: the smoke runner is handed
+        # an -Output inside the job's work tree, so a log.path pointing anywhere else means the
+        # result.json being read is not this run's.
+        [string]$ContainingRoot = ''
+    )
+
+    if (-not (Test-Path -LiteralPath $ResultJsonPath -PathType Leaf)) {
+        throw "ATTRCUDA_SMOKE_RESULT_MISSING $ResultJsonPath"
+    }
+    $result = [IO.File]::ReadAllText($ResultJsonPath) | ConvertFrom-Json
+    $logNode = $null
+    if ($null -ne $result) { $logNode = $result.PSObject.Properties['log'] }
+    if ($null -eq $logNode -or $null -eq $logNode.Value) {
+        throw "ATTRCUDA_SMOKE_LOG_NODE_MISSING $ResultJsonPath has no log node"
+    }
+    $pathProperty = $logNode.Value.PSObject.Properties['path']
+    $logPath = if ($null -eq $pathProperty) { '' } else { [string]$pathProperty.Value }
+    if ([string]::IsNullOrWhiteSpace($logPath)) {
+        throw "ATTRCUDA_SMOKE_LOG_PATH_ABSENT $ResultJsonPath declares no log.path"
+    }
+    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+        throw "ATTRCUDA_SMOKE_LOG_MISSING $logPath (named by log.path in $ResultJsonPath)"
+    }
+    $fullLogPath = [IO.Path]::GetFullPath($logPath)
+    if (-not [string]::IsNullOrWhiteSpace($ContainingRoot)) {
+        $root = [IO.Path]::GetFullPath($ContainingRoot)
+        if (-not $fullLogPath.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "ATTRCUDA_SMOKE_LOG_OUTSIDE_ROOT $fullLogPath is not under $root"
+        }
+    }
+    $actualSha = (Get-FileHash -LiteralPath $fullLogPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    $declaredSha = ''
+    $runNonce = ''
+    $evidenceNode = $result.PSObject.Properties['evidence']
+    if ($null -ne $evidenceNode -and $null -ne $evidenceNode.Value) {
+        $nonceProperty = $evidenceNode.Value.PSObject.Properties['runNonce']
+        if ($null -ne $nonceProperty) { $runNonce = [string]$nonceProperty.Value }
+        $snapshotProperty = $evidenceNode.Value.PSObject.Properties['runLogSnapshot']
+        if ($null -ne $snapshotProperty -and $null -ne $snapshotProperty.Value) {
+            $shaProperty = $snapshotProperty.Value.PSObject.Properties['sha256']
+            if ($null -ne $shaProperty) { $declaredSha = ([string]$shaProperty.Value).ToLowerInvariant() }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($declaredSha)) {
+        throw "ATTRCUDA_SMOKE_LOG_UNBOUND $ResultJsonPath carries no evidence.runLogSnapshot.sha256 to bind $fullLogPath to"
+    }
+    if ($declaredSha -ne $actualSha) {
+        throw "ATTRCUDA_SMOKE_LOG_SHA_MISMATCH $fullLogPath declared=$declaredSha actual=$actualSha"
+    }
+
+    $aggregateProperty = $logNode.Value.PSObject.Properties['aggregateSourcePath']
+    [pscustomobject]@{
+        path = $fullLogPath
+        sha256 = $actualSha
+        bytes = (Get-Item -LiteralPath $fullLogPath).Length
+        runNonce = $runNonce
+        source = 'result.json log.path (run log snapshot)'
+        aggregateSourcePath = if ($null -eq $aggregateProperty) { $null } else { $aggregateProperty.Value }
+    }
+}
+
+function Get-AttrCudaLastEligibilityLine {
+    <#
+    .SYNOPSIS
+    Parse the LAST gpu_playback_recon.eligibility line out of a log, as a key/value hashtable.
+    .DESCRIPTION
+    The line (platform/qt/MainWindow.cpp, emitted under
+    MLVAPP_GPU_PLAYBACK_RECON_ELIGIBILITY_DIAG=1) carries both bare (key=1) and quoted
+    (key="some text") values, so the value alternation has to handle quotes -- r16_reason is
+    quoted and routinely contains spaces. The LAST line wins: the probe re-runs per render
+    policy evaluation and the final one describes the state the run ended in.
+    Returns $null when the log carries no such line.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$LogText
+    )
+
+    $last = $null
+    foreach ($line in ($LogText -split "`r?`n")) {
+        if ($line -notmatch 'gpu_playback_recon\.eligibility ') { continue }
+        $values = @{}
+        foreach ($match in [regex]::Matches($line, '(?<key>[A-Za-z0-9_]+)=(?:"(?<quoted>[^"]*)"|(?<bare>[^\s]+))')) {
+            $key = $match.Groups['key'].Value
+            if ($match.Groups['quoted'].Success) { $values[$key] = $match.Groups['quoted'].Value }
+            else { $values[$key] = $match.Groups['bare'].Value }
+        }
+        $last = $values
+    }
+    $last
+}
+
+function Get-AttrCudaEligibilityVerdict {
+    <#
+    .SYNOPSIS
+    Decide whether a run may be attributed to the CUDA path at all, and with which exit code.
+    .DESCRIPTION
+    A run where the CUDA backend never loaded, or where the R16 texture path was not admitted,
+    cannot produce a CUDA attribution -- the frame counters alone would happily describe some
+    other path. A log with NO eligibility line at all is treated exactly like one that says no:
+    absence of the diagnostic is not evidence of eligibility. exitCode is 15
+    (BACKEND_NOT_AVAILABLE) whenever the run is not admitted, and every field is carried either
+    way so a refusal says WHY.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$LogText
+    )
+
+    $values = Get-AttrCudaLastEligibilityLine -LogText $LogText
+    $read = {
+        param([string]$Key)
+        if ($null -eq $values -or -not $values.ContainsKey($Key)) { return $null }
+        [string]$values[$Key]
+    }
+    $cudaBackendAvailable = & $read 'cuda_backend_available'
+    $r16Available = & $read 'r16_available'
+    $admitted = ($cudaBackendAvailable -eq '1' -and $r16Available -eq '1')
+    [pscustomobject]@{
+        source = 'gpu_playback_recon.eligibility'
+        linePresent = [bool]($null -ne $values)
+        cudaBackendAvailable = $cudaBackendAvailable
+        r16Available = $r16Available
+        r16Reason = & $read 'r16_reason'
+        cudaBackendAttempted = & $read 'cuda_backend_attempted'
+        cudaBackendResolved = & $read 'cuda_backend_resolved'
+        r16ProbeRan = & $read 'r16_probe_ran'
+        admitted = $admitted
+        exitCode = $(if ($admitted) { 0 } else { 15 })
+    }
+}
+
 Export-ModuleMember -Function `
     Get-AttrCudaArtifactNames, `
     New-AttrCudaBuildInfoHeader, `
     Get-AttrCudaEmbeddedFunctionSource, `
     Get-AttrCudaZipArchiveComment, `
-    Assert-AttrCudaSourceArchive
+    Assert-AttrCudaSourceArchive, `
+    Resolve-AttrCudaSmokeRunLog, `
+    Get-AttrCudaLastEligibilityLine, `
+    Get-AttrCudaEligibilityVerdict
