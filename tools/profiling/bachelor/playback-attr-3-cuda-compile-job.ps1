@@ -91,6 +91,7 @@ $ReconName = '__RECON_NAME__'
 $PkgName = '__PKG_NAME__'
 $Root = 'C:\mlvtmp\mlv-agent'
 $Cache = Join-Path $Root 'cache'
+$ManifestName = 'playback-attr-3-cuda-__SHORT_SHA__-build.json'
 $JobId = 'playback-attr-3-cuda-build-__SHORT_SHA__'
 $Archive = Join-Path $Root "inbox\$JobId-source.zip"
 $Work = Join-Path $Root $JobId
@@ -239,36 +240,100 @@ $deployedBackendDll = Join-Path $releaseDir 'igpu_recon_cuda.dll'
 if (-not (Test-Path -LiteralPath $deployedBackendDll)) { Complete-Failed 19 'backendDeploy' "missing after deploy: $deployedBackendDll" }
 $StepLog['backendDeploy'] = 0
 
-$pkgZipPath = Join-Path $Cache $PkgName
-if (Test-Path -LiteralPath $pkgZipPath) { Remove-Item -LiteralPath $pkgZipPath -Force }
+$stagedPkgPath = Join-Path $Scratch $PkgName
+$stagedExePath = Join-Path $Scratch $ExeName
+$stagedDllPath = Join-Path $Scratch $ReconName
+if (Test-Path -LiteralPath $stagedPkgPath) { Remove-Item -LiteralPath $stagedPkgPath -Force }
 try {
-    Compress-Archive -Path (Join-Path $releaseDir '*') -DestinationPath $pkgZipPath -Force
-    Copy-Item -LiteralPath $releaseExe -Destination (Join-Path $Cache $ExeName) -Force
-    Copy-Item -LiteralPath $deployedBackendDll -Destination (Join-Path $Cache $ReconName) -Force
+    Compress-Archive -Path (Join-Path $releaseDir '*') -DestinationPath $stagedPkgPath -Force
+    Copy-Item -LiteralPath $releaseExe -Destination $stagedExePath -Force
+    Copy-Item -LiteralPath $deployedBackendDll -Destination $stagedDllPath -Force
 } catch {
     Complete-Failed 20 'stageToCache' $_.Exception.Message
 }
-if (-not (Test-Path -LiteralPath $pkgZipPath) -or -not (Test-Path -LiteralPath (Join-Path $Cache $ExeName)) -or -not (Test-Path -LiteralPath (Join-Path $Cache $ReconName))) {
-    Complete-Failed 20 'stageToCache' 'one or more staged cache artifacts missing after copy'
+if (-not (Test-Path -LiteralPath $stagedPkgPath) -or -not (Test-Path -LiteralPath $stagedExePath) -or -not (Test-Path -LiteralPath $stagedDllPath)) {
+    Complete-Failed 20 'stageToCache' 'one or more staged artifacts missing after packaging'
 }
+$stagedPkgSha = Get-ShaLower $stagedPkgPath
+$stagedExeSha = Get-ShaLower $stagedExePath
+$stagedDllSha = Get-ShaLower $stagedDllPath
 $StepLog['stageToCache'] = 0
+
+# Non-transactional publish fix (BLOCKER): write each artifact to the cache under a
+# `.partial` name first and verify its sha256 round-tripped, THEN rename all three in
+# sequence -- so the attribution job never sees a package zip paired with a stale or
+# missing exe/DLL. The manifest (holding all three hashes) is written LAST, after the
+# rename, so its mere presence means the triple is complete and verified. Any failure
+# in this block removes only THIS job's `.partial` files, never a sibling job's.
+$partialPkgPath = Join-Path $Cache "$PkgName.partial"
+$partialExePath = Join-Path $Cache "$ExeName.partial"
+$partialDllPath = Join-Path $Cache "$ReconName.partial"
+$partialManifestPath = Join-Path $Cache "$ManifestName.partial"
+function Remove-JobPartials {
+    foreach ($p in @($partialPkgPath, $partialExePath, $partialDllPath, $partialManifestPath)) {
+        Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    }
+}
+
+try {
+    Copy-Item -LiteralPath $stagedPkgPath -Destination $partialPkgPath -Force
+    Copy-Item -LiteralPath $stagedExePath -Destination $partialExePath -Force
+    Copy-Item -LiteralPath $stagedDllPath -Destination $partialDllPath -Force
+    if ((Get-ShaLower $partialPkgPath) -ne $stagedPkgSha -or
+        (Get-ShaLower $partialExePath) -ne $stagedExeSha -or
+        (Get-ShaLower $partialDllPath) -ne $stagedDllSha) {
+        throw 'partial cache artifact sha256 did not round-trip'
+    }
+} catch {
+    Remove-JobPartials
+    Complete-Failed 23 'publishPartials' $_.Exception.Message
+}
+$StepLog['publishPartials'] = 0
+
+try {
+    Move-Item -LiteralPath $partialPkgPath -Destination (Join-Path $Cache $PkgName) -Force
+    Move-Item -LiteralPath $partialExePath -Destination (Join-Path $Cache $ExeName) -Force
+    Move-Item -LiteralPath $partialDllPath -Destination (Join-Path $Cache $ReconName) -Force
+} catch {
+    Remove-JobPartials
+    Complete-Failed 24 'publishRename' $_.Exception.Message
+}
+$StepLog['publishRename'] = 0
 
 $nvccVersionText = ((& $nvcc --version 2>&1) -join "`n").Trim()
 $qmakeVersionText = ((& $qmakeExe -version 2>&1) -join "`n").Trim()
 $gccVersionText = if (Test-Path -LiteralPath $gccExe) { ((& $gccExe --version 2>&1) -join "`n").Trim() } else { $null }
 
+$cacheManifest = [ordered]@{
+    schema = 'mlvapp.playback-attr-3-cuda-build-cache-manifest.v1'
+    sourceCommit = $SourceCommit
+    jobId = $JobId
+    exe = [ordered]@{ name = $ExeName; sha256 = $stagedExeSha }
+    dll = [ordered]@{ name = $ReconName; sha256 = $stagedDllSha }
+    packageZip = [ordered]@{ name = $PkgName; sha256 = $stagedPkgSha }
+}
+try {
+    $cacheManifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $partialManifestPath -Encoding UTF8
+    Move-Item -LiteralPath $partialManifestPath -Destination (Join-Path $Cache $ManifestName) -Force
+} catch {
+    Remove-JobPartials
+    Complete-Failed 25 'publishManifest' $_.Exception.Message
+}
+$StepLog['publishManifest'] = 0
+
 $exeItem = Get-Item -LiteralPath (Join-Path $Cache $ExeName)
 $dllItem = Get-Item -LiteralPath (Join-Path $Cache $ReconName)
-$pkgItem = Get-Item -LiteralPath $pkgZipPath
+$pkgItem = Get-Item -LiteralPath (Join-Path $Cache $PkgName)
 $result = [ordered]@{
     schema = 'mlvapp.playback-attr-3-cuda-build.v1'
     sourceCommit = $SourceCommit
     jobId = $JobId
     target = $CudaArch
     exitCode = 0
-    exe = [ordered]@{ name = $exeItem.Name; length = $exeItem.Length; sha256 = (Get-ShaLower $exeItem.FullName) }
-    dll = [ordered]@{ name = $dllItem.Name; length = $dllItem.Length; sha256 = (Get-ShaLower $dllItem.FullName) }
-    packageZip = [ordered]@{ name = $pkgItem.Name; length = $pkgItem.Length; sha256 = (Get-ShaLower $pkgItem.FullName) }
+    exe = [ordered]@{ name = $exeItem.Name; length = $exeItem.Length; sha256 = $stagedExeSha }
+    dll = [ordered]@{ name = $dllItem.Name; length = $dllItem.Length; sha256 = $stagedDllSha }
+    packageZip = [ordered]@{ name = $pkgItem.Name; length = $pkgItem.Length; sha256 = $stagedPkgSha }
+    cacheManifest = [ordered]@{ name = $ManifestName }
     toolVersions = [ordered]@{ nvcc = $nvccVersionText; qmake = $qmakeVersionText; gcc = $gccVersionText }
     steps = $StepLog
 }
