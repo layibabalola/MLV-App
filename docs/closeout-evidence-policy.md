@@ -23,18 +23,25 @@ swarm for card HYG-EVIDENCE-GROWTH-POLICY-1; board-local record
   about 1.8 MB of blobs), against a pack of about 650 MB. History is never
   rewritten, so untracking would reclaim no pack bytes.
 
-## Why there is no ratchet test
+## A floor, never a ceiling
 
 Closeout adds one directory per finalized work block, so a ceiling turns a
-required check red on normal operation (the ratchet was removed from PR #124
-for that reason). A floor can only fail after a delete or move that NA-2
-already denies at tool-call time and that
-`tools/repo_hygiene/test_mlv_never_authorized.py` already covers. Finalize
-validates the current block's artifacts itself.
+required check red during normal operation. That is why the ratchet was removed
+from PR #124.
 
-Growth is bursty, not steady. Roughly 500 directories a week were added in late
-May and June 2026, 2 on 2026-09-07, and none from then through 2026-09-16.
-Weekly directory counts are therefore not a usable trigger.
+A floor never fails on growth.
+`tools/repo_hygiene/test_closeout_evidence_ratchet.py` counts tracked
+work-block directories from the Git tree at HEAD (`git ls-tree -r`, never
+`git ls-files`) and fails below 617, the count at `18a9c60d`. NA-2 is enforced
+at tool-call time and names interpreter and script bypasses as a known limit.
+The floor catches a committed delete or move independently, in CI. If a future
+policy legitimately archives evidence, that change lowers the floor in the same
+commit.
+
+Growth is bursty, not steady. The busiest calendar week added 183 directories,
+and the busiest rolling seven days added 269 (late May to early June 2026).
+Two were added on 2026-09-07, and none from then through 2026-09-16. Weekly
+directory counts are therefore not a usable trigger.
 
 ## Re-open condition
 
