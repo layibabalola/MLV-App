@@ -169,6 +169,10 @@ function Get-ReservationBudget {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $row = $line | ConvertFrom-Json -ErrorAction Stop
         if ($row -isnot [pscustomobject]) { throw 'reservation ledger row must be an object' }
+        # Rows written by Invoke-Lane.ps1 (venue invoke-lane: 'reserved' for a direct launch, 'linked'
+        # under a dispatcher reservation) feed the product-ratio guard's all-venue coverage. They are not
+        # loop dispatches, so they never spend the loop's daily budget and never trip its state check.
+        if ((Field $row 'venue') -ceq 'invoke-lane') { continue }
         $state = Field $row 'state'
         if ($state -cnotin @('reserved','charged','refunded')) { throw 'unknown reservation state' }
         $utc = Utc (Field $row 'recordedUtc')

@@ -9894,6 +9894,20 @@ int MainWindow::openMlv( QString fileName )
     //Cut In & Out
     initCutInOut( getMlvFrames( m_pMlvObject ) );
 
+    //Seek to the saved "In" frame. The receipt's default is cutIn == 1 (frame
+    //0), so a fresh clip with no In point set still opens at the first frame.
+    //A value > 1 means the user (or a saved session) explicitly set an In
+    //point, and we should jump there. Clamp to the slider's valid range so a
+    //stale cut-in from a longer clip cannot overshoot this one.
+    if( ACTIVE_RECEIPT->cutIn() > 1 )
+    {
+        int cutInFrame = (int)ACTIVE_RECEIPT->cutIn() - 1; // 0-based frame index
+        int sliderMax = ui->horizontalSliderPosition->maximum();
+        if( cutInFrame < 0 ) cutInFrame = 0;
+        if( cutInFrame > sliderMax ) cutInFrame = sliderMax;
+        ui->horizontalSliderPosition->setValue( cutInFrame );
+    }
+
     //Raw black & white level
     initRawBlackAndWhite();
 
@@ -10773,6 +10787,10 @@ void MainWindow::initGui( void )
     if( QFileInfo( QString( "%1/raw2mlv" ).arg( QCoreApplication::applicationDirPath() ) ).exists() )
         ui->actionTranscodeAndImport->setVisible( true );
 #endif
+
+    //Rename selected clip (only one! selected clip)
+    connect( ui->actionRename, SIGNAL( triggered() ), this, SLOT( renameActiveClip() ) );
+    addAction( ui->actionRename );
 }
 
 //Initialize the library
@@ -21263,7 +21281,7 @@ void MainWindow::on_listViewSession_customContextMenuRequested(const QPoint &pos
             myMenu.addAction( ui->actionSelectAllClips );
             myMenu.addAction( QIcon( ":/RetinaIMG/RetinaIMG/Image-icon.png" ), "Show in Editor",  this, SLOT( rightClickShowFile() ) );
             myMenu.addAction( QIcon( ":/RetinaIMG/RetinaIMG/Delete-icon.png" ), "Delete Selected File from Session",  this, SLOT( deleteFileFromSession() ) );
-            myMenu.addAction( "Rename", this, SLOT( renameActiveClip() ) );
+            myMenu.addAction( ui->actionRename );
             markMenu.setTitle( "Mark Clip" );
             myMenu.addMenu( &markMenu );
             myMenu.addSeparator();
@@ -21434,12 +21452,15 @@ void MainWindow::deleteFileFromSession( void )
 //Rename the selected clip
 void MainWindow::renameActiveClip( void )
 {
+    //Catch all invalid cases to not crash the app or damage clips
+    if( !m_pModel || SESSION_EMPTY || m_pModel->activeRow() < 0 ) return;
+
     //Save slider receipt
     setReceipt( ACTIVE_RECEIPT );
 
     //If multiple selection is on, we do nothing. We just rename one selected clip
     QModelIndexList list = selectedClipsList();
-    if( list.size() > 1 ) return;
+    if( list.size() != 1 ) return;
 
     int row = list.first().data( ROLE_REALINDEX ).toInt();
 
