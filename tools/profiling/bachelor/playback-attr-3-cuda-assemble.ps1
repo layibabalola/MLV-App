@@ -112,6 +112,19 @@ $archivePath = Join-Path $Scratch "$($names.shortSha)-source.zip"
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $archivePath)) {
     Complete-Failed 2 'sourceArchive' "git archive failed for $SourceCommit"
 }
+# Same binding the Ultra-Magnus DLL-pair job applies to its own archive, through the same
+# function (sol, PR #133 r2). The sha256 leg is a round-trip check here -- this process wrote
+# the file moments ago -- but the COMMIT leg is not: it reads back the id git stamped into the
+# zip comment and refuses an archive of anything other than $SourceCommit, which is the claim
+# every later artifact name and the injected buildinfo header rest on. The verified sha is
+# recorded in build.json, so the exe's source is auditable from the manifest alone.
+$sourceArchiveSha256 = Get-ShaLower $archivePath
+try {
+    [void](Assert-AttrCudaSourceArchive -ArchivePath $archivePath -ExpectedSha256 $sourceArchiveSha256 -ExpectedCommit $SourceCommit)
+} catch {
+    Complete-Failed 2 'sourceArchive' $_.Exception.Message
+}
+Say "SOURCE ARCHIVE bound sha256=$sourceArchiveSha256 commit=$SourceCommit"
 $SourceTree = Join-Path $Work 'src'
 New-Item -ItemType Directory -Path $SourceTree -Force | Out-Null
 Expand-Archive -LiteralPath $archivePath -DestinationPath $SourceTree -Force
@@ -360,6 +373,8 @@ $buildManifest = [ordered]@{
     ffmpegRuntimeFiles = @($ffmpegNames)
     launchProbe = $launchProbe
     identity = [ordered]@{ injectedFromPinnedSourceCommit = $true; sha = $SourceCommit; dirty = 0 }
+    # The verified archive the exe was compiled from; its zip comment declared $SourceCommit.
+    sourceArchiveSha256 = $sourceArchiveSha256
     toolVersions = [ordered]@{ qmake = $qmakeVersionText; gcc = $gccVersionText }
     steps = $StepLog
     assembledAtUtc = (Get-Date).ToUniversalTime().ToString('o')

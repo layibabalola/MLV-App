@@ -28,6 +28,18 @@
 # tools/gpu/backend/amaze-debayer-dll.ps1, from the EXTRACTED source archive, so the build
 # recipe is the one committed at -SourceCommit and not a copy that can drift.
 #
+# SOURCE ARCHIVE BINDING (sol, PR #133 r2, BLOCKER). Everything above is a claim about the
+# EXTRACTED source, and the archive travels to Ultra-Magnus as an ordinary inbox side-file. Its
+# lowercase sha256 is therefore computed here and BAKED IN, and the job verifies the arriving
+# bytes against it -- and the commit id git stamps into the zip comment against -SourceCommit --
+# BEFORE Expand-Archive runs, failing closed at exit 8. Without that, altered or stale source
+# would produce DLLs whose manifest still claims sourceCommit. The verified sha is recorded as
+# dll-pair-manifest.json's sourceArchiveSha256 so the claim is auditable downstream.
+# The verification functions are embedded VERBATIM from
+# tools/profiling/bachelor/AttrCudaArtifacts.psm1 (a job on a host with no checkout cannot
+# Import-Module), which is how the test suite exercises the same code the job runs.
+# `<jobId>.job.ps1 -VerifyOnly` runs exactly that prefix and exits, writing nothing.
+#
 # NO FOOTAGE. This job compiles source and inspects binaries. It never opens, names, globs or
 # resolves a media file, and nothing it emits does either.
 #
@@ -53,7 +65,11 @@ param(
 
     # Host-side path of the Ultra-Magnus agent root. tools/profiling/um-run.ps1 submits over the
     # share \\Ultra-Magnus\g\Temp\mlv-gpu-profile\agent, which is this directory on the host.
-    [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$')]
+    # `~` is admitted because Windows temp roots carry 8.3 short names (RUNNER~1, OBABAL~1) and
+    # the behavioural tests point -AgentRoot at one; it is inert everywhere this value is used
+    # (single-quoted PowerShell literals and Join-Path), unlike the quote/`$ characters the
+    # allowlist exists to exclude.
+    [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
     [string]$AgentRoot = 'G:\Temp\mlv-gpu-profile\agent',
 
     # Optional oracle vector directory for build-backend-dll.ps1's LoadLibrary parity harness
@@ -72,6 +88,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# The shared module lives beside the Bachelor scripts; this generator reaches across for the ONE
+# definition of the verification functions rather than restating them.
+Import-Module (Join-Path $PSScriptRoot '..\bachelor\AttrCudaArtifacts.psm1') -Force
 
 $RequiredArchitecture = 'sm_86'
 
@@ -106,13 +125,29 @@ if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $archivePath)) {
     throw "git archive failed for $SourceCommit"
 }
+# Bind the emitted job to THESE bytes. Verified here as well, with the same function the job
+# runs, so a git that did not stamp the commit into the zip comment is caught on this machine
+# instead of costing an agent round trip.
+$sourceArchiveSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+[void](Assert-AttrCudaSourceArchive -ArchivePath $archivePath -ExpectedSha256 $sourceArchiveSha256 -ExpectedCommit $SourceCommit)
+
+$embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
+    'Get-AttrCudaZipArchiveComment',
+    'Assert-AttrCudaSourceArchive'
+)
 
 # --- job body template (placeholders are substituted below; the body itself never touches
 #     this generator's variables directly, so there is no accidental capture of this machine's
 #     environment into the emitted script) ----------------------------------------------------
 $template = @'
+# -VerifyOnly runs the input-verification prefix (agent-root containment, source-archive
+# presence, sha256 and commit binding) and exits WITHOUT creating, expanding or publishing
+# anything. The agent never passes it; the behavioural tests do.
+param([switch]$VerifyOnly)
+
 $ErrorActionPreference = 'Stop'
 $SourceCommit = '__SOURCE_COMMIT__'
+$SourceArchiveSha256 = '__SOURCE_ARCHIVE_SHA256__'
 $CudaArchitectures = @(__ARCH_LIST__)
 $RequiredArchitecture = '__REQUIRED_ARCH__'
 $ParityVectors = '__PARITY_VECTORS__'
@@ -129,6 +164,13 @@ $AmazeDllName = 'igpu_amaze_debayer_cuda.dll'
 
 function Say([string]$Message) { Write-Output "[$JobId] $Message" }
 function Get-ShaLower([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+
+# --- verifiers, embedded VERBATIM from tools/profiling/bachelor/AttrCudaArtifacts.psm1 --------
+# This host has no checkout, so Import-Module is not available; the generator splices the module
+# text in. tools/repo_hygiene/test_playback_attr_3_cuda_split_route.py executes the module copy
+# directly, so what is tested and what runs here are the same characters.
+__EMBEDDED_FUNCTIONS__
+# --- end embedded verifiers -------------------------------------------------------------------
 
 $StepLog = [System.Collections.Specialized.OrderedDictionary]::new()
 $Evidence = [System.Collections.Specialized.OrderedDictionary]::new()
@@ -172,6 +214,25 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
 
 Say "START source=$SourceCommit arch=$($CudaArchitectures -join ',')"
 if (-not (Test-Path -LiteralPath $Archive)) { Complete-Failed 3 'sourceArchive' "missing: $Archive" }
+$StepLog['sourceArchive'] = 0
+
+# EVERYTHING below this point is a claim about the extracted source, so the archive is bound to
+# the generator's bytes AND to $SourceCommit before a single file is written. Exit 8 is reserved
+# for this and nothing else.
+try {
+    $verifiedArchiveSha = Assert-AttrCudaSourceArchive -ArchivePath $Archive -ExpectedSha256 $SourceArchiveSha256 -ExpectedCommit $SourceCommit
+} catch {
+    Complete-Failed 8 'sourceArchiveBinding' $_.Exception.Message
+}
+$Evidence['sourceArchiveSha256'] = $verifiedArchiveSha
+$StepLog['sourceArchiveBinding'] = 0
+Say "SOURCE ARCHIVE bound sha256=$verifiedArchiveSha commit=$SourceCommit"
+
+if ($VerifyOnly) {
+    Write-Output "RESULT=VERIFY_ONLY_OK SOURCE=$SourceCommit ARCHIVE_SHA256=$verifiedArchiveSha"
+    exit 0
+}
+
 if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
 if (Test-Path -LiteralPath $Pub) { Remove-Item -LiteralPath $Pub -Recurse -Force }
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
@@ -376,6 +437,9 @@ $nvccVersion = ((& $nvcc --version 2>&1) -join "`n").Trim()
 $manifest = [ordered]@{
     schema = 'mlvapp.playback-attr-3-cuda-dll-pair-manifest.v1'
     sourceCommit = $SourceCommit
+    # The archive these DLLs were compiled from, verified on this host before it was expanded.
+    # sourceCommit above is a CLAIM; this is what makes it checkable after the fact.
+    sourceArchiveSha256 = $verifiedArchiveSha
     cudaArch = @($CudaArchitectures)
     nvccVersion = $nvccVersion
     files = $files
@@ -401,6 +465,7 @@ $StepLog['publishManifest'] = 0
 $result = [ordered]@{
     schema = 'mlvapp.playback-attr-3-cuda-dll-pair.v1'
     sourceCommit = $SourceCommit
+    sourceArchiveSha256 = $verifiedArchiveSha
     jobId = $JobId
     cudaArch = @($CudaArchitectures)
     exitCode = 0
@@ -420,18 +485,25 @@ exit 0
 $archLiteral = ($architectures | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ','
 $text = $template.
     Replace('__SOURCE_COMMIT__', $SourceCommit).
+    Replace('__SOURCE_ARCHIVE_SHA256__', $sourceArchiveSha256).
     Replace('__ARCH_LIST__', $archLiteral).
     Replace('__REQUIRED_ARCH__', $RequiredArchitecture).
     Replace('__PARITY_VECTORS__', $ParityVectors.Replace("'", "''")).
     Replace('__REQUIRE_PARITY__', $(if ($RequireParityHarness) { '$true' } else { '$false' })).
     Replace('__AGENT_ROOT__', $AgentRoot.Replace("'", "''")).
     Replace('__JOB_ID__', $JobId)
+# LAST, and deliberately so: the module text is spliced in after every other substitution, so no
+# placeholder rule can rewrite a character inside the verbatim verifier source.
+$text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
 
 [IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))
 
 [pscustomobject]@{
     jobFile = $jobPath
     sourceArchive = $archivePath
+    # The hub drops the archive into the inbox under EXACTLY this name; the job refuses any
+    # other bytes at exit 8.
+    sourceArchiveSha256 = $sourceArchiveSha256
     jobId = $JobId
     sourceCommit = $SourceCommit
     cudaArchitectures = @($architectures)
