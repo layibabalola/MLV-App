@@ -1738,6 +1738,97 @@ def test_editing_dispatch_refuses_an_existing_branch_that_carries_work(tmp_path)
         cleanup_lane_worktree(tmp_path, "TEST-EDIT-REUSE-2")
 
 
+def test_continuation_dispatches_onto_a_branch_that_carries_stage_one_work(tmp_path):
+    """TOOL-DISPATCHER-NO-CONTINUATION-PATH-1. The board's two-stage packet rule (implement+commit,
+    then a FRESH lane to verify+ship) was UNDISPATCHABLE through this dispatcher: a stage-2 lane
+    starts from stage 1's commit by construction, and that was always refused. Every stage 2
+    therefore went direct via Invoke-Lane and wrote no dispatch-attempt row, which is what made
+    Test-ProductRatioGuard report dispatchCoverage=PARTIAL - one of the two arms that hold the
+    guard RED. With the tip named, the dispatch proceeds and the branch is NOT rewound."""
+    dual, head = editing_board(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "product/TEST-EDIT-CONT-1"], cwd=tmp_path, check=True)
+    (tmp_path / "stage1.txt").write_text("stage one work\n")
+    subprocess.run(["git", "add", "stage1.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "stage one"], cwd=tmp_path, check=True)
+    tip = git(tmp_path, "rev-parse", "HEAD")
+    subprocess.run(["git", "checkout", "-q", "--detach", head], cwd=tmp_path, check=True)
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-CONT-1")],
+                                      "TEST-EDIT-CONT-1", extra=("-ContinueFromSha", tip))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "CONTINUATION card=TEST-EDIT-CONT-1" in result.stdout, result.stdout
+        assert tip in result.stdout, result.stdout
+        # The load-bearing assertion: stage 1's commit survived. A continuation that rewound the
+        # branch to baseSha would silently discard the very work it exists to build on.
+        assert git(tmp_path, "rev-parse", "refs/heads/product/TEST-EDIT-CONT-1") == tip
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-CONT-1")
+
+
+def test_continuation_refuses_when_the_branch_moved_since_the_caller_looked(tmp_path):
+    """The continuation is content-addressed on purpose. If the branch tip is not the commit the
+    caller named, fail closed: continuing onto an unnamed commit is how a dispatch silently builds
+    on a stranger's work. A bare -Continue switch could not make this distinction."""
+    dual, head = editing_board(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "product/TEST-EDIT-CONT-2"], cwd=tmp_path, check=True)
+    (tmp_path / "stage1.txt").write_text("stage one work\n")
+    subprocess.run(["git", "add", "stage1.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "stage one"], cwd=tmp_path, check=True)
+    stale = git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "stage1b.txt").write_text("someone else moved it\n")
+    subprocess.run(["git", "add", "stage1b.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "a later commit the caller never saw"], cwd=tmp_path, check=True)
+    actual = git(tmp_path, "rev-parse", "HEAD")
+    subprocess.run(["git", "checkout", "-q", "--detach", head], cwd=tmp_path, check=True)
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-CONT-2")],
+                                      "TEST-EDIT-CONT-2", extra=("-ContinueFromSha", stale))
+        assert result.returncode == 6, result.stdout + result.stderr
+        assert "REFUSED continuation-sha-mismatch" in result.stdout, result.stdout
+        assert git(tmp_path, "rev-parse", "refs/heads/product/TEST-EDIT-CONT-2") == actual
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-CONT-2")
+
+
+def test_continuation_refuses_a_branch_that_has_diverged_from_base(tmp_path):
+    """A continuation EXTENDS the approved base. A branch cut from an older master carries work
+    that was never based on what the board approved, and naming its tip must not launder that."""
+    dual, first = editing_board(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "product/TEST-EDIT-CONT-3", first], cwd=tmp_path, check=True)
+    (tmp_path / "old.txt").write_text("work on an old base\n")
+    subprocess.run(["git", "add", "old.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "work on an old base"], cwd=tmp_path, check=True)
+    tip = git(tmp_path, "rev-parse", "HEAD")
+    subprocess.run(["git", "checkout", "-q", "--detach", first], cwd=tmp_path, check=True)
+    (tmp_path / "moved.txt").write_text("master moved on\n")
+    subprocess.run(["git", "add", "moved.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "master moved on"], cwd=tmp_path, check=True)
+    newbase = git(tmp_path, "rev-parse", "HEAD")
+    subprocess.run(["git", "update-ref", "refs/remotes/fork/master", newbase], cwd=tmp_path, check=True)
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-CONT-3")],
+                                      "TEST-EDIT-CONT-3", extra=("-ContinueFromSha", tip))
+        assert result.returncode == 6, result.stdout + result.stderr
+        assert "REFUSED continuation-not-descended-from-base" in result.stdout, result.stdout
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-CONT-3")
+
+
+def test_continuation_refuses_when_the_branch_does_not_exist(tmp_path):
+    """Naming a tip on a branch that is not there is a caller error, not a fresh dispatch. Falling
+    through to 'create the branch at baseSha' would silently turn a continuation into a stage 1 and
+    the lane would find none of the work its packet describes."""
+    dual, head = editing_board(tmp_path)
+    absent = "0" * 40
+    try:
+        result = run_editing_dispatch(tmp_path, [_reuse_card(dual, "TEST-EDIT-CONT-4")],
+                                      "TEST-EDIT-CONT-4", extra=("-ContinueFromSha", absent))
+        assert result.returncode == 6, result.stdout + result.stderr
+        assert "REFUSED continuation-branch-absent" in result.stdout, result.stdout
+    finally:
+        cleanup_lane_worktree(tmp_path, "TEST-EDIT-CONT-4")
+
+
 def test_a_real_refused_dispatch_leaves_a_typed_attempt_receipt(tmp_path):
     """2026-09-14: ~90 PLAY-COUNTERS-CPU run dirs held only lane-prompt.md because a pre-launch
     refusal reached stdout alone. A NON-dry-run refusal must leave dispatch-attempt.json naming

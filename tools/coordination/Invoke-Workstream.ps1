@@ -93,6 +93,19 @@ param(
     [Parameter(ParameterSetName='Dispatch')]
     [string]$ExporterPath = '',
 
+    # STAGE-2 CONTINUATION (TOOL-DISPATCHER-NO-CONTINUATION-PATH-1). The 40-hex tip this dispatch
+    # expects to continue from. Empty (the default) preserves the historical refusal exactly: a
+    # branch carrying commits beyond baseSha is work this dispatch must not overwrite.
+    #
+    # It is a SHA and not a bare -Continue switch on purpose. A switch would say "attach to
+    # whatever is on that branch", which is the same class of defect as the consumed owner grant:
+    # an authorization that does not name what it authorizes. Naming the tip makes a continuation
+    # content-addressed, so it fails closed when the branch moved since the caller looked - the
+    # caller re-derives and decides again, rather than silently building on a stranger's commit.
+    [Parameter(ParameterSetName='Dispatch')]
+    [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
+    [string]$ContinueFromSha = '',
+
     [Parameter(Mandatory=$true,ParameterSetName='Completion')]
     [switch]$RecordCompletion,
     [Parameter(Mandatory=$true,ParameterSetName='Completion')]
@@ -1178,20 +1191,76 @@ $fence
         }
         $unique = @($uniqueOut | Where-Object { $_ })
         if ($unique.Count -gt 0) {
-            Write-Output "WORKSTREAM: REFUSED existing-branch-has-work card=$cardId branch=$branch commits=$($unique.Count)"
-            Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'existing-branch-has-work' -ExitCode 6 -Detail "branch=$branch commits=$($unique.Count)"
+            # A branch with commits not in baseSha holds work. Historically that was always a
+            # refusal - which made the board's own two-stage packet rule undispatchable, because a
+            # stage-2 lane starts from stage 1's commit BY CONSTRUCTION. Every stage 2 therefore
+            # went direct via Invoke-Lane, wrote no dispatch-attempt row, and the missing rows are
+            # what make Test-ProductRatioGuard report dispatchCoverage=PARTIAL - one of the two
+            # reasons that guard reads RED. The guard was partly RED because of THIS refusal.
+            if (-not $ContinueFromSha) {
+                Write-Output "WORKSTREAM: REFUSED existing-branch-has-work card=$cardId branch=$branch commits=$($unique.Count)"
+                Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'existing-branch-has-work' -ExitCode 6 -Detail "branch=$branch commits=$($unique.Count)"
+                exit 6
+            }
+            $branchTip = (& git -C $RepoRoot rev-parse --verify "refs/heads/$branch^{commit}" 2>$null)
+            if ($LASTEXITCODE -ne 0 -or -not $branchTip) {
+                Write-Output "WORKSTREAM: CANNOT-DETERMINE - could not resolve tip of $branch"
+                Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'cannot-determine-branch-tip' -ExitCode 3 -Detail "branch=$branch"
+                exit 3
+            }
+            $branchTip = $branchTip.Trim()
+            # Content-addressed: the caller said which commit it looked at. If the branch moved
+            # since, fail closed rather than continue onto work nobody named.
+            if ($branchTip -ne $ContinueFromSha.ToLowerInvariant() -and $branchTip -ne $ContinueFromSha) {
+                Write-Output "WORKSTREAM: REFUSED continuation-sha-mismatch card=$cardId branch=$branch expected=$ContinueFromSha actual=$branchTip"
+                Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'continuation-sha-mismatch' -ExitCode 6 -Detail "branch=$branch expected=$ContinueFromSha actual=$branchTip"
+                exit 6
+            }
+            # A continuation EXTENDS the base; it never continues onto a branch that has diverged
+            # from it. Without this, a stale branch cut from an older master would look like a
+            # legitimate stage 1 and the lane would build on a base the board never approved.
+            & git -C $RepoRoot merge-base --is-ancestor $baseSha $branchTip 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Output "WORKSTREAM: REFUSED continuation-not-descended-from-base card=$cardId branch=$branch tip=$branchTip baseSha=$baseSha"
+                Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'continuation-not-descended-from-base' -ExitCode 6 -Detail "branch=$branch tip=$branchTip baseSha=$baseSha"
+                exit 6
+            }
+            # Reuse the worktree the branch is already checked out in, when there is one: stage 1's
+            # tree carries its build outputs, and making stage 2 rebuild from scratch is most of
+            # why the wide packets ran out of turns in the first place.
+            $existingWt = $null
+            $wtLines = @(& git -C $RepoRoot worktree list --porcelain 2>$null)
+            $wtPath = $null
+            foreach ($line in $wtLines) {
+                if ($line -like 'worktree *') { $wtPath = $line.Substring(9).Trim() }
+                elseif ($line -eq "branch refs/heads/$branch") { $existingWt = $wtPath; break }
+            }
+            if ($existingWt) {
+                $laneWorkDir = $existingWt
+                Write-Output "WORKSTREAM: CONTINUATION card=$cardId branch=$branch tip=$branchTip reusing-worktree=$laneWorkDir"
+            } else {
+                & git -C $RepoRoot -c core.longpaths=true worktree add $laneWorkDir $branch 2>&1 | Out-Null
+                Write-Output "WORKSTREAM: CONTINUATION card=$cardId branch=$branch tip=$branchTip new-worktree=$laneWorkDir"
+            }
+            $script:IsContinuation = $true
+            $script:ContinuationTip = $branchTip
+        } else {
+            # Fails (and is reported) if the branch is checked out in another worktree.
+            & git -C $RepoRoot branch -f $branch $baseSha 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Output "WORKSTREAM: CANNOT-DETERMINE - could not move existing branch $branch to $baseSha (checked out elsewhere?)"
+                Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'cannot-move-existing-branch' -ExitCode 3 -Detail "branch=$branch baseSha=$baseSha"
+                exit 3
+            }
+            Write-Output "WORKSTREAM: reusing existing branch $branch (no commits beyond baseSha), moved to $baseSha"
+            & git -C $RepoRoot -c core.longpaths=true worktree add $laneWorkDir $branch 2>&1 | Out-Null
+        }
+    } else {
+        if ($ContinueFromSha) {
+            Write-Output "WORKSTREAM: REFUSED continuation-branch-absent card=$cardId branch=$branch expected=$ContinueFromSha"
+            Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'continuation-branch-absent' -ExitCode 6 -Detail "branch=$branch expected=$ContinueFromSha"
             exit 6
         }
-        # Fails (and is reported) if the branch is checked out in another worktree.
-        & git -C $RepoRoot branch -f $branch $baseSha 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Output "WORKSTREAM: CANNOT-DETERMINE - could not move existing branch $branch to $baseSha (checked out elsewhere?)"
-            Write-DispatchAttempt -Outcome 'refused-before-launch' -Cause 'cannot-move-existing-branch' -ExitCode 3 -Detail "branch=$branch baseSha=$baseSha"
-            exit 3
-        }
-        Write-Output "WORKSTREAM: reusing existing branch $branch (no commits beyond baseSha), moved to $baseSha"
-        & git -C $RepoRoot -c core.longpaths=true worktree add $laneWorkDir $branch 2>&1 | Out-Null
-    } else {
         & git -C $RepoRoot -c core.longpaths=true worktree add -b $branch $laneWorkDir $baseSha 2>&1 | Out-Null
     }
     if ($LASTEXITCODE -ne 0) {
