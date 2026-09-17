@@ -232,7 +232,7 @@ function Get-Sha([string]$Path) {
 
 
 function Save-Json($Object, [string]$Path) {
-    # Every artifact write is slot-checked: never through a link or into a directory (sol PR #133).
+    # Artifact writes go through the slot-checked helper: never through a link or into a directory (sol PR #133).
     [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))
 }
 

@@ -1,43 +1,38 @@
-# attr3_publish_write_scan.ps1 -- DEFAULT-DENY AST validation of the emitted PLAYBACK-ATTR-3-CUDA job
-# templates: they may use only an explicit language subset, and the few filesystem-mutating
-# primitives in that subset must target a destination PROVED to lie under the job-owned $Work.
+# attr3_publish_write_scan.ps1 -- REGRESSION TRIPWIRE for the emitted PLAYBACK-ATTR-3-CUDA job
+# templates. It is NOT a soundness proof, and nothing may rely on it as one.
 #
-# HISTORY (sol, PR #133). r5: a per-line "guard near the write" regex was unsound. r6: a
-# blocklist of write primitives was still unsound -- $Work reassignment, Join-Path '..' traversal,
-# Set-Variable/scoped mutation, StreamWriter/New-Object, Add-Type, the dynamic call operator and a
-# second Start-Process redirect all passed. Enumerating bad shapes cannot be complete, so this
-# scanner enumerates the GOOD ones and rejects everything else:
+# THE SAFETY BOUNDARY IS AT RUNTIME, in tools/profiling/bachelor/AttrCudaArtifacts.psm1: every
+# publish write goes through Publish-AttrCuda* / New-AttrCudaDirectory (slot check + write in one
+# call), every tree delete through Remove-AttrCudaTree (trusted-root ancestor chain + no reparse
+# point inside). The job's trusted roots (the agent root, C:\mlvtmp) are provisioning boundaries.
 #
-#   R1 commands      every command is an allowlisted cmdlet, a function DEFINED in the template, or a
-#                    function DEFINED in AttrCudaArtifacts.psm1 (the embedded, slot-checked helpers),
-#                    matched with exact case. Set-Content, Copy-Item, Move-Item, Remove-Item, Out-File,
-#                    Add-Type, New-Object, Set-Variable, Invoke-Expression, ... are not allowlisted.
-#   R2 mutators      of the allowlisted cmdlets only New-Item (-Path), Expand-Archive (-DestinationPath),
-#                    Export-Csv (-LiteralPath) and Start-Process (every -Redirect* occurrence) write;
-#                    each named destination must be provable. A positional argument on those cmdlets,
-#                    and splatting on ANY command, is rejected. New-Item must name -ItemType
-#                    'Directory' or 'File' literally (no links). ForEach-Object may take only script
-#                    blocks, so no method can be invoked by member NAME.
-#                    Not filesystem, accepted: `reg` (HKCU playback settings) and the processes that
-#                    Start-Process/`&` launch (see the child-process limit below).
-#   R3 dynamic calls `&` is allowed only on a literal ending in .exe or on a variable (or its .FullName)
-#                    named in $childExecutables (external processes: the documented limit below);
-#                    `.` sourcing, `&` on a script block or on a string naming a cmdlet is rejected.
-#   R4 .NET          static members and instance methods must be on the allowlists below; that excludes
-#                    every [IO.File]/[IO.Directory] mutator, StreamWriter::new, CopyTo/MoveTo/Delete,
-#                    .Invoke(), and reflection.
-#   R5 assignments   the left side is a plain unscoped variable, an index into one, `$script:<name>` for
-#                    a non-root name, or `$env:TEMP`/`$env:TMP` assigned a provable value. $Work is
-#                    assigned EXACTLY ONCE, at top level, in a canonical shape; root variables ($Work,
-#                    $Pub, $Cache, $AgentRoot, $Root) are never scoped or compound-assigned.
-#   R6 redirections  every file redirection (> >> 2> ...) targets $null or a provable destination.
-#   R7 provable      $Work; (Join-Path <provable> <safe literal child>) where the child is a string
-#                    constant with no '..', ':', leading separator or wildcard; or an unscoped variable
-#                    whose every assignment in the template is a plain '=' of a provable expression.
+# WHAT THIS SCRIPT DOES: it rejects the known-dangerous SHAPES a trusted author could introduce by
+# accident into the three templates, using an allowlist so that an unfamiliar shape fails loudly
+# and gets reviewed instead of passing silently:
+#   R1 commands      only allowlisted cmdlets, template-defined functions and module-defined
+#                    functions, exact case (raw Set-Content/Copy-Item/Move-Item/Remove-Item/Out-File,
+#                    Add-Type, New-Object, Set-Variable, Invoke-Expression, ... are not allowlisted).
+#   R2 arguments     New-Item (-Path; -ItemType literally Directory|File; no -Name), Expand-Archive
+#                    (-DestinationPath), Export-Csv (-LiteralPath) and Start-Process (each -Redirect*)
+#                    name a destination provable under $Work; no positional use; no splatting;
+#                    ForEach-Object takes script blocks only; Remove-AttrCudaTree's -TrustedRoot is
+#                    literally $AgentRoot or 'C:\mlvtmp'.
+#   R3 dynamic calls `&` only on a literal ending in .exe or an allowlisted child-executable variable;
+#                    no dot-sourcing.
+#   R4 .NET          allowlisted static members and instance method names only.
+#   R5 assignments   plain or index assignments; $script: only for non-root names; $env:TEMP/TMP only
+#                    to provable values; $Work assigned exactly once, at top level, canonically.
+#   R6 redirections  $null or provable.
+#   R7 provable      $Work; Join-Path <provable> <safe literal child>; a variable whose every
+#                    assignment is a plain '=' of a provable expression.
+#   R8 directives    no `using` statements and no `#requires` in a template.
 #
-# Known limit, by design: what a CHILD PROCESS writes (MLVApp, PresentMon, nvcc, the backend build
-# scripts run by a child pwsh) is outside a static scan of this script; R3 confines which processes
-# may be started and R2/R6 confine their redirected output.
+# EXPLICIT LIMITS (booked as ATTR3-SCANNER-HARDEN-1, sol PR #133 r7): arguments passed to child
+# executables, Start-Process -FilePath/-ArgumentList, and `reg` verbs are not constrained; instance
+# methods are allowlisted by NAME, not by receiver type; trusted-helper arguments other than
+# Remove-AttrCudaTree -TrustedRoot are not constrained; the scan reads the generator's template with
+# placeholders neutralised, not the emitted job text. A hostile author can defeat any static lint of
+# PowerShell -- including by editing this file -- so review of the template diff remains required.
 #
 # Output: JSON { templates: [...], violations: [ { source, line, rule, text, reason } ] }.
 
@@ -211,6 +206,13 @@ function Invoke-Scan([string]$Source, [string]$Text, [string[]]$ModuleFunctions)
         $violations.Add([ordered]@{ source = $Source; line = $err.Extent.StartLineNumber; rule = 'parse'; text = $err.Message; reason = 'template does not parse' })
     }
     $scanned.Add($Source)
+    # R8 directives: `using module/assembly/namespace` and `#requires` pull in code the lint never sees.
+    foreach ($using in @($root.UsingStatements)) {
+        Add-Violation $Source $using 'R8' 'using statements are not allowed in a job template'
+    }
+    if ($null -ne $root.ScriptRequirements) {
+        Add-Violation $Source $root 'R8' '#requires is not allowed in a job template'
+    }
     $templateFunctions = @($root.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
     $known = @($allowedCmdlets + $templateFunctions + $ModuleFunctions)
 
@@ -262,6 +264,9 @@ function Invoke-Scan([string]$Source, [string]$Text, [string[]]$ModuleFunctions)
             }
         }
         if ($key -eq 'new-item') {
+            if ((Get-NamedArguments $command @('Name')).Count -gt 0) {
+                Add-Violation $Source $command 'R2' 'New-Item -Name is not allowed (it can traverse out of -Path)'
+            }
             # Only a plain directory or file; a SymbolicLink/Junction/HardLink under $Work would let a
             # later provable write land outside it.
             $types = Get-NamedArguments $command @('ItemType')
@@ -270,6 +275,15 @@ function Invoke-Scan([string]$Source, [string]$Text, [string[]]$ModuleFunctions)
                 (@('Directory', 'File') -ccontains [string]$types[0].Value)
             if (-not $typeOk) {
                 Add-Violation $Source $command 'R2' "New-Item must name -ItemType 'Directory' or 'File' literally"
+            }
+        }
+        if ($name -ceq 'Remove-AttrCudaTree') {
+            $roots = Get-NamedArguments $command @('TrustedRoot')
+            $rootOk = $roots.Count -eq 1 -and $null -ne $roots[0] -and (
+                ($roots[0] -is [System.Management.Automation.Language.VariableExpressionAst] -and $roots[0].VariablePath.UserPath -ceq 'AgentRoot') -or
+                ($roots[0] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and [string]$roots[0].Value -ceq 'C:\mlvtmp'))
+            if (-not $rootOk) {
+                Add-Violation $Source $command 'R2' "Remove-AttrCudaTree -TrustedRoot must be `$AgentRoot or 'C:\mlvtmp'"
             }
         }
         if ($mutatorParams.ContainsKey($key)) {

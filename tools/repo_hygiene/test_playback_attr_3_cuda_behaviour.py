@@ -918,7 +918,7 @@ class LinkSafeCleanupTests(_PwshCase):
 
 
 # --------------------------------------------------------------------------------------------
-# AST proof: no raw write outside $Work in any emitted template (sol PR #133 r5)
+# regression tripwire: known-dangerous shapes in the emitted templates (not a soundness proof)
 # --------------------------------------------------------------------------------------------
 
 SCANNER = ROOT / "tools" / "repo_hygiene" / "attr3_publish_write_scan.ps1"
@@ -931,7 +931,7 @@ JOB_TEMPLATES = (
 
 @requires_pwsh
 class PublishWriteScanTests(_PwshCase):
-    """The invariant is structural: a raw write is legal only with a destination PROVED under $Work."""
+    """Tripwire over the templates; the runtime helpers, not this scan, are the safety boundary."""
 
     def scan(self, *, generators=(), templates=()) -> dict:
         proc = subprocess.run(
@@ -951,55 +951,61 @@ class PublishWriteScanTests(_PwshCase):
     # Each fixture is one way sol showed a line scan could be evaded, plus the other write shapes the
     # scanner claims to cover. Every one must be flagged.
     BYPASSES = {
-        "multiline": "Copy-Item -LiteralPath $a `\n    -Destination (Join-Path $Pub 'x') -Force\n",
-        "aliased_destination": "$d = Join-Path $Pub 'x'\nSet-Content -LiteralPath $d -Value 1\n",
-        "dotnet_static": "[IO.File]::WriteAllText((Join-Path $Pub 'x'), 'y')\n",
-        "dotnet_full_name": "[System.IO.File]::Copy($a, (Join-Path $Pub 'x'), $true)\n",
-        "guard_only_in_comment": "# Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'x')\nSet-Content -LiteralPath (Join-Path $Pub 'x') -Value 1\n",
-        "out_file": "'y' | Out-File -FilePath (Join-Path $Pub 'x')\n",
-        "redirection": "Get-Date > (Join-Path $Pub 'x')\n",
-        "alias_positional": "cp $a (Join-Path $Pub 'x')\n",
-        "positional_even_under_work": "Set-Content (Join-Path $Work 'x') 1\n",
-        "abbreviated_parameter": "Copy-Item -LiteralPath $a -Dest (Join-Path $Pub 'x')\n",
-        "reassigned_variable": "$w = Join-Path $Work 'a'\n$w = Join-Path $Pub 'b'\nSet-Content -LiteralPath $w -Value 1\n",
-        "foreach_variable": "foreach ($q in @((Join-Path $Work 'a'))) { Set-Content -LiteralPath $q -Value 1 }\n",
-        "new_directory_under_pub": "New-Item -ItemType Directory -Path (Join-Path $Pub 'logs') | Out-Null\n",
-        "start_process_redirect": "Start-Process -FilePath x.exe -RedirectStandardOutput (Join-Path $Pub 'o.txt')\n",
-        "tee_object": "1 | Tee-Object -FilePath (Join-Path $Pub 'x')\n",
-        "instance_copyto": "(Get-Item -LiteralPath $a).CopyTo((Join-Path $Pub 'x'))\n",
-        "dynamic_code": "Invoke-Expression 'Set-Content -LiteralPath C:\\x -Value 1'\n",
-        "export_csv": "$rows | Export-Csv -LiteralPath (Join-Path $Cache 'x.csv') -NoTypeInformation\n",
-        "expand_archive": "Expand-Archive -LiteralPath $z -DestinationPath $Pub -Force\n",
-        "remove_outside": "Remove-Item -LiteralPath (Join-Path $Cache 'x') -Force\n",
-        "compound_assignment": "$w = Join-Path $Work 'a'\n$w += 'b'\nNew-Item -ItemType Directory -Path $w | Out-Null\n",
+        "multiline": ("R1", "Copy-Item -LiteralPath $a `\n    -Destination (Join-Path $Pub 'x') -Force\n"),
+        "aliased_destination": ("R1", "$d = Join-Path $Pub 'x'\nSet-Content -LiteralPath $d -Value 1\n"),
+        "dotnet_static": ("R4", "[IO.File]::WriteAllText((Join-Path $Pub 'x'), 'y')\n"),
+        "dotnet_full_name": ("R4", "[System.IO.File]::Copy($a, (Join-Path $Pub 'x'), $true)\n"),
+        "guard_only_in_comment": ("R1", "# Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'x')\nSet-Content -LiteralPath (Join-Path $Pub 'x') -Value 1\n"),
+        "out_file": ("R1", "'y' | Out-File -FilePath (Join-Path $Pub 'x')\n"),
+        "redirection": ("R6", "Get-Date > (Join-Path $Pub 'x')\n"),
+        "alias_positional": ("R1", "cp $a (Join-Path $Pub 'x')\n"),
+        "positional_even_under_work": ("R1", "Set-Content (Join-Path $Work 'x') 1\n"),
+        "abbreviated_parameter": ("R1", "Copy-Item -LiteralPath $a -Dest (Join-Path $Pub 'x')\n"),
+        "reassigned_variable": ("R1", "$w = Join-Path $Work 'a'\n$w = Join-Path $Pub 'b'\nSet-Content -LiteralPath $w -Value 1\n"),
+        "foreach_variable": ("R1", "foreach ($q in @((Join-Path $Work 'a'))) { Set-Content -LiteralPath $q -Value 1 }\n"),
+        "new_directory_under_pub": ("R2", "New-Item -ItemType Directory -Path (Join-Path $Pub 'logs') | Out-Null\n"),
+        "start_process_redirect": ("R2", "Start-Process -FilePath x.exe -RedirectStandardOutput (Join-Path $Pub 'o.txt')\n"),
+        "tee_object": ("R1", "1 | Tee-Object -FilePath (Join-Path $Pub 'x')\n"),
+        "instance_copyto": ("R4", "(Get-Item -LiteralPath $a).CopyTo((Join-Path $Pub 'x'))\n"),
+        "dynamic_code": ("R1", "Invoke-Expression 'Set-Content -LiteralPath C:\\x -Value 1'\n"),
+        "export_csv": ("R2", "$rows | Export-Csv -LiteralPath (Join-Path $Cache 'x.csv') -NoTypeInformation\n"),
+        "expand_archive": ("R2", "Expand-Archive -LiteralPath $z -DestinationPath $Pub -Force\n"),
+        "remove_outside": ("R1", "Remove-Item -LiteralPath (Join-Path $Cache 'x') -Force\n"),
+        "compound_assignment": ("R2", "$w = Join-Path $Work 'a'\n$w += 'b'\nNew-Item -ItemType Directory -Path $w | Out-Null\n"),
         # sol PR #133 r6: each of these passed the r6 blocklist scanner.
-        "work_reassigned": "$Work = 'C:\\outside'\nNew-Item -ItemType Directory -Path (Join-Path $Work 'x') | Out-Null\n",
-        "work_script_scope": "$script:Work = 'C:\\outside'\nNew-Item -ItemType Directory -Path (Join-Path $Work 'x') | Out-Null\n",
-        "join_path_traversal": "New-Item -ItemType Directory -Path (Join-Path $Work '..\\..\\outside') | Out-Null\n",
-        "join_path_variable_child": "$c = '..'\nNew-Item -ItemType Directory -Path (Join-Path $Work $c) | Out-Null\n",
-        "join_path_expandable_child": "New-Item -ItemType Directory -Path (Join-Path $Work \"$c\") | Out-Null\n",
-        "set_variable": "Set-Variable -Name d -Value 'C:\\outside'\nNew-Item -ItemType Directory -Path $d | Out-Null\n",
-        "new_object_streamwriter": "$w = New-Object IO.StreamWriter 'C:\\outside\\x'\n",
-        "streamwriter_ctor": "$w = [IO.StreamWriter]::new('C:\\outside\\x')\n",
-        "add_type": "Add-Type -TypeDefinition 'public class X {}'\n",
-        "call_operator_cmdlet_string": "& 'Set-Content' -LiteralPath C:\\x -Value 1\n",
-        "call_operator_variable": "$cmd = 'Set-Content'\n& $cmd -LiteralPath C:\\x -Value 1\n",
-        "call_operator_scriptblock": "& { New-Item -ItemType Directory -Path C:\\x }\n",
-        "dot_source": ". 'C:\\outside\\x.ps1'\n",
-        "second_start_process_redirect": "Start-Process -FilePath x.exe -RedirectStandardOutput (Join-Path $Work 'o.txt') -RedirectStandardError (Join-Path $Pub 'e.txt')\n",
-        "colon_bound_destination": "New-Item -ItemType Directory -Path:(Join-Path $Pub 'x') | Out-Null\n",
-        "splatting": "$p = @{ ItemType = 'Directory'; Path = 'C:\\outside' }\nNew-Item @p | Out-Null\n",
-        "env_scope_mutation": "$env:TEMP = 'C:\\outside'\n",
-        "global_scope_assignment": "$global:x = 1\n",
-        "member_assignment": "$o = Get-Item -LiteralPath $Work\n$o.Attributes = 'Normal'\n",
-        "reflection": "$m = 'x'.GetType().GetMethod('ToString')\n",
-        "wrong_case_command": "new-item -ItemType Directory -Path (Join-Path $Work 'x') | Out-Null\n",
-        "pipeline_bound_path": "(Join-Path $Pub 'x') | New-Item -ItemType Directory | Out-Null\n",
-        "positional_new_item": "New-Item (Join-Path $Pub 'x') -ItemType Directory | Out-Null\n",
-        "foreach_member_name": "Get-ChildItem -LiteralPath $Pub | ForEach-Object Delete\n",
-        "foreach_member_name_param": "Get-ChildItem -LiteralPath $Pub | ForEach-Object -MemberName Delete\n",
-        "new_item_junction_under_work": "New-Item -ItemType Junction -Path (Join-Path $Work 'j') -Value $Pub | Out-Null\n",
-        "new_item_missing_type": "New-Item -Path (Join-Path $Work 'x') | Out-Null\n",
+        "work_reassigned": ("R5", "$Work = 'C:\\outside'\nNew-Item -ItemType Directory -Path (Join-Path $Work 'x') | Out-Null\n"),
+        "work_script_scope": ("R5", "$script:Work = 'C:\\outside'\nNew-Item -ItemType Directory -Path (Join-Path $Work 'x') | Out-Null\n"),
+        "join_path_traversal": ("R2", "New-Item -ItemType Directory -Path (Join-Path $Work '..\\..\\outside') | Out-Null\n"),
+        "join_path_variable_child": ("R2", "$c = '..'\nNew-Item -ItemType Directory -Path (Join-Path $Work $c) | Out-Null\n"),
+        "join_path_expandable_child": ("R2", "New-Item -ItemType Directory -Path (Join-Path $Work \"$c\") | Out-Null\n"),
+        "set_variable": ("R1", "Set-Variable -Name d -Value 'C:\\outside'\nNew-Item -ItemType Directory -Path $d | Out-Null\n"),
+        "new_object_streamwriter": ("R1", "$w = New-Object IO.StreamWriter 'C:\\outside\\x'\n"),
+        "streamwriter_ctor": ("R4", "$w = [IO.StreamWriter]::new('C:\\outside\\x')\n"),
+        "add_type": ("R1", "Add-Type -TypeDefinition 'public class X {}'\n"),
+        "call_operator_cmdlet_string": ("R3", "& 'Set-Content' -LiteralPath C:\\x -Value 1\n"),
+        "call_operator_variable": ("R3", "$cmd = 'Set-Content'\n& $cmd -LiteralPath C:\\x -Value 1\n"),
+        "call_operator_scriptblock": ("R3", "& { New-Item -ItemType Directory -Path C:\\x }\n"),
+        "dot_source": ("R3", ". 'C:\\outside\\x.ps1'\n"),
+        "second_start_process_redirect": ("R2", "Start-Process -FilePath x.exe -RedirectStandardOutput (Join-Path $Work 'o.txt') -RedirectStandardError (Join-Path $Pub 'e.txt')\n"),
+        "colon_bound_destination": ("R2", "New-Item -ItemType Directory -Path:(Join-Path $Pub 'x') | Out-Null\n"),
+        "splatting": ("R2", "$p = @{ ItemType = 'Directory'; Path = 'C:\\outside' }\nNew-Item @p | Out-Null\n"),
+        "env_scope_mutation": ("R5", "$env:TEMP = 'C:\\outside'\n"),
+        "global_scope_assignment": ("R5", "$global:x = 1\n"),
+        "member_assignment": ("R5", "$o = Get-Item -LiteralPath $Work\n$o.Attributes = 'Normal'\n"),
+        "reflection": ("R4", "$m = 'x'.GetType().GetMethod('ToString')\n"),
+        "wrong_case_command": ("R1", "new-item -ItemType Directory -Path (Join-Path $Work 'x') | Out-Null\n"),
+        "pipeline_bound_path": ("R2", "(Join-Path $Pub 'x') | New-Item -ItemType Directory | Out-Null\n"),
+        "positional_new_item": ("R2", "New-Item (Join-Path $Pub 'x') -ItemType Directory | Out-Null\n"),
+        "foreach_member_name": ("R2", "Get-ChildItem -LiteralPath $Pub | ForEach-Object Delete\n"),
+        "foreach_member_name_param": ("R2", "Get-ChildItem -LiteralPath $Pub | ForEach-Object -MemberName Delete\n"),
+        "new_item_junction_under_work": ("R2", "New-Item -ItemType Junction -Path (Join-Path $Work 'j') -Value $Pub | Out-Null\n"),
+        "new_item_missing_type": ("R2", "New-Item -Path (Join-Path $Work 'x') | Out-Null\n"),
+
+        # sol PR #133 r7 enforcement gaps closed in this PR.
+        "new_item_name_traversal": ("R2", "New-Item -ItemType File -Path $Work -Name '..\\outside.txt' -Force | Out-Null\n"),
+        "using_module": ("R8", "using module 'C:\\outside\\evil.psm1'\n"),
+        "requires_modules": ("R8", "#requires -Modules EvilModule\n"),
+        "tree_untrusted_root": ("R2", "Remove-AttrCudaTree -TrustedRoot 'C:\\' -Path 'C:\\outside'\n"),
     }
 
     CONTROLS = {
@@ -1018,16 +1024,23 @@ class PublishWriteScanTests(_PwshCase):
 
     def _write(self, name: str, body: str) -> Path:
         path = self.tmp / f"{name}.ps1"
-        path.write_text(self.PRELUDE + body, encoding="utf-8")
+        if body.startswith(("using ", "#requires")):
+            first, _, rest = body.partition("\n")
+            text = first + "\n" + self.PRELUDE + rest
+        else:
+            text = self.PRELUDE + body
+        path.write_text(text, encoding="utf-8")
         return path
 
-    def test_each_known_bypass_is_flagged(self) -> None:
-        files = {name: self._write(name, body) for name, body in self.BYPASSES.items()}
+    def test_each_known_bypass_is_flagged_by_its_intended_rule(self) -> None:
+        files = {name: self._write(name, body) for name, (_, body) in self.BYPASSES.items()}
         result = self.scan(templates=files.values())
-        flagged = {Path(v["source"]).stem for v in result["violations"]}
-        for name in self.BYPASSES:
-            with self.subTest(bypass=name):
-                self.assertIn(name, flagged, json.dumps(result["violations"], indent=2))
+        rules_by_fixture: dict[str, set[str]] = {}
+        for violation in result["violations"]:
+            rules_by_fixture.setdefault(Path(violation["source"]).stem, set()).add(violation["rule"])
+        for name, (rule, _) in self.BYPASSES.items():
+            with self.subTest(bypass=name, rule=rule):
+                self.assertIn(rule, rules_by_fixture.get(name, set()), json.dumps(result["violations"], indent=2))
 
     def test_proven_work_writes_and_helper_calls_are_not_flagged(self) -> None:
         files = {name: self._write(name, body) for name, body in self.CONTROLS.items()}
