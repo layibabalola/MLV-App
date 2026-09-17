@@ -86,7 +86,11 @@ param(
     # literal allowlist, not a loosened pattern -- ATTR3-FIXTURE-REHEARSAL-1). A fixture id
     # never touches NA-4: it names no path, so the generator's own consent gate never sees it.
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^(?:[A-Za-z]\d{2}-\d{3,4}|tiny_dual_iso|large_dual_iso)$')]
+    # The fixture arm is CASE-SENSITIVE via (?-i:...): PowerShell's ValidatePattern is
+    # case-insensitive by default, so without it 'TINY_DUAL_ISO' would pass validation while the
+    # case-sensitive membership test below classified it as an owner clip and emitted
+    # fixtureRehearsal=false (sol, PR #137 r1 BLOCKER).
+    [ValidatePattern('^(?:[A-Za-z]\d{2}-\d{3,4}|(?-i:tiny_dual_iso|large_dual_iso))$')]
     [string]$ClipId,
 
     # The ONE authorized clip (NA-4): must equal the CLIP_OR_NONE line of the lane running
@@ -652,6 +656,9 @@ $provenance = [ordered]@{
     llrawprocBlobId = $LlrawprocBlobId
     dllSha256 = $dllSha256Lower
     pendingSymbolPresence = $pendingSymbolPresence
+    # A rehearsal is carried by the provenance sidecar too: a reader who consults only this file
+    # must still be told that these numbers are a plumbing proof (sol, PR #137 r1).
+    fixtureRehearsal = $FixtureRehearsal
 }
 Save-Json $provenance (Join-Path $Pub 'provenance.json')
 
@@ -694,9 +701,28 @@ $manifest = [ordered]@{
     capturedUtc = (Get-Date).ToUniversalTime().ToString('o')
 }
 Save-Json $manifest (Join-Path $Pub 'evidence-manifest.json')
+# A SUCCESS summary.json, which the failure paths above all write but the success path did not:
+# summary.json is the first file a reader opens, and its absence on the one path that produces
+# numbers is exactly where a rehearsal could be mistaken for a measurement (sol, PR #137 r1).
+Save-Json ([ordered]@{
+    result = $(if ($FixtureRehearsal) { 'FIXTURE_REHEARSAL_CAPTURED' } else { 'MEASUREMENT_CAPTURED' })
+    fixtureRehearsal = $FixtureRehearsal
+    sourceCommit = $SourceCommit
+    clipId = $ClipId
+    rows = $rows.Count
+    gpuFramesTotal = $gpuFramesTotal
+    cpuFrames = $gpuSummary.cpuFrames
+    presentMonSamples = $pmRows.Count
+    diagnostics = $diagnostics
+    artifactRoot = $Pub
+}) (Join-Path $Pub 'summary.json')
 $files = Get-ChildItem -LiteralPath $Pub -Recurse -File | ForEach-Object { [ordered]@{ path=$_.FullName.Substring($Pub.Length + 1); sha256=(Get-Sha $_.FullName); bytes=$_.Length } }
-Save-Json ([ordered]@{ schema='playback-attr-3-cuda-artifact-index.v1'; artifactRoot=$Pub; files=$files }) (Join-Path $Pub 'artifact-index.json')
-Write-Output "RESULT=MEASUREMENT_CAPTURED SOURCE=$SourceCommit CLIP=$ClipId ROWS=$($rows.Count) GPU_FRAMES=$gpuFramesTotal CPU_FRAMES=$($gpuSummary.cpuFrames) PRESENTMON_SAMPLES=$($pmRows.Count) ARTIFACTS=$Pub"
+Save-Json ([ordered]@{ schema='playback-attr-3-cuda-artifact-index.v1'; artifactRoot=$Pub; fixtureRehearsal=$FixtureRehearsal; files=$files }) (Join-Path $Pub 'artifact-index.json')
+# The agent-visible result line says which kind of run this was, in the verb itself: the agent's
+# outbox result.json carries stdout and nothing else, so a reader who never opens an artifact
+# still cannot mistake a rehearsal for a measurement.
+$resultVerb = if ($FixtureRehearsal) { 'FIXTURE_REHEARSAL_CAPTURED' } else { 'MEASUREMENT_CAPTURED' }
+Write-Output "RESULT=$resultVerb FIXTURE_REHEARSAL=$FixtureRehearsal SOURCE=$SourceCommit CLIP=$ClipId ROWS=$($rows.Count) GPU_FRAMES=$gpuFramesTotal CPU_FRAMES=$($gpuSummary.cpuFrames) PRESENTMON_SAMPLES=$($pmRows.Count) ARTIFACTS=$Pub"
 exit 0
 '@
 

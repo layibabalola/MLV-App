@@ -24,6 +24,10 @@ ROOT = Path(__file__).resolve().parents[2]
 UM_RUN = ROOT / "tools" / "profiling" / "um-run.ps1"
 MODULE = ROOT / "tools" / "profiling" / "UmRunDrop.psm1"
 PWSH = shutil.which("pwsh")
+GIT = shutil.which("git")
+
+# Tracked-fixture admission asks git whether the file is tracked, so those cases need git.
+requires_git = unittest.skipIf(GIT is None, "git is not on PATH")
 
 
 def _q(path: Path | str) -> str:
@@ -122,53 +126,90 @@ class UmRunDropModuleTests(_Share):
         self.assertIn("THREW UMRUN_SIDEFILE_NAME_INVALID", proc.stdout, proc.stdout + proc.stderr)
         self.assertEqual(self.names(), [])
 
-    def test_a_tracked_fixture_clip_is_admitted_by_its_source_not_its_extension(self) -> None:
-        # ATTR3-FIXTURE-REHEARSAL-1: the admissible property is "these bytes are a tracked fixture in
-        # the repository", not a media extension in an allowlist. A file with the same name from any
-        # other directory is still refused, which is what makes this a source test and not a loophole.
-        fixtures = self.local / "tests" / "fixtures" / "clips"
-        fixtures.mkdir(parents=True)
-        clip = fixtures / "tiny_dual_iso.fixturemedia"
-        clip.write_bytes(os.urandom(2048))
+    # ---- tracked fixture admission (ATTR3-FIXTURE-REHEARSAL-1) -------------------------------
+    # These use the REPOSITORY's own fixture clips, discovered by listing the directory rather than
+    # by naming a file, and never assert on a media extension. Admission is anchored to this repo:
+    # the source's real directory must BE <repo>/tests/fixtures/clips and the file must be tracked.
+
+    def repo_fixture(self) -> Path:
+        fixtures = ROOT / "tests" / "fixtures" / "clips"
+        if not fixtures.is_dir():
+            self.skipTest("no repository fixture clips directory")
+        smallest = sorted((f for f in fixtures.iterdir() if f.is_file()), key=lambda f: f.stat().st_size)
+        if not smallest:
+            self.skipTest("no repository fixture clips")
+        return smallest[0]
+
+    def probe_source(self, path: Path) -> str:
+        script = self.tmp / f"fixture-probe-{abs(hash(str(path))) % 10**8}.ps1"
+        script.write_text(
+            "Import-Module " + _q(MODULE) + " -Force\n"
+            "Write-Output ('RESULT=' + (Test-UmRunTrackedFixtureSource -SourcePath " + _q(path) + "))\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                              capture_output=True, text=True)
+        return proc.stdout + proc.stderr
+
+    @requires_git
+    def test_a_tracked_repository_fixture_is_admitted_and_placed(self) -> None:
+        clip = self.repo_fixture()
         proc = self.drop(OBSERVING, side=[clip])
         self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
-        self.assertEqual(self.names(), ["demo.job.ps1", "tiny_dual_iso.fixturemedia"])
+        self.assertEqual(self.names(), sorted(["demo.job.ps1", clip.name]))
         self.assertEqual(
-            hashlib.sha256((self.inbox / "tiny_dual_iso.fixturemedia").read_bytes()).hexdigest(),
+            hashlib.sha256((self.inbox / clip.name).read_bytes()).hexdigest(),
             hashlib.sha256(clip.read_bytes()).hexdigest(),
         )
 
-    def test_the_same_name_from_a_non_fixture_directory_is_refused(self) -> None:
+    @requires_git
+    def test_the_same_bytes_and_name_from_another_directory_are_refused(self) -> None:
+        clip = self.repo_fixture()
         elsewhere = self.local / "downloads"
         elsewhere.mkdir()
-        impostor = elsewhere / "tiny_dual_iso.fixturemedia"
-        impostor.write_bytes(os.urandom(2048))
+        impostor = elsewhere / clip.name
+        shutil.copy2(clip, impostor)
         proc = self.drop(OBSERVING, side=[impostor])
         self.assertIn("THREW UMRUN_SIDEFILE_NAME_INVALID", proc.stdout, proc.stdout + proc.stderr)
         self.assertEqual(self.names(), [])
 
-    def test_the_fixture_source_test_requires_all_three_segments_in_order(self) -> None:
-        cases = {
-            "tests/fixtures/clips": True,
-            "repo/tests/fixtures/clips": True,
-            # A subdirectory of the fixtures dir is still the fixtures dir; NA-4 admits `under(...)` too.
-            "tests/fixtures/clips/nested": True,
-            "tests/clips/fixtures": False,
-            "fixtures/clips": False,
-            "tests/fixtures": False,
-        }
-        body = "Import-Module " + _q(MODULE) + " -Force\n"
-        for relative in cases:
-            probe = (self.local / Path(relative) / "x.fixturemedia")
-            body += ("Write-Output ('" + relative + " -> ' + (Test-UmRunTrackedFixtureSource -SourcePath "
-                     + _q(probe) + "))\n")
-        script = self.tmp / "fixture-source.ps1"
-        script.write_text(body, encoding="utf-8")
-        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
-                              capture_output=True, text=True)
-        for relative, expected in cases.items():
-            with self.subTest(relative=relative):
-                self.assertIn(f"{relative} -> {expected}", proc.stdout, proc.stdout + proc.stderr)
+    @requires_git
+    def test_a_lookalike_fixtures_tree_outside_the_repository_is_refused(self) -> None:
+        # sol PR #137 r1 BLOCKER: a lexical segment match admitted any tests\fixtures\clips tree.
+        clip = self.repo_fixture()
+        lookalike = self.local / "tests" / "fixtures" / "clips"
+        lookalike.mkdir(parents=True)
+        impostor = lookalike / clip.name
+        shutil.copy2(clip, impostor)
+        self.assertIn("RESULT=False", self.probe_source(impostor))
+        proc = self.drop(OBSERVING, side=[impostor])
+        self.assertIn("THREW UMRUN_SIDEFILE_NAME_INVALID", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), [])
+
+    @requires_git
+    def test_a_path_through_a_junction_to_a_lookalike_tree_is_refused(self) -> None:
+        clip = self.repo_fixture()
+        lookalike = self.local / "outside" / "tests" / "fixtures" / "clips"
+        lookalike.mkdir(parents=True)
+        shutil.copy2(clip, lookalike / clip.name)
+        link = self.local / "link"
+        made = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType Junction -Path {_q(link)} -Target {_q(self.local / 'outside')} | Out-Null"],
+            capture_output=True, text=True)
+        if made.returncode != 0 or not link.exists():
+            self.skipTest(f"cannot create a junction here: {made.stderr}")
+        through = link / "tests" / "fixtures" / "clips" / clip.name
+        self.assertIn("RESULT=False", self.probe_source(through))
+
+    @requires_git
+    def test_an_untracked_file_inside_the_real_fixtures_directory_is_refused(self) -> None:
+        # A file merely dropped into the repository's fixtures directory is not a fixture.
+        fixtures = ROOT / "tests" / "fixtures" / "clips"
+        intruder = fixtures / "umrun_untracked_probe.bin"
+        intruder.write_bytes(os.urandom(64))
+        self.addCleanup(lambda: intruder.exists() and intruder.unlink())
+        self.assertIn("RESULT=False", self.probe_source(intruder))
 
     def test_names_that_are_not_plain_allowlisted_basenames_are_refused(self) -> None:
         cases = ["x.job.ps1", "x.job.tmp", "x.ps1", "x.sidepart", "x.zip.", "x.zip ", "CON.zip", "noext", "x..zip", "x.exe.cmd"]

@@ -346,7 +346,7 @@ class AttributionJobTests(unittest.TestCase):
         for later_verdict in (
             "RESULT=GPU_RECON_FRAMES_ZERO",
             "RESULT=CPU_FALLBACK_DETECTED",
-            "RESULT=MEASUREMENT_CAPTURED",
+            "RESULT=$resultVerb",
         ):
             with self.subTest(verdict=later_verdict):
                 self.assertLess(gate, self.text.index(later_verdict))
@@ -370,7 +370,7 @@ class AttributionJobTests(unittest.TestCase):
         self.assertIn("RESULT=SMOKE_LOG_UNAVAILABLE", self.text)
         self.assertIn("exit 16", self.text)
         refusal = self.text.index("RESULT=SMOKE_LOG_UNAVAILABLE")
-        for later_verdict in ("RESULT=BACKEND_NOT_AVAILABLE", "RESULT=MEASUREMENT_CAPTURED"):
+        for later_verdict in ("RESULT=BACKEND_NOT_AVAILABLE", "RESULT=$resultVerb"):
             with self.subTest(verdict=later_verdict):
                 self.assertLess(refusal, self.text.index(later_verdict))
 
@@ -417,8 +417,9 @@ class AttributionJobFixtureRehearsalTests(unittest.TestCase):
     def test_flag_is_recorded_in_every_summary_and_in_the_evidence_manifest(self) -> None:
         # summary.json is written on every early-exit venue; evidence-manifest.json only on
         # the success path. Both carry the flag, so a fixture run is unmistakable either way.
-        self.assertEqual(self.text.count("fixtureRehearsal=$FixtureRehearsal"), 5)
-        self.assertEqual(self.text.count("fixtureRehearsal = $FixtureRehearsal"), 1)
+        # early-exit venues, the artifact index, and the success summary: every reader-facing output.
+        self.assertGreaterEqual(self.text.count("fixtureRehearsal=$FixtureRehearsal"), 6)
+        self.assertGreaterEqual(self.text.count("fixtureRehearsal = $FixtureRehearsal"), 3)  # provenance, manifest, success summary
 
     def test_clip_path_cache_parent_and_basename_checks_are_unchanged(self) -> None:
         self.assertIn("if ((Split-Path -Parent $clipPath) -ine $Cache)", self.text)
@@ -550,6 +551,39 @@ class SharedNamingContractTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, module)
                 self.assertIn(fragment, attribution)
+
+
+
+class FixtureRehearsalVisibilityTests(unittest.TestCase):
+    """sol PR #137 r1: a rehearsal must be unmistakable in EVERY reader-facing output."""
+
+    GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1"
+
+    def setUp(self) -> None:
+        self.text = self.GENERATOR.read_text(encoding="utf-8")
+        self.template = self.text[self.text.index("$template = @'"):]
+
+    def test_the_fixture_arm_of_the_clip_id_pattern_is_case_sensitive(self) -> None:
+        # ValidatePattern is case-insensitive by default, so the fixture ids carry (?-i:...);
+        # otherwise TINY_DUAL_ISO validates while the membership test calls it an owner clip.
+        line = [l for l in self.text.splitlines() if "ValidatePattern" in l and "dual_iso" in l]
+        self.assertEqual(len(line), 1, line)
+        self.assertIn("(?-i:", line[0])
+
+    def test_every_reader_facing_output_carries_the_flag(self) -> None:
+        for artifact in ("summary.json", "provenance.json", "evidence-manifest.json", "artifact-index.json"):
+            with self.subTest(artifact=artifact):
+                index = self.template.index(artifact)
+                window = self.template[max(0, index - 3000):index]
+                self.assertIn("fixtureRehearsal", window, f"{artifact} is written without the flag nearby")
+
+    def test_the_success_path_writes_a_summary_and_a_distinct_result_verb(self) -> None:
+        self.assertIn("FIXTURE_REHEARSAL_CAPTURED", self.template)
+        self.assertIn("FIXTURE_REHEARSAL=$FixtureRehearsal", self.template)
+        # the success path writes summary.json too, not only the failure paths
+        tail = self.template[self.template.index("$resultVerb ="):] if "$resultVerb =" in self.template else ""
+        self.assertTrue(tail, "no success result verb found")
+        self.assertIn("summary.json", self.template[self.template.index("artifact-index.v1") - 2500:])
 
 
 if __name__ == "__main__":
