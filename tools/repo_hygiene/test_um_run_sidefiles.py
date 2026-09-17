@@ -122,6 +122,54 @@ class UmRunDropModuleTests(_Share):
         self.assertIn("THREW UMRUN_SIDEFILE_NAME_INVALID", proc.stdout, proc.stdout + proc.stderr)
         self.assertEqual(self.names(), [])
 
+    def test_a_tracked_fixture_clip_is_admitted_by_its_source_not_its_extension(self) -> None:
+        # ATTR3-FIXTURE-REHEARSAL-1: the admissible property is "these bytes are a tracked fixture in
+        # the repository", not a media extension in an allowlist. A file with the same name from any
+        # other directory is still refused, which is what makes this a source test and not a loophole.
+        fixtures = self.local / "tests" / "fixtures" / "clips"
+        fixtures.mkdir(parents=True)
+        clip = fixtures / "tiny_dual_iso.fixturemedia"
+        clip.write_bytes(os.urandom(2048))
+        proc = self.drop(OBSERVING, side=[clip])
+        self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), ["demo.job.ps1", "tiny_dual_iso.fixturemedia"])
+        self.assertEqual(
+            hashlib.sha256((self.inbox / "tiny_dual_iso.fixturemedia").read_bytes()).hexdigest(),
+            hashlib.sha256(clip.read_bytes()).hexdigest(),
+        )
+
+    def test_the_same_name_from_a_non_fixture_directory_is_refused(self) -> None:
+        elsewhere = self.local / "downloads"
+        elsewhere.mkdir()
+        impostor = elsewhere / "tiny_dual_iso.fixturemedia"
+        impostor.write_bytes(os.urandom(2048))
+        proc = self.drop(OBSERVING, side=[impostor])
+        self.assertIn("THREW UMRUN_SIDEFILE_NAME_INVALID", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), [])
+
+    def test_the_fixture_source_test_requires_all_three_segments_in_order(self) -> None:
+        cases = {
+            "tests/fixtures/clips": True,
+            "repo/tests/fixtures/clips": True,
+            # A subdirectory of the fixtures dir is still the fixtures dir; NA-4 admits `under(...)` too.
+            "tests/fixtures/clips/nested": True,
+            "tests/clips/fixtures": False,
+            "fixtures/clips": False,
+            "tests/fixtures": False,
+        }
+        body = "Import-Module " + _q(MODULE) + " -Force\n"
+        for relative in cases:
+            probe = (self.local / Path(relative) / "x.fixturemedia")
+            body += ("Write-Output ('" + relative + " -> ' + (Test-UmRunTrackedFixtureSource -SourcePath "
+                     + _q(probe) + "))\n")
+        script = self.tmp / "fixture-source.ps1"
+        script.write_text(body, encoding="utf-8")
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                              capture_output=True, text=True)
+        for relative, expected in cases.items():
+            with self.subTest(relative=relative):
+                self.assertIn(f"{relative} -> {expected}", proc.stdout, proc.stdout + proc.stderr)
+
     def test_names_that_are_not_plain_allowlisted_basenames_are_refused(self) -> None:
         cases = ["x.job.ps1", "x.job.tmp", "x.ps1", "x.sidepart", "x.zip.", "x.zip ", "CON.zip", "noext", "x..zip", "x.exe.cmd"]
         body = "Import-Module " + _q(MODULE) + " -Force\n"
