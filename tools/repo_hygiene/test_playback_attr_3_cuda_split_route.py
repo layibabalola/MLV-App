@@ -23,8 +23,17 @@ Ruling: .claude-state/fleet-runs/swarm-attr3-buildhost-20260916T2150Z/SYNTHESIS.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
+
+PWSH = shutil.which("pwsh")
+
+
+def _pwsh_quote(value: str) -> str:
+    """A PowerShell single-quoted literal; newlines survive as real newlines inside the quotes."""
+    return "'" + value.replace("'", "''") + "'"
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -386,22 +395,50 @@ class AttributionJobFixtureRehearsalTests(unittest.TestCase):
         self.text = _read(ATTRIBUTION_JOB)
         match = self._CLIP_ID_PATTERN_RX.search(self.text)
         self.assertIsNotNone(match, "could not find the -ClipId ValidatePattern in the generator")
-        self.clip_id_pattern = re.compile(match.group("pattern"))
+        self.clip_id_pattern = match.group("pattern")
+
+    def match_in_powershell(self, candidates: dict[str, bool]) -> None:
+        """Evaluate the pattern in the engine that ENFORCES it.
+
+        The pattern is .NET's, not Python's: it carries a scoped inline flag `(?-i:...)` and the
+        `\\z` anchor, and Python's `re` accepts neither on every supported version -- compiling it
+        with `re` made these tests error on the CI runner while passing locally, and it would have
+        been testing a different engine's semantics either way.
+        """
+        if PWSH is None:
+            self.skipTest("pwsh is not on PATH")
+        lines = ["$pattern = " + _pwsh_quote(self.clip_id_pattern)]
+        for candidate in candidates:
+            lines.append(
+                "Write-Output ('CANDIDATE ' + " + _pwsh_quote(candidate) + " + ' -> ' + "
+                "([bool](" + _pwsh_quote(candidate) + " -cmatch $pattern)))"
+            )
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "\n".join(lines)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        for candidate, expected in candidates.items():
+            with self.subTest(clip_id=candidate):
+                self.assertIn(f"CANDIDATE {candidate} -> {expected}", proc.stdout, proc.stdout)
 
     def test_owner_clip_id_pattern_still_works(self) -> None:
-        for good in ("M16-1243", "a99-123", "Z00-9999"):
-            with self.subTest(clip_id=good):
-                self.assertIsNotNone(self.clip_id_pattern.match(good))
+        self.match_in_powershell({"M16-1243": True, "a99-123": True, "Z00-9999": True})
 
     def test_fixture_clip_ids_are_accepted(self) -> None:
-        for fixture in ("tiny_dual_iso", "large_dual_iso"):
-            with self.subTest(clip_id=fixture):
-                self.assertIsNotNone(self.clip_id_pattern.match(fixture))
+        self.match_in_powershell({"tiny_dual_iso": True, "large_dual_iso": True})
 
-    def test_an_unknown_stem_is_refused(self) -> None:
-        for bad in ("some_other_clip", "tiny_dual_iso_extra", "TINY_DUAL_ISO", "medium_dual_iso", ""):
-            with self.subTest(clip_id=bad):
-                self.assertIsNone(self.clip_id_pattern.match(bad))
+    def test_an_unknown_or_miscased_stem_is_refused(self) -> None:
+        # TINY_DUAL_ISO and a trailing newline were both sol findings (PR #137 r1 and r2): each
+        # validated once and then failed the case-sensitive membership test.
+        self.match_in_powershell({
+            "some_other_clip": False,
+            "tiny_dual_iso_extra": False,
+            "TINY_DUAL_ISO": False,
+            "Tiny_Dual_Iso": False,
+            "medium_dual_iso": False,
+            "tiny_dual_iso\n": False,
+        })
 
     def test_fixture_ids_are_a_literal_allowlist_not_a_loose_pattern(self) -> None:
         # The flag is decided by an exact membership test against the two literals, never by
