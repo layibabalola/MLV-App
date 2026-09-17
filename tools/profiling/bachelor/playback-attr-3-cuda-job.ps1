@@ -34,14 +34,39 @@
 #     tools/repo_hygiene/gpu_job_result_provenance.py.
 #   - the exe/DLL under test are NOT pinned SHA256 constants (PLAYBACK-ATTR-2 already
 #     had a built artifact to pin); they are named deterministically from -SourceCommit
-#     and expected to already be staged in the Bachelor cache by
-#     tools/profiling/bachelor/playback-attr-3-cuda-compile-job.ps1's job, which uses the
-#     IDENTICAL naming convention. Their hashes are computed fresh at run time and
-#     recorded, not asserted against a value this generator could not have known.
+#     and expected to already be staged in the Bachelor cache by the split-build route's
+#     staging job (tools/profiling/bachelor/playback-attr-3-cuda-stage-job.ps1), which uses
+#     the IDENTICAL naming convention. Their hashes are computed fresh at run time and
+#     verified against the staged build manifest, not asserted against a value this
+#     generator could not have known.
+#
+# SPLIT BUILD (swarm ruling 2026-09-16,
+# .claude-state/fleet-runs/swarm-attr3-buildhost-20260916T2150Z/SYNTHESIS.md). Bachelor has
+# no VC tools and no CUDA toolkit, so NOTHING is compiled or inspected with MSVC tooling
+# here. The CUDA DLL pair is built on Ultra-Magnus, the exe on the board host, and the
+# package is staged into the Bachelor cache by a staging job. Two consequences in this file:
+#   - pendingSymbolPresence is READ from the staged build manifest (the old on-Bachelor
+#     MSVC export-inspection probe is gone; it could only ever throw here);
+#   - the run's own gpu_playback_recon.eligibility diagnostics are parsed BEFORE any
+#     verdict, and the job exits 15 (BACKEND_NOT_AVAILABLE) unless
+#     cuda_backend_available=1 and r16_available=1, recording both plus r16_reason.
+#
+# WHICH LOG (sol, PR #133 r2, BLOCKER). The eligibility line is read from the log
+# run-release-gui-smoke.ps1 itself designates for the run just executed --
+# result.json's `log.path`, the "$outputPath.run.log" per-run snapshot it calls the
+# comparison authority -- bound to `evidence.runLogSnapshot.sha256`. NEVER from a glob
+# over out\diagnostic\logs, which cannot match anything: that runner writes into a
+# GUID-nonced logs-<stem>-<nonce> directory. The exact lines relied on are quoted beside
+# the call. A log that is absent, unbound or outside this job's work tree exits 16
+# (SMOKE_LOG_UNAVAILABLE) -- a missing gate is never a passed gate.
 #
 # Usage:
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
-#       -SourceCommit <40-hex> -ClipId M16-1243 -ClipPath <the lane's CLIP_OR_NONE path> -OutFile <path>\<jobId>.job.ps1
+#       -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> `
+#       -ClipId M16-1243 -ClipPath <the lane's CLIP_OR_NONE path> -OutFile <path>\<jobId>.job.ps1
+#
+# -BuildManifestSha256 is the sha the assembler printed (MANIFEST_SHA256= on its RESULT line)
+# and the staging generator echoed as buildManifestSha256; see docs/playback-attr-3-cuda.md.
 
 [CmdletBinding()]
 param(
@@ -63,11 +88,23 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutFile,
 
+    # The lowercase sha256 of the build.json that the staging job published into the Bachelor
+    # cache -- printed by tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1
+    # (MANIFEST_SHA256= on its RESULT line) and echoed as buildManifestSha256 by
+    # tools/profiling/bachelor/playback-attr-3-cuda-stage-job.ps1. MANDATORY (sol, PR #133 r2):
+    # without it the job trusts whichever same-named manifest sits in the mutable cache, and
+    # replacing build.json plus matching artifacts forges pendingSymbolPresence and the DLL
+    # association in one move.
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-f]{64}$')]
+    [string]$BuildManifestSha256,
+
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path,
 
     # Derived from -SourceCommit, not pinned to an old package: matches the package
-    # tools/profiling/bachelor/playback-attr-3-cuda-compile-job.ps1's emitted job stages into the
-    # Bachelor cache as MLVApp-playback-attr-3-cuda-<sha12>-pkg.zip -- a raw zip of that job's
+    # tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1 builds on the board host and
+    # tools/profiling/bachelor/playback-attr-3-cuda-stage-job.ps1's emitted job stages into the
+    # Bachelor cache as MLVApp-playback-attr-3-cuda-<sha12>-pkg.zip -- a raw zip of that build's
     # deployed release dir, so the exe inside keeps its unrenamed build name, MLVApp.exe. This
     # replaces the old default (the July MLVApp-CUDA-W4W5-4d1955f8.zip base, wrong for a build
     # of current master since its Qt runtime may not match). The hub must still verify the
@@ -87,6 +124,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
+
+# The emitted job runs on a host with no checkout, so it cannot Import-Module: the verification
+# functions are spliced into its text VERBATIM at generation time. The test suite executes the
+# module copy, so the code under test is the code that runs on Bachelor.
+$embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
+    'Assert-AttrCudaBuildManifest',
+    'Resolve-AttrCudaSmokeRunLog',
+    'Get-AttrCudaLastEligibilityLine',
+    'Get-AttrCudaEligibilityVerdict',
+    'Assert-AttrCudaWritableFileSlot',
+    'Publish-AttrCudaText',
+    'Publish-AttrCudaFileCopy',
+    'Publish-AttrCudaFileMove',
+    'New-AttrCudaDirectory',
+    'Assert-AttrCudaNoLinkBelowRoot',
+    'Remove-AttrCudaTree'
+)
 
 # --- resolve provenance locally, BEFORE the job ever touches Bachelor -------------
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
@@ -113,6 +168,7 @@ $template = @'
 $ErrorActionPreference = 'Stop'
 $SourceCommit = '__SOURCE_COMMIT__'
 $ClipId = '__CLIP_ID__'
+$BuildManifestSha256 = '__BUILD_MANIFEST_SHA256__'
 $AuthorizedClipPath = '__CLIP_PATH__'
 $RangeHeadSha = '__RANGE_HEAD_SHA__'
 $LlrawprocBlobId = '__LLRAWPROC_BLOB_ID__'
@@ -131,11 +187,17 @@ $Work = Join-Path 'C:\mlvtmp' $JobId
 $Pub = Join-Path $Root "outbox\$JobId.artifacts"
 $PresentMonTimedSeconds = 55
 
+# --- verifiers, embedded VERBATIM from tools/profiling/bachelor/AttrCudaArtifacts.psm1 --------
+# Defined FIRST, before any statement that calls them (sol PR #133 r3: the work-tree cleanup was
+# called above its definition, so every emitted job died with command-not-found).
+__EMBEDDED_FUNCTIONS__
+# --- end embedded verifiers -------------------------------------------------------------------
+
 # TEMP boundary (BLOCKER fix): job-owned scratch dir under this job's own C:\mlvtmp
 # work dir, set as TEMP/TMP at the very start -- before any child process (reg.exe,
-# the pwsh that runs run-release-gui-smoke.ps1/MLVApp.exe, dumpbin, PresentMon) -- so
-# every one of them inherits it instead of the ambient (unconstrained) machine TEMP.
-# Mirrors tools/profiling/bachelor/playback-attr-3-cuda-compile-job.ps1's $Scratch
+# the pwsh that runs run-release-gui-smoke.ps1/MLVApp.exe, PresentMon) -- so every one
+# of them inherits it instead of the ambient (unconstrained) machine TEMP.
+# Mirrors tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1's $Scratch
 # pattern. $Work is created here (not later) precisely so the scratch dir it hosts is
 # never wiped out from under a live $env:TEMP by a later "recreate $Work" step.
 function Assert-UnderMlvTmp([string]$Path, [string]$Label) {
@@ -150,7 +212,7 @@ foreach ($check in @(
     @{ path = $Pub; label = 'Pub' }
 )) { Assert-UnderMlvTmp $check.path $check.label }
 
-if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
+Remove-AttrCudaTree -TrustedRoot 'C:\mlvtmp' -Path $Work
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 $Scratch = Join-Path $Work '.job-tmp'
 New-Item -ItemType Directory -Path $Scratch -Force | Out-Null
@@ -168,8 +230,10 @@ function Get-Sha([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
 }
 
+
 function Save-Json($Object, [string]$Path) {
-    $Object | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $Path -Encoding utf8
+    # Artifact writes go through the slot-checked helper: never through a link or into a directory (sol PR #133).
+    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))
 }
 
 function Get-Mean([double[]]$Values) {
@@ -287,20 +351,6 @@ function Get-LastGpuSummary([string]$RawLog) {
     }
 }
 
-function Test-DllExportsIgpuRecon([string]$DllPath) {
-    # gpu_job_result_provenance.py requires pendingSymbolPresence to be a real boolean
-    # -- an inconclusive check must fail the job closed, never be recorded as null.
-    $vswhereExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    if (-not (Test-Path -LiteralPath $vswhereExe)) { throw "vswhere not found: $vswhereExe (cannot prove pendingSymbolPresence)" }
-    $vsInstallPath = & $vswhereExe -latest -property installationPath
-    if ([string]::IsNullOrWhiteSpace($vsInstallPath)) { throw 'vswhere found no VS install (cannot prove pendingSymbolPresence)' }
-    $dumpbinExe = Get-ChildItem -Path (Join-Path $vsInstallPath 'VC\Tools\MSVC') -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
-    if (-not $dumpbinExe) { throw 'dumpbin.exe not found under the VS install (cannot prove pendingSymbolPresence)' }
-    $exportLines = @(& $dumpbinExe.FullName /EXPORTS $DllPath 2>$null | Select-String 'igpu_recon_')
-    return [bool]($exportLines.Count -gt 0)
-}
-
 foreach ($item in @(
     @{ path=(Join-Path $Cache $PresentMonName); sha=$PresentMonSha }
 )) {
@@ -314,9 +364,23 @@ foreach ($item in @(
 # three cached files' sha256 is verified against it before anything is trusted.
 $buildManifestName = "playback-attr-3-cuda-$($SourceCommit.Substring(0,12))-build.json"
 $buildManifestPath = Join-Path $Cache $buildManifestName
-if (-not (Test-Path -LiteralPath $buildManifestPath)) { throw "cache missing build manifest $buildManifestName (required; existence of the exe/DLL/pkg alone is not sufficient)" }
-$buildManifest = Get-Content -Raw -LiteralPath $buildManifestPath | ConvertFrom-Json
-if ($buildManifest.sourceCommit -ne $SourceCommit) { throw "build manifest $buildManifestName sourceCommit=$($buildManifest.sourceCommit) does not match pinned $SourceCommit" }
+# AUTHENTICATE THE MANIFEST BEFORE READING A SINGLE FIELD OF IT (sol, PR #133 r2). The cache is
+# mutable and this job does not own it; a same-named build.json with matching artifacts would
+# otherwise forge pendingSymbolPresence and the whole DLL association. $BuildManifestSha256 was
+# baked in by the generator from the sha the assembler/staging step printed, and the check runs
+# BEFORE ConvertFrom-Json -- a parsed field is already a trusted field. The same call also
+# requires sourceCommit to equal the pinned commit, dllPairManifestSha256 to be present (so the
+# exe's DLL pair is chained back to the Ultra-Magnus manifest rather than merely asserted), and
+# pendingSymbolPresence to be a real boolean.
+$buildManifest = Assert-AttrCudaBuildManifest -Path $buildManifestPath -ExpectedSha256 $BuildManifestSha256 -ExpectedSourceCommit $SourceCommit
+# pendingSymbolPresence is READ, never re-derived here (swarm ruling
+# .claude-state/fleet-runs/swarm-attr3-buildhost-20260916T2150Z/SYNTHESIS.md): this host has no
+# VC tools at all, so the old on-Bachelor MSVC export-inspection probe could only ever throw.
+# The symbol test runs on the host that built the DLL
+# (tools/profiling/ultramagnus/playback-attr-3-cuda-dll-job.ps1) and is carried in the build
+# manifest, whose bytes are now authenticated above.
+$pendingSymbolPresence = [bool]$buildManifest.pendingSymbolPresence
+$dllPairManifestSha256 = ([string]$buildManifest.dllPairManifestSha256).ToLowerInvariant()
 $manifestChecks = @(
     @{ label = 'packageZip'; path = (Join-Path $Cache $BasePackageZip); expectedSha = $buildManifest.packageZip.sha256 },
     @{ label = 'exe'; path = (Join-Path $Cache $ExeName); expectedSha = $buildManifest.exe.sha256 },
@@ -342,7 +406,10 @@ if (-not (Test-Path -LiteralPath $clipPath -PathType Leaf)) { throw "authorized 
 # dir under $Work) -- do not remove/recreate $Work here, which would delete the live
 # $env:TEMP/$env:TMP scratch dir out from under this process.
 New-Item -ItemType Directory -Path (Join-Path $Work 'out') -Force | Out-Null
-New-Item -ItemType Directory -Path $Pub -Force | Out-Null
+# The outbox is created explicitly (never as a side effect of -Force on a deeper path), so its
+# parent is checked for links like every other directory this job creates.
+[void](New-AttrCudaDirectory -Path (Join-Path $Root 'outbox'))
+[void](New-AttrCudaDirectory -Path $Pub)
 Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip) -DestinationPath (Join-Path $Work 'pkg') -Force
 $baseExe = Get-ChildItem -LiteralPath (Join-Path $Work 'pkg') -Recurse -Filter $BasePackageExeName | Select-Object -First 1
 if (-not $baseExe) { throw "base package executable not found: $BasePackageExeName" }
@@ -351,8 +418,8 @@ $exePath = Join-Path $pkgDir $ExeName
 $reconDll = Join-Path $pkgDir 'igpu_recon_cuda.dll'
 $cacheExeSha = Get-Sha (Join-Path $Cache $ExeName)
 $cacheReconSha = Get-Sha (Join-Path $Cache $ReconName)
-Copy-Item -LiteralPath (Join-Path $Cache $ExeName) -Destination $exePath -Force
-Copy-Item -LiteralPath (Join-Path $Cache $ReconName) -Destination $reconDll -Force
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $Cache $ExeName) -Destination $exePath)
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $Cache $ReconName) -Destination $reconDll)
 if ((Get-Sha $exePath) -ne $cacheExeSha -or (Get-Sha $reconDll) -ne $cacheReconSha) {
     throw 'deployed artifact hash verification failed (copy from cache did not round-trip)'
 }
@@ -440,12 +507,70 @@ if ($presentMonDoneResult.status -ne 'done' -or [int]$presentMonDoneResult.exitC
 $rawResult = [IO.File]::ReadAllText($resultPath)
 $resultJson = $rawResult | ConvertFrom-Json -Depth 100
 if ($rawResult -notmatch [regex]::Escape($SourceCommit)) { throw "result does not report pinned source commit $SourceCommit" }
-$logPath = Get-ChildItem -LiteralPath (Join-Path $Work 'out\diagnostic\logs') -Filter 'mlvapp-*.log' -File -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime | Select-Object -Last 1 -ExpandProperty FullName
-if (-not $logPath -or -not (Test-Path -LiteralPath $logPath)) { throw 'MLVApp log missing for high-resolution frame evidence' }
+
+# THE LOG COMES FROM THE RESULT, NOT FROM A GLOB (sol, PR #133 r2). The previous
+# `out\diagnostic\logs\mlvapp-*.log` search could never match: run-release-gui-smoke.ps1 writes
+# into a GUID-nonced `logs-<stem>-<nonce>` directory and publishes the authoritative per-run
+# snapshot separately --
+#
+#     $runNonce = [Guid]::NewGuid().ToString("N")
+#     $logRoot = Join-Path $outputDir ("logs-{0}-{1}" -f $outputStem, $runNonce)
+#     # Preserve the exact lines consumed by this result in a per-run immutable
+#     # snapshot.  The aggregate rotating app log is allowed to grow later and is
+#     # therefore diagnostic only; comparison authority comes from this snapshot.
+#     $runLogSnapshotPath = "$outputPath.run.log"
+#     log = [pscustomobject]@{ path = $runLogSnapshotPath; aggregateSourcePath = ... }
+#     evidence = [pscustomobject]@{ runNonce = $runNonce; runLogSnapshot = $runLogSnapshotBinding }
+#
+# so the job threw "MLVApp log missing" before it could ever reach the eligibility gate below.
+# Resolve-AttrCudaSmokeRunLog reads log.path, requires it to sit inside this job's own work tree
+# and to hash to evidence.runLogSnapshot.sha256, and fails closed at exit 16 otherwise -- absent
+# evidence is never treated as passing evidence.
+try {
+    $runLog = Resolve-AttrCudaSmokeRunLog -ResultJsonPath $resultPath -ContainingRoot $Work
+} catch {
+    $unavailable = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='SMOKE_LOG_UNAVAILABLE'
+        message=$_.Exception.Message; smokeExitCode=$smokeRc; resultJson=$resultPath
+        sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $unavailable (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=SMOKE_LOG_UNAVAILABLE MESSAGE=`"$($_.Exception.Message)`" ARTIFACTS=$Pub"
+    exit 16
+}
+$logPath = $runLog.path
 $rawLog = [IO.File]::ReadAllText($logPath)
 $rows = Get-FrameRows $rawLog
 $rows | Export-Csv -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -NoTypeInformation
+
+# Backend-availability gate (swarm ruling, 2026-09-16): parse the run's own diagnostic
+# fields BEFORE any verdict. A run where the CUDA backend never loaded, or where the R16
+# texture path was not admitted, cannot produce a CUDA attribution -- the frame counters
+# alone would happily describe some other path. Both fields and r16_reason are recorded
+# either way, so a refusal says WHY.
+$verdict = Get-AttrCudaEligibilityVerdict -LogText $rawLog
+$diagnostics = [ordered]@{
+    source = $verdict.source
+    linePresent = $verdict.linePresent
+    cudaBackendAvailable = $verdict.cudaBackendAvailable
+    r16Available = $verdict.r16Available
+    r16Reason = $verdict.r16Reason
+    cudaBackendAttempted = $verdict.cudaBackendAttempted
+    cudaBackendResolved = $verdict.cudaBackendResolved
+    r16ProbeRan = $verdict.r16ProbeRan
+    admitted = $verdict.admitted
+    # Which bytes the verdict was read from, and the binding that proves they are this run's.
+    log = [ordered]@{ path = $runLog.path; sha256 = $runLog.sha256; bytes = $runLog.bytes; runNonce = $runLog.runNonce; source = $runLog.source; aggregateSourcePath = $runLog.aggregateSourcePath }
+}
+if (-not $verdict.admitted) {
+    $refusal = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='BACKEND_NOT_AVAILABLE'
+        diagnostics=$diagnostics; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $refusal (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=BACKEND_NOT_AVAILABLE CUDA_BACKEND_AVAILABLE=$($verdict.cudaBackendAvailable) R16_AVAILABLE=$($verdict.r16Available) R16_REASON=`"$($verdict.r16Reason)`" ARTIFACTS=$Pub"
+    exit $verdict.exitCode
+}
 
 $gpuSummary = Get-LastGpuSummary $rawLog
 # CUDA gate fix (MAJOR): gpu_preview_frames is not CUDA reconstruction -- a run with
@@ -495,7 +620,8 @@ $pmRows | Export-Csv -LiteralPath (Join-Path $legOut 'presentmon-series.csv') -N
 $pmStats = Get-Stats @($pmRows | ForEach-Object { [double]$_.msBetweenDisplayChange })
 
 $dllSha256Lower = (Get-Sha $reconDll).ToLowerInvariant()
-$pendingSymbolPresence = Test-DllExportsIgpuRecon $reconDll
+# $pendingSymbolPresence came from the build manifest above, whose dll.sha256 was verified
+# against this exact DLL before it was deployed -- so the export claim is bound to these bytes.
 $provenance = [ordered]@{
     rangeHeadSha = $RangeHeadSha
     llrawprocBlobId = $LlrawprocBlobId
@@ -504,14 +630,17 @@ $provenance = [ordered]@{
 }
 Save-Json $provenance (Join-Path $Pub 'provenance.json')
 
-Copy-Item -LiteralPath $resultPath -Destination (Join-Path $Pub 'result.json') -Force
-Copy-Item -LiteralPath (Join-Path $legOut 'smoke-stdout.txt') -Destination (Join-Path $Pub 'smoke-stdout.txt') -Force
-Copy-Item -LiteralPath (Join-Path $legOut 'smoke-stderr.txt') -Destination (Join-Path $Pub 'smoke-stderr.txt') -Force
-Copy-Item -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -Destination (Join-Path $Pub 'probe-timeline.csv') -Force
-Copy-Item -LiteralPath $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv') -Force
-Copy-Item -LiteralPath (Join-Path $legOut 'presentmon-series.csv') -Destination (Join-Path $Pub 'presentmon-series.csv') -Force
-New-Item -ItemType Directory -Path (Join-Path $Pub 'logs') -Force | Out-Null
-Copy-Item -LiteralPath $logPath -Destination (Join-Path $Pub 'logs\mlvapp.log') -Force
+[void](Publish-AttrCudaFileCopy -Source $resultPath -Destination (Join-Path $Pub 'result.json'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'smoke-stdout.txt') -Destination (Join-Path $Pub 'smoke-stdout.txt'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'smoke-stderr.txt') -Destination (Join-Path $Pub 'smoke-stderr.txt'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'probe-timeline.csv') -Destination (Join-Path $Pub 'probe-timeline.csv'))
+[void](Publish-AttrCudaFileCopy -Source $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'presentmon-series.csv') -Destination (Join-Path $Pub 'presentmon-series.csv'))
+[void](New-AttrCudaDirectory -Path (Join-Path $Pub 'logs'))
+# The per-run snapshot, under the name that says what it is. The aggregate rotating app log is
+# NOT published: the smoke runner is explicit that it may grow after the run and carries no
+# comparison authority.
+[void](Publish-AttrCudaFileCopy -Source $logPath -Destination (Join-Path $Pub 'logs\smoke-run.log'))
 
 $manifest = [ordered]@{
     schema = 'playback-attr-3-cuda-evidence-manifest.v1'
@@ -519,12 +648,17 @@ $manifest = [ordered]@{
     clipId = $ClipId
     consentReceipt = $ConsentReceiptFileName
     scaleFactor = 4
+    # The authenticated chain, end to end: this manifest's own bytes, and the DLL-pair manifest
+    # it names. Neither is a claim the measurement host had to take on trust.
+    buildManifest = [ordered]@{ name=$buildManifestName; sha256=$BuildManifestSha256; dllPairManifestSha256=$dllPairManifestSha256 }
     executable = [ordered]@{ name=$ExeName; sha256=$cacheExeSha }
     reconDll = [ordered]@{ name=$ReconName; sha256=(Get-Sha $reconDll) }
     presentMon = [ordered]@{ name=$PresentMonName; sha256=$PresentMonSha; launch='direct-child-inherits-job-temp'; positiveSamples=$pmRows.Count }
     environmentBoundary = [ordered]@{ jobTempDir=$Scratch; allChildrenInheritJobTemp=$true }
     cpuQuiescence = [ordered]@{ samples=$loads; meanPercent=$avgLoad; thresholdPercent=20.0; pass=($avgLoad -le 20.0) }
     frameRows = $rows.Count
+    smokeRunLog = [ordered]@{ path=$runLog.path; sha256=$runLog.sha256; bytes=$runLog.bytes; runNonce=$runLog.runNonce; source=$runLog.source }
+    diagnostics = $diagnostics
     gpuSummary = $gpuSummary
     gpuFramesTotal = $gpuFramesTotal
     regions = $stats
@@ -543,6 +677,7 @@ exit 0
 $text = $template.
     Replace('__SOURCE_COMMIT__', $SourceCommit).
     Replace('__CLIP_ID__', $ClipId).
+    Replace('__BUILD_MANIFEST_SHA256__', $BuildManifestSha256.ToLowerInvariant()).
     Replace('__CLIP_PATH__', $ClipPath.Replace("'", "''")).
     Replace('__RANGE_HEAD_SHA__', $SourceCommit).
     Replace('__LLRAWPROC_BLOB_ID__', $llrawprocBlobId).
@@ -553,6 +688,9 @@ $text = $template.
     Replace('__PRESENTMON_NAME__', $PresentMonName).
     Replace('__PRESENTMON_SHA256__', $PresentMonSha256).
     Replace('__CONSENT_RECEIPT__', $ConsentReceiptFileName)
+# LAST: the module text is spliced in after every other substitution, so no placeholder rule can
+# rewrite a character inside the verbatim verifier source.
+$text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
 
 $outDir = Split-Path -Parent $OutFile
 if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
@@ -561,6 +699,7 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Dir
 [pscustomobject]@{
     outFile = $OutFile
     sourceCommit = $SourceCommit
+    buildManifestSha256 = $BuildManifestSha256.ToLowerInvariant()
     clipId = $ClipId
     exeName = $exeName
     reconName = $reconName
