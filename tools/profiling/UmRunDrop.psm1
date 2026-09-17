@@ -19,6 +19,11 @@ Set-StrictMode -Version Latest
 $script:AllowedSideFileExtensions = @('.zip', '.json', '.exe', '.dll', '.txt', '.csv')
 $script:DeviceNames = @('CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
     'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9')
+# The clip fixtures, by STEM. sol, PR #137 r2 BLOCKER: "tracked under tests/fixtures/clips" admits
+# every tracked file there, including that directory's README -- and a discovery helper that picked
+# the smallest tracked file then proved the bypass rather than the feature. The same two stems the
+# attribution generator accepts as -ClipId are the admissible set here, and no extension is named.
+$script:TrackedFixtureClipStems = @('tiny_dual_iso', 'large_dual_iso')
 
 function Test-UmRunTrackedFixtureSource {
     <#
@@ -58,10 +63,14 @@ function Test-UmRunTrackedFixtureSource {
     $sourceDir = Resolve-UmRunRealDirectory -Path ([IO.Path]::GetDirectoryName($sourceItem.FullName))
     if (-not [string]::Equals($sourceDir, $resolvedDir, [StringComparison]::OrdinalIgnoreCase)) { return $false }
 
+    # A CLIP fixture, not merely a tracked file in that directory (sol r2: README.md is tracked there).
+    $name = [IO.Path]::GetFileName($sourceItem.FullName)
+    $stem = [IO.Path]::GetFileNameWithoutExtension($name)
+    if ($script:TrackedFixtureClipStems -cnotcontains $stem) { return $false }
+
     # Tracked in this repository: a file merely dropped into the fixtures directory is not a fixture.
     $git = Get-Command git -ErrorAction SilentlyContinue
     if ($null -eq $git) { return $false }
-    $name = [IO.Path]::GetFileName($sourceItem.FullName)
     $tracked = & $git.Source -C $RepoRoot ls-files --error-unmatch -- ("tests/fixtures/clips/" + $name) 2>$null
     return ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($tracked | Out-String)))
 }

@@ -131,14 +131,26 @@ class UmRunDropModuleTests(_Share):
     # by naming a file, and never assert on a media extension. Admission is anchored to this repo:
     # the source's real directory must BE <repo>/tests/fixtures/clips and the file must be tracked.
 
+    # The admissible stems, mirrored from UmRunDrop.psm1. sol PR #137 r2 BLOCKER: the first version
+    # of this helper took the SMALLEST tracked file in the directory, which is its 132-byte
+    # README.md -- so the "fixture is admitted" test proved the bypass instead of the feature.
+    FIXTURE_STEMS = ("tiny_dual_iso", "large_dual_iso")
+
     def repo_fixture(self) -> Path:
         fixtures = ROOT / "tests" / "fixtures" / "clips"
         if not fixtures.is_dir():
             self.skipTest("no repository fixture clips directory")
-        smallest = sorted((f for f in fixtures.iterdir() if f.is_file()), key=lambda f: f.stat().st_size)
-        if not smallest:
+        clips = [f for f in fixtures.iterdir() if f.is_file() and f.stem in self.FIXTURE_STEMS]
+        if not clips:
             self.skipTest("no repository fixture clips")
-        return smallest[0]
+        return sorted(clips, key=lambda f: f.stat().st_size)[0]
+
+    def repo_non_clip(self) -> Path:
+        fixtures = ROOT / "tests" / "fixtures" / "clips"
+        others = [f for f in fixtures.iterdir() if f.is_file() and f.stem not in self.FIXTURE_STEMS]
+        if not others:
+            self.skipTest("no tracked non-clip file in the fixtures directory")
+        return others[0]
 
     def probe_source(self, path: Path) -> str:
         script = self.tmp / f"fixture-probe-{abs(hash(str(path))) % 10**8}.ps1"
@@ -203,10 +215,20 @@ class UmRunDropModuleTests(_Share):
         self.assertIn("RESULT=False", self.probe_source(through))
 
     @requires_git
+    def test_a_tracked_non_clip_file_in_the_fixtures_directory_is_refused(self) -> None:
+        # sol PR #137 r2 BLOCKER: "tracked under tests/fixtures/clips" admitted that directory's
+        # README, whose extension the allowlist would otherwise refuse.
+        other = self.repo_non_clip()
+        self.assertIn("RESULT=False", self.probe_source(other))
+        proc = self.drop(OBSERVING, side=[other])
+        self.assertIn("THREW UMRUN_SIDEFILE_NAME_INVALID", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), [])
+
+    @requires_git
     def test_an_untracked_file_inside_the_real_fixtures_directory_is_refused(self) -> None:
         # A file merely dropped into the repository's fixtures directory is not a fixture.
         fixtures = ROOT / "tests" / "fixtures" / "clips"
-        intruder = fixtures / "umrun_untracked_probe.bin"
+        intruder = fixtures / "tiny_dual_iso.umrunprobe"  # a fixture STEM, deliberately: this must fail the TRACKED test
         intruder.write_bytes(os.urandom(64))
         self.addCleanup(lambda: intruder.exists() and intruder.unlink())
         self.assertIn("RESULT=False", self.probe_source(intruder))

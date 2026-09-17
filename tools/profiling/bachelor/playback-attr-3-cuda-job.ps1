@@ -90,7 +90,9 @@ param(
     # case-insensitive by default, so without it 'TINY_DUAL_ISO' would pass validation while the
     # case-sensitive membership test below classified it as an owner clip and emitted
     # fixtureRehearsal=false (sol, PR #137 r1 BLOCKER).
-    [ValidatePattern('^(?:[A-Za-z]\d{2}-\d{3,4}|(?-i:tiny_dual_iso|large_dual_iso))$')]
+    # \z, not $: .NET's $ also matches before a terminal newline, so 'tiny_dual_iso<LF>' would
+    # validate and then miss the case-sensitive membership test (sol, PR #137 r2).
+    [ValidatePattern('^(?:[A-Za-z]\d{2}-\d{3,4}|(?-i:tiny_dual_iso|large_dual_iso))\z')]
     [string]$ClipId,
 
     # The ONE authorized clip (NA-4): must equal the CLIP_OR_NONE line of the lane running
@@ -679,7 +681,9 @@ $manifest = [ordered]@{
     sourceCommit = $SourceCommit
     clipId = $ClipId
     fixtureRehearsal = $FixtureRehearsal
-    consentReceipt = $ConsentReceiptFileName
+    # A rehearsal cites no consent receipt: the fixtures are repository bytes, and recording the
+    # owner-footage receipt here would be misleading provenance (sol, PR #137 r2 minor).
+    consentReceipt = $(if ($FixtureRehearsal) { $null } else { $ConsentReceiptFileName })
     scaleFactor = 4
     # The authenticated chain, end to end: this manifest's own bytes, and the DLL-pair manifest
     # it names. Neither is a claim the measurement host had to take on trust.
