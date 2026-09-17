@@ -375,6 +375,77 @@ class AttributionJobTests(unittest.TestCase):
                 self.assertLess(refusal, self.text.index(later_verdict))
 
 
+class AttributionJobFixtureRehearsalTests(unittest.TestCase):
+    """ATTR3-FIXTURE-REHEARSAL-1: -ClipId also admits the two tracked fixtures, unmistakably."""
+
+    _CLIP_ID_PATTERN_RX = re.compile(
+        r"\[ValidatePattern\('(?P<pattern>[^']+)'\)\]\s*\r?\n\s*\[string\]\$ClipId"
+    )
+
+    def setUp(self) -> None:
+        self.text = _read(ATTRIBUTION_JOB)
+        match = self._CLIP_ID_PATTERN_RX.search(self.text)
+        self.assertIsNotNone(match, "could not find the -ClipId ValidatePattern in the generator")
+        self.clip_id_pattern = re.compile(match.group("pattern"))
+
+    def test_owner_clip_id_pattern_still_works(self) -> None:
+        for good in ("M16-1243", "a99-123", "Z00-9999"):
+            with self.subTest(clip_id=good):
+                self.assertIsNotNone(self.clip_id_pattern.match(good))
+
+    def test_fixture_clip_ids_are_accepted(self) -> None:
+        for fixture in ("tiny_dual_iso", "large_dual_iso"):
+            with self.subTest(clip_id=fixture):
+                self.assertIsNotNone(self.clip_id_pattern.match(fixture))
+
+    def test_an_unknown_stem_is_refused(self) -> None:
+        for bad in ("some_other_clip", "tiny_dual_iso_extra", "TINY_DUAL_ISO", "medium_dual_iso", ""):
+            with self.subTest(clip_id=bad):
+                self.assertIsNone(self.clip_id_pattern.match(bad))
+
+    def test_fixture_ids_are_a_literal_allowlist_not_a_loose_pattern(self) -> None:
+        # The flag is decided by an exact membership test against the two literals, never by
+        # re-deriving it from the ValidatePattern regex.
+        self.assertIn("$FixtureClipIds = @('tiny_dual_iso', 'large_dual_iso')", self.text)
+        self.assertIn("$FixtureClipIds -ccontains $ClipId", self.text)
+
+    def test_emitted_job_carries_the_flag_from_the_generators_membership_test(self) -> None:
+        self.assertIn("$FixtureRehearsal = __FIXTURE_REHEARSAL__", self.text)
+        self.assertIn("$fixtureRehearsalLiteral = if ($isFixtureRehearsal)", self.text)
+        self.assertIn("Replace('__FIXTURE_REHEARSAL__', $fixtureRehearsalLiteral)", self.text)
+
+    def test_flag_is_recorded_in_every_summary_and_in_the_evidence_manifest(self) -> None:
+        # summary.json is written on every early-exit venue; evidence-manifest.json only on
+        # the success path. Both carry the flag, so a fixture run is unmistakable either way.
+        self.assertEqual(self.text.count("fixtureRehearsal=$FixtureRehearsal"), 5)
+        self.assertEqual(self.text.count("fixtureRehearsal = $FixtureRehearsal"), 1)
+
+    def test_clip_path_cache_parent_and_basename_checks_are_unchanged(self) -> None:
+        self.assertIn("if ((Split-Path -Parent $clipPath) -ine $Cache)", self.text)
+        self.assertIn(
+            "if ([IO.Path]::GetFileNameWithoutExtension($clipPath) -cne $ClipId)", self.text
+        )
+        self.assertIn(
+            "if ($clipPath -notmatch '^[A-Za-z]:\\\\[A-Za-z0-9 _.\\\\-]+$')", self.text
+        )
+
+    def test_build_manifest_authentication_smoke_log_selection_and_eligibility_gate_are_unchanged(
+        self,
+    ) -> None:
+        # A fixture run is still subject to the same three gates as an owner-clip run.
+        self.assertIn(
+            "$buildManifest = Assert-AttrCudaBuildManifest -Path $buildManifestPath "
+            "-ExpectedSha256 $BuildManifestSha256 -ExpectedSourceCommit $SourceCommit",
+            self.text,
+        )
+        self.assertIn(
+            "Resolve-AttrCudaSmokeRunLog -ResultJsonPath $resultPath -ContainingRoot $Work",
+            self.text,
+        )
+        self.assertIn("if (-not $verdict.admitted)", self.text)
+        self.assertIn("exit $verdict.exitCode", self.text)
+
+
 class RetiredCompileJobTests(unittest.TestCase):
     """The old route must refuse, and say where to go instead."""
 
