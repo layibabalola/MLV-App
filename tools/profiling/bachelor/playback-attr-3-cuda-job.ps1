@@ -139,6 +139,7 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Publish-AttrCudaFileCopy',
     'Publish-AttrCudaFileMove',
     'New-AttrCudaDirectory',
+    'Assert-AttrCudaNoLinkBelowRoot',
     'Remove-AttrCudaTree'
 )
 
@@ -211,7 +212,7 @@ foreach ($check in @(
     @{ path = $Pub; label = 'Pub' }
 )) { Assert-UnderMlvTmp $check.path $check.label }
 
-Remove-AttrCudaTree -Path $Work
+Remove-AttrCudaTree -TrustedRoot 'C:\mlvtmp' -Path $Work
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 $Scratch = Join-Path $Work '.job-tmp'
 New-Item -ItemType Directory -Path $Scratch -Force | Out-Null

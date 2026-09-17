@@ -822,16 +822,38 @@ class LinkSafeCleanupTests(_PwshCase):
         (work / "nested").mkdir(parents=True)
         (work / "nested" / "file.txt").write_bytes(b"x")
         self.plant_junction(work / "nested")
-        proc = self.run_with_module(_guard(f"Remove-AttrCudaTree -Path '{work}'"))
+        proc = self.run_with_module(_guard(f"Remove-AttrCudaTree -TrustedRoot '{self.root}' -Path '{work}'"))
         self.assert_throws(proc, "ATTRCUDA_TREE_HAS_REPARSE_POINT")
         self.assertEqual(self.sentinel.read_bytes(), b"must survive")
         self.assertTrue((work / "nested" / "file.txt").exists(), "a refused tree must be left intact")
+
+    def test_a_tree_reached_through_a_linked_ancestor_is_refused_and_the_target_survives(self) -> None:
+        # sol PR #133 r6: AgentRoot\outbox is a junction to an outside directory holding <job>.artifacts.
+        (self.outside / "job.artifacts").mkdir()
+        (self.outside / "job.artifacts" / "keep.txt").write_bytes(b"outside the agent root")
+        self.plant_junction(self.root, "outbox")
+        target = self.root / "outbox" / "job.artifacts"
+        proc = self.run_with_module(_guard(f"Remove-AttrCudaTree -TrustedRoot '{self.root}' -Path '{target}'"))
+        self.assert_throws(proc, "ATTRCUDA_ANCESTOR_IS_LINK")
+        self.assertEqual((self.outside / "job.artifacts" / "keep.txt").read_bytes(), b"outside the agent root")
+
+    def test_an_absent_tree_under_a_linked_ancestor_is_still_refused(self) -> None:
+        self.plant_junction(self.root, "work")
+        missing = self.root / "work" / "never-created"
+        proc = self.run_with_module(_guard(f"Remove-AttrCudaTree -TrustedRoot '{self.root}' -Path '{missing}'"))
+        self.assert_throws(proc, "ATTRCUDA_ANCESTOR_IS_LINK")
+
+    def test_a_path_outside_the_trusted_root_is_refused(self) -> None:
+        escaping = str(self.root) + "\\..\\outside"
+        proc = self.run_with_module(_guard(f"Remove-AttrCudaTree -TrustedRoot '{self.root}' -Path '{escaping}'"))
+        self.assert_throws(proc, "ATTRCUDA_PATH_NOT_UNDER_ROOT")
+        self.assertEqual(self.sentinel.read_bytes(), b"must survive")
 
     def test_a_link_free_work_tree_is_removed(self) -> None:
         work = self.root / "work"
         (work / "a" / "b").mkdir(parents=True)
         (work / "a" / "b" / "f.txt").write_bytes(b"x")
-        proc = self.run_with_module(f"Remove-AttrCudaTree -Path '{work}'\n")
+        proc = self.run_with_module(f"Remove-AttrCudaTree -TrustedRoot '{self.root}' -Path '{work}'\n")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertFalse(work.exists())
 
@@ -949,20 +971,50 @@ class PublishWriteScanTests(_PwshCase):
         "export_csv": "$rows | Export-Csv -LiteralPath (Join-Path $Cache 'x.csv') -NoTypeInformation\n",
         "expand_archive": "Expand-Archive -LiteralPath $z -DestinationPath $Pub -Force\n",
         "remove_outside": "Remove-Item -LiteralPath (Join-Path $Cache 'x') -Force\n",
-        "compound_assignment": "$w = Join-Path $Work 'a'\n$w += 'b'\nSet-Content -LiteralPath $w -Value 1\n",
+        "compound_assignment": "$w = Join-Path $Work 'a'\n$w += 'b'\nNew-Item -ItemType Directory -Path $w | Out-Null\n",
+        # sol PR #133 r6: each of these passed the r6 blocklist scanner.
+        "work_reassigned": "$Work = 'C:\\outside'\nNew-Item -ItemType Directory -Path (Join-Path $Work 'x') | Out-Null\n",
+        "work_script_scope": "$script:Work = 'C:\\outside'\nNew-Item -ItemType Directory -Path (Join-Path $Work 'x') | Out-Null\n",
+        "join_path_traversal": "New-Item -ItemType Directory -Path (Join-Path $Work '..\\..\\outside') | Out-Null\n",
+        "join_path_variable_child": "$c = '..'\nNew-Item -ItemType Directory -Path (Join-Path $Work $c) | Out-Null\n",
+        "join_path_expandable_child": "New-Item -ItemType Directory -Path (Join-Path $Work \"$c\") | Out-Null\n",
+        "set_variable": "Set-Variable -Name d -Value 'C:\\outside'\nNew-Item -ItemType Directory -Path $d | Out-Null\n",
+        "new_object_streamwriter": "$w = New-Object IO.StreamWriter 'C:\\outside\\x'\n",
+        "streamwriter_ctor": "$w = [IO.StreamWriter]::new('C:\\outside\\x')\n",
+        "add_type": "Add-Type -TypeDefinition 'public class X {}'\n",
+        "call_operator_cmdlet_string": "& 'Set-Content' -LiteralPath C:\\x -Value 1\n",
+        "call_operator_variable": "$cmd = 'Set-Content'\n& $cmd -LiteralPath C:\\x -Value 1\n",
+        "call_operator_scriptblock": "& { New-Item -ItemType Directory -Path C:\\x }\n",
+        "dot_source": ". 'C:\\outside\\x.ps1'\n",
+        "second_start_process_redirect": "Start-Process -FilePath x.exe -RedirectStandardOutput (Join-Path $Work 'o.txt') -RedirectStandardError (Join-Path $Pub 'e.txt')\n",
+        "colon_bound_destination": "New-Item -ItemType Directory -Path:(Join-Path $Pub 'x') | Out-Null\n",
+        "splatting": "$p = @{ ItemType = 'Directory'; Path = 'C:\\outside' }\nNew-Item @p | Out-Null\n",
+        "env_scope_mutation": "$env:TEMP = 'C:\\outside'\n",
+        "global_scope_assignment": "$global:x = 1\n",
+        "member_assignment": "$o = Get-Item -LiteralPath $Work\n$o.Attributes = 'Normal'\n",
+        "reflection": "$m = 'x'.GetType().GetMethod('ToString')\n",
+        "wrong_case_command": "new-item -ItemType Directory -Path (Join-Path $Work 'x') | Out-Null\n",
+        "pipeline_bound_path": "(Join-Path $Pub 'x') | New-Item -ItemType Directory | Out-Null\n",
+        "positional_new_item": "New-Item (Join-Path $Pub 'x') -ItemType Directory | Out-Null\n",
     }
 
     CONTROLS = {
-        "work_literal": "Set-Content -LiteralPath (Join-Path $Work 'x') -Value 1\n",
-        "work_chain": "$s = Join-Path $Work 'a'\n$u = Join-Path -Path $s -ChildPath 'b'\nCopy-Item -LiteralPath $q -Destination $u -Force\n",
+        "work_literal": "New-Item -ItemType Directory -Path (Join-Path $Work 'x') -Force | Out-Null\n",
+        "work_chain": "$s = Join-Path $Work 'a'\n$u = Join-Path $s 'b\\c.csv'\n$rows | Export-Csv -LiteralPath $u -NoTypeInformation\n",
         "helper_to_pub": "[void](Publish-AttrCudaFileCopy -Source $a -Destination (Join-Path $Pub 'x'))\n",
         "discard": "Get-Date 2>$null\nGet-Date 2>&1 | Out-Null\n",
         "string_replace_is_not_io": "$v = $s.Replace('a', 'b')\n",
+        "child_process_redirect_under_work": "$scratch = Join-Path $Work '.job-tmp'\n$env:TEMP = $scratch\n& $nvcc --version 1> (Join-Path $Work 'nvcc.txt')\n",
+        "template_function_and_index": "function Say([string]$m) { Write-Output $m }\n$log = @{}\n$log['a'] = 1\nSay 'hi'\n",
     }
+
+    # R5 demands exactly one canonical $Work assignment in every template, so every fixture starts
+    # with it; the bypasses that attack $Work add a second, scoped or reshaped assignment.
+    PRELUDE = "$Work = Join-Path 'C:\\mlvtmp' $JobId\n"
 
     def _write(self, name: str, body: str) -> Path:
         path = self.tmp / f"{name}.ps1"
-        path.write_text(body, encoding="utf-8")
+        path.write_text(self.PRELUDE + body, encoding="utf-8")
         return path
 
     def test_each_known_bypass_is_flagged(self) -> None:

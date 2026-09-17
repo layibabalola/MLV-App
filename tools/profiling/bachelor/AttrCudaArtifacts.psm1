@@ -454,18 +454,62 @@ function Remove-AttrCudaPartialFile {
     return (-not (Test-Path -LiteralPath $Path))
 }
 
+function Assert-AttrCudaNoLinkBelowRoot {
+    <#
+    .SYNOPSIS
+    Prove $Path lies strictly under $TrustedRoot and that no EXISTING component between them is a
+    reparse point; return the full path.
+    .DESCRIPTION
+    sol, PR #133 r6: a delete of AgentRoot\outbox\<job> followed an outbox JUNCTION outside the agent
+    root before any later check could refuse the link. Every component after the trusted root, up to
+    and including the path itself, is inspected; the trusted root is the provisioning boundary.
+    Throws ATTRCUDA_PATH_NOT_UNDER_ROOT or ATTRCUDA_ANCESTOR_IS_LINK and touches nothing.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$TrustedRoot,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $rootFull = [IO.Path]::GetFullPath($TrustedRoot).TrimEnd('\')
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if (-not $full.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "ATTRCUDA_PATH_NOT_UNDER_ROOT $full is not strictly under $rootFull"
+    }
+    $relative = $full.Substring($rootFull.Length + 1)
+    $cursor = $rootFull
+    foreach ($component in $relative.Split('\')) {
+        if ([string]::IsNullOrEmpty($component) -or $component -eq '.' -or $component -eq '..') {
+            throw "ATTRCUDA_PATH_NOT_UNDER_ROOT $full has an empty or relative component"
+        }
+        $cursor = $cursor + '\' + $component
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) { break }
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "ATTRCUDA_ANCESTOR_IS_LINK $cursor (on the way to $full)"
+        }
+    }
+    return $full
+}
+
 function Remove-AttrCudaTree {
     <#
     .SYNOPSIS
-    Recursively delete a job-owned directory, refusing if ANY entry in it is a reparse point.
+    Recursively delete a job-owned directory under a trusted root, refusing if ANY component between
+    the root and the directory, or any entry inside it, is a reparse point.
     .DESCRIPTION
-    The walk does not descend into reparse points, so it cannot be steered outside the tree; if one
-    is found (at the root or anywhere below) the function throws ATTRCUDA_TREE_HAS_REPARSE_POINT
+    The ancestor chain is checked FIRST (Assert-AttrCudaNoLinkBelowRoot), even when the directory is
+    absent, so a linked parent can never steer the delete (sol PR #133 r6). The walk then does not
+    descend into reparse points; if one is found the function throws ATTRCUDA_TREE_HAS_REPARSE_POINT
     and deletes nothing. Only a tree proved free of links is handed to Remove-Item -Recurse.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$TrustedRoot,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
 
+    $Path = Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $TrustedRoot -Path $Path
     $root = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if ($null -eq $root) { return }
     $stack = [System.Collections.Generic.Stack[System.IO.FileSystemInfo]]::new()
@@ -690,6 +734,7 @@ Export-ModuleMember -Function `
     Publish-AttrCudaFileMove, `
     New-AttrCudaDirectory, `
     Remove-AttrCudaPartialFile, `
+    Assert-AttrCudaNoLinkBelowRoot, `
     Remove-AttrCudaTree, `
     Resolve-AttrCudaSmokeRunLog, `
     Get-AttrCudaLastEligibilityLine, `

@@ -123,6 +123,7 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Publish-AttrCudaFileMove',
     'New-AttrCudaDirectory',
     'Remove-AttrCudaPartialFile',
+    'Assert-AttrCudaNoLinkBelowRoot',
     'Remove-AttrCudaTree'
 )
 
@@ -293,8 +294,8 @@ if ($VerifyOnly) {
     exit 0
 }
 
-Remove-AttrCudaTree -Path $Work
-Remove-AttrCudaTree -Path $Pub
+Remove-AttrCudaTree -TrustedRoot $AgentRoot -Path $Work
+Remove-AttrCudaTree -TrustedRoot $AgentRoot -Path $Pub
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 # The outbox is created explicitly (never as a side effect of -Force on a deeper path), so its
 # parent is checked for links like every other directory this job creates.
