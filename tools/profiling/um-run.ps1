@@ -8,6 +8,19 @@
 #   $r.exitCode; $r.stdout
 #   # or inline:
 #   $r = .\um-run.ps1 -Command 'nvidia-smi; nvcc --version'
+#   # a generated job that expects side-files next to it in inbox\ (e.g. <jobId>-source.zip):
+#   $r = .\um-run.ps1 -ScriptPath .\out\<jobId>.job.ps1 -SideFile '.\out\<jobId>-source.zip' -JobId <jobId>
+#
+# SIDE-FILES. Generated jobs (tools/profiling/ultramagnus/playback-attr-3-cuda-dll-job.ps1,
+# tools/profiling/bachelor/playback-attr-3-cuda-stage-job.ps1) read their inputs from inbox\ by
+# name and verify them against hashes baked in at generation time. Placing those inputs is a
+# write to the agent share, so it happens HERE, in this tracked submitter, never by hand
+# (NA-7 refuses a hooked write to the share, and hiding the destination in a variable is not a
+# workaround). The placement rules live in UmRunDrop.psm1 (tested with observing and faulty
+# copiers): plain allowlisted names that normalise to themselves, per-submission unique temporary
+# names, share-side hash verification before each rename, renames that never overwrite, and every
+# side-file in place before the job is dropped. `pwsh -File` cannot pass arrays, so -SideFile also
+# accepts a ';'-separated list.
 
 [CmdletBinding(DefaultParameterSetName = 'Script')]
 param(
@@ -18,10 +31,14 @@ param(
     [string]$AgentShare = "\\Ultra-Magnus\g\Temp\mlv-gpu-profile\agent",
     [int]$TimeoutSec = 1800,
     [int]$PollSeconds = 3,
-    [int]$MaxHeartbeatAgeSec = 30
+    [int]$MaxHeartbeatAgeSec = 30,
+    [string[]]$SideFile = @(),
+    # Keep a generator's own job id (so outbox\<JobId>.result.json and its artifacts line up).
+    [string]$JobId = ''
 )
 
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot 'UmRunDrop.psm1') -Force
 $inbox  = Join-Path $AgentShare "inbox"
 $outbox = Join-Path $AgentShare "outbox"
 $hb     = Join-Path $AgentShare "heartbeat.txt"
@@ -39,12 +56,12 @@ if ($PSCmdlet.ParameterSetName -eq 'Command') {
 }
 if (-not (Test-Path $ScriptPath)) { throw "Script not found: $ScriptPath" }
 
-$jobId = "job_{0}_{1}" -f (Get-Date -Format "yyyyMMdd_HHmmss"), (Get-Random -Maximum 99999)
-$tmp   = Join-Path $inbox "$jobId.job.tmp"
-$fin   = Join-Path $inbox "$jobId.job.ps1"
-Copy-Item $ScriptPath $tmp -Force
-Move-Item $tmp $fin -Force   # atomic-ish: agent only picks up *.job.ps1
-Write-Host "submitted $jobId -> $fin"
+$dropLines = @(Invoke-UmRunDrop -Inbox $inbox -Outbox $outbox -ScriptPath $ScriptPath -JobId $JobId -SideFile $SideFile)
+$jobId = $null
+foreach ($line in $dropLines) {
+    if ($line -like 'UMRUN_JOBID=*') { $jobId = $line.Substring('UMRUN_JOBID='.Length) } else { Write-Host $line }
+}
+if (-not $jobId) { throw "UmRunDrop returned no job id" }
 
 $resultFile = Join-Path $outbox "$jobId.result.json"
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
