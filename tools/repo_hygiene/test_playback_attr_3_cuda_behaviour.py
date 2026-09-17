@@ -14,8 +14,8 @@ the job runs on Bachelor or Ultra-Magnus. What cannot run here is the compiling 
 no CUDA toolkit, no Qt/MinGW, no 4090, no measurement laptop -- so the jobs are exercised through
 their `-VerifyOnly` prefix and through the staging job end to end, which touches only files.
 
-SKIPS. Everything is skipped cleanly when pwsh (or git, for the fixture repositories) is absent;
-CI Windows has both.
+SKIPS. Everything is skipped cleanly when pwsh (or git, for the fixture repositories) is absent,
+and on non-Windows platforms (the jobs validate drive-letter paths); CI Windows runs it all.
 """
 
 from __future__ import annotations
@@ -81,6 +81,11 @@ class _PwshCase(unittest.TestCase):
     """Base: a temp directory per test, and a way to run a snippet against the module."""
 
     def setUp(self) -> None:
+        # The emitted jobs run only on Windows hosts and their parameters validate drive-letter
+        # paths (e.g. -AgentRoot), so a /tmp root on Linux fails parameter validation rather than
+        # exercising the logic. Windows CI runs this suite; other platforms skip it.
+        if os.name != "nt":
+            self.skipTest("the ATTR-3 host jobs are Windows-only (drive-letter path parameters)")
         self._tmp = tempfile.TemporaryDirectory(prefix="attr3-")
         self.tmp = _long_path(Path(self._tmp.name))
         self.addCleanup(self._tmp.cleanup)
