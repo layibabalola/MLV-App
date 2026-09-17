@@ -15,7 +15,11 @@
 #   R2 mutators      of the allowlisted cmdlets only New-Item (-Path), Expand-Archive (-DestinationPath),
 #                    Export-Csv (-LiteralPath) and Start-Process (every -Redirect* occurrence) write;
 #                    each named destination must be provable. A positional argument on those cmdlets,
-#                    and splatting on ANY command, is rejected.
+#                    and splatting on ANY command, is rejected. New-Item must name -ItemType
+#                    'Directory' or 'File' literally (no links). ForEach-Object may take only script
+#                    blocks, so no method can be invoked by member NAME.
+#                    Not filesystem, accepted: `reg` (HKCU playback settings) and the processes that
+#                    Start-Process/`&` launch (see the child-process limit below).
 #   R3 dynamic calls `&` is allowed only on a literal ending in .exe or on a variable (or its .FullName)
 #                    named in $childExecutables (external processes: the documented limit below);
 #                    `.` sourcing, `&` on a script block or on a string naming a cmdlet is rejected.
@@ -247,6 +251,27 @@ function Invoke-Scan([string]$Source, [string]$Text, [string[]]$ModuleFunctions)
             continue
         }
         $key = $name.ToLowerInvariant()
+        if ($key -eq 'foreach-object') {
+            # `ForEach-Object Delete` / `-MemberName Delete` invokes a method by NAME, invisible to R4.
+            $arguments = @($command.CommandElements | Select-Object -Skip 1)
+            $onlyBlocks = @($arguments | Where-Object {
+                -not ($_ -is [System.Management.Automation.Language.ScriptBlockExpressionAst])
+            }).Count -eq 0
+            if (-not $onlyBlocks) {
+                Add-Violation $Source $command 'R2' 'ForEach-Object may only take script blocks (no -MemberName, no member-name string)'
+            }
+        }
+        if ($key -eq 'new-item') {
+            # Only a plain directory or file; a SymbolicLink/Junction/HardLink under $Work would let a
+            # later provable write land outside it.
+            $types = Get-NamedArguments $command @('ItemType')
+            $typeOk = $types.Count -eq 1 -and $null -ne $types[0] -and
+                ($types[0] -is [System.Management.Automation.Language.StringConstantExpressionAst]) -and
+                (@('Directory', 'File') -ccontains [string]$types[0].Value)
+            if (-not $typeOk) {
+                Add-Violation $Source $command 'R2' "New-Item must name -ItemType 'Directory' or 'File' literally"
+            }
+        }
         if ($mutatorParams.ContainsKey($key)) {
             $destinations = Get-NamedArguments $command $mutatorParams[$key]
             if ($key -ne 'start-process') {

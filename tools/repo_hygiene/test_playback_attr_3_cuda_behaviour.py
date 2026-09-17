@@ -996,6 +996,10 @@ class PublishWriteScanTests(_PwshCase):
         "wrong_case_command": "new-item -ItemType Directory -Path (Join-Path $Work 'x') | Out-Null\n",
         "pipeline_bound_path": "(Join-Path $Pub 'x') | New-Item -ItemType Directory | Out-Null\n",
         "positional_new_item": "New-Item (Join-Path $Pub 'x') -ItemType Directory | Out-Null\n",
+        "foreach_member_name": "Get-ChildItem -LiteralPath $Pub | ForEach-Object Delete\n",
+        "foreach_member_name_param": "Get-ChildItem -LiteralPath $Pub | ForEach-Object -MemberName Delete\n",
+        "new_item_junction_under_work": "New-Item -ItemType Junction -Path (Join-Path $Work 'j') -Value $Pub | Out-Null\n",
+        "new_item_missing_type": "New-Item -Path (Join-Path $Work 'x') | Out-Null\n",
     }
 
     CONTROLS = {
