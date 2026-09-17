@@ -576,7 +576,6 @@ READONLY_AUTH_STATUS = " ".join(("claude", "au" + "th", "status"))
 # the board root, which is where hook evolution is authored.
 NA10_SETTINGS = "{REPO}/.claude/settings.json"
 NA10_HOOK_SCRIPT = "{REPO}/tools/hooks/mlv-never-authorized.py"
-NA10_GATE_SPEC = "{REPO}/tools/gates/output-budget.json"
 NA10_UNRELATED = "{REPO}/src/mlv/video_mlv.c"
 NA10_NEW_TEXT = "# rewritten by the lane this gate governs\n"
 
@@ -3345,18 +3344,6 @@ CASES = [
         "fixture": "venue_at_board",
     },
     {
-        # NA4-OWNER-CONSENTED-FOOTAGE-1: the gate spec whose MERGED paths NA-4 admits is the
-        # fourth tail.  A lane rewriting it would be authoring the text that widens its gate.
-        "name": "na10 lane rewrites the output budget gate spec",
-        "group": "na10",
-        "tool": "Write",
-        "input": {"file_path": NA10_GATE_SPEC, "content": NA10_NEW_TEXT},
-        "expect": "DENY",
-        "na": "NA-10",
-        "reason_contains": "OWN gate",
-        "fixture": "venue_at_worktree",
-    },
-    {
         # The shell arm.  A hook is neutered as effectively by `Set-Content` as by `Write`,
         # and the register's "any write" is a predicate on the PATH, not on the tool.
         "name": "na10 shell set content over the hook script",
@@ -3370,7 +3357,7 @@ CASES = [
     },
     {
         # THE CONTROL.  An ordinary source edit in the same worktree at the same venue: NA-10
-        # is about four files, not about a lane's right to edit code.
+        # is about three files, not about a lane's right to edit code.
         "name": "na10 control unrelated worktree edit at a lane venue",
         "group": "na10",
         "tool": "Edit",
@@ -6007,8 +5994,7 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # control that keeps it about the GATE and not about the worktree.
         self.assertEqual(counts.get("na3"), 5, "5 NA-3 claude-auth rows")
         self.assertEqual(counts.get("na3_persistent"), 6, "6 NA-3 O129 persistent-scope rows")
-        # NA4-OWNER-CONSENTED-FOOTAGE-1 adds the seventh: the gate spec tail at a lane venue.
-        self.assertEqual(counts.get("na10"), 7, "7 NA-10 self-edit rows")
+        self.assertEqual(counts.get("na10"), 6, "6 NA-10 self-edit rows")
         # PINNED, NEW at the thirteenth commit (S131): a NEW group, 3 rows -- the `setx.exe`
         # credential-prefix bypass, the `setx.exe` persistent-name bypass, and the fully
         # qualified `[System.Environment]::SetEnvironmentVariable` persistent-name bypass.
@@ -6797,24 +6783,14 @@ class EnableCompoundIsFailClosedTests(unittest.TestCase):
 
 # ------------------------------------ NA4-OWNER-CONSENTED-FOOTAGE-1: exception (3)
 #
-# FIXTURE-SCOPED, END TO END.  Every row builds a THROWAWAY git repository as the board,
-# commits a fixture gate spec, and points `refs/remotes/fork/master` at it, so the hook's
-# real `git show` runs against a spec this test wrote.  No row reads the real board, the real
-# spec or any real footage.  The synthetic "clips" are extension-free names under the tmp
-# CLIP CACHE root, which NA-4 treats as footage exactly as it treats a clip extension; the
-# admit decision under test is the same line for both.
-#
-# The consent TABLE is injected (the module attribute is swapped for a fixture table) in
-# every row except the two that are ABOUT the frozen table: the subprocess row, which runs
-# the real hook process against the real six-id table with fixture paths, and the pin row.
+# ROUND 2.  The hook admits a clip token iff ``sha256(norm(token))`` is a frozen
+# ``path_norm_sha256`` in ``OWNER_CONSENTED_FOOTAGE``; it reads NOTHING to decide (round 1's git
+# read of a mutable local ref is gone, and with it every git-fixture row).  Every row here uses
+# synthetic, extension-free names under the tmp CLIP CACHE root -- NA-4 treats the cache root
+# as footage exactly as it treats a clip extension -- and an injected fixture table whose path
+# hashes are computed from the hook's own ``norm``.  No row reads real footage or a real spec.
+# The rows that are ABOUT the frozen table (the pins, and the real-table denials) use it as is.
 
-CONSENT_FIXTURE_PART0 = (11, hashlib.sha256(b"fixture part 0").hexdigest())
-CONSENT_FIXTURE_PART1 = (7, hashlib.sha256(b"fixture part 1").hexdigest())
-CONSENT_FIXTURE_TABLE = {
-    "clips": {"M16-1243": (CONSENT_FIXTURE_PART0, CONSENT_FIXTURE_PART1)},
-    "purposes": ("fixture purpose",),
-    "authority": {"transcript": "fixture", "line": 1, "sha256": "0" * 64},
-}
 CONSENTED_IDS_PINNED = (
     "M16-1243",
     "M16-1327",
@@ -6823,22 +6799,20 @@ CONSENTED_IDS_PINNED = (
     "M15-1320",
     "M16-1210",
 )
-OWNER_AUTHORITY_LINE_SHA256 = "254075c85a821758067f7d37dbc5a26a05ae8e2a2368f1e02af0fa2110ac8e41"
+# sha256 of the raw JSONL line bytes EXCLUDING the line terminator.
+OWNER_CONSENT_LINE = 1739
+OWNER_CONSENT_LINE_SHA256 = "461af7a5291099e009230a8abcfe547e064435287a23f40cf93e5ba4ddb0a066"
+OWNER_CONSENT_QUESTION_LINE = 1718
+OWNER_CONSENT_QUESTION_LINE_SHA256 = (
+    "88484275b4ef158bdaf0a98a3755c70fb65be34c514ae406c6603446dee4a38a"
+)
+OWNER_DIRECTIVE_LINE = 2137
+OWNER_DIRECTIVE_LINE_SHA256 = "254075c85a821758067f7d37dbc5a26a05ae8e2a2368f1e02af0fa2110ac8e41"
 REGISTER_DOC = os.path.join(REPO_ROOT, "docs", "never-authorized.json")
 
 
-def _git(cwd, *args):
-    return subprocess.run(
-        ["git", "-C", cwd] + list(args),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-    )
-
-
-@unittest.skipUnless(shutil.which("git"), "git is required for the merged-spec read")
 class OwnerConsentedFootageTests(unittest.TestCase):
-    """NA-4 exception (3): merged spec paths, consented ids only, hash-pinned, fail closed."""
+    """NA-4 exception (3): frozen path-norm hashes, consented ids only, no reads, fail closed."""
 
     def setUp(self):
         self.module = _load_hook_module()
@@ -6858,6 +6832,7 @@ class OwnerConsentedFootageTests(unittest.TestCase):
                 del os.environ[key]
         os.environ["MLV_BOARD_ROOT"] = self.board
         os.environ["MLV_CLIP_CACHE_ROOT"] = self.cache
+        self.table = self._table({"M16-1243": (self.part0, self.part1)})
 
     def _restore_env(self):
         os.environ.clear()
@@ -6865,50 +6840,31 @@ class OwnerConsentedFootageTests(unittest.TestCase):
 
     # ------------------------------------------------------------------ fixtures
 
-    def _entry(self, clip_id, part_paths, part_values):
-        parts = [
-            {"path": path, "length": value[0], "sha256": value[1].upper()}
-            for path, value in zip(part_paths, part_values)
-        ]
+    def _path_hash(self, path):
+        return hashlib.sha256(self.module.norm(path).encode("utf-8")).hexdigest()
+
+    def _table(self, clips):
         return {
-            "id": clip_id,
-            "required": True,
-            "path": parts[0]["path"],
-            "length": parts[0]["length"],
-            "sha256": parts[0]["sha256"],
-            "parts": parts,
+            "clips": {
+                clip_id: tuple(
+                    (
+                        index + 1,
+                        hashlib.sha256(b"fixture part %d" % index).hexdigest(),
+                        self._path_hash(path),
+                    )
+                    for index, path in enumerate(paths)
+                )
+                for clip_id, paths in clips.items()
+            },
+            "purposes": ("fixture purpose",),
+            "authority": {},
         }
 
-    def _spec(self, *entries):
-        return {"schema": "fixture/output-budget", "clips": list(entries)}
-
-    def _consented_entry(self, part1_value=CONSENT_FIXTURE_PART1):
-        return self._entry(
-            "M16-1243", (self.part0, self.part1), (CONSENT_FIXTURE_PART0, part1_value)
-        )
-
-    def _init_board(self):
-        for args in (("init", "-q"), ("config", "user.name", "fixture"),
-                     ("config", "user.email", "fixture@example.invalid"),
-                     ("config", "commit.gpgsign", "false"), ("config", "core.autocrlf", "false")):
-            self.assertEqual(_git(self.board, *args).returncode, 0, args)
-
-    def _commit_spec(self, document, publish=True):
-        """Commit `document` as the board's gate spec; `publish` moves fork/master onto it."""
-        if not os.path.isdir(os.path.join(self.board, ".git")):
-            self._init_board()
-        spec = os.path.join(self.board, "tools", "gates", "output-budget.json")
-        _write(spec, json.dumps(document, indent=2))
-        self.assertEqual(_git(self.board, "add", "tools/gates/output-budget.json").returncode, 0)
-        committed = _git(self.board, "commit", "-q", "-m", "fixture spec")
-        self.assertEqual(committed.returncode, 0, committed.stderr)
-        if publish:
-            moved = _git(self.board, "update-ref", "refs/remotes/fork/master", "HEAD")
-            self.assertEqual(moved.returncode, 0, moved.stderr)
-
-    def _decide(self, path, consent=CONSENT_FIXTURE_TABLE):
+    def _decide(self, path, consent="fixture"):
+        consent = self.table if consent == "fixture" else consent
         saved = self.module.OWNER_CONSENTED_FOOTAGE
-        self.module.OWNER_CONSENTED_FOOTAGE = consent
+        if consent is not None:
+            self.module.OWNER_CONSENTED_FOOTAGE = consent
         try:
             return self.module.decide(
                 {"tool_name": "Bash", "tool_input": {"command": 'mlv_dump -v "%s"' % path}},
@@ -6926,145 +6882,123 @@ class OwnerConsentedFootageTests(unittest.TestCase):
 
     # ---------------------------------------------------------------------- rows
 
-    def test_allow_a_consented_ids_listed_paths(self):
-        self._commit_spec(self._spec(self._consented_entry()))
+    def test_allow_a_path_whose_norm_hash_is_consented(self):
         self.assertAllow(self._decide(self.part0))
         self.assertAllow(self._decide(self.part1))
+        # A different SPELLING of the same path normalises to the same hash.
+        self.assertAllow(self._decide(self.part1.upper().replace("\\", "/")))
 
-    def test_deny_m02_1344_even_when_the_merged_spec_lists_it(self):
-        # The fixture spec lists M02-1344 with the very digests the table pins for a consented
-        # id: the table has no M02-1344 row, so nothing about the entry can admit it.
-        self._commit_spec(
-            self._spec(
-                self._entry(
-                    "M02-1344", (self.unconsented,), (CONSENT_FIXTURE_PART0,)
-                )
-            )
-        )
-        self.assertNa4Deny(self._decide(self.unconsented))
-        self.assertNotIn("M02-1344", self.module.OWNER_CONSENTED_FOOTAGE["clips"])
-
-    def test_deny_a_consented_id_at_another_directory(self):
-        self._commit_spec(self._spec(self._consented_entry()))
+    def test_deny_the_same_basename_in_a_different_directory(self):
         moved = os.path.join(self.cache, "mirror", "elsewhere", "clip-a.part0")
         self.assertNa4Deny(self._decide(moved))
 
-    def test_deny_when_a_spec_part_digest_differs_from_the_frozen_table(self):
-        swapped = (CONSENT_FIXTURE_PART1[0], hashlib.sha256(b"different content").hexdigest())
-        self._commit_spec(self._spec(self._consented_entry(part1_value=swapped)))
-        # The WHOLE id is refused, not merely the mismatching part.
-        self.assertNa4Deny(self._decide(self.part0))
-        self.assertNa4Deny(self._decide(self.part1))
+    def test_deny_m02_1344(self):
+        # The fixture table carries a consented id only; a synthetic M02-1344 part is not in it,
+        # and the FROZEN table has no M02-1344 row at all.
+        m02 = os.path.join(self.cache, "mirror", "M02-1344", "M02-1344.part0")
+        self.assertNa4Deny(self._decide(m02))
+        self.assertNa4Deny(self._decide(m02, consent=None))
+        self.assertNotIn("M02-1344", self.module.OWNER_CONSENTED_FOOTAGE["clips"])
 
-    def test_deny_when_a_spec_part_length_differs_from_the_frozen_table(self):
-        swapped = (CONSENT_FIXTURE_PART1[0] + 1, CONSENT_FIXTURE_PART1[1])
-        self._commit_spec(self._spec(self._consented_entry(part1_value=swapped)))
-        self.assertNa4Deny(self._decide(self.part0))
-
-    def test_deny_a_path_present_only_in_a_worktree_modified_spec(self):
-        # fork/master carries a spec WITHOUT the consented id; the board's working tree and
-        # an unpublished HEAD commit both carry it, hashes and all.  Only the git object counts.
-        self._commit_spec(self._spec())
-        self._commit_spec(self._spec(self._consented_entry()), publish=False)
-        self.assertAllow(self._decide(os.path.join(self.tmp, "not-footage.txt")))
-        self.assertNa4Deny(self._decide(self.part0))
-        _write(
-            os.path.join(self.board, "tools", "gates", "output-budget.json"),
-            json.dumps(self._spec(self._consented_entry())),
-        )
-        self.assertNa4Deny(self._decide(self.part0))
-
-    def test_deny_an_unlisted_cache_path(self):
-        self._commit_spec(self._spec(self._consented_entry()))
+    def test_deny_any_token_whose_norm_hash_is_absent(self):
         self.assertNa4Deny(self._decide(self.unconsented))
+        # The real frozen table: synthetic paths are never its hashes.
+        self.assertNa4Deny(self._decide(self.part0, consent=None))
+        self.assertNa4Deny(self._decide(self.unconsented, consent=None))
 
-    def test_deny_when_the_git_read_fails(self):
-        # (a) the board is not a repository at all;
-        self.assertNa4Deny(self._decide(self.part0))
-        # (b) a repository whose fork/master does not exist;
-        self._commit_spec(self._spec(self._consented_entry()), publish=False)
-        self.assertNa4Deny(self._decide(self.part0))
-        # (c) a published object that is not JSON.
-        _write(os.path.join(self.board, "tools", "gates", "output-budget.json"), "{not json")
-        _git(self.board, "add", "tools/gates/output-budget.json")
-        _git(self.board, "commit", "-q", "-m", "broken spec")
-        _git(self.board, "update-ref", "refs/remotes/fork/master", "HEAD")
-        self.assertNa4Deny(self._decide(self.part0))
+    def test_deny_a_path_hash_under_a_malformed_table(self):
+        malformed = {"clips": {"M16-1243": ((1, "0" * 64),)}}  # no path_norm_sha256 column
+        self.assertNa4Deny(self._decide(self.part0, consent=malformed))
+        self.assertNa4Deny(self._decide(self.part0, consent={}))
 
-    def test_deny_a_duplicated_consented_id(self):
-        self._commit_spec(self._spec(self._consented_entry(), self._consented_entry()))
-        self.assertNa4Deny(self._decide(self.part0))
-
-    def test_the_merged_spec_is_read_once_and_only_for_a_footage_token(self):
-        calls = []
-
-        def counting_reader(board_root_raw):
-            calls.append(board_root_raw)
-            return self._spec(self._consented_entry())
-
-        saved_reader = self.module._read_merged_output_budget
-        saved_table = self.module.OWNER_CONSENTED_FOOTAGE
-        self.module._read_merged_output_budget = counting_reader
-        self.module.OWNER_CONSENTED_FOOTAGE = CONSENT_FIXTURE_TABLE
-        try:
-            self.assertAllow(
-                self.module.decide({"tool_name": "Bash", "tool_input": {"command": "git status"}}, None)
-            )
-            self.assertEqual(calls, [], "no footage token, no git read")
-            command = 'mlv_dump "%s" "%s"' % (self.part0, self.part1)
-            self.assertAllow(
-                self.module.decide({"tool_name": "Bash", "tool_input": {"command": command}}, None)
-            )
-            self.assertEqual(len(calls), 1, "one read per invocation")
-        finally:
-            self.module._read_merged_output_budget = saved_reader
-            self.module.OWNER_CONSENTED_FOOTAGE = saved_table
-
-    def test_the_real_hook_process_admits_with_the_frozen_table(self):
-        # The one row on the REAL six-id table: fixture paths carrying M16-1210's pinned
-        # lengths and digests, through the hook as a process, exactly as a lane would meet it.
-        pinned = self.module.OWNER_CONSENTED_FOOTAGE["clips"]["M16-1210"]
-        self._commit_spec(
-            self._spec(self._entry("M16-1210", (self.part0, self.part1), pinned))
+    def test_an_unresolved_env_reference_is_never_admitted(self):
+        self.assertFalse(
+            self.module.is_owner_consented_path("$env:UNSET_NAME/clip", consent=self.table)
         )
+        self.assertFalse(self.module.is_owner_consented_path("relative/clip", consent=self.table))
+
+    def test_no_subprocess_on_the_na4_path(self):
+        cases = (self.part0, self.part1, self.unconsented, os.path.join(self.tmp, "x.txt"))
+        baseline = [self._decide(path) for path in cases]
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("NA-4 must not start a process")
+
+        patched = [
+            (subprocess, "Popen"), (subprocess, "run"), (subprocess, "check_output"),
+            (os, "system"), (os, "popen"),
+        ]
+        saved = [(owner, name, getattr(owner, name)) for owner, name in patched]
+        for owner, name in patched:
+            setattr(owner, name, refuse)
+        try:
+            refused = [self._decide(path) for path in cases]
+        finally:
+            for owner, name, value in saved:
+                setattr(owner, name, value)
+        self.assertEqual(refused, baseline)
+        self.assertEqual(baseline[0], (0, ""))
+        self.assertEqual(baseline[2][0], 2)
+        self.assertFalse(hasattr(self.module, "_read_merged_output_budget"))
+        self.assertNotIn("subprocess", vars(self.module))
+
+    def test_the_real_hook_process_denies_an_unconsented_cache_path(self):
         env = dict(os.environ)
         env.pop("CLAUDE_PROJECT_DIR", None)
         env["PYTHONIOENCODING"] = "utf-8"
-
-        def run(path):
-            payload = json.dumps(
-                {"tool_name": "Bash", "tool_input": {"command": 'mlv_dump -v "%s"' % path}}
-            )
-            return subprocess.run(
-                [sys.executable, HOOK], input=payload, capture_output=True, text=True,
-                encoding="utf-8", env=env, cwd=self.tmp,
-            )
-
-        admitted = run(self.part1)
-        self.assertEqual((admitted.returncode, admitted.stderr.strip()), (0, ""), admitted.stderr)
-        refused = run(self.unconsented)
+        payload = json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": 'mlv_dump -v "%s"' % self.part0}}
+        )
+        refused = subprocess.run(
+            [sys.executable, HOOK], input=payload, capture_output=True, text=True,
+            encoding="utf-8", env=env, cwd=self.tmp,
+        )
         self.assertEqual(refused.returncode, 2, refused.stderr)
         self.assertTrue(refused.stderr.startswith("NA-4: "), refused.stderr)
 
-    def test_the_frozen_consent_table_is_exactly_the_six_owner_consented_ids(self):
+    def test_the_frozen_consent_table_is_exactly_the_six_consented_ids(self):
         table = self.module.OWNER_CONSENTED_FOOTAGE
+        self.assertEqual(len(table["clips"]), 6)
         self.assertEqual(sorted(table["clips"]), sorted(CONSENTED_IDS_PINNED))
         self.assertNotIn("M02-1344", table["clips"])
+        path_hashes = []
         for clip_id, parts in table["clips"].items():
             self.assertTrue(parts, clip_id)
-            for length, digest in parts:
+            for part in parts:
+                self.assertEqual(len(part), 3, clip_id)
+                length, digest, path_hash = part
                 self.assertIsInstance(length, int, clip_id)
                 self.assertGreater(length, 0, clip_id)
                 self.assertRegex(digest, r"\A[0-9a-f]{64}\Z", clip_id)
+                self.assertRegex(path_hash, r"\A[0-9a-f]{64}\Z", clip_id)
+                path_hashes.append(path_hash)
+        self.assertEqual(len(path_hashes), len(set(path_hashes)), "a path hash is listed twice")
         self.assertEqual(
             tuple(table["purposes"]), ("#72b delta-baseline gate", "PLAYBACK-ATTR-3-CUDA")
         )
-        self.assertEqual(table["authority"]["line"], 2137)
-        self.assertEqual(table["authority"]["sha256"], OWNER_AUTHORITY_LINE_SHA256)
         with self.assertRaises(TypeError):
             table["clips"]["M02-1344"] = ()  # frozen: a mapping proxy refuses assignment
 
-    def test_the_frozen_consent_table_matches_the_register_na4_text(self):
+    def test_the_authority_citations_are_distinct_and_hashed(self):
+        authority = self.module.OWNER_CONSENTED_FOOTAGE["authority"]
+        self.assertEqual(
+            authority["hash_convention"], "sha256 of the raw line bytes excluding the terminator"
+        )
+        consent = authority["consent"]
+        self.assertIn("peaceful-rubin-701ecd", consent["transcript"])
+        self.assertIn("a482bbe6-87e2-4332-970e-8accb08b1663.jsonl", consent["transcript"])
+        self.assertEqual(consent["line"], OWNER_CONSENT_LINE)
+        self.assertEqual(consent["sha256"], OWNER_CONSENT_LINE_SHA256)
+        self.assertEqual(consent["answers_line"], OWNER_CONSENT_QUESTION_LINE)
+        self.assertEqual(consent["answers_line_sha256"], OWNER_CONSENT_QUESTION_LINE_SHA256)
+        directive = authority["directive_no_manual_paths"]
+        self.assertIn("f9010ab1-55f2-4f4c-967c-467cf19c04ef.jsonl", directive["transcript"])
+        self.assertEqual(directive["line"], OWNER_DIRECTIVE_LINE)
+        self.assertEqual(directive["sha256"], OWNER_DIRECTIVE_LINE_SHA256)
+        self.assertIn("derived by the hub", authority["scope_derivation"])
+        self.assertIn("M02-1344 excluded (not acquired)", authority["scope_derivation"])
+
+    def test_the_frozen_consent_table_matches_the_register_text(self):
         with open(REGISTER_DOC, "r", encoding="utf-8") as handle:
             register = json.load(handle)
         na4 = [item for item in register["items"] if item["id"] == "NA-4"]
@@ -7075,12 +7009,22 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         ids = [value.strip() for value in listed.group(1).split(",")]
         self.assertEqual(sorted(ids), sorted(self.module.OWNER_CONSENTED_FOOTAGE["clips"]))
         self.assertIn("M02-1344 is NOT consented", act)
-        self.assertIn(self.module.CONSENTED_SPEC_GIT_OBJECT, act)
+        self.assertIn("path_norm_sha256", act)
+        self.assertIn("tools/gates/verify_consented_footage.py", act)
+        self.assertIn("agent-reviewed and CI-test-pinned", act)
+        self.assertIn("NOT yet wired", act)
+        self.assertNotIn("fork/master", act)
         for purpose in self.module.OWNER_CONSENTED_FOOTAGE["purposes"]:
             self.assertIn(purpose, act)
-        self.assertIn(OWNER_AUTHORITY_LINE_SHA256, register["authority"])
-        self.assertIn("line 2137", register["authority"])
-        self.assertIn("tools/gates/output-budget.json", self.module.NA10_GUARDED_TAILS)
+        self.assertIn("exception (3)", na4[0]["enforced_after_0_1"])
+        for needle in (
+            OWNER_CONSENT_LINE_SHA256, OWNER_CONSENT_QUESTION_LINE_SHA256,
+            OWNER_DIRECTIVE_LINE_SHA256, "line 1739", "line 1718", "line 2137",
+            "excluding the terminator",
+        ):
+            self.assertIn(needle, register["authority"])
+        # Round 1's spec tail is gone with the spec read: the table lives in the hook script.
+        self.assertNotIn("tools/gates/output-budget.json", self.module.NA10_GUARDED_TAILS)
 
 
 def _slug(name):

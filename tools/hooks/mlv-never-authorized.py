@@ -50,9 +50,8 @@ assume the hub":
     an absent target, with the exact stdin JSON of a currently valid canonical enable as
     its content -- see THE PRE-FLIGHT ARTIFACT ACT below).
   * NA-10, O129 (hub extension) -- a lane editing its own gate.  Any write to
-    ``.claude/settings.json``, ``.claude/settings.local.json``,
-    ``tools/hooks/mlv-never-authorized.py`` or ``tools/gates/output-budget.json`` (the spec
-    NA-4's owner-consented footage exception reads), UNDER ANY ROOT, is denied away from the board
+    ``.claude/settings.json``, ``.claude/settings.local.json`` or
+    ``tools/hooks/mlv-never-authorized.py``, UNDER ANY ROOT, is denied away from the board
     venue: this hook is re-read on every tool call, so a lane's edit of its registration or
     of this script would take effect on its next call.  Hook evolution stays hub-authored.
 
@@ -433,10 +432,7 @@ The literal arm runs LAST, after the receipt state, the venue and the shape, so 
 never told that its literal was well-formed and only the board-rooted actor ever sees the
 expected digest in a refusal line.
 
-Stdlib only.  Deterministic: no clock, no network, and ONE subprocess -- NA-4's owner-consented
-footage exception runs ``git -C <board> show fork/master:tools/gates/output-budget.json``, at
-most once per invocation and only when a clip token is not otherwise allowed; any failure of
-it admits nothing.  ``datetime`` is imported
+Stdlib only.  Deterministic: no subprocess, no clock, no network -- ``datetime`` is imported
 to PARSE the pinned stamps (the literal's two and every receipt's ``recordedUtc`` -- O141),
 never to read the current time, and ``hashlib`` to hash
 a file already on disk and to recompute the O172 digest from a receipt's own ``hashes``.
@@ -453,7 +449,6 @@ import json
 import os
 import posixpath
 import re
-import subprocess
 import sys
 import types
 
@@ -814,14 +809,12 @@ MANIFEST_PROMPTS_PREFIX = "prompts/v2/"
 # NA-10 (O129, hub extension): a lane editing its OWN gate.  Path TAILS, matched
 # segment-wise against the END of the path, UNDER ANY ROOT -- the rule is about which file
 # is being written, not about which tree it sits in, because every lane worktree carries its
-# own copy of all four and each one governs that lane's next tool call.
+# own copy of all three and each one governs that lane's next tool call.  (NA-4's owner-
+# consented footage table lives IN the hook script, so the third tail already guards it.)
 NA10_GUARDED_TAILS = (
     ".claude/settings.json",
     ".claude/settings.local.json",
     "tools/hooks/mlv-never-authorized.py",
-    # NA4-OWNER-CONSENTED-FOOTAGE-1: the gate spec whose MERGED paths NA-4 admits for
-    # owner-consented footage.  A lane may not author the text that widens its own gate.
-    "tools/gates/output-budget.json",
 )
 
 
@@ -3294,163 +3287,168 @@ def rule_na3(ctx):
 _CLIP_LINE_RX = re.compile(r"^(?:- )?CLIP_OR_NONE:\s*(.*?)\s*$", re.M)
 FIXTURE_TAIL = "tests/fixtures/clips"
 
-# NA4-OWNER-CONSENTED-FOOTAGE-1 -- THE THIRD NA-4 EXCEPTION, AND WHO DECIDED IT.
+# NA4-OWNER-CONSENTED-FOOTAGE-1 -- THE THIRD NA-4 EXCEPTION, WHO DECIDED IT, AND WHAT IT BINDS.
 #
-# The OWNER decided this, in the owner's own typed words; no lane, quorum or adjudication can widen
-# it, and the swarm that designed the mechanism
-# (fleet-runs/swarm-autonomous-footage-20260917T0105Z/SYNTHESIS.md) decided nothing about
-# consent.  The citation below is the owner's chat line, hashed as its raw JSONL bytes; the
-# scope is the consent recorded 2026-09-16 (receipts/owner-footage-consent-20260916.json)
-# NARROWED to the six ids that have content hashes -- M02-1344 is NOT here.
+# AUTHORITY (round 2, re-cited; every line hash is sha256 of the raw JSONL line bytes EXCLUDING
+# the line terminator).  The CONSENT is the owner's own typed line in the peaceful-rubin
+# transcript, line 1739, answering the assistant's question at line 1718.  The hub transcript's
+# line 2137 is a DIFFERENT owner line: the directive against manual path steps; it names no
+# clip.  The six ids are the HUB's derivation, not the owner's words (``scope_derivation``
+# below); M02-1344 is NOT here.  No lane, quorum or adjudication can widen this table.
 #
-# The table holds content identity only: per part, the expected byte length and lowercase
-# sha256.  It holds NO PATH.  A path is admitted only when it is spelled in the MERGED gate
-# spec -- git object `fork/master:tools/gates/output-budget.json` in the board repository,
-# never a worktree file -- under a consented id whose every part carries exactly these
-# lengths and digests, so editing the spec cannot swap a different clip in under a consented
-# id.  Any git or parse failure admits nothing.
+# WHAT IS FROZEN.  Per consented id, per part: the byte length, the lowercase sha256 of the
+# content, and ``path_norm_sha256`` -- the sha256 of this hook's own ``norm()`` output for that
+# part's path, UTF-8 encoded.  NO PATH is stored and NOTHING is read to admit one: a clip token
+# is admitted iff ``sha256(norm(token))`` is one of the frozen ``path_norm_sha256`` values.  No
+# subprocess, no git, no spec file on the hot path (round 1 read a mutable local git ref, which
+# a ref move, a shadowing tag or branch, ``git replace`` or a substituted remote could steer).
 #
-# LIMITS, stated rather than papered over.  (1) Widening this table is possible only through
-# a reviewed PR to this file; what the mechanism removes is widening it silently, or by a
-# prompt, a fields file or a receipt.  (2) The purposes are recorded, not enforced: purpose
-# binding relies on the card id in an agent-written prompt.  (3) Content identity is
-# verified by the JOB before opening (each part's length and sha256 against the same git
-# object); this hook compares text and never reads footage.
+# LIMITS, stated rather than papered over.  (1) Widening needs a change to THIS table, which is
+# visible in the diff and pinned by tests (tools/repo_hygiene/test_mlv_never_authorized.py); the
+# merge path is agent-reviewed and CI-test-pinned, NOT an un-mintable owner gate -- the repo has
+# zero required reviews and one shared account.  (2) The purposes are recorded, not enforced.
+# (3) This hook binds PATHS only and never reads footage.  CONTENT binding exists only where a
+# consumer calls tools/gates/verify_consented_footage.py, which checks every part's existence,
+# length and sha256 against this table: EVERY footage consumer MUST call it before opening a
+# clip.  The CUDA job and the delta-A/B jobs are NOT yet wired to it (card ATTR3-FOOTAGE-BIND-1
+# and the #72b tooling).
 OWNER_CONSENTED_FOOTAGE = types.MappingProxyType(
     {
+        # clip id -> ((length, content sha256, path_norm_sha256), ...) in part order.
         "clips": types.MappingProxyType(
             {
                 "M16-1243": (
-                    (2221399552, "c8f09e1ea8e6c40f673bf465d2d4adb90ca218bc9f78c6461db5cd22cd3e01b9"),
-                    (1174057472, "5dd782178e1658dad5da31808bf3a7c249f7e282682220e4d72b7743dacc163b"),
+                    (
+                        2221399552,
+                        "c8f09e1ea8e6c40f673bf465d2d4adb90ca218bc9f78c6461db5cd22cd3e01b9",
+                        "28a106d4cc483f1ffd83d54c0b95536c4e7a21a127808fad7dfa3d8f25c0f552",
+                    ),
+                    (
+                        1174057472,
+                        "5dd782178e1658dad5da31808bf3a7c249f7e282682220e4d72b7743dacc163b",
+                        "0f2c4cb7c41a4f836e38acfe44a0d7dcd589b0dc8f889986668f05e30a32de7c",
+                    ),
                 ),
                 "M16-1327": (
-                    (2654424576, "cfdcd64da9931db94b2b4f938fec1e10b8a742c2e79847975bdd6a986e137a3f"),
-                    (1327107584, "c13ed73d60a5767f58bee0a22bbb046f8cf795a8c09511689bbfa6213e770cd7"),
+                    (
+                        2654424576,
+                        "cfdcd64da9931db94b2b4f938fec1e10b8a742c2e79847975bdd6a986e137a3f",
+                        "cba05ef72d33bb8116c21d912938575f173ee5b54975d64e85bc98847a3f17af",
+                    ),
+                    (
+                        1327107584,
+                        "c13ed73d60a5767f58bee0a22bbb046f8cf795a8c09511689bbfa6213e770cd7",
+                        "a823c17ae653fb2b8c5d7abd6a7027e160c6c5dab481df9c46967cfc0cbafec3",
+                    ),
                 ),
                 "M16-1347": (
-                    (2454400512, "763e5a302a8d04e97d84ca7d281d65752529a6ed00bf5a7ff8bbb1e46609934d"),
-                    (1236876288, "e32c19b7b61619e1ea29c05358a23e863218ba021c4d2e8bdda5d057417d5fb1"),
+                    (
+                        2454400512,
+                        "763e5a302a8d04e97d84ca7d281d65752529a6ed00bf5a7ff8bbb1e46609934d",
+                        "63fbc5a24cc158754bacd0dd2d4be7abdc92053134a603b6f983d60602d5da52",
+                    ),
+                    (
+                        1236876288,
+                        "e32c19b7b61619e1ea29c05358a23e863218ba021c4d2e8bdda5d057417d5fb1",
+                        "6af3176539897975fb494a9ec370fa476e474660c664e344fa9fd1df1c2d1e1d",
+                    ),
                 ),
                 "M17-1207": (
-                    (2367993856, "3bbb5034d8ab5d63a078517af5a3098fff89677be37e78298317a19def043dce"),
-                    (1369447936, "3ab34479a80363a693bce3e13782b828b1eccbc38e96dd11ad0eb8c2d919a54e"),
+                    (
+                        2367993856,
+                        "3bbb5034d8ab5d63a078517af5a3098fff89677be37e78298317a19def043dce",
+                        "5fc530e0e0e1a06d34cc702ba48de0a6db3e8018a0045989cb7315581a49574e",
+                    ),
+                    (
+                        1369447936,
+                        "3ab34479a80363a693bce3e13782b828b1eccbc38e96dd11ad0eb8c2d919a54e",
+                        "cb94f742140e72e46ee029eb40b93cfed9299f00a68c87e3d9fc59b39a60aea3",
+                    ),
                 ),
                 "M15-1320": (
-                    (462899712, "b72347ace4f18981a9ea66db9fc2db9413718c99d4818a1846413b86b703ca1e"),
-                    (228077056, "8b7de65f58e9118001e53e1b6490784c0fa2cda0ef108e7eb63c8d62f5c7e999"),
+                    (
+                        462899712,
+                        "b72347ace4f18981a9ea66db9fc2db9413718c99d4818a1846413b86b703ca1e",
+                        "81a01b33a298de563aed14851308ce0e706e3287b9413b9e42d8b68bc3dd0873",
+                    ),
+                    (
+                        228077056,
+                        "8b7de65f58e9118001e53e1b6490784c0fa2cda0ef108e7eb63c8d62f5c7e999",
+                        "bae2d8f11f9b221456feec6d9e699b63cffd9af607bdc6e5bde689d8f628cad6",
+                    ),
                 ),
                 "M16-1210": (
-                    (793847808, "679ee976b0150c71ca26f7d8895c775afdca273fa7f907db22cf7c3d58af17cd"),
-                    (395081728, "d7a31dbb9b2afe717485a4f664619c7d4f2e747c3e13be1d503f93904551af84"),
+                    (
+                        793847808,
+                        "679ee976b0150c71ca26f7d8895c775afdca273fa7f907db22cf7c3d58af17cd",
+                        "e29feea8e1cd1c5a77ea1efbb4001af0e5d81659b3f25631df9567c89ce290c0",
+                    ),
+                    (
+                        395081728,
+                        "d7a31dbb9b2afe717485a4f664619c7d4f2e747c3e13be1d503f93904551af84",
+                        "c084dd034f80f90ce3ec26ef25a635fe8192ddcc9bf63ab77e9661013585a8b4",
+                    ),
                 ),
             }
         ),
         "purposes": ("#72b delta-baseline gate", "PLAYBACK-ATTR-3-CUDA"),
         "authority": types.MappingProxyType(
             {
-                "transcript": r"C:\Users\obabalola\.claude\projects"
-                r"\C---Layi-Wkspc-MLV-App--claude-worktrees-happy-ptolemy-9fe12d"
-                r"\f9010ab1-55f2-4f4c-967c-467cf19c04ef.jsonl",
-                "line": 2137,
-                "sha256": "254075c85a821758067f7d37dbc5a26a05ae8e2a2368f1e02af0fa2110ac8e41",
+                "hash_convention": "sha256 of the raw line bytes excluding the terminator",
+                "consent": types.MappingProxyType(
+                    {
+                        "transcript": r"C:\Users\obabalola\.claude\projects"
+                        r"\C---Layi-Wkspc-MLV-App--claude-worktrees-peaceful-rubin-701ecd"
+                        r"\a482bbe6-87e2-4332-970e-8accb08b1663.jsonl",
+                        "line": 1739,
+                        "sha256": "461af7a5291099e009230a8abcfe547e064435287a23f40cf93e5ba4ddb0a066",
+                        "timestamp": "2026-09-16T16:42:09Z",
+                        "answers_line": 1718,
+                        "answers_line_sha256": (
+                            "88484275b4ef158bdaf0a98a3755c70fb65be34c514ae406c6603446dee4a38a"
+                        ),
+                    }
+                ),
+                "directive_no_manual_paths": types.MappingProxyType(
+                    {
+                        "transcript": r"C:\Users\obabalola\.claude\projects"
+                        r"\C---Layi-Wkspc-MLV-App--claude-worktrees-happy-ptolemy-9fe12d"
+                        r"\f9010ab1-55f2-4f4c-967c-467cf19c04ef.jsonl",
+                        "line": 2137,
+                        "sha256": "254075c85a821758067f7d37dbc5a26a05ae8e2a2368f1e02af0fa2110ac8e41",
+                    }
+                ),
+                "scope_derivation": (
+                    "ids derived by the hub from tools/gates/output-budget.json at abcf1697; "
+                    "M02-1344 excluded (not acquired); purposes #72b delta-baseline gate and "
+                    "PLAYBACK-ATTR-3-CUDA from the consent exchange"
+                ),
             }
         ),
     }
 )
-# The MERGED spec, as a git object in the board repository.  Never a worktree path.
-CONSENTED_SPEC_GIT_OBJECT = "fork/master:tools/gates/output-budget.json"
-CONSENTED_SPEC_GIT_TIMEOUT_SECONDS = 20
-_SHA256_HEX_RX = re.compile(r"\A[0-9a-fA-F]{64}\Z")
 
 
-def _read_merged_output_budget(board_root_raw):
-    """-> the parsed merged spec, or None on ANY failure (git absent, bad ref, bad JSON)."""
-    try:
-        # The board root must BE a repository, not merely sit inside one: without this, git's
-        # upward discovery would answer from whatever enclosing repository it found.
-        if not os.path.exists(os.path.join(board_root_raw, ".git")):
-            return None
-        completed = subprocess.run(
-            ["git", "-C", board_root_raw, "show", CONSENTED_SPEC_GIT_OBJECT],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=CONSENTED_SPEC_GIT_TIMEOUT_SECONDS,
-        )
-        if completed.returncode != 0:
-            return None
-        document = json.loads(completed.stdout.decode("utf-8"))
-    except Exception:
-        return None
-    return document if isinstance(document, dict) else None
-
-
-def _consented_part_matches(part, expected):
-    """One spec entry against one frozen (length, sha256) pair -> its normalised path or None."""
-    if not isinstance(part, dict):
-        return None
-    path, length, digest = part.get("path"), part.get("length"), part.get("sha256")
-    if not isinstance(path, str) or not path.strip():
-        return None
-    if isinstance(length, bool) or not isinstance(length, int) or length != expected[0]:
-        return None
-    if not isinstance(digest, str) or not _SHA256_HEX_RX.match(digest):
-        return None
-    if digest.lower() != expected[1]:
-        return None
-    path_norm = norm(path)
-    if _unresolved_env_ref(path_norm) or not is_absolute(path_norm):
-        return None
-    return path_norm
-
-
-def consented_footage_paths(board_root_raw, consent=None, reader=None):
-    """-> frozenset of normalised paths the merged spec lists for consented, hash-matching ids.
-
-    FAIL CLOSED at every step: an unreadable or malformed spec admits NOTHING; a consented id
-    that is absent, duplicated, or whose top-level entry or ANY part disagrees with the frozen
-    table (count, order, length or digest) admits nothing for that id.  ``consent`` and
-    ``reader`` exist for the fixture-scoped tests only; the hook passes neither.
-    """
+def _consented_path_norm_hashes(consent=None):
+    """-> frozenset of every frozen ``path_norm_sha256``; a malformed row contributes nothing."""
     consent = OWNER_CONSENTED_FOOTAGE if consent is None else consent
-    reader = _read_merged_output_budget if reader is None else reader
-    document = reader(board_root_raw)
-    if not isinstance(document, dict) or not isinstance(document.get("clips"), list):
+    hashes = set()
+    try:
+        for parts in consent["clips"].values():
+            for part in parts:
+                if isinstance(part, tuple) and len(part) == 3 and isinstance(part[2], str):
+                    hashes.add(part[2].lower())
+    except Exception:
         return frozenset()
-    seen = {}
-    for entry in document["clips"]:
-        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
-            seen.setdefault(entry["id"], []).append(entry)
-    admitted = set()
-    for clip_id, expected_parts in consent["clips"].items():
-        entries = seen.get(clip_id, [])
-        if len(entries) != 1:
-            continue
-        entry = entries[0]
-        parts = entry.get("parts")
-        if not expected_parts or not isinstance(parts, list) or len(parts) != len(expected_parts):
-            continue
-        part_paths = [
-            _consented_part_matches(part, expected)
-            for part, expected in zip(parts, expected_parts)
-        ]
-        top_path = _consented_part_matches(entry, expected_parts[0])
-        if top_path is None or any(path is None for path in part_paths):
-            continue
-        if top_path != part_paths[0]:
-            continue
-        admitted.update(part_paths)
-    return frozenset(admitted)
+    return frozenset(hashes)
 
 
-def _ctx_consented_footage_paths(ctx):
-    """The merged-spec read, made at most ONCE per hook invocation and only when needed."""
-    cached = getattr(ctx, "consented_footage_paths_cache", None)
-    if cached is None:
-        cached = consented_footage_paths(ctx.board_root_raw)
-        ctx.consented_footage_paths_cache = cached
-    return cached
+def is_owner_consented_path(path_norm, consent=None):
+    """Is this NORMALISED path one the frozen table names?  Pure: no I/O, no subprocess."""
+    if not path_norm or _unresolved_env_ref(path_norm) or not is_absolute(path_norm):
+        return False
+    digest = hashlib.sha256(path_norm.encode("utf-8")).hexdigest()
+    return digest in _consented_path_norm_hashes(consent)
 
 
 def authorized_clip(ctx):
@@ -3486,8 +3484,8 @@ def rule_na4(ctx):
             continue  # tracked fixtures are always allowed
         if allowed is not None and path_norm == allowed:
             continue
-        if path_norm in _ctx_consented_footage_paths(ctx):
-            continue  # owner-consented footage, spelled by the MERGED spec (see the table)
+        if is_owner_consented_path(path_norm):
+            continue  # owner-consented footage: its norm hash is in the frozen table
         if allowed is None:
             raise Deny(
                 "NA-4",
@@ -3860,8 +3858,7 @@ def rule_na9(ctx):
 # that takes effect on ITS NEXT TOOL CALL.  Nothing else in the register covered it -- NA-2
 # guards `.claude-state/**` and `.claude/ANALYSIS_LOG.md`, NA-7 explicitly ALLOWS the lane's
 # own worktree, and NA-6 is about tests -- so the three files that constitute the gate were
-# the one part of the tree the gate did not defend.  NA4-OWNER-CONSENTED-FOOTAGE-1 adds a
-# fourth tail, `tools/gates/output-budget.json`, the spec whose MERGED paths NA-4 admits.
+# the one part of the tree the gate did not defend.
 #
 # The predicate is (TAIL, VENUE) and nothing else.  UNDER ANY ROOT, because every lane
 # worktree carries its own copy and it is that copy which governs that lane; and denied
@@ -3881,12 +3878,12 @@ def rule_na9(ctx):
 #     `hook-unregistered` refusals at dispatch and the sol review of every PR diff.
 #
 # NA-10 runs LAST, in register order.  Every specified row is attributable there: NA-7
-# allows a lane's own worktree by construction, and none of the four tails is an NA-2
+# allows a lane's own worktree by construction, and none of the three tails is an NA-2
 # protected path, so nothing else fires first and steals the reason line.
 
 
 def _na10_guarded(path_norm):
-    """Does this path END with one of the four gate tails, under any root?"""
+    """Does this path END with one of the three gate tails, under any root?"""
     if not path_norm:
         return False
     return any(
