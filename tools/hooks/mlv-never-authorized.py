@@ -50,8 +50,9 @@ assume the hub":
     an absent target, with the exact stdin JSON of a currently valid canonical enable as
     its content -- see THE PRE-FLIGHT ARTIFACT ACT below).
   * NA-10, O129 (hub extension) -- a lane editing its own gate.  Any write to
-    ``.claude/settings.json``, ``.claude/settings.local.json`` or
-    ``tools/hooks/mlv-never-authorized.py``, UNDER ANY ROOT, is denied away from the board
+    ``.claude/settings.json``, ``.claude/settings.local.json``,
+    ``tools/hooks/mlv-never-authorized.py`` or ``tools/gates/output-budget.json`` (the spec
+    NA-4's owner-consented footage exception reads), UNDER ANY ROOT, is denied away from the board
     venue: this hook is re-read on every tool call, so a lane's edit of its registration or
     of this script would take effect on its next call.  Hook evolution stays hub-authored.
 
@@ -808,11 +809,14 @@ MANIFEST_PROMPTS_PREFIX = "prompts/v2/"
 # NA-10 (O129, hub extension): a lane editing its OWN gate.  Path TAILS, matched
 # segment-wise against the END of the path, UNDER ANY ROOT -- the rule is about which file
 # is being written, not about which tree it sits in, because every lane worktree carries its
-# own copy of all three and each one governs that lane's next tool call.
+# own copy of all four and each one governs that lane's next tool call.
 NA10_GUARDED_TAILS = (
     ".claude/settings.json",
     ".claude/settings.local.json",
     "tools/hooks/mlv-never-authorized.py",
+    # NA4-OWNER-CONSENTED-FOOTAGE-1: the gate spec whose MERGED paths NA-4 admits for
+    # owner-consented footage.  A lane may not author the text that widens its own gate.
+    "tools/gates/output-budget.json",
 )
 
 
@@ -3691,7 +3695,8 @@ def rule_na9(ctx):
 # that takes effect on ITS NEXT TOOL CALL.  Nothing else in the register covered it -- NA-2
 # guards `.claude-state/**` and `.claude/ANALYSIS_LOG.md`, NA-7 explicitly ALLOWS the lane's
 # own worktree, and NA-6 is about tests -- so the three files that constitute the gate were
-# the one part of the tree the gate did not defend.
+# the one part of the tree the gate did not defend.  NA4-OWNER-CONSENTED-FOOTAGE-1 adds a
+# fourth tail, `tools/gates/output-budget.json`, the spec whose MERGED paths NA-4 admits.
 #
 # The predicate is (TAIL, VENUE) and nothing else.  UNDER ANY ROOT, because every lane
 # worktree carries its own copy and it is that copy which governs that lane; and denied
@@ -3711,12 +3716,12 @@ def rule_na9(ctx):
 #     `hook-unregistered` refusals at dispatch and the sol review of every PR diff.
 #
 # NA-10 runs LAST, in register order.  Every specified row is attributable there: NA-7
-# allows a lane's own worktree by construction, and none of the three tails is an NA-2
+# allows a lane's own worktree by construction, and none of the four tails is an NA-2
 # protected path, so nothing else fires first and steals the reason line.
 
 
 def _na10_guarded(path_norm):
-    """Does this path END with one of the three gate tails, under any root?"""
+    """Does this path END with one of the four gate tails, under any root?"""
     if not path_norm:
         return False
     return any(

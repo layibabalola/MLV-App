@@ -576,6 +576,7 @@ READONLY_AUTH_STATUS = " ".join(("claude", "au" + "th", "status"))
 # the board root, which is where hook evolution is authored.
 NA10_SETTINGS = "{REPO}/.claude/settings.json"
 NA10_HOOK_SCRIPT = "{REPO}/tools/hooks/mlv-never-authorized.py"
+NA10_GATE_SPEC = "{REPO}/tools/gates/output-budget.json"
 NA10_UNRELATED = "{REPO}/src/mlv/video_mlv.c"
 NA10_NEW_TEXT = "# rewritten by the lane this gate governs\n"
 
@@ -3344,6 +3345,18 @@ CASES = [
         "fixture": "venue_at_board",
     },
     {
+        # NA4-OWNER-CONSENTED-FOOTAGE-1: the gate spec whose MERGED paths NA-4 admits is the
+        # fourth tail.  A lane rewriting it would be authoring the text that widens its gate.
+        "name": "na10 lane rewrites the output budget gate spec",
+        "group": "na10",
+        "tool": "Write",
+        "input": {"file_path": NA10_GATE_SPEC, "content": NA10_NEW_TEXT},
+        "expect": "DENY",
+        "na": "NA-10",
+        "reason_contains": "OWN gate",
+        "fixture": "venue_at_worktree",
+    },
+    {
         # The shell arm.  A hook is neutered as effectively by `Set-Content` as by `Write`,
         # and the register's "any write" is a predicate on the PATH, not on the tool.
         "name": "na10 shell set content over the hook script",
@@ -3357,7 +3370,7 @@ CASES = [
     },
     {
         # THE CONTROL.  An ordinary source edit in the same worktree at the same venue: NA-10
-        # is about three files, not about a lane's right to edit code.
+        # is about four files, not about a lane's right to edit code.
         "name": "na10 control unrelated worktree edit at a lane venue",
         "group": "na10",
         "tool": "Edit",
@@ -5994,7 +6007,8 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # control that keeps it about the GATE and not about the worktree.
         self.assertEqual(counts.get("na3"), 5, "5 NA-3 claude-auth rows")
         self.assertEqual(counts.get("na3_persistent"), 6, "6 NA-3 O129 persistent-scope rows")
-        self.assertEqual(counts.get("na10"), 6, "6 NA-10 self-edit rows")
+        # NA4-OWNER-CONSENTED-FOOTAGE-1 adds the seventh: the gate spec tail at a lane venue.
+        self.assertEqual(counts.get("na10"), 7, "7 NA-10 self-edit rows")
         # PINNED, NEW at the thirteenth commit (S131): a NEW group, 3 rows -- the `setx.exe`
         # credential-prefix bypass, the `setx.exe` persistent-name bypass, and the fully
         # qualified `[System.Environment]::SetEnvironmentVariable` persistent-name bypass.
