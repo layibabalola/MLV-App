@@ -881,6 +881,34 @@ class LinkSafeCleanupTests(_PwshCase):
                         self.assertGreater(first_call, placeholder,
                                            f"{name} is called before it is embedded in {script.name}")
 
+    def test_every_publish_write_in_each_emitted_job_is_slot_checked_first(self) -> None:
+        # sol PR #133 r4: result.json (success AND failure) and every other artifact write, not only
+        # the transactional .partial/rename steps, must pass Assert-AttrCudaWritableFileSlot first.
+        import re
+
+        write = re.compile(r"(Set-Content -LiteralPath|Copy-Item -LiteralPath .+ -Destination|Move-Item -LiteralPath .+ -Destination)")
+        publish_target = re.compile(r"\$Pub|\$Cache|partial|cachePath|\$reconLog|\$amazeLog|\$Path\b")
+        for script in (
+            ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1",
+            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1",
+            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1",
+        ):
+            text = script.read_text(encoding="utf-8").replace("\r\n", "\n")
+            start = text.index("$template = @'")
+            lines = text[start:text.index("\n'@", start)].split("\n")
+            checked = 0
+            for index, line in enumerate(lines):
+                match = write.search(line)
+                # Judge the DESTINATION only: copies OUT of the cache into the job-owned work tree are reads.
+                if not match or not publish_target.search(line[match.end():]):
+                    continue
+                window = "\n".join(lines[max(0, index - 3):index + 1])
+                with self.subTest(script=script.name, line=line.strip()):
+                    self.assertIn("Assert-AttrCudaWritableFileSlot", window,
+                                  f"unguarded publish write in {script.name}: {line.strip()}")
+                checked += 1
+            self.assertGreater(checked, 0, f"no publish writes found in {script.name}; the scan is broken")
+
     def test_no_emitted_job_or_assembler_recurses_a_delete_outside_the_guarded_function(self) -> None:
         import re
 

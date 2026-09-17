@@ -212,7 +212,13 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
             evidence = $Evidence
             steps = $StepLog
         }
-        $partial | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Pub 'result.json') -Encoding UTF8
+        # Still a publish write: slot-checked, and a refusal never masks the original exit code.
+        try {
+            [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'result.json'))
+            $partial | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Pub 'result.json') -Encoding UTF8
+        } catch {
+            Say "RESULT_JSON_NOT_WRITTEN $($_.Exception.Message)"
+        }
     }
     Write-Output "RESULT=DLL_PAIR_FAILED STEP=$Step EXIT=$Code"
     exit $Code
@@ -317,6 +323,7 @@ if (-not [string]::IsNullOrWhiteSpace($ParityVectors)) {
 Say "BUILD recon backend arch=$archLabel"
 $reconOutput = @(& $psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $reconCommand 2>&1 | ForEach-Object { [string]$_ })
 $reconRc = $LASTEXITCODE
+[void](Assert-AttrCudaWritableFileSlot -Path $reconLog)
 $reconOutput | Set-Content -LiteralPath $reconLog -Encoding UTF8
 $reconDll = Join-Path $Backend $ReconDllName
 if (-not (Test-Path -LiteralPath $reconDll)) { Complete-Failed 11 'reconBackendBuild' "$ReconDllName not produced (script exit=$reconRc)" }
@@ -334,6 +341,7 @@ Say "BUILD amaze backend arch=$archLabel"
 $amazeCommand = "& $(ConvertTo-PsSingleQuoted $AmazeScript) -Dir $(ConvertTo-PsSingleQuoted $Backend) -Arch $(ConvertTo-PsSingleQuoted $archLabel)"
 $amazeOutput = @(& $psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $amazeCommand 2>&1 | ForEach-Object { [string]$_ })
 $amazeRc = $LASTEXITCODE
+[void](Assert-AttrCudaWritableFileSlot -Path $amazeLog)
 $amazeOutput | Set-Content -LiteralPath $amazeLog -Encoding UTF8
 $amazeDll = Join-Path $Backend $AmazeDllName
 # amaze-debayer-dll.ps1 exits 0 only after its own export verification passes, so a nonzero
@@ -489,6 +497,7 @@ $result = [ordered]@{
     evidence = $Evidence
     steps = $StepLog
 }
+try { [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'result.json')) } catch { Complete-Failed 23 'publishResult' $_.Exception.Message }
 $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Pub 'result.json') -Encoding UTF8
 Write-Output "RESULT=DLL_PAIR_OK SOURCE=$SourceCommit ARCH=$archLabel RECON=$($files[$ReconDllName]) AMAZE=$($files[$AmazeDllName]) ARTIFACTS=$Pub"
 exit 0

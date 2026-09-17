@@ -171,7 +171,13 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
             stagedOnHost = $env:COMPUTERNAME
             steps = $StepLog
         }
-        $partial | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Pub 'result.json') -Encoding UTF8
+        # Still a publish write: slot-checked, and a refusal never masks the original exit code.
+        try {
+            [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'result.json'))
+            $partial | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Pub 'result.json') -Encoding UTF8
+        } catch {
+            Say "RESULT_JSON_NOT_WRITTEN $($_.Exception.Message)"
+        }
     }
     Write-Output "RESULT=STAGE_FAILED STEP=$Step EXIT=$Code"
     exit $Code
@@ -371,6 +377,7 @@ $result = [ordered]@{
     stagedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     steps = $StepLog
 }
+try { [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'result.json')) } catch { Complete-Failed 23 'publishResult' $_.Exception.Message }
 $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Pub 'result.json') -Encoding UTF8
 Write-Output "RESULT=STAGE_OK SOURCE=$SourceCommit FILES=$($published.Count) CACHE=$Cache ARTIFACTS=$Pub"
 exit 0

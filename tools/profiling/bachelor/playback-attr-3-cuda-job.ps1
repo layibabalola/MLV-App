@@ -134,6 +134,7 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Resolve-AttrCudaSmokeRunLog',
     'Get-AttrCudaLastEligibilityLine',
     'Get-AttrCudaEligibilityVerdict',
+    'Assert-AttrCudaWritableFileSlot',
     'Remove-AttrCudaTree'
 )
 
@@ -226,6 +227,8 @@ function Get-Sha([string]$Path) {
 
 
 function Save-Json($Object, [string]$Path) {
+    # Every artifact write is slot-checked: never through a link or into a directory (sol PR #133).
+    [void](Assert-AttrCudaWritableFileSlot -Path $Path)
     $Object | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $Path -Encoding utf8
 }
 
@@ -620,16 +623,23 @@ $provenance = [ordered]@{
 }
 Save-Json $provenance (Join-Path $Pub 'provenance.json')
 
+[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'result.json'))
 Copy-Item -LiteralPath $resultPath -Destination (Join-Path $Pub 'result.json') -Force
+[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'smoke-stdout.txt'))
 Copy-Item -LiteralPath (Join-Path $legOut 'smoke-stdout.txt') -Destination (Join-Path $Pub 'smoke-stdout.txt') -Force
+[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'smoke-stderr.txt'))
 Copy-Item -LiteralPath (Join-Path $legOut 'smoke-stderr.txt') -Destination (Join-Path $Pub 'smoke-stderr.txt') -Force
+[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'probe-timeline.csv'))
 Copy-Item -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -Destination (Join-Path $Pub 'probe-timeline.csv') -Force
+[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'presentmon.csv'))
 Copy-Item -LiteralPath $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv') -Force
+[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'presentmon-series.csv'))
 Copy-Item -LiteralPath (Join-Path $legOut 'presentmon-series.csv') -Destination (Join-Path $Pub 'presentmon-series.csv') -Force
 New-Item -ItemType Directory -Path (Join-Path $Pub 'logs') -Force | Out-Null
 # The per-run snapshot, under the name that says what it is. The aggregate rotating app log is
 # NOT published: the smoke runner is explicit that it may grow after the run and carries no
 # comparison authority.
+[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'logs\smoke-run.log'))
 Copy-Item -LiteralPath $logPath -Destination (Join-Path $Pub 'logs\smoke-run.log') -Force
 
 $manifest = [ordered]@{
