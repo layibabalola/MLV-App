@@ -82,6 +82,30 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # This job takes 13.65 min on windows-latest against 2.63 min on ubuntu-latest for the SAME
+      # `unittest discover`, and the cause is process creation, not the tests: the suite issues ~85
+      # `subprocess` calls and ~22 `git init` fixtures, and `test_brokered_closeout.py` spawns real
+      # process trees. Defender real-time scanning inspects every `python.exe` and `git.exe` spawn
+      # and every file the fixtures write under the workspace and RUNNER_TEMP.
+      #
+      # Excluding those two paths is the standard remedy and costs NOTHING in coverage -- it changes
+      # no test, no matrix leg and no required check. It is scoped to the two ephemeral directories
+      # of a throwaway runner, not machine-wide, and the runner is destroyed after the job.
+      #
+      # Deliberately fail-soft: if the runner image ever drops Defender or revokes the privilege,
+      # the job must keep running at the old speed rather than fail. A cost optimisation that can
+      # redden a REQUIRED check has negative expected value.
+      - name: Exclude the ephemeral workspace from Defender real-time scanning
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath $env:RUNNER_TEMP, $env:GITHUB_WORKSPACE -ErrorAction Stop
+            Write-Host "Defender exclusions added for RUNNER_TEMP and GITHUB_WORKSPACE."
+          } catch {
+            Write-Host "::notice::Defender exclusions unavailable; continuing unoptimised. $($_.Exception.Message)"
+          }
+
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
