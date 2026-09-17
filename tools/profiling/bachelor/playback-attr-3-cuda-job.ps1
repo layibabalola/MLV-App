@@ -135,6 +135,10 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Get-AttrCudaLastEligibilityLine',
     'Get-AttrCudaEligibilityVerdict',
     'Assert-AttrCudaWritableFileSlot',
+    'Publish-AttrCudaText',
+    'Publish-AttrCudaFileCopy',
+    'Publish-AttrCudaFileMove',
+    'New-AttrCudaDirectory',
     'Remove-AttrCudaTree'
 )
 
@@ -228,8 +232,7 @@ function Get-Sha([string]$Path) {
 
 function Save-Json($Object, [string]$Path) {
     # Every artifact write is slot-checked: never through a link or into a directory (sol PR #133).
-    [void](Assert-AttrCudaWritableFileSlot -Path $Path)
-    $Object | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $Path -Encoding utf8
+    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))
 }
 
 function Get-Mean([double[]]$Values) {
@@ -402,7 +405,10 @@ if (-not (Test-Path -LiteralPath $clipPath -PathType Leaf)) { throw "authorized 
 # dir under $Work) -- do not remove/recreate $Work here, which would delete the live
 # $env:TEMP/$env:TMP scratch dir out from under this process.
 New-Item -ItemType Directory -Path (Join-Path $Work 'out') -Force | Out-Null
-New-Item -ItemType Directory -Path $Pub -Force | Out-Null
+# The outbox is created explicitly (never as a side effect of -Force on a deeper path), so its
+# parent is checked for links like every other directory this job creates.
+[void](New-AttrCudaDirectory -Path (Join-Path $Root 'outbox'))
+[void](New-AttrCudaDirectory -Path $Pub)
 Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip) -DestinationPath (Join-Path $Work 'pkg') -Force
 $baseExe = Get-ChildItem -LiteralPath (Join-Path $Work 'pkg') -Recurse -Filter $BasePackageExeName | Select-Object -First 1
 if (-not $baseExe) { throw "base package executable not found: $BasePackageExeName" }
@@ -411,8 +417,8 @@ $exePath = Join-Path $pkgDir $ExeName
 $reconDll = Join-Path $pkgDir 'igpu_recon_cuda.dll'
 $cacheExeSha = Get-Sha (Join-Path $Cache $ExeName)
 $cacheReconSha = Get-Sha (Join-Path $Cache $ReconName)
-Copy-Item -LiteralPath (Join-Path $Cache $ExeName) -Destination $exePath -Force
-Copy-Item -LiteralPath (Join-Path $Cache $ReconName) -Destination $reconDll -Force
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $Cache $ExeName) -Destination $exePath)
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $Cache $ReconName) -Destination $reconDll)
 if ((Get-Sha $exePath) -ne $cacheExeSha -or (Get-Sha $reconDll) -ne $cacheReconSha) {
     throw 'deployed artifact hash verification failed (copy from cache did not round-trip)'
 }
@@ -623,24 +629,17 @@ $provenance = [ordered]@{
 }
 Save-Json $provenance (Join-Path $Pub 'provenance.json')
 
-[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'result.json'))
-Copy-Item -LiteralPath $resultPath -Destination (Join-Path $Pub 'result.json') -Force
-[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'smoke-stdout.txt'))
-Copy-Item -LiteralPath (Join-Path $legOut 'smoke-stdout.txt') -Destination (Join-Path $Pub 'smoke-stdout.txt') -Force
-[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'smoke-stderr.txt'))
-Copy-Item -LiteralPath (Join-Path $legOut 'smoke-stderr.txt') -Destination (Join-Path $Pub 'smoke-stderr.txt') -Force
-[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'probe-timeline.csv'))
-Copy-Item -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -Destination (Join-Path $Pub 'probe-timeline.csv') -Force
-[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'presentmon.csv'))
-Copy-Item -LiteralPath $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv') -Force
-[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'presentmon-series.csv'))
-Copy-Item -LiteralPath (Join-Path $legOut 'presentmon-series.csv') -Destination (Join-Path $Pub 'presentmon-series.csv') -Force
-New-Item -ItemType Directory -Path (Join-Path $Pub 'logs') -Force | Out-Null
+[void](Publish-AttrCudaFileCopy -Source $resultPath -Destination (Join-Path $Pub 'result.json'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'smoke-stdout.txt') -Destination (Join-Path $Pub 'smoke-stdout.txt'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'smoke-stderr.txt') -Destination (Join-Path $Pub 'smoke-stderr.txt'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'probe-timeline.csv') -Destination (Join-Path $Pub 'probe-timeline.csv'))
+[void](Publish-AttrCudaFileCopy -Source $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'presentmon-series.csv') -Destination (Join-Path $Pub 'presentmon-series.csv'))
+[void](New-AttrCudaDirectory -Path (Join-Path $Pub 'logs'))
 # The per-run snapshot, under the name that says what it is. The aggregate rotating app log is
 # NOT published: the smoke runner is explicit that it may grow after the run and carries no
 # comparison authority.
-[void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'logs\smoke-run.log'))
-Copy-Item -LiteralPath $logPath -Destination (Join-Path $Pub 'logs\smoke-run.log') -Force
+[void](Publish-AttrCudaFileCopy -Source $logPath -Destination (Join-Path $Pub 'logs\smoke-run.log'))
 
 $manifest = [ordered]@{
     schema = 'playback-attr-3-cuda-evidence-manifest.v1'

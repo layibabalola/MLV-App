@@ -135,6 +135,10 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Get-AttrCudaZipArchiveComment',
     'Assert-AttrCudaSourceArchive',
     'Assert-AttrCudaWritableFileSlot',
+    'Publish-AttrCudaText',
+    'Publish-AttrCudaFileCopy',
+    'Publish-AttrCudaFileMove',
+    'New-AttrCudaDirectory',
     'Remove-AttrCudaPartialFile',
     'Remove-AttrCudaTree'
 )
@@ -214,8 +218,7 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
         }
         # Still a publish write: slot-checked, and a refusal never masks the original exit code.
         try {
-            [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'result.json'))
-            $partial | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Pub 'result.json') -Encoding UTF8
+            [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value ($partial | ConvertTo-Json -Depth 12))
         } catch {
             Say "RESULT_JSON_NOT_WRITTEN $($_.Exception.Message)"
         }
@@ -248,7 +251,10 @@ if ($VerifyOnly) {
 Remove-AttrCudaTree -Path $Work
 Remove-AttrCudaTree -Path $Pub
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
-New-Item -ItemType Directory -Path $Pub -Force | Out-Null
+# The outbox is created explicitly (never as a side effect of -Force on a deeper path), so its
+# parent is checked for links like every other directory this job creates.
+[void](New-AttrCudaDirectory -Path (Join-Path $AgentRoot 'outbox'))
+[void](New-AttrCudaDirectory -Path $Pub)
 $PubReady = $true
 Expand-Archive -LiteralPath $Archive -DestinationPath $Work -Force
 $StepLog['sourceExpand'] = 0
@@ -323,8 +329,7 @@ if (-not [string]::IsNullOrWhiteSpace($ParityVectors)) {
 Say "BUILD recon backend arch=$archLabel"
 $reconOutput = @(& $psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $reconCommand 2>&1 | ForEach-Object { [string]$_ })
 $reconRc = $LASTEXITCODE
-[void](Assert-AttrCudaWritableFileSlot -Path $reconLog)
-$reconOutput | Set-Content -LiteralPath $reconLog -Encoding UTF8
+[void](Publish-AttrCudaText -Path $reconLog -Value $reconOutput)
 $reconDll = Join-Path $Backend $ReconDllName
 if (-not (Test-Path -LiteralPath $reconDll)) { Complete-Failed 11 'reconBackendBuild' "$ReconDllName not produced (script exit=$reconRc)" }
 # The script's tail runs the LoadLibrary parity harness and exits with ITS code; see the
@@ -341,8 +346,7 @@ Say "BUILD amaze backend arch=$archLabel"
 $amazeCommand = "& $(ConvertTo-PsSingleQuoted $AmazeScript) -Dir $(ConvertTo-PsSingleQuoted $Backend) -Arch $(ConvertTo-PsSingleQuoted $archLabel)"
 $amazeOutput = @(& $psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $amazeCommand 2>&1 | ForEach-Object { [string]$_ })
 $amazeRc = $LASTEXITCODE
-[void](Assert-AttrCudaWritableFileSlot -Path $amazeLog)
-$amazeOutput | Set-Content -LiteralPath $amazeLog -Encoding UTF8
+[void](Publish-AttrCudaText -Path $amazeLog -Value $amazeOutput)
 $amazeDll = Join-Path $Backend $AmazeDllName
 # amaze-debayer-dll.ps1 exits 0 only after its own export verification passes, so a nonzero
 # code here is a real failure, never a harness artefact.
@@ -427,8 +431,7 @@ try {
         $sourcePath = [string]$item.source
         $partial = Join-Path $Pub "$name.partial"
         $script:partials += $partial
-        [void](Assert-AttrCudaWritableFileSlot -Path $partial)
-        Copy-Item -LiteralPath $sourcePath -Destination $partial -Force
+        [void](Publish-AttrCudaFileCopy -Source $sourcePath -Destination $partial)
         $expected = Get-ShaLower $sourcePath
         if ((Get-ShaLower $partial) -ne $expected) { throw "sha256 did not round-trip for $name" }
         $files[$name] = $expected
@@ -442,8 +445,7 @@ $StepLog['publishPartials'] = 0
 try {
     foreach ($item in $publishSet) {
         $name = [string]$item.name
-        [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub $name))
-        Move-Item -LiteralPath (Join-Path $Pub "$name.partial") -Destination (Join-Path $Pub $name) -Force
+        [void](Publish-AttrCudaFileMove -Source (Join-Path $Pub "$name.partial") -Destination (Join-Path $Pub $name))
     }
 } catch {
     Remove-JobPartials
@@ -472,10 +474,9 @@ $manifest = [ordered]@{
     builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
 }
 try {
-    [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub "$ManifestName.partial"))
     [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub $ManifestName))
-    $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Pub "$ManifestName.partial") -Encoding UTF8
-    Move-Item -LiteralPath (Join-Path $Pub "$ManifestName.partial") -Destination (Join-Path $Pub $ManifestName) -Force
+    [void](Publish-AttrCudaText -Path (Join-Path $Pub "$ManifestName.partial") -Value ($manifest | ConvertTo-Json -Depth 12))
+    [void](Publish-AttrCudaFileMove -Source (Join-Path $Pub "$ManifestName.partial") -Destination (Join-Path $Pub $ManifestName))
 } catch {
     Remove-JobPartials
     Complete-Failed 22 'publishManifest' $_.Exception.Message
@@ -497,8 +498,7 @@ $result = [ordered]@{
     evidence = $Evidence
     steps = $StepLog
 }
-try { [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'result.json')) } catch { Complete-Failed 23 'publishResult' $_.Exception.Message }
-$result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Pub 'result.json') -Encoding UTF8
+try { [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value ($result | ConvertTo-Json -Depth 12)) } catch { Complete-Failed 23 'publishResult' $_.Exception.Message }
 Write-Output "RESULT=DLL_PAIR_OK SOURCE=$SourceCommit ARCH=$archLabel RECON=$($files[$ReconDllName]) AMAZE=$($files[$AmazeDllName]) ARTIFACTS=$Pub"
 exit 0
 '@

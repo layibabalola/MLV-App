@@ -249,7 +249,8 @@ class StageJobTests(unittest.TestCase):
         # generator's header prose names these cmdlets too.
         template = self.text[self.text.index("$template = @'") :]
         safety = template.index("$StepLog['artifactNameSafety'] = 0")
-        for mutation in ("Copy-Item", "Move-Item", "Remove-Item -LiteralPath ([string]$item.path)"):
+        for mutation in ("Publish-AttrCudaFileCopy -Source", "Publish-AttrCudaFileMove -Source",
+                         "Remove-AttrCudaPartialFile -Path ([string]$item.path)"):
             with self.subTest(mutation=mutation):
                 self.assertLess(safety, template.index(mutation))
         for root, label in (("$Inbox", "inbox"), ("$Cache", "cache")):

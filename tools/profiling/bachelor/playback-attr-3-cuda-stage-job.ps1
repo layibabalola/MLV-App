@@ -118,6 +118,10 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Assert-AttrCudaSafeArtifactName',
     'Assert-AttrCudaDirectChild',
     'Assert-AttrCudaWritableFileSlot',
+    'Publish-AttrCudaText',
+    'Publish-AttrCudaFileCopy',
+    'Publish-AttrCudaFileMove',
+    'New-AttrCudaDirectory',
     'Remove-AttrCudaPartialFile',
     'Remove-AttrCudaTree'
 )
@@ -173,8 +177,7 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
         }
         # Still a publish write: slot-checked, and a refusal never masks the original exit code.
         try {
-            [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'result.json'))
-            $partial | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Pub 'result.json') -Encoding UTF8
+            [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value ($partial | ConvertTo-Json -Depth 10))
         } catch {
             Say "RESULT_JSON_NOT_WRITTEN $($_.Exception.Message)"
         }
@@ -293,8 +296,11 @@ if ($VerifyOnly) {
 Remove-AttrCudaTree -Path $Work
 Remove-AttrCudaTree -Path $Pub
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
-New-Item -ItemType Directory -Path $Pub -Force | Out-Null
-New-Item -ItemType Directory -Path $Cache -Force | Out-Null
+# The outbox is created explicitly (never as a side effect of -Force on a deeper path), so its
+# parent is checked for links like every other directory this job creates.
+[void](New-AttrCudaDirectory -Path (Join-Path $AgentRoot 'outbox'))
+[void](New-AttrCudaDirectory -Path $Pub)
+[void](New-AttrCudaDirectory -Path $Cache)
 $PubReady = $true
 
 # Job-owned TEMP before anything else runs.
@@ -319,8 +325,7 @@ function Remove-JobPartials {
 try {
     foreach ($item in $sideFiles) {
         $partial = [string]$item.partialPath
-        [void](Assert-AttrCudaWritableFileSlot -Path $partial)
-        Copy-Item -LiteralPath ([string]$item.path) -Destination $partial -Force
+        [void](Publish-AttrCudaFileCopy -Source ([string]$item.path) -Destination $partial)
         if ((Get-ShaLower $partial) -ne [string]$item.sha256) { throw "sha256 did not round-trip into the cache for $($item.name)" }
     }
 } catch {
@@ -331,8 +336,7 @@ $StepLog['publishPartials'] = 0
 
 try {
     foreach ($item in $sideFiles) {
-        [void](Assert-AttrCudaWritableFileSlot -Path ([string]$item.cachePath))
-        Move-Item -LiteralPath ([string]$item.partialPath) -Destination ([string]$item.cachePath) -Force
+        [void](Publish-AttrCudaFileMove -Source ([string]$item.partialPath) -Destination ([string]$item.cachePath))
     }
 } catch {
     Remove-JobPartials
@@ -341,11 +345,10 @@ try {
 $StepLog['publishRename'] = 0
 
 try {
-    [void](Assert-AttrCudaWritableFileSlot -Path $manifestPartialPath)
     [void](Assert-AttrCudaWritableFileSlot -Path $manifestCachePath)
-    Copy-Item -LiteralPath $manifestSide -Destination $manifestPartialPath -Force
+    [void](Publish-AttrCudaFileCopy -Source $manifestSide -Destination $manifestPartialPath)
     if ((Get-ShaLower $manifestPartialPath) -ne $ManifestSha256) { throw "sha256 did not round-trip into the cache for $ManifestName" }
-    Move-Item -LiteralPath $manifestPartialPath -Destination $manifestCachePath -Force
+    [void](Publish-AttrCudaFileMove -Source $manifestPartialPath -Destination $manifestCachePath)
 } catch {
     Remove-JobPartials
     Complete-Failed 22 'publishManifest' $_.Exception.Message
@@ -355,8 +358,9 @@ $StepLog['publishManifest'] = 0
 # The side-files are MOVED, not copied: leaving the package sitting in the inbox invites a
 # later job to stage a stale copy of it. Removal happens only after the cache publish is
 # complete, so an interrupted run leaves the inbox intact and is simply re-runnable.
-foreach ($item in $sideFiles) { Remove-Item -LiteralPath ([string]$item.path) -Force -ErrorAction SilentlyContinue }
-Remove-Item -LiteralPath $manifestSide -Force -ErrorAction SilentlyContinue
+# Plain-file removal only (never a directory, never through a link): the same guarded helper.
+foreach ($item in $sideFiles) { [void](Remove-AttrCudaPartialFile -Path ([string]$item.path)) }
+[void](Remove-AttrCudaPartialFile -Path $manifestSide)
 $StepLog['inboxCleanup'] = 0
 # $item.path and $manifestSide are the values Assert-AttrCudaDirectChild returned: a full path
 # already proved to sit directly in the inbox. This is the Remove-Item the traversal finding was
@@ -377,8 +381,7 @@ $result = [ordered]@{
     stagedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     steps = $StepLog
 }
-try { [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'result.json')) } catch { Complete-Failed 23 'publishResult' $_.Exception.Message }
-$result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Pub 'result.json') -Encoding UTF8
+try { [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value ($result | ConvertTo-Json -Depth 10)) } catch { Complete-Failed 23 'publishResult' $_.Exception.Message }
 Write-Output "RESULT=STAGE_OK SOURCE=$SourceCommit FILES=$($published.Count) CACHE=$Cache ARTIFACTS=$Pub"
 exit 0
 '@

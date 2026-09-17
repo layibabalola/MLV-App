@@ -352,6 +352,83 @@ function Assert-AttrCudaWritableFileSlot {
     return $full
 }
 
+function Publish-AttrCudaText {
+    <#
+    .SYNOPSIS
+    The ONLY way an emitted job writes text outside its job-owned work tree: slot check and write
+    in one call, so a guard can never be separated from the write it guards (sol PR #133 r5).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][AllowNull()][object]$Value
+    )
+
+    $slot = Assert-AttrCudaWritableFileSlot -Path $Path
+    $text = if ($null -eq $Value) { '' } else { (@($Value) | ForEach-Object { [string]$_ }) -join [Environment]::NewLine }
+    [IO.File]::WriteAllText($slot, $text + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    return $slot
+}
+
+function Publish-AttrCudaFileCopy {
+    <#
+    .SYNOPSIS
+    Copy a file to a destination outside the job-owned work tree, slot-checked in the same call.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $slot = Assert-AttrCudaWritableFileSlot -Path $Destination
+    Copy-Item -LiteralPath $Source -Destination $slot -Force
+    return $slot
+}
+
+function Publish-AttrCudaFileMove {
+    <#
+    .SYNOPSIS
+    Rename a file into a destination outside the job-owned work tree, slot-checked in the same call.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $slot = Assert-AttrCudaWritableFileSlot -Path $Destination
+    Move-Item -LiteralPath $Source -Destination $slot -Force
+    return $slot
+}
+
+function New-AttrCudaDirectory {
+    <#
+    .SYNOPSIS
+    Create (or accept) a directory whose parent is not a link and which is not itself a link.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $parent = Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($full)) -Force -ErrorAction SilentlyContinue
+    if ($null -eq $parent -or -not $parent.PSIsContainer) {
+        throw "ATTRCUDA_DIR_PARENT_MISSING $full"
+    }
+    if (($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "ATTRCUDA_DIR_PARENT_IS_LINK $($parent.FullName)"
+    }
+    $existing = Get-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existing) {
+        if (-not $existing.PSIsContainer -or (($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw "ATTRCUDA_DIR_OCCUPIED $full is a file or a reparse point"
+        }
+        return $full
+    }
+    [void](New-Item -ItemType Directory -Path $full)
+    return $full
+}
+
 function Remove-AttrCudaPartialFile {
     <#
     .SYNOPSIS
@@ -608,6 +685,10 @@ Export-ModuleMember -Function `
     Assert-AttrCudaDirectChild, `
     Assert-AttrCudaBuildManifest, `
     Assert-AttrCudaWritableFileSlot, `
+    Publish-AttrCudaText, `
+    Publish-AttrCudaFileCopy, `
+    Publish-AttrCudaFileMove, `
+    New-AttrCudaDirectory, `
     Remove-AttrCudaPartialFile, `
     Remove-AttrCudaTree, `
     Resolve-AttrCudaSmokeRunLog, `

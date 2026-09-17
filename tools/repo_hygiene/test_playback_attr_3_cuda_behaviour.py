@@ -881,34 +881,6 @@ class LinkSafeCleanupTests(_PwshCase):
                         self.assertGreater(first_call, placeholder,
                                            f"{name} is called before it is embedded in {script.name}")
 
-    def test_every_publish_write_in_each_emitted_job_is_slot_checked_first(self) -> None:
-        # sol PR #133 r4: result.json (success AND failure) and every other artifact write, not only
-        # the transactional .partial/rename steps, must pass Assert-AttrCudaWritableFileSlot first.
-        import re
-
-        write = re.compile(r"(Set-Content -LiteralPath|Copy-Item -LiteralPath .+ -Destination|Move-Item -LiteralPath .+ -Destination)")
-        publish_target = re.compile(r"\$Pub|\$Cache|partial|cachePath|\$reconLog|\$amazeLog|\$Path\b")
-        for script in (
-            ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1",
-            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1",
-            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1",
-        ):
-            text = script.read_text(encoding="utf-8").replace("\r\n", "\n")
-            start = text.index("$template = @'")
-            lines = text[start:text.index("\n'@", start)].split("\n")
-            checked = 0
-            for index, line in enumerate(lines):
-                match = write.search(line)
-                # Judge the DESTINATION only: copies OUT of the cache into the job-owned work tree are reads.
-                if not match or not publish_target.search(line[match.end():]):
-                    continue
-                window = "\n".join(lines[max(0, index - 3):index + 1])
-                with self.subTest(script=script.name, line=line.strip()):
-                    self.assertIn("Assert-AttrCudaWritableFileSlot", window,
-                                  f"unguarded publish write in {script.name}: {line.strip()}")
-                checked += 1
-            self.assertGreater(checked, 0, f"no publish writes found in {script.name}; the scan is broken")
-
     def test_no_emitted_job_or_assembler_recurses_a_delete_outside_the_guarded_function(self) -> None:
         import re
 
@@ -921,6 +893,90 @@ class LinkSafeCleanupTests(_PwshCase):
             with self.subTest(script=script.name):
                 text = script.read_text(encoding="utf-8")
                 self.assertIsNone(re.search(r"Remove-Item[^\n]*-Recurse", text), script.name)
+
+
+# --------------------------------------------------------------------------------------------
+# AST proof: no raw write outside $Work in any emitted template (sol PR #133 r5)
+# --------------------------------------------------------------------------------------------
+
+SCANNER = ROOT / "tools" / "repo_hygiene" / "attr3_publish_write_scan.ps1"
+JOB_TEMPLATES = (
+    ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1",
+    ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1",
+    ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1",
+)
+
+
+@requires_pwsh
+class PublishWriteScanTests(_PwshCase):
+    """The invariant is structural: a raw write is legal only with a destination PROVED under $Work."""
+
+    def scan(self, *, generators=(), templates=()) -> dict:
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(SCANNER),
+             "-GeneratorPath", ";".join(str(g) for g in generators),
+             "-TemplateFile", ";".join(str(f) for f in templates)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_every_emitted_template_parses_and_has_no_unproven_write(self) -> None:
+        result = self.scan(generators=JOB_TEMPLATES)
+        self.assertEqual(len(result["templates"]), len(JOB_TEMPLATES))
+        self.assertEqual(result["violations"], [], json.dumps(result["violations"], indent=2))
+
+    # Each fixture is one way sol showed a line scan could be evaded, plus the other write shapes the
+    # scanner claims to cover. Every one must be flagged.
+    BYPASSES = {
+        "multiline": "Copy-Item -LiteralPath $a `\n    -Destination (Join-Path $Pub 'x') -Force\n",
+        "aliased_destination": "$d = Join-Path $Pub 'x'\nSet-Content -LiteralPath $d -Value 1\n",
+        "dotnet_static": "[IO.File]::WriteAllText((Join-Path $Pub 'x'), 'y')\n",
+        "dotnet_full_name": "[System.IO.File]::Copy($a, (Join-Path $Pub 'x'), $true)\n",
+        "guard_only_in_comment": "# Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub 'x')\nSet-Content -LiteralPath (Join-Path $Pub 'x') -Value 1\n",
+        "out_file": "'y' | Out-File -FilePath (Join-Path $Pub 'x')\n",
+        "redirection": "Get-Date > (Join-Path $Pub 'x')\n",
+        "alias_positional": "cp $a (Join-Path $Pub 'x')\n",
+        "positional_even_under_work": "Set-Content (Join-Path $Work 'x') 1\n",
+        "abbreviated_parameter": "Copy-Item -LiteralPath $a -Dest (Join-Path $Pub 'x')\n",
+        "reassigned_variable": "$w = Join-Path $Work 'a'\n$w = Join-Path $Pub 'b'\nSet-Content -LiteralPath $w -Value 1\n",
+        "foreach_variable": "foreach ($q in @((Join-Path $Work 'a'))) { Set-Content -LiteralPath $q -Value 1 }\n",
+        "new_directory_under_pub": "New-Item -ItemType Directory -Path (Join-Path $Pub 'logs') | Out-Null\n",
+        "start_process_redirect": "Start-Process -FilePath x.exe -RedirectStandardOutput (Join-Path $Pub 'o.txt')\n",
+        "tee_object": "1 | Tee-Object -FilePath (Join-Path $Pub 'x')\n",
+        "instance_copyto": "(Get-Item -LiteralPath $a).CopyTo((Join-Path $Pub 'x'))\n",
+        "dynamic_code": "Invoke-Expression 'Set-Content -LiteralPath C:\\x -Value 1'\n",
+        "export_csv": "$rows | Export-Csv -LiteralPath (Join-Path $Cache 'x.csv') -NoTypeInformation\n",
+        "expand_archive": "Expand-Archive -LiteralPath $z -DestinationPath $Pub -Force\n",
+        "remove_outside": "Remove-Item -LiteralPath (Join-Path $Cache 'x') -Force\n",
+        "compound_assignment": "$w = Join-Path $Work 'a'\n$w += 'b'\nSet-Content -LiteralPath $w -Value 1\n",
+    }
+
+    CONTROLS = {
+        "work_literal": "Set-Content -LiteralPath (Join-Path $Work 'x') -Value 1\n",
+        "work_chain": "$s = Join-Path $Work 'a'\n$u = Join-Path -Path $s -ChildPath 'b'\nCopy-Item -LiteralPath $q -Destination $u -Force\n",
+        "helper_to_pub": "[void](Publish-AttrCudaFileCopy -Source $a -Destination (Join-Path $Pub 'x'))\n",
+        "discard": "Get-Date 2>$null\nGet-Date 2>&1 | Out-Null\n",
+        "string_replace_is_not_io": "$v = $s.Replace('a', 'b')\n",
+    }
+
+    def _write(self, name: str, body: str) -> Path:
+        path = self.tmp / f"{name}.ps1"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_each_known_bypass_is_flagged(self) -> None:
+        files = {name: self._write(name, body) for name, body in self.BYPASSES.items()}
+        result = self.scan(templates=files.values())
+        flagged = {Path(v["source"]).stem for v in result["violations"]}
+        for name in self.BYPASSES:
+            with self.subTest(bypass=name):
+                self.assertIn(name, flagged, json.dumps(result["violations"], indent=2))
+
+    def test_proven_work_writes_and_helper_calls_are_not_flagged(self) -> None:
+        files = {name: self._write(name, body) for name, body in self.CONTROLS.items()}
+        result = self.scan(templates=files.values())
+        self.assertEqual(result["violations"], [], json.dumps(result["violations"], indent=2))
 
 
 # --------------------------------------------------------------------------------------------
@@ -937,6 +993,10 @@ class EmbeddedFunctionContractTests(_PwshCase):
             "Get-AttrCudaZipArchiveComment",
             "Assert-AttrCudaSourceArchive",
             "Assert-AttrCudaWritableFileSlot",
+            "Publish-AttrCudaText",
+            "Publish-AttrCudaFileCopy",
+            "Publish-AttrCudaFileMove",
+            "New-AttrCudaDirectory",
             "Remove-AttrCudaPartialFile",
             "Remove-AttrCudaTree",
         ),
@@ -945,6 +1005,10 @@ class EmbeddedFunctionContractTests(_PwshCase):
             "Assert-AttrCudaSafeArtifactName",
             "Assert-AttrCudaDirectChild",
             "Assert-AttrCudaWritableFileSlot",
+            "Publish-AttrCudaText",
+            "Publish-AttrCudaFileCopy",
+            "Publish-AttrCudaFileMove",
+            "New-AttrCudaDirectory",
             "Remove-AttrCudaPartialFile",
             "Remove-AttrCudaTree",
         ),
@@ -953,6 +1017,11 @@ class EmbeddedFunctionContractTests(_PwshCase):
             "Resolve-AttrCudaSmokeRunLog",
             "Get-AttrCudaLastEligibilityLine",
             "Get-AttrCudaEligibilityVerdict",
+            "Assert-AttrCudaWritableFileSlot",
+            "Publish-AttrCudaText",
+            "Publish-AttrCudaFileCopy",
+            "Publish-AttrCudaFileMove",
+            "New-AttrCudaDirectory",
             "Remove-AttrCudaTree",
         ),
     }
