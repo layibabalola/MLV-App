@@ -318,6 +318,40 @@ function Assert-AttrCudaBuildManifest {
     $manifest
 }
 
+function Assert-AttrCudaWritableFileSlot {
+    <#
+    .SYNOPSIS
+    Prove a publish destination can only ever be written as a plain local FILE, then return it.
+    .DESCRIPTION
+    sol, PR #133 r3: Copy-Item / Move-Item / Set-Content onto a path that is a junction or a
+    directory writes INTO the link target -- possibly outside the job root -- before any hash
+    check can fail. Every publish write therefore calls this first. The parent directory must
+    exist and must not be a reparse point; the slot itself must be absent or a plain file (which
+    is removed so the write creates a fresh file). Anything else throws ATTRCUDA_SLOT_OCCUPIED
+    or ATTRCUDA_SLOT_PARENT_IS_LINK, and nothing is written.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $parent = Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($full)) -Force -ErrorAction SilentlyContinue
+    if ($null -eq $parent -or -not $parent.PSIsContainer) {
+        throw "ATTRCUDA_SLOT_PARENT_MISSING $full"
+    }
+    if (($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "ATTRCUDA_SLOT_PARENT_IS_LINK $($parent.FullName)"
+    }
+    $existing = Get-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existing) {
+        $isReparse = (($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+        if ($existing.PSIsContainer -or $isReparse) {
+            throw "ATTRCUDA_SLOT_OCCUPIED $full is a directory or reparse point; refusing to write through it"
+        }
+        Remove-Item -LiteralPath $full -Force -Confirm:$false
+    }
+    return $full
+}
+
 function Remove-AttrCudaPartialFile {
     <#
     .SYNOPSIS
@@ -573,6 +607,7 @@ Export-ModuleMember -Function `
     Assert-AttrCudaSafeArtifactName, `
     Assert-AttrCudaDirectChild, `
     Assert-AttrCudaBuildManifest, `
+    Assert-AttrCudaWritableFileSlot, `
     Remove-AttrCudaPartialFile, `
     Remove-AttrCudaTree, `
     Resolve-AttrCudaSmokeRunLog, `

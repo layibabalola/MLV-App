@@ -181,6 +181,12 @@ $Work = Join-Path 'C:\mlvtmp' $JobId
 $Pub = Join-Path $Root "outbox\$JobId.artifacts"
 $PresentMonTimedSeconds = 55
 
+# --- verifiers, embedded VERBATIM from tools/profiling/bachelor/AttrCudaArtifacts.psm1 --------
+# Defined FIRST, before any statement that calls them (sol PR #133 r3: the work-tree cleanup was
+# called above its definition, so every emitted job died with command-not-found).
+__EMBEDDED_FUNCTIONS__
+# --- end embedded verifiers -------------------------------------------------------------------
+
 # TEMP boundary (BLOCKER fix): job-owned scratch dir under this job's own C:\mlvtmp
 # work dir, set as TEMP/TMP at the very start -- before any child process (reg.exe,
 # the pwsh that runs run-release-gui-smoke.ps1/MLVApp.exe, PresentMon) -- so every one
@@ -218,9 +224,6 @@ function Get-Sha([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
 }
 
-# --- verifiers, embedded VERBATIM from tools/profiling/bachelor/AttrCudaArtifacts.psm1 --------
-__EMBEDDED_FUNCTIONS__
-# --- end embedded verifiers -------------------------------------------------------------------
 
 function Save-Json($Object, [string]$Path) {
     $Object | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $Path -Encoding utf8

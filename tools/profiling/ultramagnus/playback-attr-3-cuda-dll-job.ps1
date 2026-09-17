@@ -134,6 +134,7 @@ $sourceArchiveSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256
 $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Get-AttrCudaZipArchiveComment',
     'Assert-AttrCudaSourceArchive',
+    'Assert-AttrCudaWritableFileSlot',
     'Remove-AttrCudaPartialFile',
     'Remove-AttrCudaTree'
 )
@@ -418,6 +419,7 @@ try {
         $sourcePath = [string]$item.source
         $partial = Join-Path $Pub "$name.partial"
         $script:partials += $partial
+        [void](Assert-AttrCudaWritableFileSlot -Path $partial)
         Copy-Item -LiteralPath $sourcePath -Destination $partial -Force
         $expected = Get-ShaLower $sourcePath
         if ((Get-ShaLower $partial) -ne $expected) { throw "sha256 did not round-trip for $name" }
@@ -432,6 +434,7 @@ $StepLog['publishPartials'] = 0
 try {
     foreach ($item in $publishSet) {
         $name = [string]$item.name
+        [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub $name))
         Move-Item -LiteralPath (Join-Path $Pub "$name.partial") -Destination (Join-Path $Pub $name) -Force
     }
 } catch {
@@ -461,6 +464,8 @@ $manifest = [ordered]@{
     builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
 }
 try {
+    [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub "$ManifestName.partial"))
+    [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $Pub $ManifestName))
     $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Pub "$ManifestName.partial") -Encoding UTF8
     Move-Item -LiteralPath (Join-Path $Pub "$ManifestName.partial") -Destination (Join-Path $Pub $ManifestName) -Force
 } catch {

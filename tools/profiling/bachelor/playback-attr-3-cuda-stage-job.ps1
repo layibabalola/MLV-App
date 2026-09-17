@@ -117,6 +117,7 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Get-AttrCudaArtifactNames',
     'Assert-AttrCudaSafeArtifactName',
     'Assert-AttrCudaDirectChild',
+    'Assert-AttrCudaWritableFileSlot',
     'Remove-AttrCudaPartialFile',
     'Remove-AttrCudaTree'
 )
@@ -312,6 +313,7 @@ function Remove-JobPartials {
 try {
     foreach ($item in $sideFiles) {
         $partial = [string]$item.partialPath
+        [void](Assert-AttrCudaWritableFileSlot -Path $partial)
         Copy-Item -LiteralPath ([string]$item.path) -Destination $partial -Force
         if ((Get-ShaLower $partial) -ne [string]$item.sha256) { throw "sha256 did not round-trip into the cache for $($item.name)" }
     }
@@ -323,6 +325,7 @@ $StepLog['publishPartials'] = 0
 
 try {
     foreach ($item in $sideFiles) {
+        [void](Assert-AttrCudaWritableFileSlot -Path ([string]$item.cachePath))
         Move-Item -LiteralPath ([string]$item.partialPath) -Destination ([string]$item.cachePath) -Force
     }
 } catch {
@@ -332,6 +335,8 @@ try {
 $StepLog['publishRename'] = 0
 
 try {
+    [void](Assert-AttrCudaWritableFileSlot -Path $manifestPartialPath)
+    [void](Assert-AttrCudaWritableFileSlot -Path $manifestCachePath)
     Copy-Item -LiteralPath $manifestSide -Destination $manifestPartialPath -Force
     if ((Get-ShaLower $manifestPartialPath) -ne $ManifestSha256) { throw "sha256 did not round-trip into the cache for $ManifestName" }
     Move-Item -LiteralPath $manifestPartialPath -Destination $manifestCachePath -Force

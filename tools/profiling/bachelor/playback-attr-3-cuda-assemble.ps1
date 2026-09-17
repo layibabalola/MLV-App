@@ -330,6 +330,7 @@ function Remove-RunPartials {
 try {
     foreach ($item in $publishSet) {
         $partial = Join-Path $OutDir "$($item.name).partial"
+        [void](Assert-AttrCudaWritableFileSlot -Path $partial)
         Copy-Item -LiteralPath ([string]$item.source) -Destination $partial -Force
         if ((Get-ShaLower $partial) -ne [string]$item.sha) { throw "sha256 did not round-trip for $($item.name)" }
     }
@@ -341,6 +342,7 @@ $StepLog['publishPartials'] = 0
 
 try {
     foreach ($item in $publishSet) {
+        [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $OutDir ([string]$item.name)))
         Move-Item -LiteralPath (Join-Path $OutDir "$($item.name).partial") -Destination (Join-Path $OutDir ([string]$item.name)) -Force
     }
 } catch {
@@ -381,6 +383,8 @@ $buildManifest = [ordered]@{
     assembledAtUtc = (Get-Date).ToUniversalTime().ToString('o')
 }
 try {
+    [void](Assert-AttrCudaWritableFileSlot -Path $partialManifestPath)
+    [void](Assert-AttrCudaWritableFileSlot -Path (Join-Path $OutDir $names.buildManifestName))
     $buildManifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $partialManifestPath -Encoding UTF8
     Move-Item -LiteralPath $partialManifestPath -Destination (Join-Path $OutDir $names.buildManifestName) -Force
 } catch {

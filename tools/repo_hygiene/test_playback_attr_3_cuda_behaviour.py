@@ -733,6 +733,24 @@ class InterruptedStagingTests(_PwshCase):
         self.assertEqual(self.cache_names(), sorted(self.names.values()))
         self.assertEqual(list(self.inbox.iterdir()), [], "side-files were left in the inbox")
 
+    def test_a_cache_partial_that_is_a_junction_receives_no_write(self) -> None:
+        # sol PR #133 r3: Copy-Item onto a junction .partial writes into the link target.
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        link = self.cache / f"{self.names['exe']}.partial"
+        proc = self.run_with_module(
+            f"New-Item -ItemType Junction -Path '{link}' -Target '{outside}' | Out-Null\n"
+        )
+        if proc.returncode != 0 or not link.exists():
+            self.skipTest(f"cannot create a junction here: {proc.stderr}")
+        self.drop()
+
+        proc = _run_job(self.job)
+
+        self.assertNotEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertEqual(list(outside.iterdir()), [], "the stage job wrote through a junction")
+        self.assertNotIn(self.names["manifest"], self.cache_names())
+
     def test_a_tampered_side_file_publishes_nothing(self) -> None:
         self.drop()
         (self.inbox / self.names["exe"]).write_bytes(b"swapped after the hashes were baked")
@@ -817,6 +835,52 @@ class LinkSafeCleanupTests(_PwshCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertFalse(work.exists())
 
+    def test_a_slot_that_is_a_junction_is_refused_before_anything_is_written(self) -> None:
+        link = self.plant_junction(self.root, "exe.partial")
+        proc = self.run_with_module(_guard(f"Assert-AttrCudaWritableFileSlot -Path '{link}'"))
+        self.assert_throws(proc, "ATTRCUDA_SLOT_OCCUPIED")
+        self.assertEqual(sorted(e.name for e in self.outside.iterdir()), ["precious.txt"])
+
+    def test_a_slot_under_a_linked_parent_is_refused(self) -> None:
+        link = self.plant_junction(self.root, "cache")
+        proc = self.run_with_module(_guard(f"Assert-AttrCudaWritableFileSlot -Path '{link / 'x.partial'}'"))
+        self.assert_throws(proc, "ATTRCUDA_SLOT_PARENT_IS_LINK")
+
+    def test_a_plain_file_slot_is_cleared_and_an_absent_slot_is_accepted(self) -> None:
+        stale = self.root / "exe.partial"
+        stale.write_bytes(b"stale")
+        proc = self.run_with_module(
+            f"Assert-AttrCudaWritableFileSlot -Path '{stale}' | Out-Null\n"
+            f"Assert-AttrCudaWritableFileSlot -Path '{self.root / 'absent.partial'}' | Out-Null\n"
+            "Write-Output 'ok'\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(stale.exists())
+
+    def test_every_embedded_function_is_defined_before_its_first_call_in_each_job(self) -> None:
+        # sol PR #133 r3: the attribution job called Remove-AttrCudaTree above __EMBEDDED_FUNCTIONS__.
+        import re
+
+        jobs = {
+            ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1": DLL_GENERATOR,
+            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1": STAGE_GENERATOR,
+            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1": None,
+        }
+        for script in jobs:
+            text = script.read_text(encoding="utf-8").replace("\r\n", "\n")
+            start = text.index("$template = @'")
+            end = text.index("\n'@", start)
+            template = text[start:end]
+            placeholder = template.index("__EMBEDDED_FUNCTIONS__")
+            names = re.findall(r"^\s*'((?:Get|Assert|Resolve|Remove)-AttrCuda\w+)',?\s*$", text[:start], re.M)
+            self.assertTrue(names, f"no embedded function list found in {script.name}")
+            for name in names:
+                with self.subTest(script=script.name, function=name):
+                    first_call = template.find(name)
+                    if first_call != -1:
+                        self.assertGreater(first_call, placeholder,
+                                           f"{name} is called before it is embedded in {script.name}")
+
     def test_no_emitted_job_or_assembler_recurses_a_delete_outside_the_guarded_function(self) -> None:
         import re
 
@@ -844,6 +908,7 @@ class EmbeddedFunctionContractTests(_PwshCase):
         ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1": (
             "Get-AttrCudaZipArchiveComment",
             "Assert-AttrCudaSourceArchive",
+            "Assert-AttrCudaWritableFileSlot",
             "Remove-AttrCudaPartialFile",
             "Remove-AttrCudaTree",
         ),
@@ -851,6 +916,7 @@ class EmbeddedFunctionContractTests(_PwshCase):
             "Get-AttrCudaArtifactNames",
             "Assert-AttrCudaSafeArtifactName",
             "Assert-AttrCudaDirectChild",
+            "Assert-AttrCudaWritableFileSlot",
             "Remove-AttrCudaPartialFile",
             "Remove-AttrCudaTree",
         ),
