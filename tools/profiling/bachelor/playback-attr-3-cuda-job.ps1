@@ -23,6 +23,14 @@
 # consent, never an authorization. Adjudication:
 # .claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md.
 #
+# FIXTURE REHEARSAL (ATTR3-FIXTURE-REHEARSAL-1): -ClipId may instead be exactly
+# 'tiny_dual_iso' or 'large_dual_iso' -- the two tracked fixtures under
+# tests/fixtures/clips/, admitted by NA-4 without a CLIP_OR_NONE authorization because
+# they never resolve through an id-to-file lookup either. -ClipPath still must resolve
+# to the agent cache with BaseName -ceq $ClipId, unchanged from the owner-clip case. Such
+# a run bakes fixtureRehearsal=true into every summary.json/evidence-manifest.json this
+# job writes, so a fixture run can never be read as an attribution result.
+#
 # Differences from PLAYBACK-ATTR-2:
 #   - shipping-default scale (4), NOT forced to 1: no MLVAPP_PLAYBACK_SCALE_FACTOR
 #     override is emitted, and -ScaleFactor 4 is passed explicitly.
@@ -74,8 +82,11 @@ param(
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$SourceCommit,
 
+    # Either the owner-clip id pattern, or exactly one of the two tracked-fixture ids (a
+    # literal allowlist, not a loosened pattern -- ATTR3-FIXTURE-REHEARSAL-1). A fixture id
+    # never touches NA-4: it names no path, so the generator's own consent gate never sees it.
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^[A-Za-z]\d{2}-\d{3,4}$')]
+    [ValidatePattern('^(?:[A-Za-z]\d{2}-\d{3,4}|tiny_dual_iso|large_dual_iso)$')]
     [string]$ClipId,
 
     # The ONE authorized clip (NA-4): must equal the CLIP_OR_NONE line of the lane running
@@ -161,6 +172,14 @@ $shortSha = $SourceCommit.Substring(0, 12)
 $exeName = "MLVApp-playback-attr-3-cuda-$shortSha.exe"
 $reconName = "igpu_recon_cuda-playback-attr-3-cuda-$shortSha.dll"
 
+# ATTR3-FIXTURE-REHEARSAL-1: the literal allowlist the ValidatePattern above also enforces,
+# restated here so the fixtureRehearsal flag is decided by an exact membership test rather
+# than by re-deriving it from the regex. A fixture run must be unmistakable in its own
+# artifacts, so this flag is baked into the job body and never inferred by the job at runtime.
+$FixtureClipIds = @('tiny_dual_iso', 'large_dual_iso')
+$isFixtureRehearsal = $FixtureClipIds -ccontains $ClipId
+$fixtureRehearsalLiteral = if ($isFixtureRehearsal) { '$true' } else { '$false' }
+
 # --- job body template (placeholders are substituted below; the body itself never
 #     touches this generator's variables directly, so there is no accidental capture
 #     of this machine's environment into the emitted script) ----------------------
@@ -179,6 +198,7 @@ $BasePackageExeName = '__BASE_PACKAGE_EXE_NAME__'
 $PresentMonName = '__PRESENTMON_NAME__'
 $PresentMonSha = '__PRESENTMON_SHA256__'
 $ConsentReceiptFileName = '__CONSENT_RECEIPT__'
+$FixtureRehearsal = __FIXTURE_REHEARSAL__
 $Root = 'C:\mlvtmp\mlv-agent'
 $Cache = Join-Path $Root 'cache'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -443,6 +463,7 @@ if ($avgLoad -gt 20.0) {
     $venue = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'
         result='VENUE_NOT_QUIESCENT'
+        fixtureRehearsal=$FixtureRehearsal
         cpuSamples=$loads
         cpuMean=$avgLoad
         cpuThresholdPercent=20.0
@@ -531,6 +552,7 @@ try {
 } catch {
     $unavailable = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='SMOKE_LOG_UNAVAILABLE'
+        fixtureRehearsal=$FixtureRehearsal
         message=$_.Exception.Message; smokeExitCode=$smokeRc; resultJson=$resultPath
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
@@ -565,6 +587,7 @@ $diagnostics = [ordered]@{
 if (-not $verdict.admitted) {
     $refusal = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='BACKEND_NOT_AVAILABLE'
+        fixtureRehearsal=$FixtureRehearsal
         diagnostics=$diagnostics; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $refusal (Join-Path $Pub 'summary.json')
@@ -580,6 +603,7 @@ $gpuFramesTotal = $gpuSummary.gpuReconReadbackFrames + $gpuSummary.gpuTextureRea
 if ($gpuFramesTotal -le 0) {
     $fallback = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='GPU_RECON_FRAMES_ZERO'
+        fixtureRehearsal=$FixtureRehearsal
         gpuSummary=$gpuSummary; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $fallback (Join-Path $Pub 'summary.json')
@@ -589,6 +613,7 @@ if ($gpuFramesTotal -le 0) {
 if ($gpuSummary.cpuFrames -gt 0) {
     $fallback = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='CPU_FALLBACK_DETECTED'
+        fixtureRehearsal=$FixtureRehearsal
         gpuSummary=$gpuSummary; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $fallback (Join-Path $Pub 'summary.json')
@@ -646,6 +671,7 @@ $manifest = [ordered]@{
     schema = 'playback-attr-3-cuda-evidence-manifest.v1'
     sourceCommit = $SourceCommit
     clipId = $ClipId
+    fixtureRehearsal = $FixtureRehearsal
     consentReceipt = $ConsentReceiptFileName
     scaleFactor = 4
     # The authenticated chain, end to end: this manifest's own bytes, and the DLL-pair manifest
@@ -687,7 +713,8 @@ $text = $template.
     Replace('__BASE_PACKAGE_EXE_NAME__', $BasePackageExeName).
     Replace('__PRESENTMON_NAME__', $PresentMonName).
     Replace('__PRESENTMON_SHA256__', $PresentMonSha256).
-    Replace('__CONSENT_RECEIPT__', $ConsentReceiptFileName)
+    Replace('__CONSENT_RECEIPT__', $ConsentReceiptFileName).
+    Replace('__FIXTURE_REHEARSAL__', $fixtureRehearsalLiteral)
 # LAST: the module text is spliced in after every other substitution, so no placeholder rule can
 # rewrite a character inside the verbatim verifier source.
 $text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
