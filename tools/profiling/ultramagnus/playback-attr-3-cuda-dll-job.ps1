@@ -133,7 +133,9 @@ $sourceArchiveSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256
 
 $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Get-AttrCudaZipArchiveComment',
-    'Assert-AttrCudaSourceArchive'
+    'Assert-AttrCudaSourceArchive',
+    'Remove-AttrCudaPartialFile',
+    'Remove-AttrCudaTree'
 )
 
 # --- job body template (placeholders are substituted below; the body itself never touches
@@ -236,8 +238,8 @@ if ($VerifyOnly) {
     exit 0
 }
 
-if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
-if (Test-Path -LiteralPath $Pub) { Remove-Item -LiteralPath $Pub -Recurse -Force }
+Remove-AttrCudaTree -Path $Work
+Remove-AttrCudaTree -Path $Pub
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 New-Item -ItemType Directory -Path $Pub -Force | Out-Null
 $PubReady = $true
@@ -404,11 +406,9 @@ if (Test-Path -LiteralPath $archSidecar) {
 
 $partials = @()
 function Remove-JobPartials {
-    # -Recurse -Confirm:$false: a .partial path occupied by a directory would otherwise make
-    # Remove-Item PROMPT, which on an unattended agent is a terminating error inside the catch
-    # block and turns a clean publish failure into an unexplained exit 1.
-    foreach ($p in $script:partials) { Remove-Item -LiteralPath $p -Force -Recurse -Confirm:$false -ErrorAction SilentlyContinue }
-    Remove-Item -LiteralPath (Join-Path $Pub "$ManifestName.partial") -Force -Recurse -Confirm:$false -ErrorAction SilentlyContinue
+    # Files only: never -Recurse, never through a link (sol PR #133 r3; see Remove-AttrCudaPartialFile).
+    foreach ($p in $script:partials) { [void](Remove-AttrCudaPartialFile -Path $p) }
+    [void](Remove-AttrCudaPartialFile -Path (Join-Path $Pub "$ManifestName.partial"))
 }
 
 $files = [System.Collections.Specialized.OrderedDictionary]::new()

@@ -318,6 +318,59 @@ function Assert-AttrCudaBuildManifest {
     $manifest
 }
 
+function Remove-AttrCudaPartialFile {
+    <#
+    .SYNOPSIS
+    Delete one .partial path only if it is a plain FILE; never recurse, never follow a link.
+    .DESCRIPTION
+    sol, PR #133 r3: `Remove-Item -Recurse` on a .partial path that is occupied by a directory can
+    traverse an NTFS junction inside it and delete the junction's TARGET, outside the job root
+    (PowerShell/PowerShell#26913). A .partial is only ever written as a file, so anything else --
+    a directory, a symlink, a junction -- is left exactly where it is and reported. Returns $true
+    when the path is absent or was a file that is now gone, $false when it was refused.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return $true }
+    $isReparse = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+    if ($item.PSIsContainer -or $isReparse) {
+        Write-Warning "ATTRCUDA_PARTIAL_NOT_A_FILE left in place (directory or reparse point): $Path"
+        return $false
+    }
+    Remove-Item -LiteralPath $Path -Force -Confirm:$false -ErrorAction SilentlyContinue
+    return (-not (Test-Path -LiteralPath $Path))
+}
+
+function Remove-AttrCudaTree {
+    <#
+    .SYNOPSIS
+    Recursively delete a job-owned directory, refusing if ANY entry in it is a reparse point.
+    .DESCRIPTION
+    The walk does not descend into reparse points, so it cannot be steered outside the tree; if one
+    is found (at the root or anywhere below) the function throws ATTRCUDA_TREE_HAS_REPARSE_POINT
+    and deletes nothing. Only a tree proved free of links is handed to Remove-Item -Recurse.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $root = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $root) { return }
+    $stack = [System.Collections.Generic.Stack[System.IO.FileSystemInfo]]::new()
+    $stack.Push($root)
+    while ($stack.Count -gt 0) {
+        $entry = $stack.Pop()
+        if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "ATTRCUDA_TREE_HAS_REPARSE_POINT $($entry.FullName) (refusing to delete $Path)"
+        }
+        if ($entry -is [System.IO.DirectoryInfo]) {
+            foreach ($child in $entry.EnumerateFileSystemInfos()) { $stack.Push($child) }
+        }
+    }
+    Remove-Item -LiteralPath $Path -Recurse -Force -Confirm:$false
+}
+
 function Resolve-AttrCudaSmokeRunLog {
     <#
     .SYNOPSIS
@@ -395,6 +448,7 @@ function Resolve-AttrCudaSmokeRunLog {
     $actualSha = (Get-FileHash -LiteralPath $fullLogPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
     $declaredSha = ''
+    $declaredLength = $null
     $runNonce = ''
     $evidenceNode = $result.PSObject.Properties['evidence']
     if ($null -ne $evidenceNode -and $null -ne $evidenceNode.Value) {
@@ -404,6 +458,8 @@ function Resolve-AttrCudaSmokeRunLog {
         if ($null -ne $snapshotProperty -and $null -ne $snapshotProperty.Value) {
             $shaProperty = $snapshotProperty.Value.PSObject.Properties['sha256']
             if ($null -ne $shaProperty) { $declaredSha = ([string]$shaProperty.Value).ToLowerInvariant() }
+            $lengthProperty = $snapshotProperty.Value.PSObject.Properties['length']
+            if ($null -ne $lengthProperty -and $null -ne $lengthProperty.Value) { $declaredLength = [string]$lengthProperty.Value }
         }
     }
     if ([string]::IsNullOrWhiteSpace($declaredSha)) {
@@ -411,6 +467,15 @@ function Resolve-AttrCudaSmokeRunLog {
     }
     if ($declaredSha -ne $actualSha) {
         throw "ATTRCUDA_SMOKE_LOG_SHA_MISMATCH $fullLogPath declared=$declaredSha actual=$actualSha"
+    }
+    # sol, PR #133 r3: the smoke runner binds the snapshot by sha256 AND length; both are checked.
+    $actualLength = [int64](Get-Item -LiteralPath $fullLogPath).Length
+    [int64]$parsedLength = -1
+    if ($null -eq $declaredLength -or -not [int64]::TryParse($declaredLength, [ref]$parsedLength)) {
+        throw "ATTRCUDA_SMOKE_LOG_LENGTH_UNBOUND $ResultJsonPath carries no integer evidence.runLogSnapshot.length"
+    }
+    if ($parsedLength -ne $actualLength) {
+        throw "ATTRCUDA_SMOKE_LOG_LENGTH_MISMATCH $fullLogPath declared=$parsedLength actual=$actualLength"
     }
 
     $aggregateProperty = $logNode.Value.PSObject.Properties['aggregateSourcePath']
@@ -508,6 +573,8 @@ Export-ModuleMember -Function `
     Assert-AttrCudaSafeArtifactName, `
     Assert-AttrCudaDirectChild, `
     Assert-AttrCudaBuildManifest, `
+    Remove-AttrCudaPartialFile, `
+    Remove-AttrCudaTree, `
     Resolve-AttrCudaSmokeRunLog, `
     Get-AttrCudaLastEligibilityLine, `
     Get-AttrCudaEligibilityVerdict

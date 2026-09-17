@@ -133,7 +133,8 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Assert-AttrCudaBuildManifest',
     'Resolve-AttrCudaSmokeRunLog',
     'Get-AttrCudaLastEligibilityLine',
-    'Get-AttrCudaEligibilityVerdict'
+    'Get-AttrCudaEligibilityVerdict',
+    'Remove-AttrCudaTree'
 )
 
 # --- resolve provenance locally, BEFORE the job ever touches Bachelor -------------
@@ -199,7 +200,7 @@ foreach ($check in @(
     @{ path = $Pub; label = 'Pub' }
 )) { Assert-UnderMlvTmp $check.path $check.label }
 
-if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
+Remove-AttrCudaTree -Path $Work
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 $Scratch = Join-Path $Work '.job-tmp'
 New-Item -ItemType Directory -Path $Scratch -Force | Out-Null

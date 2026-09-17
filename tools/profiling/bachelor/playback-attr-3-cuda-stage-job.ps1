@@ -116,7 +116,9 @@ $manifestSha256 = Get-ShaLower $buildManifestPath
 $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Get-AttrCudaArtifactNames',
     'Assert-AttrCudaSafeArtifactName',
-    'Assert-AttrCudaDirectChild'
+    'Assert-AttrCudaDirectChild',
+    'Remove-AttrCudaPartialFile',
+    'Remove-AttrCudaTree'
 )
 
 if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
@@ -281,8 +283,8 @@ if ($VerifyOnly) {
     exit 0
 }
 
-if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
-if (Test-Path -LiteralPath $Pub) { Remove-Item -LiteralPath $Pub -Recurse -Force }
+Remove-AttrCudaTree -Path $Work
+Remove-AttrCudaTree -Path $Pub
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 New-Item -ItemType Directory -Path $Pub -Force | Out-Null
 New-Item -ItemType Directory -Path $Cache -Force | Out-Null
@@ -301,12 +303,10 @@ $partialPaths = @()
 foreach ($item in $sideFiles) { $partialPaths += [string]$item.partialPath }
 $partialPaths += $manifestPartialPath
 function Remove-JobPartials {
-    # -Recurse -Confirm:$false, not just -Force: if a .partial path is occupied by a DIRECTORY
-    # (a corrupt cache, and the state that makes the manifest copy fail in the first place),
-    # Remove-Item would otherwise PROMPT -- which on an unattended agent is a terminating error
-    # inside the catch block, turning a clean exit 22 into an unexplained exit 1. Every path here
-    # was proved a direct child of the cache during artifactNameSafety.
-    foreach ($p in $script:partialPaths) { Remove-Item -LiteralPath $p -Force -Recurse -Confirm:$false -ErrorAction SilentlyContinue }
+    # Files only: a .partial occupied by a directory or a link is LEFT IN PLACE and reported, never
+    # recursed into (sol PR #133 r3: -Recurse can follow a junction out of the cache). It cannot
+    # prompt, because Remove-AttrCudaPartialFile never asks Remove-Item to delete a container.
+    foreach ($p in $script:partialPaths) { [void](Remove-AttrCudaPartialFile -Path $p) }
 }
 
 try {

@@ -97,7 +97,7 @@ if ($LASTEXITCODE -ne 0) { Complete-Failed 2 'sourceCommit' "not a commit known 
 if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
 $Work = Join-Path $OutDir ".work-$($names.shortSha)"
-if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
+Remove-AttrCudaTree -Path $Work
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 
 # Job-owned TEMP under the work dir, set before any child process (qmake, mingw32-make,
@@ -320,13 +320,11 @@ $publishSet = @(
 )
 $partialManifestPath = Join-Path $OutDir "$($names.buildManifestName).partial"
 function Remove-RunPartials {
-    # -Recurse -Confirm:$false: a .partial path occupied by a directory would otherwise make
-    # Remove-Item PROMPT, and a prompt inside the catch block is a terminating error that hides
-    # the real publish failure behind exit 1.
+    # Files only: never -Recurse, never through a link (sol PR #133 r3; see Remove-AttrCudaPartialFile).
     foreach ($item in $script:publishSet) {
-        Remove-Item -LiteralPath (Join-Path $OutDir "$($item.name).partial") -Force -Recurse -Confirm:$false -ErrorAction SilentlyContinue
+        [void](Remove-AttrCudaPartialFile -Path (Join-Path $OutDir "$($item.name).partial"))
     }
-    Remove-Item -LiteralPath $script:partialManifestPath -Force -Recurse -Confirm:$false -ErrorAction SilentlyContinue
+    [void](Remove-AttrCudaPartialFile -Path $script:partialManifestPath)
 }
 
 try {

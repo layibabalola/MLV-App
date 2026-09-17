@@ -614,6 +614,31 @@ class SmokeRunLogSelectorTests(_PwshCase):
         )
         self.assert_throws(proc, "ATTRCUDA_SMOKE_LOG_SHA_MISMATCH")
 
+    def _rewrite_declared_length(self, value) -> None:
+        data = json.loads(self.result_json.read_text(encoding="utf-8"))
+        if value is None:
+            del data["evidence"]["runLogSnapshot"]["length"]
+        else:
+            data["evidence"]["runLogSnapshot"]["length"] = value
+        self.result_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def test_a_declared_length_that_disagrees_with_the_log_is_refused(self) -> None:
+        # sol PR #133 r3: the runner binds the snapshot by sha256 AND length; the length is checked.
+        self.write_run(cuda="1", r16="1")
+        self._rewrite_declared_length(self.run_log.stat().st_size + 1)
+        proc = self.run_with_module(
+            _guard(f"Resolve-AttrCudaSmokeRunLog -ResultJsonPath '{self.result_json}'")
+        )
+        self.assert_throws(proc, "ATTRCUDA_SMOKE_LOG_LENGTH_MISMATCH")
+
+    def test_a_result_with_no_declared_length_is_refused(self) -> None:
+        self.write_run(cuda="1", r16="1")
+        self._rewrite_declared_length(None)
+        proc = self.run_with_module(
+            _guard(f"Resolve-AttrCudaSmokeRunLog -ResultJsonPath '{self.result_json}'")
+        )
+        self.assert_throws(proc, "ATTRCUDA_SMOKE_LOG_LENGTH_UNBOUND")
+
     def test_a_result_declaring_no_log_path_is_refused(self) -> None:
         self.result_json.write_text(json.dumps({"log": {"aggregateSourcePath": None}}), encoding="utf-8")
         proc = self.run_with_module(
@@ -719,6 +744,94 @@ class InterruptedStagingTests(_PwshCase):
 
 
 # --------------------------------------------------------------------------------------------
+# cleanup never follows a link out of the job root (sol PR #133 r3)
+# --------------------------------------------------------------------------------------------
+
+
+@requires_pwsh
+class LinkSafeCleanupTests(_PwshCase):
+    """A junction planted inside a .partial or a work tree must never lead a delete outside it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.outside = self.tmp / "outside"
+        self.outside.mkdir()
+        self.sentinel = self.outside / "precious.txt"
+        self.sentinel.write_bytes(b"must survive")
+        self.root = self.tmp / "jobroot"
+        self.root.mkdir()
+
+    def plant_junction(self, parent: Path, name: str = "link") -> Path:
+        link = parent / name
+        proc = self.run_with_module(
+            f"New-Item -ItemType Junction -Path '{link}' -Target '{self.outside}' | Out-Null\n"
+        )
+        if proc.returncode != 0 or not link.exists():
+            self.skipTest(f"cannot create a junction here: {proc.stderr}")
+        return link
+
+    def test_a_partial_occupied_by_a_directory_holding_a_junction_is_left_and_nothing_outside_is_deleted(self) -> None:
+        partial = self.root / "build.json.partial"
+        partial.mkdir()
+        self.plant_junction(partial)
+        proc = self.run_with_module(
+            f"Write-Output ('removed=' + (Remove-AttrCudaPartialFile -Path '{partial}'))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("removed=False", proc.stdout)
+        self.assertEqual(self.sentinel.read_bytes(), b"must survive")
+        self.assertTrue(partial.exists())
+
+    def test_a_partial_that_is_itself_a_junction_is_left_and_its_target_survives(self) -> None:
+        link = self.plant_junction(self.root, "build.json.partial")
+        proc = self.run_with_module(
+            f"Write-Output ('removed=' + (Remove-AttrCudaPartialFile -Path '{link}'))\n"
+        )
+        self.assertIn("removed=False", proc.stdout)
+        self.assertEqual(self.sentinel.read_bytes(), b"must survive")
+
+    def test_a_plain_partial_file_is_removed(self) -> None:
+        partial = self.root / "exe.partial"
+        partial.write_bytes(b"half written")
+        proc = self.run_with_module(
+            f"Write-Output ('removed=' + (Remove-AttrCudaPartialFile -Path '{partial}'))\n"
+        )
+        self.assertIn("removed=True", proc.stdout)
+        self.assertFalse(partial.exists())
+
+    def test_a_work_tree_containing_a_junction_is_refused_whole(self) -> None:
+        work = self.root / "work"
+        (work / "nested").mkdir(parents=True)
+        (work / "nested" / "file.txt").write_bytes(b"x")
+        self.plant_junction(work / "nested")
+        proc = self.run_with_module(_guard(f"Remove-AttrCudaTree -Path '{work}'"))
+        self.assert_throws(proc, "ATTRCUDA_TREE_HAS_REPARSE_POINT")
+        self.assertEqual(self.sentinel.read_bytes(), b"must survive")
+        self.assertTrue((work / "nested" / "file.txt").exists(), "a refused tree must be left intact")
+
+    def test_a_link_free_work_tree_is_removed(self) -> None:
+        work = self.root / "work"
+        (work / "a" / "b").mkdir(parents=True)
+        (work / "a" / "b" / "f.txt").write_bytes(b"x")
+        proc = self.run_with_module(f"Remove-AttrCudaTree -Path '{work}'\n")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(work.exists())
+
+    def test_no_emitted_job_or_assembler_recurses_a_delete_outside_the_guarded_function(self) -> None:
+        import re
+
+        for script in (
+            ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1",
+            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1",
+            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-assemble.ps1",
+            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1",
+        ):
+            with self.subTest(script=script.name):
+                text = script.read_text(encoding="utf-8")
+                self.assertIsNone(re.search(r"Remove-Item[^\n]*-Recurse", text), script.name)
+
+
+# --------------------------------------------------------------------------------------------
 # the embedding contract the rest of this file rests on
 # --------------------------------------------------------------------------------------------
 
@@ -731,17 +844,22 @@ class EmbeddedFunctionContractTests(_PwshCase):
         ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1": (
             "Get-AttrCudaZipArchiveComment",
             "Assert-AttrCudaSourceArchive",
+            "Remove-AttrCudaPartialFile",
+            "Remove-AttrCudaTree",
         ),
         ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1": (
             "Get-AttrCudaArtifactNames",
             "Assert-AttrCudaSafeArtifactName",
             "Assert-AttrCudaDirectChild",
+            "Remove-AttrCudaPartialFile",
+            "Remove-AttrCudaTree",
         ),
         ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1": (
             "Assert-AttrCudaBuildManifest",
             "Resolve-AttrCudaSmokeRunLog",
             "Get-AttrCudaLastEligibilityLine",
             "Get-AttrCudaEligibilityVerdict",
+            "Remove-AttrCudaTree",
         ),
     }
 
