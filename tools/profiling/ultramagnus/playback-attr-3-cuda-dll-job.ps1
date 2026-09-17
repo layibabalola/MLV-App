@@ -421,8 +421,8 @@ if (Test-Path -LiteralPath $archSidecar) {
 $partials = @()
 function Remove-JobPartials {
     # Files only: never -Recurse, never through a link (sol PR #133 r3; see Remove-AttrCudaPartialFile).
-    foreach ($p in $script:partials) { [void](Remove-AttrCudaPartialFile -Path $p) }
-    [void](Remove-AttrCudaPartialFile -Path (Join-Path $Pub "$ManifestName.partial"))
+    foreach ($p in $script:partials) { [void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $p) }
+    [void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path (Join-Path $Pub "$ManifestName.partial"))
 }
 
 $files = [System.Collections.Specialized.OrderedDictionary]::new()

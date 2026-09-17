@@ -320,7 +320,7 @@ function Remove-JobPartials {
     # Files only: a .partial occupied by a directory or a link is LEFT IN PLACE and reported, never
     # recursed into (sol PR #133 r3: -Recurse can follow a junction out of the cache). It cannot
     # prompt, because Remove-AttrCudaPartialFile never asks Remove-Item to delete a container.
-    foreach ($p in $script:partialPaths) { [void](Remove-AttrCudaPartialFile -Path $p) }
+    foreach ($p in $script:partialPaths) { [void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $p) }
 }
 
 try {
@@ -360,8 +360,9 @@ $StepLog['publishManifest'] = 0
 # later job to stage a stale copy of it. Removal happens only after the cache publish is
 # complete, so an interrupted run leaves the inbox intact and is simply re-runnable.
 # Plain-file removal only (never a directory, never through a link): the same guarded helper.
-foreach ($item in $sideFiles) { [void](Remove-AttrCudaPartialFile -Path ([string]$item.path)) }
-[void](Remove-AttrCudaPartialFile -Path $manifestSide)
+# The ancestor chain from $AgentRoot is re-checked at deletion time (sol PR #133 r8: a linked inbox).
+foreach ($item in $sideFiles) { [void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path ([string]$item.path)) }
+[void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $manifestSide)
 $StepLog['inboxCleanup'] = 0
 # $item.path and $manifestSide are the values Assert-AttrCudaDirectChild returned: a full path
 # already proved to sit directly in the inbox. This is the Remove-Item the traversal finding was

@@ -439,10 +439,22 @@ function Remove-AttrCudaPartialFile {
     (PowerShell/PowerShell#26913). A .partial is only ever written as a file, so anything else --
     a directory, a symlink, a junction -- is left exactly where it is and reported. Returns $true
     when the path is absent or was a file that is now gone, $false when it was refused.
+    sol, PR #133 r8: the ANCESTOR chain from -TrustedRoot is checked too (a plain file reached
+    through a linked inbox/cache/outbox is outside the root). A refusal never throws: this runs in
+    cleanup and failure paths, where an exception would mask the job's real exit code.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$TrustedRoot,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
 
+    try {
+        $Path = Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $TrustedRoot -Path $Path
+    } catch {
+        Write-Warning "ATTRCUDA_PARTIAL_OUTSIDE_TRUSTED_ROOT left in place: $($_.Exception.Message)"
+        return $false
+    }
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if ($null -eq $item) { return $true }
     $isReparse = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)

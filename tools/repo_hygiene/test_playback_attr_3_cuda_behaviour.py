@@ -793,7 +793,7 @@ class LinkSafeCleanupTests(_PwshCase):
         partial.mkdir()
         self.plant_junction(partial)
         proc = self.run_with_module(
-            f"Write-Output ('removed=' + (Remove-AttrCudaPartialFile -Path '{partial}'))\n"
+            f"Write-Output ('removed=' + (Remove-AttrCudaPartialFile -TrustedRoot '{self.root}' -Path '{partial}'))\n"
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("removed=False", proc.stdout)
@@ -803,7 +803,7 @@ class LinkSafeCleanupTests(_PwshCase):
     def test_a_partial_that_is_itself_a_junction_is_left_and_its_target_survives(self) -> None:
         link = self.plant_junction(self.root, "build.json.partial")
         proc = self.run_with_module(
-            f"Write-Output ('removed=' + (Remove-AttrCudaPartialFile -Path '{link}'))\n"
+            f"Write-Output ('removed=' + (Remove-AttrCudaPartialFile -TrustedRoot '{self.root}' -Path '{link}'))\n"
         )
         self.assertIn("removed=False", proc.stdout)
         self.assertEqual(self.sentinel.read_bytes(), b"must survive")
@@ -812,7 +812,7 @@ class LinkSafeCleanupTests(_PwshCase):
         partial = self.root / "exe.partial"
         partial.write_bytes(b"half written")
         proc = self.run_with_module(
-            f"Write-Output ('removed=' + (Remove-AttrCudaPartialFile -Path '{partial}'))\n"
+            f"Write-Output ('removed=' + (Remove-AttrCudaPartialFile -TrustedRoot '{self.root}' -Path '{partial}'))\n"
         )
         self.assertIn("removed=True", proc.stdout)
         self.assertFalse(partial.exists())
@@ -848,6 +848,54 @@ class LinkSafeCleanupTests(_PwshCase):
         proc = self.run_with_module(_guard(f"Remove-AttrCudaTree -TrustedRoot '{self.root}' -Path '{escaping}'"))
         self.assert_throws(proc, "ATTRCUDA_PATH_NOT_UNDER_ROOT")
         self.assertEqual(self.sentinel.read_bytes(), b"must survive")
+
+    def test_every_module_helper_call_names_all_mandatory_parameters(self) -> None:
+        # sol PR #133 r8: the assembler called Remove-AttrCudaTree without the newly mandatory
+        # -TrustedRoot and would have failed before compiling; nothing executed that call site.
+        scripts = [
+            ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1",
+            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1",
+            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1",
+            ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-assemble.ps1",
+        ]
+        quoted = ",".join(f"'{s}'" for s in scripts)
+        proc = self.run_with_module(
+            "$mandatory = @{}\n"
+            "foreach ($c in Get-Command -Module AttrCudaArtifacts) {\n"
+            "    $mandatory[$c.Name] = @($c.Parameters.Values | Where-Object { $_.Attributes | Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] -and $_.Mandatory } } | ForEach-Object { $_.Name })\n"
+            "}\n"
+            f"foreach ($file in @({quoted})) {{\n"
+            "    $tokens = $null; $errors = $null\n"
+            "    $text = [regex]::Replace([IO.File]::ReadAllText($file), '__[A-Z0-9_]+__', '$attrCudaPlaceholder')\n"
+            "    $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)\n"
+            "    foreach ($call in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {\n"
+            "        $name = $call.GetCommandName()\n"
+            "        if (-not $name -or -not $mandatory.ContainsKey($name)) { continue }\n"
+            "        $given = @($call.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })\n"
+            "        foreach ($required in $mandatory[$name]) {\n"
+            "            if (-not ($given | Where-Object { $required.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) })) {\n"
+            "                Write-Output ('MISSING ' + [IO.Path]::GetFileName($file) + ':' + $call.Extent.StartLineNumber + ' ' + $name + ' -' + $required)\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "Write-Output 'SCAN_DONE'\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("SCAN_DONE", proc.stdout)
+        self.assertNotIn("MISSING", proc.stdout, proc.stdout)
+
+    def test_a_plain_file_reached_through_a_linked_inbox_is_not_deleted(self) -> None:
+        # sol PR #133 r8: AgentRoot\inbox is a junction; the side-file it resolves to is outside the root.
+        (self.outside / "side.zip").write_bytes(b"outside the agent root")
+        self.plant_junction(self.root, "inbox")
+        side = self.root / "inbox" / "side.zip"
+        proc = self.run_with_module(
+            f"Write-Output ('removed=' + (Remove-AttrCudaPartialFile -TrustedRoot '{self.root}' -Path '{side}'))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("removed=False", proc.stdout)
+        self.assertEqual((self.outside / "side.zip").read_bytes(), b"outside the agent root")
 
     def test_a_link_free_work_tree_is_removed(self) -> None:
         work = self.root / "work"
@@ -943,7 +991,7 @@ class PublishWriteScanTests(_PwshCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         return json.loads(proc.stdout)
 
-    def test_every_emitted_template_parses_and_has_no_unproven_write(self) -> None:
+    def test_every_emitted_template_parses_and_trips_no_rule(self) -> None:
         result = self.scan(generators=JOB_TEMPLATES)
         self.assertEqual(len(result["templates"]), len(JOB_TEMPLATES))
         self.assertEqual(result["violations"], [], json.dumps(result["violations"], indent=2))
@@ -1005,6 +1053,7 @@ class PublishWriteScanTests(_PwshCase):
         "new_item_name_traversal": ("R2", "New-Item -ItemType File -Path $Work -Name '..\\outside.txt' -Force | Out-Null\n"),
         "using_module": ("R8", "using module 'C:\\outside\\evil.psm1'\n"),
         "requires_modules": ("R8", "#requires -Modules EvilModule\n"),
+        "partial_untrusted_root": ("R2", "[void](Remove-AttrCudaPartialFile -TrustedRoot 'C:\\' -Path 'C:\\outside\\x')\n"),
         "tree_untrusted_root": ("R2", "Remove-AttrCudaTree -TrustedRoot 'C:\\' -Path 'C:\\outside'\n"),
     }
 

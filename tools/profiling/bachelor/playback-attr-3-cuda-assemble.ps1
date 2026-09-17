@@ -97,7 +97,7 @@ if ($LASTEXITCODE -ne 0) { Complete-Failed 2 'sourceCommit' "not a commit known 
 if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
 $Work = Join-Path $OutDir ".work-$($names.shortSha)"
-Remove-AttrCudaTree -Path $Work
+Remove-AttrCudaTree -TrustedRoot $OutDir -Path $Work
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 
 # Job-owned TEMP under the work dir, set before any child process (qmake, mingw32-make,
@@ -322,9 +322,9 @@ $partialManifestPath = Join-Path $OutDir "$($names.buildManifestName).partial"
 function Remove-RunPartials {
     # Files only: never -Recurse, never through a link (sol PR #133 r3; see Remove-AttrCudaPartialFile).
     foreach ($item in $script:publishSet) {
-        [void](Remove-AttrCudaPartialFile -Path (Join-Path $OutDir "$($item.name).partial"))
+        [void](Remove-AttrCudaPartialFile -TrustedRoot $OutDir -Path (Join-Path $OutDir "$($item.name).partial"))
     }
-    [void](Remove-AttrCudaPartialFile -Path $script:partialManifestPath)
+    [void](Remove-AttrCudaPartialFile -TrustedRoot $OutDir -Path $script:partialManifestPath)
 }
 
 try {

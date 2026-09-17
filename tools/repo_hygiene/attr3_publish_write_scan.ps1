@@ -15,8 +15,8 @@
 #   R2 arguments     New-Item (-Path; -ItemType literally Directory|File; no -Name), Expand-Archive
 #                    (-DestinationPath), Export-Csv (-LiteralPath) and Start-Process (each -Redirect*)
 #                    name a destination provable under $Work; no positional use; no splatting;
-#                    ForEach-Object takes script blocks only; Remove-AttrCudaTree's -TrustedRoot is
-#                    literally $AgentRoot or 'C:\mlvtmp'.
+#                    ForEach-Object takes script blocks only; the -TrustedRoot of Remove-AttrCudaTree
+#                    and Remove-AttrCudaPartialFile is literally $AgentRoot or 'C:\mlvtmp'.
 #   R3 dynamic calls `&` only on a literal ending in .exe or an allowlisted child-executable variable;
 #                    no dot-sourcing.
 #   R4 .NET          allowlisted static members and instance method names only.
@@ -277,13 +277,13 @@ function Invoke-Scan([string]$Source, [string]$Text, [string[]]$ModuleFunctions)
                 Add-Violation $Source $command 'R2' "New-Item must name -ItemType 'Directory' or 'File' literally"
             }
         }
-        if ($name -ceq 'Remove-AttrCudaTree') {
+        if ($name -ceq 'Remove-AttrCudaTree' -or $name -ceq 'Remove-AttrCudaPartialFile') {
             $roots = Get-NamedArguments $command @('TrustedRoot')
             $rootOk = $roots.Count -eq 1 -and $null -ne $roots[0] -and (
                 ($roots[0] -is [System.Management.Automation.Language.VariableExpressionAst] -and $roots[0].VariablePath.UserPath -ceq 'AgentRoot') -or
                 ($roots[0] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and [string]$roots[0].Value -ceq 'C:\mlvtmp'))
             if (-not $rootOk) {
-                Add-Violation $Source $command 'R2' "Remove-AttrCudaTree -TrustedRoot must be `$AgentRoot or 'C:\mlvtmp'"
+                Add-Violation $Source $command 'R2' "$name -TrustedRoot must be `$AgentRoot or 'C:\mlvtmp'"
             }
         }
         if ($mutatorParams.ContainsKey($key)) {
