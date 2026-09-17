@@ -433,7 +433,10 @@ The literal arm runs LAST, after the receipt state, the venue and the shape, so 
 never told that its literal was well-formed and only the board-rooted actor ever sees the
 expected digest in a refusal line.
 
-Stdlib only.  Deterministic: no subprocess, no clock, no network -- ``datetime`` is imported
+Stdlib only.  Deterministic: no clock, no network, and ONE subprocess -- NA-4's owner-consented
+footage exception runs ``git -C <board> show fork/master:tools/gates/output-budget.json``, at
+most once per invocation and only when a clip token is not otherwise allowed; any failure of
+it admits nothing.  ``datetime`` is imported
 to PARSE the pinned stamps (the literal's two and every receipt's ``recordedUtc`` -- O141),
 never to read the current time, and ``hashlib`` to hash
 a file already on disk and to recompute the O172 digest from a receipt's own ``hashes``.
@@ -450,7 +453,9 @@ import json
 import os
 import posixpath
 import re
+import subprocess
 import sys
+import types
 
 EXIT_ALLOW = 0
 EXIT_DENY = 2
@@ -3289,6 +3294,164 @@ def rule_na3(ctx):
 _CLIP_LINE_RX = re.compile(r"^(?:- )?CLIP_OR_NONE:\s*(.*?)\s*$", re.M)
 FIXTURE_TAIL = "tests/fixtures/clips"
 
+# NA4-OWNER-CONSENTED-FOOTAGE-1 -- THE THIRD NA-4 EXCEPTION, AND WHO DECIDED IT.
+#
+# The OWNER decided this, in the owner's own typed words; no lane, quorum or adjudication can widen
+# it, and the swarm that designed the mechanism
+# (fleet-runs/swarm-autonomous-footage-20260917T0105Z/SYNTHESIS.md) decided nothing about
+# consent.  The citation below is the owner's chat line, hashed as its raw JSONL bytes; the
+# scope is the consent recorded 2026-09-16 (receipts/owner-footage-consent-20260916.json)
+# NARROWED to the six ids that have content hashes -- M02-1344 is NOT here.
+#
+# The table holds content identity only: per part, the expected byte length and lowercase
+# sha256.  It holds NO PATH.  A path is admitted only when it is spelled in the MERGED gate
+# spec -- git object `fork/master:tools/gates/output-budget.json` in the board repository,
+# never a worktree file -- under a consented id whose every part carries exactly these
+# lengths and digests, so editing the spec cannot swap a different clip in under a consented
+# id.  Any git or parse failure admits nothing.
+#
+# LIMITS, stated rather than papered over.  (1) Widening this table is possible only through
+# a reviewed PR to this file; what the mechanism removes is widening it silently, or by a
+# prompt, a fields file or a receipt.  (2) The purposes are recorded, not enforced: purpose
+# binding relies on the card id in an agent-written prompt.  (3) Content identity is
+# verified by the JOB before opening (each part's length and sha256 against the same git
+# object); this hook compares text and never reads footage.
+OWNER_CONSENTED_FOOTAGE = types.MappingProxyType(
+    {
+        "clips": types.MappingProxyType(
+            {
+                "M16-1243": (
+                    (2221399552, "c8f09e1ea8e6c40f673bf465d2d4adb90ca218bc9f78c6461db5cd22cd3e01b9"),
+                    (1174057472, "5dd782178e1658dad5da31808bf3a7c249f7e282682220e4d72b7743dacc163b"),
+                ),
+                "M16-1327": (
+                    (2654424576, "cfdcd64da9931db94b2b4f938fec1e10b8a742c2e79847975bdd6a986e137a3f"),
+                    (1327107584, "c13ed73d60a5767f58bee0a22bbb046f8cf795a8c09511689bbfa6213e770cd7"),
+                ),
+                "M16-1347": (
+                    (2454400512, "763e5a302a8d04e97d84ca7d281d65752529a6ed00bf5a7ff8bbb1e46609934d"),
+                    (1236876288, "e32c19b7b61619e1ea29c05358a23e863218ba021c4d2e8bdda5d057417d5fb1"),
+                ),
+                "M17-1207": (
+                    (2367993856, "3bbb5034d8ab5d63a078517af5a3098fff89677be37e78298317a19def043dce"),
+                    (1369447936, "3ab34479a80363a693bce3e13782b828b1eccbc38e96dd11ad0eb8c2d919a54e"),
+                ),
+                "M15-1320": (
+                    (462899712, "b72347ace4f18981a9ea66db9fc2db9413718c99d4818a1846413b86b703ca1e"),
+                    (228077056, "8b7de65f58e9118001e53e1b6490784c0fa2cda0ef108e7eb63c8d62f5c7e999"),
+                ),
+                "M16-1210": (
+                    (793847808, "679ee976b0150c71ca26f7d8895c775afdca273fa7f907db22cf7c3d58af17cd"),
+                    (395081728, "d7a31dbb9b2afe717485a4f664619c7d4f2e747c3e13be1d503f93904551af84"),
+                ),
+            }
+        ),
+        "purposes": ("#72b delta-baseline gate", "PLAYBACK-ATTR-3-CUDA"),
+        "authority": types.MappingProxyType(
+            {
+                "transcript": r"C:\Users\obabalola\.claude\projects"
+                r"\C---Layi-Wkspc-MLV-App--claude-worktrees-happy-ptolemy-9fe12d"
+                r"\f9010ab1-55f2-4f4c-967c-467cf19c04ef.jsonl",
+                "line": 2137,
+                "sha256": "254075c85a821758067f7d37dbc5a26a05ae8e2a2368f1e02af0fa2110ac8e41",
+            }
+        ),
+    }
+)
+# The MERGED spec, as a git object in the board repository.  Never a worktree path.
+CONSENTED_SPEC_GIT_OBJECT = "fork/master:tools/gates/output-budget.json"
+CONSENTED_SPEC_GIT_TIMEOUT_SECONDS = 20
+_SHA256_HEX_RX = re.compile(r"\A[0-9a-fA-F]{64}\Z")
+
+
+def _read_merged_output_budget(board_root_raw):
+    """-> the parsed merged spec, or None on ANY failure (git absent, bad ref, bad JSON)."""
+    try:
+        # The board root must BE a repository, not merely sit inside one: without this, git's
+        # upward discovery would answer from whatever enclosing repository it found.
+        if not os.path.exists(os.path.join(board_root_raw, ".git")):
+            return None
+        completed = subprocess.run(
+            ["git", "-C", board_root_raw, "show", CONSENTED_SPEC_GIT_OBJECT],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=CONSENTED_SPEC_GIT_TIMEOUT_SECONDS,
+        )
+        if completed.returncode != 0:
+            return None
+        document = json.loads(completed.stdout.decode("utf-8"))
+    except Exception:
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _consented_part_matches(part, expected):
+    """One spec entry against one frozen (length, sha256) pair -> its normalised path or None."""
+    if not isinstance(part, dict):
+        return None
+    path, length, digest = part.get("path"), part.get("length"), part.get("sha256")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    if isinstance(length, bool) or not isinstance(length, int) or length != expected[0]:
+        return None
+    if not isinstance(digest, str) or not _SHA256_HEX_RX.match(digest):
+        return None
+    if digest.lower() != expected[1]:
+        return None
+    path_norm = norm(path)
+    if _unresolved_env_ref(path_norm) or not is_absolute(path_norm):
+        return None
+    return path_norm
+
+
+def consented_footage_paths(board_root_raw, consent=None, reader=None):
+    """-> frozenset of normalised paths the merged spec lists for consented, hash-matching ids.
+
+    FAIL CLOSED at every step: an unreadable or malformed spec admits NOTHING; a consented id
+    that is absent, duplicated, or whose top-level entry or ANY part disagrees with the frozen
+    table (count, order, length or digest) admits nothing for that id.  ``consent`` and
+    ``reader`` exist for the fixture-scoped tests only; the hook passes neither.
+    """
+    consent = OWNER_CONSENTED_FOOTAGE if consent is None else consent
+    reader = _read_merged_output_budget if reader is None else reader
+    document = reader(board_root_raw)
+    if not isinstance(document, dict) or not isinstance(document.get("clips"), list):
+        return frozenset()
+    seen = {}
+    for entry in document["clips"]:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            seen.setdefault(entry["id"], []).append(entry)
+    admitted = set()
+    for clip_id, expected_parts in consent["clips"].items():
+        entries = seen.get(clip_id, [])
+        if len(entries) != 1:
+            continue
+        entry = entries[0]
+        parts = entry.get("parts")
+        if not expected_parts or not isinstance(parts, list) or len(parts) != len(expected_parts):
+            continue
+        part_paths = [
+            _consented_part_matches(part, expected)
+            for part, expected in zip(parts, expected_parts)
+        ]
+        top_path = _consented_part_matches(entry, expected_parts[0])
+        if top_path is None or any(path is None for path in part_paths):
+            continue
+        if top_path != part_paths[0]:
+            continue
+        admitted.update(part_paths)
+    return frozenset(admitted)
+
+
+def _ctx_consented_footage_paths(ctx):
+    """The merged-spec read, made at most ONCE per hook invocation and only when needed."""
+    cached = getattr(ctx, "consented_footage_paths_cache", None)
+    if cached is None:
+        cached = consented_footage_paths(ctx.board_root_raw)
+        ctx.consented_footage_paths_cache = cached
+    return cached
+
 
 def authorized_clip(ctx):
     """The ONE canonical absolute path from the lane prompt, or None."""
@@ -3323,6 +3486,8 @@ def rule_na4(ctx):
             continue  # tracked fixtures are always allowed
         if allowed is not None and path_norm == allowed:
             continue
+        if path_norm in _ctx_consented_footage_paths(ctx):
+            continue  # owner-consented footage, spelled by the MERGED spec (see the table)
         if allowed is None:
             raise Deny(
                 "NA-4",
