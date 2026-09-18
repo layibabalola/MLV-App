@@ -6918,6 +6918,16 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         finally:
             self.module.OWNER_CONSENTED_FOOTAGE = saved
 
+    def _decide_command(self, command):
+        saved = self.module.OWNER_CONSENTED_FOOTAGE
+        self.module.OWNER_CONSENTED_FOOTAGE = self.table
+        try:
+            return self.module.decide(
+                {"tool_name": "Bash", "tool_input": {"command": command}}, None
+            )
+        finally:
+            self.module.OWNER_CONSENTED_FOOTAGE = saved
+
     def assertAllow(self, decision):
         self.assertEqual(decision, (0, ""), decision)
 
@@ -7008,6 +7018,41 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertNa4Deny(self._decide(token))
 
+    def test_exception_3_admits_only_a_whole_shell_word(self):
+        # ROUND 5 (astra MAJOR C).  The tokenizer splits `"<consented>"$SUFFIX` into the quoted
+        # literal and `$SUFFIX`; round 4 admitted the literal FRAGMENT while Bash concatenates
+        # both into ONE argument naming a different file.  Exception (3) now admits a token only
+        # when the raw characters on both sides of its span (quotes included) are the start or
+        # end of the command, whitespace, or one of `; | & ( ) < >`.  Every refused row below
+        # was an ALLOW at 83fb6dfe.
+        path = self.part0.replace("\\", "/")
+        for command in (
+            'SUFFIX=.other; probe "%s"$SUFFIX' % path,
+            'probe "%s"${SUFFIX}' % path,
+            'probe "%s"%%SUFFIX%%' % path,
+            'probe "%s"`printf x`' % path,
+            'probe "%s"$(printf x)' % path,
+            'probe "%s"x' % path,
+            'probe "%s""-other"' % path,
+            'probe "%s"+$x' % path,
+            'probe $PREFIX"%s"' % path,
+            'probe "%s" "%s"$SUFFIX' % (path, path),  # EVERY occurrence must be whole
+        ):
+            with self.subTest(command=command):
+                self.assertNa4Deny(self._decide_command(command))
+        for command in (
+            "probe %s" % path,
+            'probe "%s"' % path,
+            "probe '%s'" % path,
+            'probe "%s";echo done' % path,
+            'probe "%s"|head -c 1' % path,
+            'probe "%s">out.txt' % path,
+            "probe %s;echo done" % path,
+            '(probe "%s")' % path,
+        ):
+            with self.subTest(command=command):
+                self.assertAllow(self._decide_command(command))
+
     # ------------------------------------------------------------- values pinned (A)
 
     def test_the_whole_frozen_table_is_value_pinned(self):
@@ -7051,6 +7096,9 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             "NA4-CLIP-NAME-TRIM-1",
             "(5) Exceptions (1) and (2) still compare the EXPANDED token,",
             "NA4-EXC12-LITERAL-TOKENS-1",
+            '(6) A "literal token" here is a WHOLE SHELL WORD:',
+            "whitespace, or one of ; | & ( ) < >.",
+            "and only the two together make\n    the hashed text the whole argument the child receives.",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, source)
@@ -7162,6 +7210,9 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             "exceptions (1) and (2) still compare the expanded token",
             "NA4-EXC12-LITERAL-TOKENS-1",
             "exception (3) admits only a literal canonical token",
+            "that is also a whole shell word",
+            "whitespace, or one of ; | & ( ) < >",
+            "every occurrence must be whole",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, act)

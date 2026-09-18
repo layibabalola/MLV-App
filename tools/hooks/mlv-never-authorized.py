@@ -1072,8 +1072,8 @@ def is_absolute(path_norm):
 _TOKEN_RX = re.compile(r"\"([^\"]*)\"|'([^']*)'|([^\s'\"=,;|&()\[\]<>]+)")
 
 
-def tokens(text):
-    """Quoted strings and bare runs, in order.  Quotes are stripped, nothing is executed."""
+def token_spans(text):
+    """``tokens`` with each one's RAW span ``(value, start, end)``, its own quotes included."""
     found = []
     for match in _TOKEN_RX.finditer(text or ""):
         value = match.group(1)
@@ -1082,8 +1082,32 @@ def tokens(text):
         if value is None:
             value = match.group(3)
         if value:
-            found.append(value)
+            found.append((value, match.start(), match.end()))
     return found
+
+
+def tokens(text):
+    """Quoted strings and bare runs, in order.  Quotes are stripped, nothing is executed."""
+    return [value for value, _start, _end in token_spans(text)]
+
+
+_WORD_BOUNDARY_CHARS = frozenset(";|&()<>")
+
+
+def is_whole_shell_word(text, start, end):
+    """Is the raw span ``text[start:end]`` a COMPLETE shell word, not a fragment of one?
+
+    The character just before the span and the one just after must each be the start or end
+    of the text, whitespace, or one of ``; | & ( ) < >``.  Anything else -- a quote, ``$``,
+    ``%``, a backtick, ``+``, ``=``, a letter or a digit -- means a shell would join the span
+    with its neighbour into one larger argument that names something else.
+    """
+    for index in (start - 1, end):
+        if 0 <= index < len(text):
+            char = text[index]
+            if not (char.isspace() or char in _WORD_BOUNDARY_CHARS):
+                return False
+    return True
 
 
 def json_blobs(text):
@@ -3329,6 +3353,11 @@ FIXTURE_TAIL = "tests/fixtures/clips"
 # (5) Exceptions (1) and (2) still compare the EXPANDED token, so a hook-read variable a child
 # shell reassigns can open a different target; this predates the card, and follow-up card
 # NA4-EXC12-LITERAL-TOKENS-1 gives them exception (3)'s literal-token rule.
+# (6) A "literal token" here is a WHOLE SHELL WORD: the raw characters immediately before and
+# after its span, its own quotes included, must each be the start or end of the command,
+# whitespace, or one of ; | & ( ) < >.  A tokenizer fragment such as the quoted literal in
+# "<literal>"$SUFFIX is refused, because the shell joins it with its neighbour into ONE
+# argument naming a different file (round 5, reproduced at rounds 2-4).
 OWNER_CONSENTED_FOOTAGE = types.MappingProxyType(
     {
         # clip id -> ((length, content sha256, path_norm_sha256), ...) in part order.
@@ -3481,7 +3510,9 @@ def is_literal_canonical_token(token):
     and backslash-to-slash folding ``norm`` applies.  The last test alone subsumes the segment
     test, a doubled separator and a trailing slash; the explicit ones state the rule.  So no
     reference any shell expands, and no ``..`` a collapse could hide one behind, reaches the
-    hash, and the hashed text is the text the child opens.
+    hash.  This predicate sees one tokenizer FRAGMENT only; ``rule_na4`` also requires the
+    fragment to be a whole shell word (``is_whole_shell_word``), and only the two together make
+    the hashed text the whole argument the child receives.
     """
     raw = str(token).strip().strip('"').strip("'")
     if not _LITERAL_DRIVE_RX.match(raw) or _NOT_LITERAL_CHARS.intersection(raw):
@@ -3512,7 +3543,8 @@ def authorized_clip(ctx):
 def rule_na4(ctx):
     allowed = authorized_clip(ctx)
     fixture_root = norm(os.path.join(ctx.worktree_root_raw, FIXTURE_TAIL))
-    for token in tokens(ctx.subject):
+    subject = ctx.subject
+    for token, start, end in token_spans(subject):
         path_norm = norm(token)
         is_clip = path_norm.endswith(".mlv")
         in_cache = under(path_norm, ctx.clip_cache_root) or has_seg(
@@ -3526,8 +3558,15 @@ def rule_na4(ctx):
             continue
         # Exception (3) admits LITERAL CANONICAL tokens only -- an allowlist on the RAW token
         # (`is_literal_canonical_token`): anything a shell could expand, or a `..` that `norm`
-        # would collapse, could make the admitted hash and the opened target differ.
-        if is_literal_canonical_token(token) and is_owner_consented_path(path_norm):
+        # would collapse, could make the admitted hash and the opened target differ.  And the
+        # token must be a WHOLE shell word (`is_whole_shell_word`): a fragment the tokenizer split
+        # off `"<literal>"$SUFFIX` is joined back into one different argument by the shell.
+        # Each occurrence is its own iteration, so EVERY occurrence must be whole.
+        if (
+            is_literal_canonical_token(token)
+            and is_whole_shell_word(subject, start, end)
+            and is_owner_consented_path(path_norm)
+        ):
             continue  # owner-consented footage: its norm hash is in the frozen table
         if allowed is None:
             raise Deny(
