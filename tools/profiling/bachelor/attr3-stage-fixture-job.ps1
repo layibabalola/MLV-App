@@ -60,6 +60,9 @@ if ([IO.Path]::GetFileNameWithoutExtension($fixture.Name) -cne $ClipStem) {
     throw "ATTR3_FIXTURE_STEM_MISMATCH '$($fixture.Name)' does not carry the stem '$ClipStem'"
 }
 [void](Assert-AttrCudaSafeArtifactName -Name $fixture.Name)
+# ATTR3-FIXTURE-STAGE-1: "tracked" is not "unmodified" -- refuse before baking a sha256 for
+# working-tree bytes no reviewed commit ever produced.
+[void](Assert-AttrCudaFixtureCommittedBytes -Path $fixture.FullName)
 
 $fixtureSha = (Get-FileHash -LiteralPath $fixture.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 $jobId = "attr3-stage-fixture-$ClipStem-$($fixtureSha.Substring(0, 12))"
@@ -248,6 +251,10 @@ $text = $template.
     Replace('__FIXTURE_SHA256__', $fixtureSha).
     Replace('__CLIP_STEM__', $ClipStem)
 [IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))
+
+# So the hub can pass the baked hash to playback-attr-3-cuda-job.ps1's -FixtureSha256 without
+# re-deriving it (and without re-hashing a file it should not be naming in a shell command).
+Write-Output "RESULT=FIXTURE_STAGE_JOB_EMITTED FIXTURE_SHA256=$fixtureSha JOB=$jobPath"
 
 [pscustomobject]@{
     jobFile = $jobPath

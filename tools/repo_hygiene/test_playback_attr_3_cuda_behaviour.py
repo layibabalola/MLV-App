@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
 STAGE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1"
 DLL_GENERATOR = ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1"
+ATTRIBUTION_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1"
+STAGE_FIXTURE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-fixture-job.ps1"
 
 PWSH = shutil.which("pwsh")
 GIT = shutil.which("git")
@@ -759,6 +761,242 @@ class InterruptedStagingTests(_PwshCase):
 
         self.assertEqual(proc.returncode, 4, f"{proc.stdout}\n{proc.stderr}")
         self.assertEqual(self.cache_names(), [])
+
+
+# --------------------------------------------------------------------------------------------
+# (f) ATTR3-FIXTURE-STAGE-1: -ClipPath becomes optional for a fixture id, gated on
+#     -FixtureSha256, and the emitted job authenticates the cached clip's CONTENT before it
+#     ever opens it.
+# --------------------------------------------------------------------------------------------
+
+
+@requires_pwsh
+@requires_git
+class AttributionJobOptionalClipPathTests(_PwshCase):
+    """Generation-time behaviour of the new -ClipPath / -FixtureSha256 rules."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+
+    def _generate(self, **overrides):
+        out_file = self.staging / "job.ps1"
+        args = {
+            "SourceCommit": self.shas[1],
+            "BuildManifestSha256": "a" * 64,
+            "ClipId": "tiny_dual_iso",
+            "OutFile": str(out_file),
+            "RepoRoot": str(self.repo),
+        }
+        args.update(overrides)
+        parts = [f"-{key} '{value}'" for key, value in args.items() if value is not None]
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' " + " ".join(parts) + "\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script), out_file
+
+    def test_a_fixture_id_without_clippath_derives_the_cache_path(self) -> None:
+        fixture_sha = "b" * 64
+        proc, out_file = self._generate(FixtureSha256=fixture_sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        job_text = out_file.read_text(encoding="utf-8")
+        clip_id = "tiny_dual_iso"
+        extension = "." + "mlv"
+        expected = "C:\\mlvtmp\\mlv-agent\\cache\\" + clip_id + extension
+        self.assertIn(f"$AuthorizedClipPath = '{expected}'", job_text)
+        self.assertIn(f"$FixtureSha256 = '{fixture_sha}'", job_text)
+
+    def test_a_fixture_id_without_fixture_sha_is_refused(self) -> None:
+        proc, out_file = self._generate()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED", proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_an_owner_id_without_clippath_is_refused(self) -> None:
+        proc, out_file = self._generate(ClipId="M16-1243")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REQUIRED", proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_an_owner_id_with_fixture_sha_is_refused(self) -> None:
+        owner_path = "C:\\mlvtmp\\mlv-agent\\cache\\M16-1243.raw"
+        proc, out_file = self._generate(ClipId="M16-1243", ClipPath=owner_path, FixtureSha256="c" * 64)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED", proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_a_fixture_id_with_an_explicit_clippath_is_still_accepted(self) -> None:
+        clip_id = "tiny_dual_iso"
+        extension = "." + "mlv"
+        explicit_path = "C:\\mlvtmp\\mlv-agent\\cache\\" + clip_id + extension
+        proc, out_file = self._generate(FixtureSha256="d" * 64, ClipPath=explicit_path)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(f"$AuthorizedClipPath = '{explicit_path}'", out_file.read_text(encoding="utf-8"))
+
+
+@requires_pwsh
+@requires_git
+class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
+    """The emitted job hashes a fixture's cached bytes before it ever opens the clip."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+        self.agent = self.tmp / "agent"
+        self.cache = self.agent / "cache"
+        self.cache.mkdir(parents=True)
+
+    def _fake_cache(self) -> dict:
+        import hashlib
+
+        short = self.shas[1][:12]
+        names = {
+            "exe": f"MLVApp-playback-attr-3-cuda-{short}.exe",
+            "dll": f"igpu_recon_cuda-playback-attr-3-cuda-{short}.dll",
+            "packageZip": f"MLVApp-playback-attr-3-cuda-{short}-pkg.zip",
+            "manifest": f"playback-attr-3-cuda-{short}-build.json",
+            "presentMon": "PresentMon-2.5.1-x64.exe",
+            "smoke": "run-release-gui-smoke.ps1",
+        }
+        shas = {}
+        for key in ("exe", "dll", "packageZip"):
+            payload = f"fabricated {key} for {self.shas[1]}".encode("utf-8")
+            (self.cache / names[key]).write_bytes(payload)
+            shas[key] = hashlib.sha256(payload).hexdigest()
+        presentmon_payload = b"fabricated presentmon executable"
+        (self.cache / names["presentMon"]).write_bytes(presentmon_payload)
+        shas["presentMon"] = hashlib.sha256(presentmon_payload).hexdigest()
+        (self.cache / names["smoke"]).write_text("# fabricated placeholder\n", encoding="utf-8")
+        manifest = {
+            "schema": "mlvapp.playback-attr-3-cuda-build-cache-manifest.v1",
+            "sourceCommit": self.shas[1],
+            "exe": {"name": names["exe"], "sha256": shas["exe"]},
+            "dll": {"name": names["dll"], "sha256": shas["dll"]},
+            "packageZip": {"name": names["packageZip"], "sha256": shas["packageZip"]},
+            "pendingSymbolPresence": True,
+            "dllPairManifestSha256": "e" * 64,
+        }
+        manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
+        (self.cache / names["manifest"]).write_bytes(manifest_bytes)
+        return {
+            "names": names,
+            "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "presentMonSha256": shas["presentMon"],
+        }
+
+    def _generate(self, fixture_sha256: str) -> Path:
+        info = self._fake_cache()
+        out_file = self.staging / "job.ps1"
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
+            f"-BuildManifestSha256 '{info['manifestSha256']}' -ClipId 'tiny_dual_iso' "
+            f"-FixtureSha256 '{fixture_sha256}' -OutFile '{out_file}' -RepoRoot '{self.repo}' "
+            f"-AgentRoot '{self.agent}' -PresentMonSha256 '{info['presentMonSha256']}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        return out_file
+
+    def test_a_mismatched_cached_clip_fails_closed_before_the_package_is_touched(self) -> None:
+        import hashlib
+
+        extension = "." + "mlv"
+        clip_name = "tiny_dual_iso" + extension
+        wrong_bytes = b"not the fixture the hub thinks is cached"
+        (self.cache / clip_name).write_bytes(wrong_bytes)
+        expected_sha = hashlib.sha256(b"the real fixture bytes").hexdigest()
+        job = self._generate(expected_sha)
+
+        proc = _run_job(job)
+
+        self.assertEqual(proc.returncode, 17, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=FIXTURE_CONTENT_MISMATCH", proc.stdout)
+        self.assertIn(expected_sha, proc.stdout)
+        self.assertIn(hashlib.sha256(wrong_bytes).hexdigest(), proc.stdout)
+        outboxes = list((self.agent / "outbox").glob("*.artifacts"))
+        self.assertEqual(len(outboxes), 1, outboxes)
+        summary = json.loads((outboxes[0] / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["result"], "FIXTURE_CONTENT_MISMATCH")
+        self.assertTrue(summary["fixtureRehearsal"])
+        self.assertEqual(summary["expectedSha256"], expected_sha)
+        self.assertEqual(summary["actualSha256"], hashlib.sha256(wrong_bytes).hexdigest())
+
+    def test_matching_cached_clip_content_passes_the_gate(self) -> None:
+        import hashlib
+
+        extension = "." + "mlv"
+        clip_name = "tiny_dual_iso" + extension
+        clip_bytes = b"exactly the bytes the hub staged"
+        (self.cache / clip_name).write_bytes(clip_bytes)
+        matching_sha = hashlib.sha256(clip_bytes).hexdigest()
+        job = self._generate(matching_sha)
+
+        proc = _run_job(job)
+
+        self.assertNotIn("FIXTURE_CONTENT_MISMATCH", proc.stdout)
+        self.assertNotEqual(proc.returncode, 17, f"{proc.stdout}\n{proc.stderr}")
+
+
+@requires_pwsh
+@requires_git
+class FixtureCommittedBytesTests(_PwshCase):
+    """Assert-AttrCudaFixtureCommittedBytes, exercised against a throwaway git repository."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.tracked_path = self.repo / "src" / "mlv" / "llrawproc" / "llrawproc.c"
+
+    def test_an_unmodified_tracked_file_is_accepted(self) -> None:
+        proc = self.run_with_module(
+            f"Write-Output (Assert-AttrCudaFixtureCommittedBytes -Path '{self.tracked_path}')\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        expected = _git_run(["hash-object", "--", "src/mlv/llrawproc/llrawproc.c"], self.repo)
+        self.assertIn(expected, proc.stdout)
+
+    def test_a_dirtied_working_tree_copy_is_refused(self) -> None:
+        self.tracked_path.write_text("/* dirtied after the commit */\n", encoding="utf-8")
+        proc = self.run_with_module(_guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{self.tracked_path}'"))
+        self.assert_throws(proc, "ATTR3_FIXTURE_WORKING_TREE_DIRTY")
+
+    def test_a_missing_file_is_refused(self) -> None:
+        missing = self.repo / "src" / "mlv" / "llrawproc" / "absent.c"
+        proc = self.run_with_module(_guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{missing}'"))
+        self.assert_throws(proc, "ATTR3_FIXTURE_MISSING")
+
+    def test_a_file_outside_any_git_repository_is_refused(self) -> None:
+        outside = self.tmp / "loose.txt"
+        outside.write_text("not in a repo\n", encoding="utf-8")
+        proc = self.run_with_module(_guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{outside}'"))
+        self.assert_throws(proc, "ATTR3_FIXTURE_NOT_IN_A_REPO")
+
+
+@requires_pwsh
+@requires_git
+class StageFixtureJobCommittedBytesWiringTests(_PwshCase):
+    """attr3-stage-fixture-job.ps1 calls the new check and prints the baked hash."""
+
+    def test_generator_source_calls_the_committed_bytes_check(self) -> None:
+        text = STAGE_FIXTURE_GENERATOR.read_text(encoding="utf-8")
+        self.assertIn("Assert-AttrCudaFixtureCommittedBytes -Path $fixture.FullName", text)
+
+    def test_generator_prints_a_fixture_sha256_result_line(self) -> None:
+        text = STAGE_FIXTURE_GENERATOR.read_text(encoding="utf-8")
+        self.assertIn("RESULT=FIXTURE_STAGE_JOB_EMITTED FIXTURE_SHA256=$fixtureSha", text)
 
 
 # --------------------------------------------------------------------------------------------

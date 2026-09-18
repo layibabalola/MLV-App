@@ -206,14 +206,45 @@ clip is ever opened. Pass `-ClipId tiny_dual_iso` or `-ClipId large_dual_iso`: t
 in this repository under `tests/fixtures/clips`. NA-4 admits those already, with no `CLIP_OR_NONE`
 line and no consent receipt, because they are repository fixtures rather than the owner's footage.
 
-- **Staging.** `tools/profiling/um-run.ps1 -SideFile <repo>/tests/fixtures/clips/<name>` places the
-  fixture in the agent cache by the same verified route as every other side-file. It is admitted by
-  its SOURCE (a `tests/fixtures/clips` directory), not by its extension: see
-  `Test-UmRunTrackedFixtureSource` in `tools/profiling/UmRunDrop.psm1`. A file with the same name from
-  any other directory is refused.
-- **Unchanged for a fixture run.** `-ClipPath` must still resolve into the agent cache with
-  `BaseName -ceq $ClipId`; `-BuildManifestSha256` still authenticates the staged manifest; the
-  eligibility gate still exits 15 unless `cuda_backend_available=1` and `r16_available=1`.
+`tools/profiling/um-run.ps1` does not place a side-file into the agent CACHE by itself -- it drops
+it into the agent INBOX (the same route every other side-file uses), and NA-4 does not admit a
+bare Bachelor cache path either. The fixture has to be moved from inbox to cache through the
+guarded route below, and the attribution job then has to open it FROM the cache without ever
+naming a cache path on the command line. Four steps:
+
+```powershell
+# (i) emit the job that moves the fixture from the inbox into the cache through the guarded
+#     route (tools/profiling/bachelor/attr3-stage-fixture-job.ps1). Note its own printed
+#     RESULT=... FIXTURE_SHA256=<hex> line -- step (iii) needs it.
+pwsh -NoProfile -File tools\profiling\bachelor\attr3-stage-fixture-job.ps1 `
+    -ClipStem tiny_dual_iso -FixturePath <repo>\tests\fixtures\clips\<name> -OutDir <staging-dir>
+
+# (ii) submit the stage job, with the tracked fixture as its side-file. -AgentShare is
+#     MANDATORY: um-run.ps1 defaults to the Ultra-Magnus share, not Bachelor's.
+pwsh -NoProfile -File tools\profiling\um-run.ps1 `
+    -ScriptPath <staging-dir>\<jobId>.job.ps1 -SideFile <repo>\tests\fixtures\clips\<name> `
+    -JobId <jobId> -AgentShare \\bachelor\mlv-agent
+
+# (iii) generate the attribution job for the fixture id, WITHOUT -ClipPath: the generator
+#     derives the cache path itself and bakes in the hash step (i) printed.
+pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
+    -SourceCommit <same-40-hex-sha> -BuildManifestSha256 <64-lowercase-hex> `
+    -ClipId tiny_dual_iso -FixtureSha256 <the FIXTURE_SHA256= step (i) printed> `
+    -OutFile <staging-dir>\<jobId>.job.ps1
+
+# (iv) submit the attribution job the same way, again with -AgentShare explicit.
+pwsh -NoProfile -File tools\profiling\um-run.ps1 `
+    -ScriptPath <staging-dir>\<jobId>.job.ps1 -JobId <jobId> -AgentShare \\bachelor\mlv-agent
+```
+
+- **-ClipPath is OPTIONAL for a fixture id (ATTR3-FIXTURE-STAGE-1).** Omitted, the generator
+  derives it as the agent cache path for `-ClipId`; supplied, it must still resolve into the agent
+  cache with `BaseName -ceq $ClipId`, unchanged from the owner-clip case. `-FixtureSha256` is
+  MANDATORY for a fixture id and REFUSED for an owner clip id: the emitted job hashes the cached
+  clip before it is ever opened and fails closed at `FIXTURE_CONTENT_MISMATCH` (exit 17) on a
+  mismatch -- a cache file name proves nothing about its bytes.
+- **Unchanged for a fixture run.** `-BuildManifestSha256` still authenticates the staged manifest;
+  the eligibility gate still exits 15 unless `cuda_backend_available=1` and `r16_available=1`.
 - **What it establishes.** That staging, backend load, the eligibility gate, PresentMon capture and
   artifact publication all work on the measurement host, against the exact package under test.
 - **What it does NOT establish.** Anything about performance. Both fixtures are small dual-ISO files;

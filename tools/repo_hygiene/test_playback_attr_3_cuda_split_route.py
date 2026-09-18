@@ -467,6 +467,32 @@ class AttributionJobFixtureRehearsalTests(unittest.TestCase):
             "if ($clipPath -notmatch '^[A-Za-z]:\\\\[A-Za-z0-9 _.\\\\-]+$')", self.text
         )
 
+    def test_consent_receipt_is_never_cited_for_a_fixture_run(self) -> None:
+        # Was queue card ATTR3-CONSENT-RECEIPT-TEST-1: pinned so a revert to the unconditional
+        # form (consentReceipt = $ConsentReceiptFileName, cited for a fixture run too) goes red.
+        self.assertIn(
+            "consentReceipt = $(if ($FixtureRehearsal) { $null } else { $ConsentReceiptFileName })",
+            self.text,
+        )
+
+    def test_clippath_is_optional_for_a_fixture_id_and_fixture_sha_gates_it(self) -> None:
+        # ATTR3-FIXTURE-STAGE-1.
+        self.assertIn("[Parameter(Mandatory = $false)]", self.text)
+        self.assertIn("[string]$FixtureSha256 = ''", self.text)
+        self.assertIn("PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED", self.text)
+        self.assertIn("PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED", self.text)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REQUIRED", self.text)
+
+    def test_fixture_content_is_authenticated_before_the_package_is_deployed(self) -> None:
+        # ATTR3-FIXTURE-STAGE-1: a cache file name proves nothing about its bytes.
+        self.assertIn("RESULT=FIXTURE_CONTENT_MISMATCH", self.text)
+        self.assertIn("exit 17", self.text)
+        mismatch = self.text.index("RESULT=FIXTURE_CONTENT_MISMATCH")
+        deploy = self.text.index(
+            "Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)"
+        )
+        self.assertLess(mismatch, deploy, "the fixture content gate must run before deployment")
+
     def test_build_manifest_authentication_smoke_log_selection_and_eligibility_gate_are_unchanged(
         self,
     ) -> None:
