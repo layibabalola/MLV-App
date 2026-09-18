@@ -6861,10 +6861,12 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         self.module = _load_hook_module()
         self.tmp = tempfile.mkdtemp(prefix="mlv-na4c-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.board = os.path.join(self.tmp, "board")
-        self.cache = os.path.join(self.tmp, "cache")
-        os.makedirs(self.board)
-        os.makedirs(self.cache)
+        # ROUND 4: SYNTHETIC drive-letter roots, never the temp dir.  Exception (3) admits only a
+        # literal, canonical, drive-letter absolute token, and a temp dir is neither portable
+        # (/tmp on the ubuntu leg) nor literal (an 8.3 `~` short name on this board).  NA-4
+        # decides on strings alone, so nothing here has to exist.
+        self.board = "C:/synthetic-board"
+        self.cache = "C:/synthetic-board/cache"
         self.part0 = os.path.join(self.cache, "mirror", "consented", "clip-a.part0")
         self.part1 = os.path.join(self.cache, "mirror", "consented", "clip-a.part1")
         self.unconsented = os.path.join(self.cache, "mirror", "unconsented", "clip-z.part0")
@@ -6979,6 +6981,33 @@ class OwnerConsentedFootageTests(unittest.TestCase):
                 self.assertEqual(self.module.norm(token), self.module.norm(resolved))
                 self.assertNa4Deny(self._decide(token, consent=table))
 
+    def test_exception_3_is_an_allowlist_of_literal_canonical_tokens(self):
+        # ROUND 4 (sol MAJOR C-final).  Round 3 DENIED three named spellings, a denylist: sol got
+        # an ALLOW from a Bash `$NAME` followed by `..`, and from a leading `~/../`, because
+        # `norm` collapses the `..` and lands on the consented hash while a child shell resolves
+        # something else.  Now a token is admitted only when its RAW form is already the literal
+        # canonical path, and every spelling below goes through `_decide` against a table under
+        # which its norm IS consented -- so each row was an ALLOW before the fix.
+        self.assertAllow(self._decide(self.part0))  # the literal consented path
+        self.assertAllow(self._decide(self.part0.upper().replace("\\", "/")))  # case/separators
+        consented = self.module.norm(self.part0)
+        for token in (
+            "C:/synthetic-board/cache/mirror/consented/$MLV_BOARD_ROOT/../clip-a.part0",
+            "~/../C:/synthetic-board/cache/mirror/consented/clip-a.part0",
+            "C:/synthetic-board/cache/mirror/elsewhere/../consented/clip-a.part0",
+            "C:/synthetic-board/cache/mirror/./consented/clip-a.part0",
+        ):
+            with self.subTest(token=token):
+                self.assertEqual(self.module.norm(token), consented)
+                self.assertNa4Deny(self._decide(token))
+        for token in (
+            "C:/synthetic-board/cache/mirror/consented/clip-a`.part0",
+            "C:/synthetic-board/cache/mirror/consented/%SYNTHETIC_NAME%/../clip-a.part0",
+            "C:/synthetic-board/cache/mirror/consented/%MLV_BOARD_ROOT%/../clip-a.part0",
+        ):
+            with self.subTest(token=token):
+                self.assertNa4Deny(self._decide(token))
+
     # ------------------------------------------------------------- values pinned (A)
 
     def test_the_whole_frozen_table_is_value_pinned(self):
@@ -7020,6 +7049,8 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             "(4) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the\n"
             "# cache",
             "NA4-CLIP-NAME-TRIM-1",
+            "(5) Exceptions (1) and (2) still compare the EXPANDED token,",
+            "NA4-EXC12-LITERAL-TOKENS-1",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, source)
@@ -7120,6 +7151,20 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         self.assertIn("tools/gates/verify_consented_footage.py", act)
         self.assertIn("agent-reviewed and CI-test-pinned", act)
         self.assertIn("NOT yet wired", act)
+        # Round 4 (fable minor 2): the register's disclosures are pinned, not only the hook's.
+        for needle in (
+            "value-pinned (the tests pin a sha256 of the whole canonical table plus each id's part"
+            " count)",
+            "a board-rooted actor can still edit the table transiently",
+            "clip detection does not strip trailing dots or spaces from a clip name outside the"
+            " cache (follow-up card NA4-CLIP-NAME-TRIM-1)",
+            "until then the CUDA job generator refuses every owner-clip id",
+            "exceptions (1) and (2) still compare the expanded token",
+            "NA4-EXC12-LITERAL-TOKENS-1",
+            "exception (3) admits only a literal canonical token",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, act)
         self.assertNotIn("fork/master", act)
         for purpose in self.module.OWNER_CONSENTED_FOOTAGE["purposes"]:
             self.assertIn(purpose, act)

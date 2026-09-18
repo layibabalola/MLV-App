@@ -3326,6 +3326,9 @@ FIXTURE_TAIL = "tests/fixtures/clips"
 # (4) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the
 # cache, so such a spelling is not detected as a clip; this predates the card, and a follow-up
 # card (NA4-CLIP-NAME-TRIM-1) fixes it.
+# (5) Exceptions (1) and (2) still compare the EXPANDED token, so a hook-read variable a child
+# shell reassigns can open a different target; this predates the card, and follow-up card
+# NA4-EXC12-LITERAL-TOKENS-1 gives them exception (3)'s literal-token rule.
 OWNER_CONSENTED_FOOTAGE = types.MappingProxyType(
     {
         # clip id -> ((length, content sha256, path_norm_sha256), ...) in part order.
@@ -3465,6 +3468,29 @@ def is_owner_consented_path(path_norm, consent=None):
     return digest in _consented_path_norm_hashes(consent)
 
 
+_LITERAL_DRIVE_RX = re.compile(r"\A[A-Za-z]:[\\/]")
+_NOT_LITERAL_CHARS = frozenset("$%~`")
+
+
+def is_literal_canonical_token(token):
+    """Exception (3)'s ALLOWLIST on the RAW token.  Round 3's denylist is gone.
+
+    The raw token, with the same quote stripping ``norm`` applies, must be a drive-letter
+    absolute path, contain none of ``$``, ``%``, ``~`` or a backtick, carry no ``.`` or ``..`` segment,
+    and already BE its canonical form: ``norm(raw)`` may differ from it only by the lowercasing
+    and backslash-to-slash folding ``norm`` applies.  The last test alone subsumes the segment
+    test, a doubled separator and a trailing slash; the explicit ones state the rule.  So no
+    reference any shell expands, and no ``..`` a collapse could hide one behind, reaches the
+    hash, and the hashed text is the text the child opens.
+    """
+    raw = str(token).strip().strip('"').strip("'")
+    if not _LITERAL_DRIVE_RX.match(raw) or _NOT_LITERAL_CHARS.intersection(raw):
+        return False
+    if any(segment in (".", "..") for segment in re.split(r"[\\/]", raw)):
+        return False
+    return raw.replace("\\", "/").lower() == norm(raw)
+
+
 def authorized_clip(ctx):
     """The ONE canonical absolute path from the lane prompt, or None."""
     if not ctx.lane_prompt:
@@ -3498,10 +3524,10 @@ def rule_na4(ctx):
             continue  # tracked fixtures are always allowed
         if allowed is not None and path_norm == allowed:
             continue
-        # Exception (3) admits LITERAL tokens only, checked on the RAW token before `norm`
-        # expands it: a known reference is resolved with THIS hook's value, and a child shell
-        # may reassign it at process scope, so the hash and the opened target could differ.
-        if not _ENV_REF_RX.search(str(token)) and is_owner_consented_path(path_norm):
+        # Exception (3) admits LITERAL CANONICAL tokens only -- an allowlist on the RAW token
+        # (`is_literal_canonical_token`): anything a shell could expand, or a `..` that `norm`
+        # would collapse, could make the admitted hash and the opened target differ.
+        if is_literal_canonical_token(token) and is_owner_consented_path(path_norm):
             continue  # owner-consented footage: its norm hash is in the frozen table
         if allowed is None:
             raise Deny(
