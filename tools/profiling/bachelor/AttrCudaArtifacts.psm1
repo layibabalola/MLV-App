@@ -457,6 +457,75 @@ function Publish-AttrCudaFileMove {
     return $slot
 }
 
+function Assert-AttrCudaNonOverwritingFileSlot {
+    <#
+    .SYNOPSIS
+    Prove a publish destination's PARENT is safe to write into, without touching whatever (if
+    anything) already occupies the destination itself.
+    .DESCRIPTION
+    ATTR3-FIXTURE-STAGE-1 (sol, PR #139 r1 MAJOR). Assert-AttrCudaWritableFileSlot removes a
+    plain file already occupying the slot so its caller's subsequent -Force write always
+    succeeds -- exactly the race a non-overwriting publish must not have: a different-bytes
+    file that a concurrent publisher placed at the destination, deleted out from under it and
+    replaced. This checks only what Assert-AttrCudaWritableFileSlot checks about the PARENT
+    (must exist, must not itself be a reparse point) and leaves the destination path alone.
+    Whether the destination is occupied is never decided here -- Publish-AttrCudaFileMove-
+    NonOverwriting's [System.IO.File]::Move(..., $false) is the sole, atomic arbiter of that.
+    Throws ATTRCUDA_SLOT_PARENT_MISSING or ATTRCUDA_SLOT_PARENT_IS_LINK; returns the full path
+    otherwise.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $parent = Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($full)) -Force -ErrorAction SilentlyContinue
+    if ($null -eq $parent -or -not $parent.PSIsContainer) {
+        throw "ATTRCUDA_SLOT_PARENT_MISSING $full"
+    }
+    if (($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "ATTRCUDA_SLOT_PARENT_IS_LINK $($parent.FullName)"
+    }
+    $full
+}
+
+function Publish-AttrCudaFileMoveNonOverwriting {
+    <#
+    .SYNOPSIS
+    Atomically rename a file into a destination outside the job-owned work tree WITHOUT ever
+    overwriting or deleting a same-named file already there.
+    .DESCRIPTION
+    ATTR3-FIXTURE-STAGE-1 (sol, PR #139 r1 MAJOR), narrowly scoped to the fixture stager --
+    Publish-AttrCudaFileMove's slot check deletes ANY plain file occupying the destination and
+    then moves with -Force, so a different-bytes cache file that arrives between the fixture
+    job's own initial existence check and this call is silently removed and replaced. That
+    race is closed here, not in the shared helper: the package stager (playback-attr-3-cuda-
+    stage-job.ps1) still calls Publish-AttrCudaFileMove and still has it, tracked separately.
+    The parent is checked exactly like Assert-AttrCudaWritableFileSlot (must exist, must not be
+    a link), but the destination slot itself is never inspected or removed first. .NET's
+    [System.IO.File]::Move($Source, $Destination, $false) is the sole arbiter of "is it
+    occupied" -- overwrite=$false is atomic on NTFS, so there is no check-then-act window for a
+    concurrent writer to land in between the check and the rename.
+    On IOException the destination already exists; nothing has been moved, deleted or written
+    -- the caller re-hashes the destination (identical bytes: a concurrent publisher already
+    finished this exact fixture; different bytes: fail closed) instead of this helper silently
+    reporting success either way.
+    Throws ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS when the destination is occupied.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $slot = Assert-AttrCudaNonOverwritingFileSlot -Path $Destination
+    try {
+        [IO.File]::Move($Source, $slot, $false)
+    } catch [IO.IOException] {
+        throw "ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS $slot already exists: $($_.Exception.Message)"
+    }
+    return $slot
+}
+
 function New-AttrCudaDirectory {
     <#
     .SYNOPSIS
@@ -797,9 +866,11 @@ Export-ModuleMember -Function `
     Assert-AttrCudaBuildManifest, `
     Assert-AttrCudaFixtureCommittedBytes, `
     Assert-AttrCudaWritableFileSlot, `
+    Assert-AttrCudaNonOverwritingFileSlot, `
     Publish-AttrCudaText, `
     Publish-AttrCudaFileCopy, `
     Publish-AttrCudaFileMove, `
+    Publish-AttrCudaFileMoveNonOverwriting, `
     New-AttrCudaDirectory, `
     Remove-AttrCudaPartialFile, `
     Assert-AttrCudaNoLinkBelowRoot, `

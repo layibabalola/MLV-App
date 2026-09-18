@@ -118,6 +118,29 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
     exit $Code
 }
 
+# ATTR3-FIXTURE-STAGE-1 (sol, PR #139 r1 MINOR): the one exit for "the cache already holds
+# these exact bytes", whether that was discovered by the pre-flight check or by losing the
+# publish race to a concurrent identical-bytes publisher (see the Publish-AttrCudaFileMove-
+# NonOverwriting catch below). Both must still remove the inbox copy through the guarded
+# remover, and both must fail closed rather than record a cleanup failure as success.
+function Complete-AlreadyStaged([string]$CachePathValue) {
+    $inboxRemoved = Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $side
+    if (-not $inboxRemoved) {
+        $StepLog['inboxCleanup'] = 1
+        Complete-Failed 22 'inboxCleanup' "could not remove staged inbox copy: $FixtureName"
+    }
+    $StepLog['inboxCleanup'] = 0
+    $StepLog['publish'] = 0
+    [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value (([ordered]@{
+        schema = 'mlvapp.attr3-stage-fixture.v1'; jobId = $JobId; clipStem = $ClipStem
+        fixtureRehearsal = $true; exitCode = 0; alreadyStaged = $true
+        fixture = [ordered]@{ name = $FixtureName; sha256 = $FixtureSha256; cachePath = $CachePathValue }
+        stagedOnHost = $env:COMPUTERNAME; steps = $StepLog
+    }) | ConvertTo-Json -Depth 10))
+    Write-Output "RESULT=FIXTURE_STAGE_OK ALREADY=1 FIXTURE=$FixtureName CACHE=$CachePathValue"
+    exit 0
+}
+
 function Assert-UnderAgentRoot([string]$Path, [string]$Label) {
     $full = [IO.Path]::GetFullPath($Path)
     $root = [IO.Path]::GetFullPath($AgentRoot)
@@ -181,15 +204,7 @@ $env:TMP = $Scratch
 # Already staged with identical bytes: nothing to do, and re-staging must not churn the cache.
 if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
     if ((Get-ShaLower $cachePath) -eq $FixtureSha256) {
-        $StepLog['publish'] = 0
-        [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value (([ordered]@{
-            schema = 'mlvapp.attr3-stage-fixture.v1'; jobId = $JobId; clipStem = $ClipStem
-            fixtureRehearsal = $true; exitCode = 0; alreadyStaged = $true
-            fixture = [ordered]@{ name = $FixtureName; sha256 = $FixtureSha256; cachePath = $cachePath }
-            stagedOnHost = $env:COMPUTERNAME; steps = $StepLog
-        }) | ConvertTo-Json -Depth 10))
-        Write-Output "RESULT=FIXTURE_STAGE_OK ALREADY=1 FIXTURE=$FixtureName CACHE=$cachePath"
-        exit 0
+        Complete-AlreadyStaged -CachePathValue $cachePath
     }
     Complete-Failed 21 'publishRename' "cache already holds $FixtureName with DIFFERENT bytes"
 }
@@ -204,16 +219,30 @@ try {
 $StepLog['publishPartial'] = 0
 
 try {
-    [void](Publish-AttrCudaFileMove -Source $partialPath -Destination $cachePath)
+    [void](Publish-AttrCudaFileMoveNonOverwriting -Source $partialPath -Destination $cachePath)
 } catch {
+    # sol, PR #139 r1 MAJOR: a plain Move-Item -Force here would delete and replace whatever a
+    # concurrent publisher had just placed at $cachePath. The non-overwriting move above never
+    # touches an occupied destination -- it either renamed cleanly or the destination is exactly
+    # as some other writer left it. Re-hash it to tell "a concurrent publisher already finished
+    # this exact fixture" (this run's job is simply done) from "something else is there" (fail
+    # closed at the same exit code the pre-flight check uses for that).
     [void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $partialPath)
+    if ((Test-Path -LiteralPath $cachePath -PathType Leaf) -and (Get-ShaLower $cachePath) -eq $FixtureSha256) {
+        Complete-AlreadyStaged -CachePathValue $cachePath
+    }
     Complete-Failed 21 'publishRename' $_.Exception.Message
 }
 $StepLog['publishRename'] = 0
 
 # The inbox copy is removed only after the cache publish is complete, so an interrupted run leaves
-# the inbox intact and is simply re-runnable.
-[void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $side)
+# the inbox intact and is simply re-runnable. sol, PR #139 r1 MINOR: the remover's boolean result
+# used to be discarded here, so a refused cleanup was still recorded as inboxCleanup=0/success.
+$inboxRemoved = Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $side
+if (-not $inboxRemoved) {
+    $StepLog['inboxCleanup'] = 1
+    Complete-Failed 22 'inboxCleanup' "could not remove staged inbox copy: $FixtureName"
+}
 $StepLog['inboxCleanup'] = 0
 
 try { [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value (([ordered]@{
@@ -231,9 +260,10 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Assert-AttrCudaDirectChild',
     'Assert-AttrCudaNoLinkBelowRoot',
     'Assert-AttrCudaWritableFileSlot',
+    'Assert-AttrCudaNonOverwritingFileSlot',
     'Publish-AttrCudaText',
     'Publish-AttrCudaFileCopy',
-    'Publish-AttrCudaFileMove',
+    'Publish-AttrCudaFileMoveNonOverwriting',
     'New-AttrCudaDirectory',
     'Remove-AttrCudaPartialFile',
     'Remove-AttrCudaTree'

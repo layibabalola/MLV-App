@@ -1237,6 +1237,100 @@ class LinkSafeCleanupTests(_PwshCase):
 
 
 # --------------------------------------------------------------------------------------------
+# (g) ATTR3-FIXTURE-STAGE-1 (sol, PR #139 r1 MAJOR): the final cache publish must be a truly
+#     non-overwriting rename. These call the module functions directly -- both the OLD helper
+#     the fixture job used to call and the NEW one it calls now -- against the exact race sol
+#     described: a different-bytes file lands at the destination AFTER the job's own absence
+#     check has already passed and BEFORE the rename runs.
+# --------------------------------------------------------------------------------------------
+
+
+@requires_pwsh
+class NonOverwritingPublishRaceTests(_PwshCase):
+    """RED: the old helper overwrites a raced destination. GREEN: the new one never does."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.source = self.tmp / "fixture.partial"
+        self.source.write_bytes(b"this run's own bytes")
+        self.destination = self.tmp / "fixture.bin"
+
+    def test_RED_the_old_helper_deletes_and_overwrites_a_destination_that_raced_in(self) -> None:
+        # Publish-AttrCudaFileMove is still exactly what it was: still used, unchanged, by
+        # playback-attr-3-cuda-stage-job.ps1 (the package stager) -- ATTR3-SCANNER's own r7
+        # note that a hostile SHAPE can't be caught by static lint applies just as much to a
+        # RACE, which no lint of any kind can see. This is the vulnerability sol reported,
+        # reproduced directly against the helper the fixture job used to call.
+        self.destination.write_bytes(b"a concurrent publisher's DIFFERENT bytes")
+        proc = self.run_with_module(
+            f"Write-Output ('MOVED=' + (Publish-AttrCudaFileMove -Source '{self.source}' "
+            f"-Destination '{self.destination}'))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("MOVED=", proc.stdout)
+        self.assertEqual(
+            self.destination.read_bytes(),
+            b"this run's own bytes",
+            "RED: the old helper silently deleted the raced-in file and overwrote it",
+        )
+
+    def test_GREEN_the_new_helper_refuses_a_destination_that_raced_in_with_different_bytes(self) -> None:
+        self.destination.write_bytes(b"a concurrent publisher's DIFFERENT bytes")
+        proc = self.run_with_module(
+            _guard(f"Publish-AttrCudaFileMoveNonOverwriting -Source '{self.source}' "
+                   f"-Destination '{self.destination}'")
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assert_throws(proc, "ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS")
+        self.assertEqual(
+            self.destination.read_bytes(),
+            b"a concurrent publisher's DIFFERENT bytes",
+            "the raced-in file must survive completely untouched",
+        )
+        self.assertTrue(self.source.exists(), "a refused move must leave the source in place")
+
+    def test_GREEN_the_new_helper_refuses_a_destination_that_raced_in_with_identical_bytes(self) -> None:
+        # Even identical bytes are never silently accepted as "the same move" by the helper
+        # itself -- it throws either way. Distinguishing "someone already finished this exact
+        # fixture" from "something else is there" is the CALLER's job (attr3-stage-fixture-
+        # job.ps1 re-hashes on catch), never this helper's.
+        self.destination.write_bytes(b"this run's own bytes")
+        proc = self.run_with_module(
+            _guard(f"Publish-AttrCudaFileMoveNonOverwriting -Source '{self.source}' "
+                   f"-Destination '{self.destination}'")
+        )
+        self.assert_throws(proc, "ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS")
+        self.assertEqual(self.destination.read_bytes(), b"this run's own bytes")
+
+    def test_a_missing_destination_is_still_moved_cleanly(self) -> None:
+        proc = self.run_with_module(
+            f"Publish-AttrCudaFileMoveNonOverwriting -Source '{self.source}' "
+            f"-Destination '{self.destination}' | Out-Null\n"
+            "Write-Output 'ok'\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ok", proc.stdout)
+        self.assertFalse(self.source.exists())
+        self.assertEqual(self.destination.read_bytes(), b"this run's own bytes")
+
+    def test_a_linked_parent_is_refused_without_ever_calling_move(self) -> None:
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        cache = self.tmp / "cache"
+        proc = self.run_with_module(
+            f"New-Item -ItemType Junction -Path '{cache}' -Target '{outside}' | Out-Null\n"
+        )
+        if proc.returncode != 0 or not cache.exists():
+            self.skipTest(f"cannot create a junction here: {proc.stderr}")
+        target = cache / "fixture.bin"
+        proc = self.run_with_module(
+            _guard(f"Publish-AttrCudaFileMoveNonOverwriting -Source '{self.source}' -Destination '{target}'")
+        )
+        self.assert_throws(proc, "ATTRCUDA_SLOT_PARENT_IS_LINK")
+        self.assertEqual(list(outside.iterdir()), [], "nothing may be written through the link")
+
+
+# --------------------------------------------------------------------------------------------
 # regression tripwire: known-dangerous shapes in the emitted templates (not a soundness proof)
 # --------------------------------------------------------------------------------------------
 

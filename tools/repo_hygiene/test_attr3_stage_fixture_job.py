@@ -156,6 +156,64 @@ class StageFixtureJobTests(unittest.TestCase):
         self.assertEqual(run.returncode, 21, run.stdout + run.stderr)
         self.assertEqual((self.cache / self.clip.name).read_bytes(), b"someone else staged this")
 
+    # ---- ATTR3-FIXTURE-STAGE-1 (sol, PR #139 r1 MINOR): inbox cleanup -----------------------
+
+    def test_already_staged_branch_also_removes_the_inbox_copy(self) -> None:
+        proc = self.generate()
+        job = self.job_path(proc)
+        self.drop_side_file()
+        first = self.run_job(job)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.drop_side_file()
+        self.assertEqual(sorted(p.name for p in self.inbox.iterdir()), [self.clip.name])
+        second = self.run_job(job)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("ALREADY=1", second.stdout)
+        self.assertEqual(
+            sorted(p.name for p in self.inbox.iterdir()),
+            [],
+            "the already-staged branch left its inbox copy behind",
+        )
+
+    def _make_junction(self, link: Path, target: Path) -> bool:
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType Junction -Path '{link}' -Target '{target}' | Out-Null"],
+            capture_output=True, text=True,
+        )
+        return proc.returncode == 0 and link.exists()
+
+    def test_a_refused_inbox_cleanup_fails_closed_after_a_successful_publish(self) -> None:
+        # sol, PR #139 r1 MINOR: the normal path used to discard Remove-AttrCudaPartialFile's
+        # boolean result and record inboxCleanup=0 (success) even when it was refused. Route
+        # the inbox through a junction: the guarded remover's own ancestor-chain check refuses
+        # to touch anything reached through a reparse point and returns $false -- a real refusal
+        # of the exact kind Remove-AttrCudaPartialFile is documented to report, not a crash.
+        self.inbox.rmdir()
+        outside = self.tmp / "outside-inbox"
+        outside.mkdir()
+        if not self._make_junction(self.inbox, outside):
+            self.skipTest("cannot create a junction here")
+        proc = self.generate()
+        job = self.job_path(proc)
+        shutil.copy2(self.clip, self.inbox / self.clip.name)
+
+        run = self.run_job(job)
+
+        self.assertEqual(run.returncode, 22, run.stdout + run.stderr)
+        self.assertIn("STEP=inboxCleanup", run.stdout)
+        # The cache publish itself must have already succeeded -- only cleanup failed closed.
+        staged = self.cache / self.clip.name
+        self.assertTrue(staged.is_file())
+        self.assertEqual(
+            hashlib.sha256(staged.read_bytes()).hexdigest(),
+            hashlib.sha256(self.clip.read_bytes()).hexdigest(),
+        )
+        self.assertTrue(
+            (outside / self.clip.name).is_file(),
+            "a refused cleanup must leave the file exactly where it was",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -557,6 +557,42 @@ class RunbookTests(unittest.TestCase):
         self.assertIn("result.json", lowered)
         self.assertIn("toolchain probe receipt", lowered)
 
+    def _fixture_rehearsal_section(self) -> str:
+        # sol, PR #139: section 4b must run exactly as printed in a workspace whose path
+        # contains spaces -- quoted path placeholders and two DISTINCT job ids.
+        start = self.text.index("## 4b. Fixture rehearsal")
+        end = self.text.index("\n## ", start + 1)
+        return self.text[start:end]
+
+    def test_fixture_rehearsal_job_ids_are_distinct(self) -> None:
+        section = self._fixture_rehearsal_section()
+        self.assertIn("<stageJobId>", section)
+        self.assertIn("<attrJobId>", section)
+        # The old ambiguous placeholder must not survive: a reader copying <jobId> into both
+        # submissions hits UMRUN_JOBID_IN_USE on the second one.
+        self.assertNotIn("<jobId>", section)
+        code_lines = [
+            line
+            for line in section.splitlines()
+            if not line.strip().startswith("#")
+        ]
+        job_id_args = re.findall(r"-JobId (\S+)", "\n".join(code_lines))
+        self.assertEqual(len(job_id_args), 2, "expected exactly two -JobId submissions in 4b")
+        self.assertNotEqual(
+            job_id_args[0], job_id_args[1], "the two -JobId values in 4b must differ"
+        )
+
+    def test_fixture_rehearsal_path_placeholders_are_quoted(self) -> None:
+        section = self._fixture_rehearsal_section()
+        for flag in ("-FixturePath", "-OutDir", "-ScriptPath", "-SideFile", "-OutFile"):
+            with self.subTest(flag=flag):
+                self.assertIn(
+                    f'{flag} "',
+                    section,
+                    f"{flag}'s path argument is not double-quoted in runbook 4b, so a "
+                    "workspace path containing spaces breaks argument parsing",
+                )
+
     def test_says_the_old_route_is_retired(self) -> None:
         self.assertIn("retired and refuses to emit", self.text.lower())
 

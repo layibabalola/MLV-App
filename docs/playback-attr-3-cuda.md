@@ -215,26 +215,32 @@ naming a cache path on the command line. Four steps:
 ```powershell
 # (i) emit the job that moves the fixture from the inbox into the cache through the guarded
 #     route (tools/profiling/bachelor/attr3-stage-fixture-job.ps1). Note its own printed
-#     RESULT=... FIXTURE_SHA256=<hex> line -- step (iii) needs it.
-pwsh -NoProfile -File tools\profiling\bachelor\attr3-stage-fixture-job.ps1 `
-    -ClipStem tiny_dual_iso -FixturePath <repo>\tests\fixtures\clips\<name> -OutDir <staging-dir>
+#     RESULT=... FIXTURE_SHA256=<hex> JOB=<path> line -- steps (ii) and (iii) need it: the
+#     staging job id is the JOB= file's basename with ".job.ps1" removed.
+pwsh -NoProfile -File "tools\profiling\bachelor\attr3-stage-fixture-job.ps1" `
+    -ClipStem tiny_dual_iso -FixturePath "<repo>\tests\fixtures\clips\<name>" -OutDir "<staging-dir>"
 
 # (ii) submit the stage job, with the tracked fixture as its side-file. -AgentShare is
-#     MANDATORY: um-run.ps1 defaults to the Ultra-Magnus share, not Bachelor's.
-pwsh -NoProfile -File tools\profiling\um-run.ps1 `
-    -ScriptPath <staging-dir>\<jobId>.job.ps1 -SideFile <repo>\tests\fixtures\clips\<name> `
-    -JobId <jobId> -AgentShare \\bachelor\mlv-agent
+#     MANDATORY: um-run.ps1 defaults to the Ultra-Magnus share, not Bachelor's. -JobId is
+#     <stageJobId> from step (i) -- DISTINCT from step (iv)'s <attrJobId> below; reusing one
+#     id for both submissions is rejected with UMRUN_JOBID_IN_USE.
+pwsh -NoProfile -File "tools\profiling\um-run.ps1" `
+    -ScriptPath "<staging-dir>\<stageJobId>.job.ps1" -SideFile "<repo>\tests\fixtures\clips\<name>" `
+    -JobId <stageJobId> -AgentShare \\bachelor\mlv-agent
 
 # (iii) generate the attribution job for the fixture id, WITHOUT -ClipPath: the generator
-#     derives the cache path itself and bakes in the hash step (i) printed.
-pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
+#     derives the cache path itself and bakes in the hash step (i) printed. Choose an
+#     <attrJobId> DIFFERENT from <stageJobId> and name -OutFile after it: that file's basename
+#     is the attribution job id step (iv) submits with.
+pwsh -NoProfile -File "tools\profiling\bachelor\playback-attr-3-cuda-job.ps1" `
     -SourceCommit <same-40-hex-sha> -BuildManifestSha256 <64-lowercase-hex> `
     -ClipId tiny_dual_iso -FixtureSha256 <the FIXTURE_SHA256= step (i) printed> `
-    -OutFile <staging-dir>\<jobId>.job.ps1
+    -OutFile "<staging-dir>\<attrJobId>.job.ps1"
 
-# (iv) submit the attribution job the same way, again with -AgentShare explicit.
-pwsh -NoProfile -File tools\profiling\um-run.ps1 `
-    -ScriptPath <staging-dir>\<jobId>.job.ps1 -JobId <jobId> -AgentShare \\bachelor\mlv-agent
+# (iv) submit the attribution job the same way, again with -AgentShare explicit and its own
+#     <attrJobId> from step (iii)'s -OutFile basename.
+pwsh -NoProfile -File "tools\profiling\um-run.ps1" `
+    -ScriptPath "<staging-dir>\<attrJobId>.job.ps1" -JobId <attrJobId> -AgentShare \\bachelor\mlv-agent
 ```
 
 - **-ClipPath is OPTIONAL for a fixture id (ATTR3-FIXTURE-STAGE-1).** Omitted, the generator
