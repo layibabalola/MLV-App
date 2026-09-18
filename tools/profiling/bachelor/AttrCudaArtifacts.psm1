@@ -318,6 +318,61 @@ function Assert-AttrCudaBuildManifest {
     $manifest
 }
 
+function Assert-AttrCudaFixtureCommittedBytes {
+    <#
+    .SYNOPSIS
+    Refuse a working-tree fixture whose bytes are not exactly what HEAD has for it.
+    .DESCRIPTION
+    ATTR3-FIXTURE-STAGE-1. A fixture is admissible because it is a TRACKED repository fixture
+    (Test-UmRunTrackedFixtureSource, tools/profiling/UmRunDrop.psm1) -- but "tracked" says
+    nothing about whether the WORKING-TREE bytes at that path are still the committed ones. A
+    dirty or corrupted working copy would otherwise bake a sha256 into the staging job that
+    no reviewed commit ever produced. This compares `git hash-object` of the file on disk
+    to `git rev-parse HEAD:<repo-relative path>`, run in whichever repository actually contains
+    the file (found from the file's own directory via `git rev-parse --show-toplevel`, never
+    assumed to be this module's own checkout), so a throwaway test repository is verified the
+    same way the real one is.
+    Throws with a distinguishable ATTR3_FIXTURE_* token; returns the verified (matching) hash.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "ATTR3_FIXTURE_MISSING $Path"
+    }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw "ATTR3_FIXTURE_GIT_UNAVAILABLE git is required to verify $Path against its committed blob"
+    }
+    $full = [IO.Path]::GetFullPath($Path)
+    $dir = [IO.Path]::GetDirectoryName($full)
+    $repoRoot = (& git -C $dir rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repoRoot)) {
+        throw "ATTR3_FIXTURE_NOT_IN_A_REPO $full is not inside a git working tree"
+    }
+    $repoRoot = ($repoRoot.Trim()) -replace '/', '\'
+    if (-not $full.StartsWith($repoRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "ATTR3_FIXTURE_NOT_IN_A_REPO $full does not resolve under its own repository root $repoRoot"
+    }
+    $relative = ($full.Substring($repoRoot.Length + 1)) -replace '\\', '/'
+    $workingHash = (& git -C $repoRoot hash-object -- $relative 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($workingHash)) {
+        throw "ATTR3_FIXTURE_GIT_UNAVAILABLE could not hash-object $relative in $repoRoot"
+    }
+    $workingHash = $workingHash.Trim().ToLowerInvariant()
+    $committedHash = (& git -C $repoRoot rev-parse "HEAD:$relative" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($committedHash)) {
+        throw "ATTR3_FIXTURE_NOT_COMMITTED HEAD:$relative could not be resolved in $repoRoot"
+    }
+    $committedHash = $committedHash.Trim().ToLowerInvariant()
+    if ($workingHash -ne $committedHash) {
+        throw "ATTR3_FIXTURE_WORKING_TREE_DIRTY $relative working-tree blob $workingHash differs from the committed blob $committedHash"
+    }
+    $workingHash
+}
+
 function Assert-AttrCudaWritableFileSlot {
     <#
     .SYNOPSIS
@@ -399,6 +454,75 @@ function Publish-AttrCudaFileMove {
 
     $slot = Assert-AttrCudaWritableFileSlot -Path $Destination
     Move-Item -LiteralPath $Source -Destination $slot -Force
+    return $slot
+}
+
+function Assert-AttrCudaNonOverwritingFileSlot {
+    <#
+    .SYNOPSIS
+    Prove a publish destination's PARENT is safe to write into, without touching whatever (if
+    anything) already occupies the destination itself.
+    .DESCRIPTION
+    ATTR3-FIXTURE-STAGE-1 (sol, PR #139 r1 MAJOR). Assert-AttrCudaWritableFileSlot removes a
+    plain file already occupying the slot so its caller's subsequent -Force write always
+    succeeds -- exactly the race a non-overwriting publish must not have: a different-bytes
+    file that a concurrent publisher placed at the destination, deleted out from under it and
+    replaced. This checks only what Assert-AttrCudaWritableFileSlot checks about the PARENT
+    (must exist, must not itself be a reparse point) and leaves the destination path alone.
+    Whether the destination is occupied is never decided here -- Publish-AttrCudaFileMove-
+    NonOverwriting's [System.IO.File]::Move(..., $false) is the sole, atomic arbiter of that.
+    Throws ATTRCUDA_SLOT_PARENT_MISSING or ATTRCUDA_SLOT_PARENT_IS_LINK; returns the full path
+    otherwise.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $parent = Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($full)) -Force -ErrorAction SilentlyContinue
+    if ($null -eq $parent -or -not $parent.PSIsContainer) {
+        throw "ATTRCUDA_SLOT_PARENT_MISSING $full"
+    }
+    if (($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "ATTRCUDA_SLOT_PARENT_IS_LINK $($parent.FullName)"
+    }
+    $full
+}
+
+function Publish-AttrCudaFileMoveNonOverwriting {
+    <#
+    .SYNOPSIS
+    Atomically rename a file into a destination outside the job-owned work tree WITHOUT ever
+    overwriting or deleting a same-named file already there.
+    .DESCRIPTION
+    ATTR3-FIXTURE-STAGE-1 (sol, PR #139 r1 MAJOR), narrowly scoped to the fixture stager --
+    Publish-AttrCudaFileMove's slot check deletes ANY plain file occupying the destination and
+    then moves with -Force, so a different-bytes cache file that arrives between the fixture
+    job's own initial existence check and this call is silently removed and replaced. That
+    race is closed here, not in the shared helper: the package stager (playback-attr-3-cuda-
+    stage-job.ps1) still calls Publish-AttrCudaFileMove and still has it, tracked separately.
+    The parent is checked exactly like Assert-AttrCudaWritableFileSlot (must exist, must not be
+    a link), but the destination slot itself is never inspected or removed first. .NET's
+    [System.IO.File]::Move($Source, $Destination, $false) is the sole arbiter of "is it
+    occupied" -- overwrite=$false is atomic on NTFS, so there is no check-then-act window for a
+    concurrent writer to land in between the check and the rename.
+    On IOException the destination already exists; nothing has been moved, deleted or written
+    -- the caller re-hashes the destination (identical bytes: a concurrent publisher already
+    finished this exact fixture; different bytes: fail closed) instead of this helper silently
+    reporting success either way.
+    Throws ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS when the destination is occupied.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $slot = Assert-AttrCudaNonOverwritingFileSlot -Path $Destination
+    try {
+        [IO.File]::Move($Source, $slot, $false)
+    } catch [IO.IOException] {
+        throw "ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS $slot already exists: $($_.Exception.Message)"
+    }
     return $slot
 }
 
@@ -740,10 +864,13 @@ Export-ModuleMember -Function `
     Assert-AttrCudaSafeArtifactName, `
     Assert-AttrCudaDirectChild, `
     Assert-AttrCudaBuildManifest, `
+    Assert-AttrCudaFixtureCommittedBytes, `
     Assert-AttrCudaWritableFileSlot, `
+    Assert-AttrCudaNonOverwritingFileSlot, `
     Publish-AttrCudaText, `
     Publish-AttrCudaFileCopy, `
     Publish-AttrCudaFileMove, `
+    Publish-AttrCudaFileMoveNonOverwriting, `
     New-AttrCudaDirectory, `
     Remove-AttrCudaPartialFile, `
     Assert-AttrCudaNoLinkBelowRoot, `

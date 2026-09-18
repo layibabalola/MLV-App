@@ -467,6 +467,32 @@ class AttributionJobFixtureRehearsalTests(unittest.TestCase):
             "if ($clipPath -notmatch '^[A-Za-z]:\\\\[A-Za-z0-9 _.\\\\-]+$')", self.text
         )
 
+    def test_consent_receipt_is_never_cited_for_a_fixture_run(self) -> None:
+        # Was queue card ATTR3-CONSENT-RECEIPT-TEST-1: pinned so a revert to the unconditional
+        # form (consentReceipt = $ConsentReceiptFileName, cited for a fixture run too) goes red.
+        self.assertIn(
+            "consentReceipt = $(if ($FixtureRehearsal) { $null } else { $ConsentReceiptFileName })",
+            self.text,
+        )
+
+    def test_clippath_is_optional_for_a_fixture_id_and_fixture_sha_gates_it(self) -> None:
+        # ATTR3-FIXTURE-STAGE-1.
+        self.assertIn("[Parameter(Mandatory = $false)]", self.text)
+        self.assertIn("[string]$FixtureSha256 = ''", self.text)
+        self.assertIn("PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED", self.text)
+        self.assertIn("PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED", self.text)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REQUIRED", self.text)
+
+    def test_fixture_content_is_authenticated_before_the_package_is_deployed(self) -> None:
+        # ATTR3-FIXTURE-STAGE-1: a cache file name proves nothing about its bytes.
+        self.assertIn("RESULT=FIXTURE_CONTENT_MISMATCH", self.text)
+        self.assertIn("exit 17", self.text)
+        mismatch = self.text.index("RESULT=FIXTURE_CONTENT_MISMATCH")
+        deploy = self.text.index(
+            "Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)"
+        )
+        self.assertLess(mismatch, deploy, "the fixture content gate must run before deployment")
+
     def test_build_manifest_authentication_smoke_log_selection_and_eligibility_gate_are_unchanged(
         self,
     ) -> None:
@@ -497,11 +523,14 @@ class AttributionJobOwnerClipRefusalTests(unittest.TestCase):
         head = subprocess.run(
             ["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True
         ).stdout.strip()
+        # ATTR3-FIXTURE-STAGE-1 made -FixtureSha256 mandatory for a fixture id.
+        fixture_sha = ["-FixtureSha256", "b" * 64] if clip_id in ("tiny_dual_iso", "large_dual_iso") else []
         return subprocess.run(
             [
                 PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(ATTRIBUTION_JOB),
                 "-SourceCommit", head, "-BuildManifestSha256", "0" * 64,
                 "-ClipId", clip_id, "-ClipPath", "C:\\synthetic-cache\\" + clip_id,
+                *fixture_sha,
                 "-OutFile", str(out_file),
             ],
             capture_output=True, text=True,
@@ -580,6 +609,42 @@ class RunbookTests(unittest.TestCase):
         self.assertIn("a precedent script is not a precedent result", lowered)
         self.assertIn("result.json", lowered)
         self.assertIn("toolchain probe receipt", lowered)
+
+    def _fixture_rehearsal_section(self) -> str:
+        # sol, PR #139: section 4b must run exactly as printed in a workspace whose path
+        # contains spaces -- quoted path placeholders and two DISTINCT job ids.
+        start = self.text.index("## 4b. Fixture rehearsal")
+        end = self.text.index("\n## ", start + 1)
+        return self.text[start:end]
+
+    def test_fixture_rehearsal_job_ids_are_distinct(self) -> None:
+        section = self._fixture_rehearsal_section()
+        self.assertIn("<stageJobId>", section)
+        self.assertIn("<attrJobId>", section)
+        # The old ambiguous placeholder must not survive: a reader copying <jobId> into both
+        # submissions hits UMRUN_JOBID_IN_USE on the second one.
+        self.assertNotIn("<jobId>", section)
+        code_lines = [
+            line
+            for line in section.splitlines()
+            if not line.strip().startswith("#")
+        ]
+        job_id_args = re.findall(r"-JobId (\S+)", "\n".join(code_lines))
+        self.assertEqual(len(job_id_args), 2, "expected exactly two -JobId submissions in 4b")
+        self.assertNotEqual(
+            job_id_args[0], job_id_args[1], "the two -JobId values in 4b must differ"
+        )
+
+    def test_fixture_rehearsal_path_placeholders_are_quoted(self) -> None:
+        section = self._fixture_rehearsal_section()
+        for flag in ("-FixturePath", "-OutDir", "-ScriptPath", "-SideFile", "-OutFile"):
+            with self.subTest(flag=flag):
+                self.assertIn(
+                    f'{flag} "',
+                    section,
+                    f"{flag}'s path argument is not double-quoted in runbook 4b, so a "
+                    "workspace path containing spaces breaks argument parsing",
+                )
 
     def test_says_the_old_route_is_retired(self) -> None:
         self.assertIn("retired and refuses to emit", self.text.lower())

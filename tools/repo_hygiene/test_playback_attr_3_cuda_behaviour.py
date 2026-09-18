@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
 STAGE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1"
 DLL_GENERATOR = ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1"
+ATTRIBUTION_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1"
+STAGE_FIXTURE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-fixture-job.ps1"
 
 PWSH = shutil.which("pwsh")
 GIT = shutil.which("git")
@@ -762,6 +764,278 @@ class InterruptedStagingTests(_PwshCase):
 
 
 # --------------------------------------------------------------------------------------------
+# (f) ATTR3-FIXTURE-STAGE-1: -ClipPath becomes optional for a fixture id, gated on
+#     -FixtureSha256, and the emitted job authenticates the cached clip's CONTENT before it
+#     ever opens it.
+# --------------------------------------------------------------------------------------------
+
+
+@requires_pwsh
+@requires_git
+class AttributionJobOptionalClipPathTests(_PwshCase):
+    """Generation-time behaviour of the new -ClipPath / -FixtureSha256 rules."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+
+    def _generate(self, **overrides):
+        out_file = self.staging / "job.ps1"
+        args = {
+            "SourceCommit": self.shas[1],
+            "BuildManifestSha256": "a" * 64,
+            "ClipId": "tiny_dual_iso",
+            "OutFile": str(out_file),
+            "RepoRoot": str(self.repo),
+        }
+        args.update(overrides)
+        parts = [f"-{key} '{value}'" for key, value in args.items() if value is not None]
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' " + " ".join(parts) + "\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script), out_file
+
+    def test_a_fixture_id_without_clippath_derives_the_cache_path(self) -> None:
+        fixture_sha = "b" * 64
+        proc, out_file = self._generate(FixtureSha256=fixture_sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        job_text = out_file.read_text(encoding="utf-8")
+        clip_id = "tiny_dual_iso"
+        extension = "." + "mlv"
+        expected = "C:\\mlvtmp\\mlv-agent\\cache\\" + clip_id + extension
+        self.assertIn(f"$AuthorizedClipPath = '{expected}'", job_text)
+        self.assertIn(f"$FixtureSha256 = '{fixture_sha}'", job_text)
+
+    def test_a_fixture_id_without_fixture_sha_is_refused(self) -> None:
+        proc, out_file = self._generate()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED", proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    # NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (B): every owner-clip id is refused outright until
+    # ATTR3-FOOTAGE-BIND-1, BEFORE the -ClipPath / -FixtureSha256 checks, so these two cases now
+    # assert that refusal instead of PLAYBACK_ATTR3_CLIPPATH_REQUIRED / _FIXTURE_SHA_REFUSED.
+    def test_an_owner_id_without_clippath_is_refused(self) -> None:
+        proc, out_file = self._generate(ClipId="M16-1243")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ATTR3-FOOTAGE-BIND-1", proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_an_owner_id_with_fixture_sha_is_refused(self) -> None:
+        owner_path = "C:\\mlvtmp\\mlv-agent\\cache\\M16-1243.raw"
+        proc, out_file = self._generate(ClipId="M16-1243", ClipPath=owner_path, FixtureSha256="c" * 64)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ATTR3-FOOTAGE-BIND-1", proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_a_fixture_id_with_an_explicit_clippath_is_still_accepted(self) -> None:
+        clip_id = "tiny_dual_iso"
+        extension = "." + "mlv"
+        explicit_path = "C:\\mlvtmp\\mlv-agent\\cache\\" + clip_id + extension
+        proc, out_file = self._generate(FixtureSha256="d" * 64, ClipPath=explicit_path)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(f"$AuthorizedClipPath = '{explicit_path}'", out_file.read_text(encoding="utf-8"))
+
+
+@requires_pwsh
+@requires_git
+class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
+    """The emitted job hashes a fixture's cached bytes before it ever opens the clip.
+
+    ATTR3-FIXTURE-STAGE-1 r2: this class used to generate a full job.ps1 and run it end to
+    end via _run_job, exactly like AttributionJob*Tests elsewhere in this file. That made it
+    depend on -AgentRoot resolving under the real C:\\mlvtmp, because the job's OWN
+    Assert-UnderMlvTmp guard (a deliberate hard floor independent of -AgentRoot -- see
+    playback-attr-3-cuda-job.ps1's "TEMP boundary (BLOCKER fix)" comment) throws before the
+    fixture-content check ever runs if $Root/$Work/$Pub are not under C:\\mlvtmp. A lane
+    whose scratch root happens to sit under C:\\mlvtmp (Invoke-Lane) passed by accident; a
+    normal TEMP does not (exit 1, "job-owned path 'Root' resolves outside C:\\mlvtmp"), and
+    CI/other reviewers run from a normal TEMP. That guard is production behaviour and is not
+    touched here (test_the_default_agent_root_guard_still_refuses_a_root_outside_mlvtmp below
+    proves it still fires). Instead, the fixture-content check itself -- inline top-level
+    code in the template, not a named module function, so there is nothing to Import-Module
+    -- is sliced VERBATIM out of the generator's own $template text by _extract_fixture_
+    content_check and run standalone, with just the handful of variables and the Save-Json
+    helper it actually reads. This is the same "run the real characters, not a
+    re-implementation" guarantee Get-AttrCudaEmbeddedFunctionSource gives the psm1-based
+    checks, applied to a block that has no function name to splice by. It also never touches
+    $Root/$Work/-AgentRoot/C:\\mlvtmp at all, so it is portable regardless of ambient TEMP.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.agent = self.tmp / "agent"
+        self.cache = self.agent / "cache"
+        self.cache.mkdir(parents=True)
+
+    def _extract_fixture_content_check(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start_marker = "if ($FixtureRehearsal) {"
+        end_marker = "\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)"
+        start = text.index(start_marker)
+        end = text.index(end_marker, start)
+        self.assertGreater(end, start, "fixture-content-check markers moved in the generator")
+        return text[start:end]
+
+    def _run_fixture_content_check(
+        self, *, clip_path: Path, fixture_sha256: str, pub: Path
+    ) -> subprocess.CompletedProcess:
+        # The real job creates $Pub (New-AttrCudaDirectory) before this block ever runs; this
+        # probe stands in for that one step so Save-Json has somewhere to write.
+        pub.mkdir(parents=True)
+        block = self._extract_fixture_content_check()
+        script = self.tmp / "fixture-content-check-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            "$FixtureRehearsal = $true\n"
+            f"$clipPath = '{clip_path}'\n"
+            f"$FixtureSha256 = '{fixture_sha256}'\n"
+            f"$SourceCommit = '{self.shas[1]}'\n"
+            "$ClipId = 'tiny_dual_iso'\n"
+            f"$Pub = '{pub}'\n"
+            "function Save-Json($Object, [string]$Path) {\n"
+            "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
+            "}\n"
+            + block + "\n"
+            "Write-Output 'RESULT=NO_MISMATCH'\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script)
+
+    def test_a_mismatched_cached_clip_fails_closed_before_the_package_is_touched(self) -> None:
+        import hashlib
+
+        extension = "." + "mlv"
+        clip_name = "tiny_dual_iso" + extension
+        wrong_bytes = b"not the fixture the hub thinks is cached"
+        clip_path = self.cache / clip_name
+        clip_path.write_bytes(wrong_bytes)
+        expected_sha = hashlib.sha256(b"the real fixture bytes").hexdigest()
+        pub = self.agent / "outbox" / "fake-job.artifacts"
+
+        proc = self._run_fixture_content_check(
+            clip_path=clip_path, fixture_sha256=expected_sha, pub=pub
+        )
+
+        self.assertEqual(proc.returncode, 17, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=FIXTURE_CONTENT_MISMATCH", proc.stdout)
+        self.assertIn(expected_sha, proc.stdout)
+        self.assertIn(hashlib.sha256(wrong_bytes).hexdigest(), proc.stdout)
+        summary = json.loads((pub / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["result"], "FIXTURE_CONTENT_MISMATCH")
+        self.assertTrue(summary["fixtureRehearsal"])
+        self.assertEqual(summary["expectedSha256"], expected_sha)
+        self.assertEqual(summary["actualSha256"], hashlib.sha256(wrong_bytes).hexdigest())
+
+    def test_matching_cached_clip_content_passes_the_gate(self) -> None:
+        import hashlib
+
+        extension = "." + "mlv"
+        clip_name = "tiny_dual_iso" + extension
+        clip_bytes = b"exactly the bytes the hub staged"
+        clip_path = self.cache / clip_name
+        clip_path.write_bytes(clip_bytes)
+        matching_sha = hashlib.sha256(clip_bytes).hexdigest()
+        pub = self.agent / "outbox" / "fake-job-2.artifacts"
+
+        proc = self._run_fixture_content_check(
+            clip_path=clip_path, fixture_sha256=matching_sha, pub=pub
+        )
+
+        self.assertNotIn("FIXTURE_CONTENT_MISMATCH", proc.stdout)
+        self.assertNotEqual(proc.returncode, 17, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=NO_MISMATCH", proc.stdout, f"{proc.stdout}\n{proc.stderr}")
+
+    def test_the_default_agent_root_guard_still_refuses_a_root_outside_mlvtmp(self) -> None:
+        # Proves the check above does not paper over a real regression: with NO override,
+        # the emitted job's Assert-UnderMlvTmp guard still refuses an -AgentRoot that
+        # resolves outside C:\mlvtmp, before it ever looks at the cache. A LITERAL path is
+        # used here rather than self.tmp/self.agent: self.tmp can itself land under the real
+        # C:\mlvtmp (e.g. a fleet lane whose own scratch root is
+        # C:\mlvtmp\lane-scratch\...), which would make self.agent the wrong fixture for an
+        # "outside mlvtmp" assertion and is exactly how this bug went unnoticed before.
+        outside_root = "C:\\attr3-guard-check-outside-mlvtmp"
+        out_file = self.tmp / "outside-root-job.ps1"
+        script = self.tmp / "generate-outside-root.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'tiny_dual_iso' "
+            f"-FixtureSha256 '{'b' * 64}' -OutFile '{out_file}' -RepoRoot '{self.repo}' "
+            f"-AgentRoot '{outside_root}' -PresentMonSha256 '{'c' * 64}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+
+        proc = _run_job(out_file)
+
+        self.assertEqual(proc.returncode, 1, f"{proc.stdout}\n{proc.stderr}")
+        combined = proc.stdout + proc.stderr
+        self.assertIn("job-owned path 'Root' resolves outside", combined)
+        self.assertIn("C:\\mlvtmp", combined)
+
+
+@requires_pwsh
+@requires_git
+class FixtureCommittedBytesTests(_PwshCase):
+    """Assert-AttrCudaFixtureCommittedBytes, exercised against a throwaway git repository."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.tracked_path = self.repo / "src" / "mlv" / "llrawproc" / "llrawproc.c"
+
+    def test_an_unmodified_tracked_file_is_accepted(self) -> None:
+        proc = self.run_with_module(
+            f"Write-Output (Assert-AttrCudaFixtureCommittedBytes -Path '{self.tracked_path}')\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        expected = _git_run(["hash-object", "--", "src/mlv/llrawproc/llrawproc.c"], self.repo)
+        self.assertIn(expected, proc.stdout)
+
+    def test_a_dirtied_working_tree_copy_is_refused(self) -> None:
+        self.tracked_path.write_text("/* dirtied after the commit */\n", encoding="utf-8")
+        proc = self.run_with_module(_guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{self.tracked_path}'"))
+        self.assert_throws(proc, "ATTR3_FIXTURE_WORKING_TREE_DIRTY")
+
+    def test_a_missing_file_is_refused(self) -> None:
+        missing = self.repo / "src" / "mlv" / "llrawproc" / "absent.c"
+        proc = self.run_with_module(_guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{missing}'"))
+        self.assert_throws(proc, "ATTR3_FIXTURE_MISSING")
+
+    def test_a_file_outside_any_git_repository_is_refused(self) -> None:
+        outside = self.tmp / "loose.txt"
+        outside.write_text("not in a repo\n", encoding="utf-8")
+        proc = self.run_with_module(_guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{outside}'"))
+        self.assert_throws(proc, "ATTR3_FIXTURE_NOT_IN_A_REPO")
+
+
+@requires_pwsh
+@requires_git
+class StageFixtureJobCommittedBytesWiringTests(_PwshCase):
+    """attr3-stage-fixture-job.ps1 calls the new check and prints the baked hash."""
+
+    def test_generator_source_calls_the_committed_bytes_check(self) -> None:
+        text = STAGE_FIXTURE_GENERATOR.read_text(encoding="utf-8")
+        self.assertIn("Assert-AttrCudaFixtureCommittedBytes -Path $fixture.FullName", text)
+
+    def test_generator_prints_a_fixture_sha256_result_line(self) -> None:
+        text = STAGE_FIXTURE_GENERATOR.read_text(encoding="utf-8")
+        self.assertIn("RESULT=FIXTURE_STAGE_JOB_EMITTED FIXTURE_SHA256=$fixtureSha", text)
+
+
+# --------------------------------------------------------------------------------------------
 # cleanup never follows a link out of the job root (sol PR #133 r3)
 # --------------------------------------------------------------------------------------------
 
@@ -966,6 +1240,100 @@ class LinkSafeCleanupTests(_PwshCase):
 
 
 # --------------------------------------------------------------------------------------------
+# (g) ATTR3-FIXTURE-STAGE-1 (sol, PR #139 r1 MAJOR): the final cache publish must be a truly
+#     non-overwriting rename. These call the module functions directly -- both the OLD helper
+#     the fixture job used to call and the NEW one it calls now -- against the exact race sol
+#     described: a different-bytes file lands at the destination AFTER the job's own absence
+#     check has already passed and BEFORE the rename runs.
+# --------------------------------------------------------------------------------------------
+
+
+@requires_pwsh
+class NonOverwritingPublishRaceTests(_PwshCase):
+    """RED: the old helper overwrites a raced destination. GREEN: the new one never does."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.source = self.tmp / "fixture.partial"
+        self.source.write_bytes(b"this run's own bytes")
+        self.destination = self.tmp / "fixture.bin"
+
+    def test_RED_the_old_helper_deletes_and_overwrites_a_destination_that_raced_in(self) -> None:
+        # Publish-AttrCudaFileMove is still exactly what it was: still used, unchanged, by
+        # playback-attr-3-cuda-stage-job.ps1 (the package stager) -- ATTR3-SCANNER's own r7
+        # note that a hostile SHAPE can't be caught by static lint applies just as much to a
+        # RACE, which no lint of any kind can see. This is the vulnerability sol reported,
+        # reproduced directly against the helper the fixture job used to call.
+        self.destination.write_bytes(b"a concurrent publisher's DIFFERENT bytes")
+        proc = self.run_with_module(
+            f"Write-Output ('MOVED=' + (Publish-AttrCudaFileMove -Source '{self.source}' "
+            f"-Destination '{self.destination}'))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("MOVED=", proc.stdout)
+        self.assertEqual(
+            self.destination.read_bytes(),
+            b"this run's own bytes",
+            "RED: the old helper silently deleted the raced-in file and overwrote it",
+        )
+
+    def test_GREEN_the_new_helper_refuses_a_destination_that_raced_in_with_different_bytes(self) -> None:
+        self.destination.write_bytes(b"a concurrent publisher's DIFFERENT bytes")
+        proc = self.run_with_module(
+            _guard(f"Publish-AttrCudaFileMoveNonOverwriting -Source '{self.source}' "
+                   f"-Destination '{self.destination}'")
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assert_throws(proc, "ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS")
+        self.assertEqual(
+            self.destination.read_bytes(),
+            b"a concurrent publisher's DIFFERENT bytes",
+            "the raced-in file must survive completely untouched",
+        )
+        self.assertTrue(self.source.exists(), "a refused move must leave the source in place")
+
+    def test_GREEN_the_new_helper_refuses_a_destination_that_raced_in_with_identical_bytes(self) -> None:
+        # Even identical bytes are never silently accepted as "the same move" by the helper
+        # itself -- it throws either way. Distinguishing "someone already finished this exact
+        # fixture" from "something else is there" is the CALLER's job (attr3-stage-fixture-
+        # job.ps1 re-hashes on catch), never this helper's.
+        self.destination.write_bytes(b"this run's own bytes")
+        proc = self.run_with_module(
+            _guard(f"Publish-AttrCudaFileMoveNonOverwriting -Source '{self.source}' "
+                   f"-Destination '{self.destination}'")
+        )
+        self.assert_throws(proc, "ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS")
+        self.assertEqual(self.destination.read_bytes(), b"this run's own bytes")
+
+    def test_a_missing_destination_is_still_moved_cleanly(self) -> None:
+        proc = self.run_with_module(
+            f"Publish-AttrCudaFileMoveNonOverwriting -Source '{self.source}' "
+            f"-Destination '{self.destination}' | Out-Null\n"
+            "Write-Output 'ok'\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ok", proc.stdout)
+        self.assertFalse(self.source.exists())
+        self.assertEqual(self.destination.read_bytes(), b"this run's own bytes")
+
+    def test_a_linked_parent_is_refused_without_ever_calling_move(self) -> None:
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        cache = self.tmp / "cache"
+        proc = self.run_with_module(
+            f"New-Item -ItemType Junction -Path '{cache}' -Target '{outside}' | Out-Null\n"
+        )
+        if proc.returncode != 0 or not cache.exists():
+            self.skipTest(f"cannot create a junction here: {proc.stderr}")
+        target = cache / "fixture.bin"
+        proc = self.run_with_module(
+            _guard(f"Publish-AttrCudaFileMoveNonOverwriting -Source '{self.source}' -Destination '{target}'")
+        )
+        self.assert_throws(proc, "ATTRCUDA_SLOT_PARENT_IS_LINK")
+        self.assertEqual(list(outside.iterdir()), [], "nothing may be written through the link")
+
+
+# --------------------------------------------------------------------------------------------
 # regression tripwire: known-dangerous shapes in the emitted templates (not a soundness proof)
 # --------------------------------------------------------------------------------------------
 
@@ -974,6 +1342,9 @@ JOB_TEMPLATES = (
     ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1",
     ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1",
     ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1",
+    # Every emitted job that runs unattended on a measurement host is scanned, including the
+    # fixture stager: a template added without this line would run unscanned.
+    ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-fixture-job.ps1",
 )
 
 

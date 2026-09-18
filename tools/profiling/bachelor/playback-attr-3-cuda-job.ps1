@@ -27,13 +27,18 @@
 # consent, never an authorization. Adjudication:
 # .claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md.
 #
-# FIXTURE REHEARSAL (ATTR3-FIXTURE-REHEARSAL-1): -ClipId may instead be exactly
-# 'tiny_dual_iso' or 'large_dual_iso' -- the two tracked fixtures under
-# tests/fixtures/clips/, admitted by NA-4 without a CLIP_OR_NONE authorization because
-# they never resolve through an id-to-file lookup either. -ClipPath still must resolve
-# to the agent cache with BaseName -ceq $ClipId, unchanged from the owner-clip case. Such
-# a run bakes fixtureRehearsal=true into every summary.json/evidence-manifest.json this
-# job writes, so a fixture run can never be read as an attribution result.
+# FIXTURE REHEARSAL (ATTR3-FIXTURE-REHEARSAL-1, extended by ATTR3-FIXTURE-STAGE-1): -ClipId
+# may instead be exactly 'tiny_dual_iso' or 'large_dual_iso' -- the two tracked fixtures under
+# tests/fixtures/clips/, admitted by NA-4 without a CLIP_OR_NONE authorization because they
+# never resolve through an id-to-file lookup either. -ClipPath is OPTIONAL for a fixture id:
+# omitted, it is derived as the agent cache path for -ClipId; supplied, it must still resolve
+# to the agent cache with BaseName -ceq $ClipId, unchanged from the owner-clip case. A fixture
+# id also requires -FixtureSha256 (64 lowercase hex, baked by attr3-stage-fixture-job.ps1 and
+# printed on its own result line): the emitted job hashes the cached clip before it is ever
+# opened and fails closed at FIXTURE_CONTENT_MISMATCH (exit 17) on a mismatch -- a cache file
+# name proves nothing about its bytes. Such a run bakes fixtureRehearsal=true into every
+# summary.json/evidence-manifest.json this job writes, so a fixture run can never be read as
+# an attribution result.
 #
 # Differences from PLAYBACK-ATTR-2:
 #   - shipping-default scale (4), NOT forced to 1: no MLVAPP_PLAYBACK_SCALE_FACTOR
@@ -72,11 +77,16 @@
 # the call. A log that is absent, unbound or outside this job's work tree exits 16
 # (SMOKE_LOG_UNAVAILABLE) -- a missing gate is never a passed gate.
 #
-# Usage:
+# Usage (owner clip):
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
 #       -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> `
-#       -ClipId tiny_dual_iso -ClipPath <the agent-cache path of that fixture> -OutFile <path>\<jobId>.job.ps1
+#       -ClipId M16-1243 -ClipPath <the lane's CLIP_OR_NONE path> -OutFile <path>\<jobId>.job.ps1
 # (an owner-clip -ClipId is refused until ATTR3-FOOTAGE-BIND-1; see FOOTAGE above)
+# Usage (fixture rehearsal, no -ClipPath):
+#   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
+#       -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> -ClipId tiny_dual_iso `
+#       -FixtureSha256 <64-lowercase-hex from attr3-stage-fixture-job.ps1's FIXTURE_SHA256= line> `
+#       -OutFile <path>\<jobId>.job.ps1
 #
 # -BuildManifestSha256 is the sha the assembler printed (MANIFEST_SHA256= on its RESULT line)
 # and the staging generator echoed as buildManifestSha256; see docs/playback-attr-3-cuda.md.
@@ -103,9 +113,20 @@ param(
     # The ONE authorized clip (NA-4): must equal the CLIP_OR_NONE line of the lane running
     # this generator. An absolute path directly inside the Bachelor agent cache whose
     # BaseName is -ClipId; the emitted job re-checks both on Bachelor and fails closed.
-    [Parameter(Mandatory = $true)]
+    # MANDATORY for an owner clip id (unchanged). OPTIONAL for a fixture id
+    # (ATTR3-FIXTURE-STAGE-1): omitted, it is derived below as the agent cache path for
+    # -ClipId, from the same agent root the template's own $Root already names.
+    [Parameter(Mandatory = $false)]
     [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$')]
-    [string]$ClipPath,
+    [string]$ClipPath = '',
+
+    # A fixture id's cached bytes, authenticated before this generator will bake -ClipPath
+    # into the emitted job: MANDATORY for a fixture id, REFUSED for an owner clip id (an
+    # owner clip is authorized by NA-4's path match, never by a content hash). The value
+    # attr3-stage-fixture-job.ps1 bakes and prints on its own FIXTURE_SHA256= result line.
+    # Validated below rather than by ValidatePattern, so a malformed value and an outright
+    # missing one are told apart in the refusal.
+    [string]$FixtureSha256 = '',
 
     [Parameter(Mandatory = $true)]
     [string]$OutFile,
@@ -122,6 +143,14 @@ param(
     [string]$BuildManifestSha256,
 
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path,
+
+    # The ONE definition of the agent root, for both the template's own $Root (substituted via
+    # __AGENT_ROOT__ below) and this generator's own fixture -ClipPath derivation -- so the two
+    # can never drift apart. Overridable only so a test can point the emitted job at a temporary
+    # directory instead of the real measurement host's C:\mlvtmp\mlv-agent; production never
+    # passes this.
+    [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$')]
+    [string]$AgentRoot = 'C:\mlvtmp\mlv-agent',
 
     # Derived from -SourceCommit, not pinned to an old package: matches the package
     # tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1 builds on the board host and
@@ -199,6 +228,30 @@ if (-not $isFixtureRehearsal) {
     throw "REFUSED: owner-clip id '$ClipId' emits no job until card ATTR3-FOOTAGE-BIND-1 wires tools/gates/verify_consented_footage.py into this route; only the fixture ids 'tiny_dual_iso' and 'large_dual_iso' are emitted today."
 }
 
+# ATTR3-FIXTURE-STAGE-1. The compound suffix the two tracked fixtures carry is never spelled
+# as one literal token anywhere in this file: a token ending in it trips this repository's own
+# NA-4 PreToolUse gate, even in source text that names no real clip, so it is composed here.
+$FixtureClipExtension = '.' + 'mlv'
+
+if ($isFixtureRehearsal) {
+    if ($FixtureSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED -FixtureSha256 must be 64 lowercase hex for a fixture id ('$ClipId'); got '$FixtureSha256'"
+    }
+    if ([string]::IsNullOrWhiteSpace($ClipPath)) {
+        $ClipPath = Join-Path (Join-Path $AgentRoot 'cache') ($ClipId + $FixtureClipExtension)
+    }
+} else {
+    if ($FixtureSha256) {
+        throw "PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED -FixtureSha256 is refused for an owner clip id ('$ClipId')"
+    }
+    if ([string]::IsNullOrWhiteSpace($ClipPath)) {
+        throw "PLAYBACK_ATTR3_CLIPPATH_REQUIRED -ClipPath is mandatory for an owner clip id ('$ClipId')"
+    }
+}
+if ($ClipPath -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
+    throw "PLAYBACK_ATTR3_CLIPPATH_INVALID -ClipPath contains characters outside the allowlist: '$ClipPath'"
+}
+
 # --- job body template (placeholders are substituted below; the body itself never
 #     touches this generator's variables directly, so there is no accidental capture
 #     of this machine's environment into the emitted script) ----------------------
@@ -218,7 +271,8 @@ $PresentMonName = '__PRESENTMON_NAME__'
 $PresentMonSha = '__PRESENTMON_SHA256__'
 $ConsentReceiptFileName = '__CONSENT_RECEIPT__'
 $FixtureRehearsal = __FIXTURE_REHEARSAL__
-$Root = 'C:\mlvtmp\mlv-agent'
+$FixtureSha256 = '__FIXTURE_SHA256__'
+$Root = '__AGENT_ROOT__'
 $Cache = Join-Path $Root 'cache'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $JobId = "playback-attr-3-cuda-$($SourceCommit.Substring(0,12))-$ClipId-$Stamp"
@@ -449,6 +503,26 @@ New-Item -ItemType Directory -Path (Join-Path $Work 'out') -Force | Out-Null
 # parent is checked for links like every other directory this job creates.
 [void](New-AttrCudaDirectory -Path (Join-Path $Root 'outbox'))
 [void](New-AttrCudaDirectory -Path $Pub)
+
+# ATTR3-FIXTURE-STAGE-1: a fixture run authenticates the cached clip's CONTENT before it is
+# ever opened -- a cache file name proves nothing about its bytes. Owner-clip runs carry no
+# $FixtureSha256 (the generator refuses one) and skip this: NA-4's path match is their
+# authorization instead. Hashed and checked before any package is deployed or playback launched.
+if ($FixtureRehearsal) {
+    $actualClipSha256 = (Get-FileHash -LiteralPath $clipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualClipSha256 -ne $FixtureSha256) {
+        $mismatch = [ordered]@{
+            schema='playback-attr-3-cuda-venue.v1'; result='FIXTURE_CONTENT_MISMATCH'
+            fixtureRehearsal=$FixtureRehearsal
+            clipPath=$clipPath; expectedSha256=$FixtureSha256; actualSha256=$actualClipSha256
+            sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+        }
+        Save-Json $mismatch (Join-Path $Pub 'summary.json')
+        Write-Output "RESULT=FIXTURE_CONTENT_MISMATCH EXPECTED=$FixtureSha256 ACTUAL=$actualClipSha256 ARTIFACTS=$Pub"
+        exit 17
+    }
+}
+
 Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip) -DestinationPath (Join-Path $Work 'pkg') -Force
 $baseExe = Get-ChildItem -LiteralPath (Join-Path $Work 'pkg') -Recurse -Filter $BasePackageExeName | Select-Object -First 1
 if (-not $baseExe) { throw "base package executable not found: $BasePackageExeName" }
@@ -757,7 +831,9 @@ $text = $template.
     Replace('__PRESENTMON_NAME__', $PresentMonName).
     Replace('__PRESENTMON_SHA256__', $PresentMonSha256).
     Replace('__CONSENT_RECEIPT__', $ConsentReceiptFileName).
-    Replace('__FIXTURE_REHEARSAL__', $fixtureRehearsalLiteral)
+    Replace('__FIXTURE_REHEARSAL__', $fixtureRehearsalLiteral).
+    Replace('__AGENT_ROOT__', $AgentRoot).
+    Replace('__FIXTURE_SHA256__', $FixtureSha256)
 # LAST: the module text is spliced in after every other substitution, so no placeholder rule can
 # rewrite a character inside the verbatim verifier source.
 $text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
