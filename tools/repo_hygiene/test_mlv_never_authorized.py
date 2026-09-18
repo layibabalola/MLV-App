@@ -6795,15 +6795,17 @@ class EnableCompoundIsFailClosedTests(unittest.TestCase):
         )
 
 
-# ------------------------------------ NA4-OWNER-CONSENTED-FOOTAGE-1: exception (3)
+# ------------------------------------ NA4-OWNER-CONSENTED-FOOTAGE-1: the consent record
 #
-# ROUND 2.  The hook admits a clip token iff ``sha256(norm(token))`` is a frozen
-# ``path_norm_sha256`` in ``OWNER_CONSENTED_FOOTAGE``; it reads NOTHING to decide (round 1's git
-# read of a mutable local ref is gone, and with it every git-fixture row).  Every row here uses
-# synthetic, extension-free names under the tmp CLIP CACHE root -- NA-4 treats the cache root
-# as footage exactly as it treats a clip extension -- and an injected fixture table whose path
-# hashes are computed from the hook's own ``norm``.  No row reads real footage or a real spec.
-# The rows that are ABOUT the frozen table (the pins, and the real-table denials) use it as is.
+# ROUND 6 (NARROW).  Rounds 1-5 tested an exception (3) that admitted a consented path named in
+# command text; that admission is removed, and with it every row of its machinery (the
+# literal-token allowlist, the whole-shell-word span test, ``is_owner_consented_path``).  The
+# frozen ``OWNER_CONSENTED_FOOTAGE`` table stays as the consent record, value-pinned here, and a
+# consented-footage path in command text is DENIED by NA-4 like any other footage path.  Every
+# row uses synthetic, extension-free names under a synthetic CLIP CACHE root -- NA-4 treats the
+# cache root as footage exactly as it treats a clip extension -- and an injected fixture table
+# whose path hashes are computed from the hook's own ``norm``, so the DENY rows run against a
+# table under which each path WOULD have been consented.  No row reads real footage.
 
 CONSENTED_IDS_PINNED = (
     "M16-1243",
@@ -6855,16 +6857,14 @@ def _canonical_consent_table(table):
 
 
 class OwnerConsentedFootageTests(unittest.TestCase):
-    """NA-4 exception (3): frozen path-norm hashes, consented ids only, no reads, fail closed."""
+    """NA-4 consent record: frozen and value-pinned; a consented path in command text is DENIED."""
 
     def setUp(self):
         self.module = _load_hook_module()
         self.tmp = tempfile.mkdtemp(prefix="mlv-na4c-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        # ROUND 4: SYNTHETIC drive-letter roots, never the temp dir.  Exception (3) admits only a
-        # literal, canonical, drive-letter absolute token, and a temp dir is neither portable
-        # (/tmp on the ubuntu leg) nor literal (an 8.3 `~` short name on this board).  NA-4
-        # decides on strings alone, so nothing here has to exist.
+        # SYNTHETIC drive-letter roots, never the temp dir: portable across the ubuntu and
+        # windows legs.  NA-4 decides on strings alone, so nothing here has to exist.
         self.board = "C:/synthetic-board"
         self.cache = "C:/synthetic-board/cache"
         self.part0 = os.path.join(self.cache, "mirror", "consented", "clip-a.part0")
@@ -6937,11 +6937,26 @@ class OwnerConsentedFootageTests(unittest.TestCase):
 
     # ---------------------------------------------------------------------- rows
 
-    def test_allow_a_path_whose_norm_hash_is_consented(self):
-        self.assertAllow(self._decide(self.part0))
-        self.assertAllow(self._decide(self.part1))
-        # A different SPELLING of the same path normalises to the same hash.
-        self.assertAllow(self._decide(self.part1.upper().replace("\\", "/")))
+    def test_deny_a_consented_footage_path_in_command_text(self):
+        # ROUND 6 (NARROW).  The fixture table consents `self.part0` and `self.part1` -- their
+        # norm hashes ARE in it -- and NA-4 still denies each one named in command text, in
+        # every spelling, as a whole shell word, alone or joined to a neighbour.  Every row was
+        # an ALLOW at d4bd9721 (exception (3)); consented footage is reachable only through
+        # tracked, id-addressed consumers, never through a path in agent command text.
+        path = self.part0.replace("\\", "/")
+        self.assertIn(self._path_hash(self.part0), [p[2] for p in self.table["clips"]["M16-1243"]])
+        for spelling in (self.part0, self.part1, self.part1.upper().replace("\\", "/")):
+            with self.subTest(spelling=spelling):
+                self.assertNa4Deny(self._decide(spelling))
+        for command in (
+            "probe %s" % path,
+            'probe "%s"' % path,
+            "probe '%s'" % path,
+            'probe "%s";echo done' % path,
+            '(probe "%s")' % path,
+        ):
+            with self.subTest(command=command):
+                self.assertNa4Deny(self._decide_command(command))
 
     def test_deny_the_same_basename_in_a_different_directory(self):
         moved = os.path.join(self.cache, "mirror", "elsewhere", "clip-a.part0")
@@ -6965,93 +6980,6 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         malformed = {"clips": {"M16-1243": ((1, "0" * 64),)}}  # no path_norm_sha256 column
         self.assertNa4Deny(self._decide(self.part0, consent=malformed))
         self.assertNa4Deny(self._decide(self.part0, consent={}))
-
-    def test_an_unresolved_env_reference_is_never_admitted(self):
-        self.assertFalse(
-            self.module.is_owner_consented_path("$env:UNSET_NAME/clip", consent=self.table)
-        )
-        self.assertFalse(self.module.is_owner_consented_path("relative/clip", consent=self.table))
-
-    def test_a_known_env_reference_is_never_admitted_by_the_consent_exception(self):
-        # ROUND 3 (sol MAJOR C).  `norm` expands a KNOWN variable with the PARENT hook's value,
-        # while a child shell may reassign it at process scope, so the admitted hash and the
-        # opened target could differ.  Exception (3) therefore admits only LITERAL tokens.  The
-        # rows go through `_decide`: `is_owner_consented_path` alone sees an already-resolved,
-        # consented path and would pass for the wrong reason.
-        os.environ["MLV_CLIP_CACHE_ROOT"] = os.path.join(self.board, "cache")
-        resolved = os.path.join(self.board, "cache", "mirror", "consented", "clip-a.part0")
-        table = self._table({"M16-1243": (resolved,)})
-        self.assertAllow(self._decide(resolved, consent=table))  # the literal is admitted
-        for token in (
-            r"$env:MLV_BOARD_ROOT\cache\mirror\consented\clip-a.part0",
-            r"${env:MLV_BOARD_ROOT}\cache\mirror\consented\clip-a.part0",
-            r"%MLV_BOARD_ROOT%\cache\mirror\consented\clip-a.part0",
-        ):
-            with self.subTest(token=token):
-                self.assertEqual(self.module.norm(token), self.module.norm(resolved))
-                self.assertNa4Deny(self._decide(token, consent=table))
-
-    def test_exception_3_is_an_allowlist_of_literal_canonical_tokens(self):
-        # ROUND 4 (sol MAJOR C-final).  Round 3 DENIED three named spellings, a denylist: sol got
-        # an ALLOW from a Bash `$NAME` followed by `..`, and from a leading `~/../`, because
-        # `norm` collapses the `..` and lands on the consented hash while a child shell resolves
-        # something else.  Now a token is admitted only when its RAW form is already the literal
-        # canonical path, and every spelling below goes through `_decide` against a table under
-        # which its norm IS consented -- so each row was an ALLOW before the fix.
-        self.assertAllow(self._decide(self.part0))  # the literal consented path
-        self.assertAllow(self._decide(self.part0.upper().replace("\\", "/")))  # case/separators
-        consented = self.module.norm(self.part0)
-        for token in (
-            "C:/synthetic-board/cache/mirror/consented/$MLV_BOARD_ROOT/../clip-a.part0",
-            "~/../C:/synthetic-board/cache/mirror/consented/clip-a.part0",
-            "C:/synthetic-board/cache/mirror/elsewhere/../consented/clip-a.part0",
-            "C:/synthetic-board/cache/mirror/./consented/clip-a.part0",
-        ):
-            with self.subTest(token=token):
-                self.assertEqual(self.module.norm(token), consented)
-                self.assertNa4Deny(self._decide(token))
-        for token in (
-            "C:/synthetic-board/cache/mirror/consented/clip-a`.part0",
-            "C:/synthetic-board/cache/mirror/consented/%SYNTHETIC_NAME%/../clip-a.part0",
-            "C:/synthetic-board/cache/mirror/consented/%MLV_BOARD_ROOT%/../clip-a.part0",
-        ):
-            with self.subTest(token=token):
-                self.assertNa4Deny(self._decide(token))
-
-    def test_exception_3_admits_only_a_whole_shell_word(self):
-        # ROUND 5 (astra MAJOR C).  The tokenizer splits `"<consented>"$SUFFIX` into the quoted
-        # literal and `$SUFFIX`; round 4 admitted the literal FRAGMENT while Bash concatenates
-        # both into ONE argument naming a different file.  Exception (3) now admits a token only
-        # when the raw characters on both sides of its span (quotes included) are the start or
-        # end of the command, whitespace, or one of `; | & ( ) < >`.  Every refused row below
-        # was an ALLOW at 83fb6dfe.
-        path = self.part0.replace("\\", "/")
-        for command in (
-            'SUFFIX=.other; probe "%s"$SUFFIX' % path,
-            'probe "%s"${SUFFIX}' % path,
-            'probe "%s"%%SUFFIX%%' % path,
-            'probe "%s"`printf x`' % path,
-            'probe "%s"$(printf x)' % path,
-            'probe "%s"x' % path,
-            'probe "%s""-other"' % path,
-            'probe "%s"+$x' % path,
-            'probe $PREFIX"%s"' % path,
-            'probe "%s" "%s"$SUFFIX' % (path, path),  # EVERY occurrence must be whole
-        ):
-            with self.subTest(command=command):
-                self.assertNa4Deny(self._decide_command(command))
-        for command in (
-            "probe %s" % path,
-            'probe "%s"' % path,
-            "probe '%s'" % path,
-            'probe "%s";echo done' % path,
-            'probe "%s"|head -c 1' % path,
-            'probe "%s">out.txt' % path,
-            "probe %s;echo done" % path,
-            '(probe "%s")' % path,
-        ):
-            with self.subTest(command=command):
-                self.assertAllow(self._decide_command(command))
 
     # ------------------------------------------------------------- values pinned (A)
 
@@ -7087,21 +7015,34 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         with open(self.module.__file__, "r", encoding="utf-8") as handle:
             source = handle.read()
         for needle in (
+            # Round 6 (NARROW): no command-text admission, and the id-only route.
+            "this hook admits NO consented path from command text",
+            "No rule in this hook reads the table.",
+            "(1) Consented footage is reachable ONLY through\n"
+            "# tracked, id-addressed consumers that verify content against this table",
+            # The honesty statement: scope, not exposure; the interpreter residual stands.
+            "(2) THE NARROWING REDUCES\n# SCOPE, NOT EXPOSURE.",
+            "The interpreter-one-liner residual is UNCHANGED:",
+            "so such a one-liner can open\n# any path, consented or not,",
             "VALUE-pinned by tests",
             "A board-rooted actor can still edit the table transiently:",
-            "bounded by the NA-10 venue\n# gate and the 0.05 hook-enforced receipt that Invoke-Lane checks.",
+            "bounded by the NA-10 venue gate and the 0.05\n# hook-enforced receipt that Invoke-Lane checks.",
             "until then the CUDA job generator refuses every owner-clip id.",
-            "(4) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the\n"
+            "(5) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the\n"
             "# cache",
             "NA4-CLIP-NAME-TRIM-1",
-            "(5) Exceptions (1) and (2) still compare the EXPANDED token,",
+            "(6) Exceptions (1) and (2) still compare the EXPANDED token,",
             "NA4-EXC12-LITERAL-TOKENS-1",
-            '(6) A "literal token" here is a WHOLE SHELL WORD:',
-            "whitespace, or one of ; | & ( ) < >.",
-            "and only the two together make\n    the hashed text the whole argument the child receives.",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, source)
+        # The removed machinery is gone, not dormant.
+        for removed in (
+            "is_owner_consented_path", "is_literal_canonical_token", "is_whole_shell_word",
+            "token_spans", "_consented_path_norm_hashes",
+        ):
+            with self.subTest(removed=removed):
+                self.assertFalse(hasattr(self.module, removed), removed)
 
     def test_no_subprocess_on_the_na4_path(self):
         cases = (self.part0, self.part1, self.unconsented, os.path.join(self.tmp, "x.txt"))
@@ -7123,7 +7064,7 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             for owner, name, value in saved:
                 setattr(owner, name, value)
         self.assertEqual(refused, baseline)
-        self.assertEqual(baseline[0], (0, ""))
+        self.assertEqual(baseline[0][0], 2)  # round 6: a consented path is denied too
         self.assertEqual(baseline[2][0], 2)
         self.assertFalse(hasattr(self.module, "_read_merged_output_budget"))
         self.assertNotIn("subprocess", vars(self.module))
@@ -7209,17 +7150,32 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             "until then the CUDA job generator refuses every owner-clip id",
             "exceptions (1) and (2) still compare the expanded token",
             "NA4-EXC12-LITERAL-TOKENS-1",
-            "exception (3) admits only a literal canonical token",
-            "that is also a whole shell word",
-            "whitespace, or one of ; | & ( ) < >",
-            "every occurrence must be whole",
+            # Round 6 (NARROW): no third exception, the id-only route, and the honest residual.
+            "there is NO third exception",
+            "a consented-footage path named in command text is DENIED exactly like any other"
+            " clip outside (1) and (2)",
+            "no hook rule reads it",
+            "Consented footage is reachable ONLY through tracked, id-addressed consumers",
+            "the narrowing reduces scope, not exposure: the interpreter-one-liner residual is"
+            " unchanged",
+            "such a one-liner can open any path, consented or not",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, act)
         self.assertNotIn("fork/master", act)
+        self.assertNotIn("exception (3) admits", act)
         for purpose in self.module.OWNER_CONSENTED_FOOTAGE["purposes"]:
             self.assertIn(purpose, act)
-        self.assertIn("exception (3)", na4[0]["enforced_after_0_1"])
+        enforced = na4[0]["enforced_after_0_1"]
+        self.assertNotIn("exception (3)", enforced)
+        self.assertIn(
+            "a consented-footage path in command text is denied like any other footage path",
+            enforced,
+        )
+        self.assertIn(
+            "consented footage is reachable only through tracked, id-addressed consumers",
+            enforced,
+        )
         for needle in (
             OWNER_CONSENT_LINE_SHA256, OWNER_CONSENT_QUESTION_LINE_SHA256,
             OWNER_DIRECTIVE_LINE_SHA256, "line 1739", "line 1718", "line 2137",

@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Verify owner-consented footage CONTENT against the frozen table before a clip is opened.
 
-NA4-OWNER-CONSENTED-FOOTAGE-1, round 2.  The project hook (tools/hooks/mlv-never-authorized.py)
-admits a clip PATH when its normalised hash is in ``OWNER_CONSENTED_FOOTAGE``; it never reads
-footage.  This module is the CONTENT half: for one consented id it checks every part's
-existence, byte length and sha256 against that same table, hashing in streaming chunks.
+NA4-OWNER-CONSENTED-FOOTAGE-1, round 6 (NARROW).  The project hook
+(tools/hooks/mlv-never-authorized.py) holds the frozen consent record ``OWNER_CONSENTED_FOOTAGE``
+but admits NO consented path from agent command text: such a path is denied by NA-4 exactly
+as on master.  Consented footage is reachable ONLY through tracked, id-addressed consumers
+that verify content against that table.  This module is that check: for one consented id it
+checks every part's existence, byte length and sha256 against the table, hashing in streaming
+chunks.
 
-EVERY FOOTAGE CONSUMER MUST CALL ``verify`` (or the CLI) BEFORE OPENING A CLIP, and must not
-open it unless the result is ``ok``.  As of this change the CUDA job and the delta-A/B jobs are
-NOT yet wired to it -- that is card ATTR3-FOOTAGE-BIND-1 plus the #72b tooling.
+EVERY SUCH CONSUMER MUST CALL ``verify`` (or the CLI) BEFORE OPENING A CLIP, and must not open
+it unless the result is ``ok``.  As of this change no consumer is wired to it: the CUDA job is
+card ATTR3-FOOTAGE-BIND-1, and the #72b delta tooling must be made tracked and id-only first.
+LIMIT: this narrows scope, not exposure; an interpreter one-liner can still open any path,
+because a text-matching hook never sees the path it opens.
 
 The table is imported from the hook module itself, so there is exactly one copy of it.  The
 output never echoes a part path: parts are reported by index only.

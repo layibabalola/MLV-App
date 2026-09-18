@@ -813,8 +813,8 @@ MANIFEST_PROMPTS_PREFIX = "prompts/v2/"
 # own copy of all three and each one governs that lane's next tool call.  (NA-4's owner-
 # consented footage table lives IN the hook script, so the third tail already guards it.  The
 # FOURTH tail is that table's content verifier (NA4-OWNER-CONSENTED-FOOTAGE-1 round 3, E):
-# every footage consumer must call it before opening a clip, so a lane that rewrites it
-# rewrites the content half of the consent gate.)
+# every tracked, id-addressed footage consumer must call it before opening a clip, so a lane
+# that rewrites it rewrites the only content check those consumers have.)
 NA10_GUARDED_TAILS = (
     ".claude/settings.json",
     ".claude/settings.local.json",
@@ -1072,8 +1072,8 @@ def is_absolute(path_norm):
 _TOKEN_RX = re.compile(r"\"([^\"]*)\"|'([^']*)'|([^\s'\"=,;|&()\[\]<>]+)")
 
 
-def token_spans(text):
-    """``tokens`` with each one's RAW span ``(value, start, end)``, its own quotes included."""
+def tokens(text):
+    """Quoted strings and bare runs, in order.  Quotes are stripped, nothing is executed."""
     found = []
     for match in _TOKEN_RX.finditer(text or ""):
         value = match.group(1)
@@ -1082,32 +1082,8 @@ def token_spans(text):
         if value is None:
             value = match.group(3)
         if value:
-            found.append((value, match.start(), match.end()))
+            found.append(value)
     return found
-
-
-def tokens(text):
-    """Quoted strings and bare runs, in order.  Quotes are stripped, nothing is executed."""
-    return [value for value, _start, _end in token_spans(text)]
-
-
-_WORD_BOUNDARY_CHARS = frozenset(";|&()<>")
-
-
-def is_whole_shell_word(text, start, end):
-    """Is the raw span ``text[start:end]`` a COMPLETE shell word, not a fragment of one?
-
-    The character just before the span and the one just after must each be the start or end
-    of the text, whitespace, or one of ``; | & ( ) < >``.  Anything else -- a quote, ``$``,
-    ``%``, a backtick, ``+``, ``=``, a letter or a digit -- means a shell would join the span
-    with its neighbour into one larger argument that names something else.
-    """
-    for index in (start - 1, end):
-        if 0 <= index < len(text):
-            char = text[index]
-            if not (char.isspace() or char in _WORD_BOUNDARY_CHARS):
-                return False
-    return True
 
 
 def json_blobs(text):
@@ -3316,7 +3292,8 @@ def rule_na3(ctx):
 _CLIP_LINE_RX = re.compile(r"^(?:- )?CLIP_OR_NONE:\s*(.*?)\s*$", re.M)
 FIXTURE_TAIL = "tests/fixtures/clips"
 
-# NA4-OWNER-CONSENTED-FOOTAGE-1 -- THE THIRD NA-4 EXCEPTION, WHO DECIDED IT, AND WHAT IT BINDS.
+# NA4-OWNER-CONSENTED-FOOTAGE-1 -- THE OWNER-CONSENTED FOOTAGE RECORD, WHO DECIDED IT, AND
+# WHAT IT BINDS.
 #
 # AUTHORITY (round 2, re-cited; every line hash is sha256 of the raw JSONL line bytes EXCLUDING
 # the line terminator).  The CONSENT is the owner's own typed line in the peaceful-rubin
@@ -3325,39 +3302,42 @@ FIXTURE_TAIL = "tests/fixtures/clips"
 # clip.  The six ids are the HUB's derivation, not the owner's words (``scope_derivation``
 # below); M02-1344 is NOT here.  No lane, quorum or adjudication can widen this table.
 #
+# ROUND 6: NARROW.  Rounds 1-5 used this table for an exception (3) that ADMITTED a consented
+# path named in agent command text.  Every round found a new command-text bypass, because this
+# hook evaluates text that differs from what bash, PowerShell or cmd execute.  That admission
+# is REMOVED: this hook admits NO consented path from command text, and a consented-footage
+# path in command text is DENIED by NA-4 exactly as on master.  Only exceptions (1) tracked
+# fixtures and (2) CLIP_OR_NONE remain.  The table stays as the CONSENT RECORD that tracked,
+# id-addressed consumers verify content against.
+#
 # WHAT IS FROZEN.  Per consented id, per part: the byte length, the lowercase sha256 of the
 # content, and ``path_norm_sha256`` -- the sha256 of this hook's own ``norm()`` output for that
-# part's path, UTF-8 encoded.  NO PATH is stored and NOTHING is read to admit one: a clip token
-# is admitted iff ``sha256(norm(token))`` is one of the frozen ``path_norm_sha256`` values.  No
-# subprocess, no git, no spec file on the hot path (round 1 read a mutable local git ref, which
-# a ref move, a shadowing tag or branch, ``git replace`` or a substituted remote could steer).
+# part's path, UTF-8 encoded.  NO PATH is stored.  No rule in this hook reads the table.
 #
-# LIMITS, stated rather than papered over.  (1) Widening needs a change to THIS table, which is
-# visible in the diff and VALUE-pinned by tests (tools/repo_hygiene/test_mlv_never_authorized.py
-# pins the sha256 of a canonical serialisation of the WHOLE table -- ids, per-part length,
-# content sha256 and path_norm_sha256, part counts, purposes and citations -- plus each id's
-# part count, so an in-place hash swap or an appended part row goes red); the merge path is
-# agent-reviewed and CI-test-pinned, NOT an un-mintable owner gate -- the repo has zero required
-# reviews and one shared account.  A board-rooted actor can still edit the table transiently:
-# that is the same residual as every NA rule at the board venue, bounded by the NA-10 venue
-# gate and the 0.05 hook-enforced receipt that Invoke-Lane checks.  (2) The purposes are
-# recorded, not enforced.
-# (3) This hook binds PATHS only and never reads footage.  CONTENT binding exists only where a
-# consumer calls tools/gates/verify_consented_footage.py, which checks every part's existence,
-# length and sha256 against this table: EVERY footage consumer MUST call it before opening a
-# clip.  The CUDA job and the delta-A/B jobs are NOT yet wired to it (card ATTR3-FOOTAGE-BIND-1
-# and the #72b tooling); until then the CUDA job generator refuses every owner-clip id.
-# (4) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the
+# LIMITS, stated rather than papered over.  (1) Consented footage is reachable ONLY through
+# tracked, id-addressed consumers that verify content against this table with
+# tools/gates/verify_consented_footage.py (each part's existence, length and sha256).  None is
+# wired yet: the CUDA job (card ATTR3-FOOTAGE-BIND-1) and the #72b delta tooling are not, and
+# until then the CUDA job generator refuses every owner-clip id.  (2) THE NARROWING REDUCES
+# SCOPE, NOT EXPOSURE.  The interpreter-one-liner residual is UNCHANGED: a text-matching hook
+# never sees the path an interpreter one-liner or a script opens, so such a one-liner can open
+# any path, consented or not, exactly as before this card.  Removing exception (3) removes a
+# review surface; it does not close that hole.  (3) Widening needs a change to THIS table,
+# which is visible in the diff and VALUE-pinned by tests
+# (tools/repo_hygiene/test_mlv_never_authorized.py pins the sha256 of a canonical
+# serialisation of the WHOLE table -- ids, per-part length, content sha256 and
+# path_norm_sha256, part counts, purposes and citations -- plus each id's part count, so an
+# in-place hash swap or an appended part row goes red); the merge path is agent-reviewed and
+# CI-test-pinned, NOT an un-mintable owner gate -- the repo has zero required reviews and one
+# shared account.  A board-rooted actor can still edit the table transiently: that is the same
+# residual as every NA rule at the board venue, bounded by the NA-10 venue gate and the 0.05
+# hook-enforced receipt that Invoke-Lane checks.  (4) The purposes are recorded, not enforced.
+# (5) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the
 # cache, so such a spelling is not detected as a clip; this predates the card, and a follow-up
 # card (NA4-CLIP-NAME-TRIM-1) fixes it.
-# (5) Exceptions (1) and (2) still compare the EXPANDED token, so a hook-read variable a child
+# (6) Exceptions (1) and (2) still compare the EXPANDED token, so a hook-read variable a child
 # shell reassigns can open a different target; this predates the card, and follow-up card
-# NA4-EXC12-LITERAL-TOKENS-1 gives them exception (3)'s literal-token rule.
-# (6) A "literal token" here is a WHOLE SHELL WORD: the raw characters immediately before and
-# after its span, its own quotes included, must each be the start or end of the command,
-# whitespace, or one of ; | & ( ) < >.  A tokenizer fragment such as the quoted literal in
-# "<literal>"$SUFFIX is refused, because the shell joins it with its neighbour into ONE
-# argument naming a different file (round 5, reproduced at rounds 2-4).
+# NA4-EXC12-LITERAL-TOKENS-1 tracks it.
 OWNER_CONSENTED_FOOTAGE = types.MappingProxyType(
     {
         # clip id -> ((length, content sha256, path_norm_sha256), ...) in part order.
@@ -3475,53 +3455,6 @@ OWNER_CONSENTED_FOOTAGE = types.MappingProxyType(
 )
 
 
-def _consented_path_norm_hashes(consent=None):
-    """-> frozenset of every frozen ``path_norm_sha256``; a malformed row contributes nothing."""
-    consent = OWNER_CONSENTED_FOOTAGE if consent is None else consent
-    hashes = set()
-    try:
-        for parts in consent["clips"].values():
-            for part in parts:
-                if isinstance(part, tuple) and len(part) == 3 and isinstance(part[2], str):
-                    hashes.add(part[2].lower())
-    except Exception:
-        return frozenset()
-    return frozenset(hashes)
-
-
-def is_owner_consented_path(path_norm, consent=None):
-    """Is this NORMALISED path one the frozen table names?  Pure: no I/O, no subprocess."""
-    if not path_norm or _unresolved_env_ref(path_norm) or not is_absolute(path_norm):
-        return False
-    digest = hashlib.sha256(path_norm.encode("utf-8")).hexdigest()
-    return digest in _consented_path_norm_hashes(consent)
-
-
-_LITERAL_DRIVE_RX = re.compile(r"\A[A-Za-z]:[\\/]")
-_NOT_LITERAL_CHARS = frozenset("$%~`")
-
-
-def is_literal_canonical_token(token):
-    """Exception (3)'s ALLOWLIST on the RAW token.  Round 3's denylist is gone.
-
-    The raw token, with the same quote stripping ``norm`` applies, must be a drive-letter
-    absolute path, contain none of ``$``, ``%``, ``~`` or a backtick, carry no ``.`` or ``..`` segment,
-    and already BE its canonical form: ``norm(raw)`` may differ from it only by the lowercasing
-    and backslash-to-slash folding ``norm`` applies.  The last test alone subsumes the segment
-    test, a doubled separator and a trailing slash; the explicit ones state the rule.  So no
-    reference any shell expands, and no ``..`` a collapse could hide one behind, reaches the
-    hash.  This predicate sees one tokenizer FRAGMENT only; ``rule_na4`` also requires the
-    fragment to be a whole shell word (``is_whole_shell_word``), and only the two together make
-    the hashed text the whole argument the child receives.
-    """
-    raw = str(token).strip().strip('"').strip("'")
-    if not _LITERAL_DRIVE_RX.match(raw) or _NOT_LITERAL_CHARS.intersection(raw):
-        return False
-    if any(segment in (".", "..") for segment in re.split(r"[\\/]", raw)):
-        return False
-    return raw.replace("\\", "/").lower() == norm(raw)
-
-
 def authorized_clip(ctx):
     """The ONE canonical absolute path from the lane prompt, or None."""
     if not ctx.lane_prompt:
@@ -3543,8 +3476,7 @@ def authorized_clip(ctx):
 def rule_na4(ctx):
     allowed = authorized_clip(ctx)
     fixture_root = norm(os.path.join(ctx.worktree_root_raw, FIXTURE_TAIL))
-    subject = ctx.subject
-    for token, start, end in token_spans(subject):
+    for token in tokens(ctx.subject):
         path_norm = norm(token)
         is_clip = path_norm.endswith(".mlv")
         in_cache = under(path_norm, ctx.clip_cache_root) or has_seg(
@@ -3556,18 +3488,9 @@ def rule_na4(ctx):
             continue  # tracked fixtures are always allowed
         if allowed is not None and path_norm == allowed:
             continue
-        # Exception (3) admits LITERAL CANONICAL tokens only -- an allowlist on the RAW token
-        # (`is_literal_canonical_token`): anything a shell could expand, or a `..` that `norm`
-        # would collapse, could make the admitted hash and the opened target differ.  And the
-        # token must be a WHOLE shell word (`is_whole_shell_word`): a fragment the tokenizer split
-        # off `"<literal>"$SUFFIX` is joined back into one different argument by the shell.
-        # Each occurrence is its own iteration, so EVERY occurrence must be whole.
-        if (
-            is_literal_canonical_token(token)
-            and is_whole_shell_word(subject, start, end)
-            and is_owner_consented_path(path_norm)
-        ):
-            continue  # owner-consented footage: its norm hash is in the frozen table
+        # No exception (3) (round 6, NARROW): a consented-footage path in command text is
+        # denied here exactly as on master.  Consented footage is reached only through tracked,
+        # id-addressed consumers that verify content against OWNER_CONSENTED_FOOTAGE.
         if allowed is None:
             raise Deny(
                 "NA-4",
