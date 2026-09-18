@@ -23,8 +23,17 @@ Ruling: .claude-state/fleet-runs/swarm-attr3-buildhost-20260916T2150Z/SYNTHESIS.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
+
+PWSH = shutil.which("pwsh")
+
+
+def _pwsh_quote(value: str) -> str:
+    """A PowerShell single-quoted literal; newlines survive as real newlines inside the quotes."""
+    return "'" + value.replace("'", "''") + "'"
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -346,7 +355,7 @@ class AttributionJobTests(unittest.TestCase):
         for later_verdict in (
             "RESULT=GPU_RECON_FRAMES_ZERO",
             "RESULT=CPU_FALLBACK_DETECTED",
-            "RESULT=MEASUREMENT_CAPTURED",
+            "RESULT=$resultVerb",
         ):
             with self.subTest(verdict=later_verdict):
                 self.assertLess(gate, self.text.index(later_verdict))
@@ -370,9 +379,109 @@ class AttributionJobTests(unittest.TestCase):
         self.assertIn("RESULT=SMOKE_LOG_UNAVAILABLE", self.text)
         self.assertIn("exit 16", self.text)
         refusal = self.text.index("RESULT=SMOKE_LOG_UNAVAILABLE")
-        for later_verdict in ("RESULT=BACKEND_NOT_AVAILABLE", "RESULT=MEASUREMENT_CAPTURED"):
+        for later_verdict in ("RESULT=BACKEND_NOT_AVAILABLE", "RESULT=$resultVerb"):
             with self.subTest(verdict=later_verdict):
                 self.assertLess(refusal, self.text.index(later_verdict))
+
+
+class AttributionJobFixtureRehearsalTests(unittest.TestCase):
+    """ATTR3-FIXTURE-REHEARSAL-1: -ClipId also admits the two tracked fixtures, unmistakably."""
+
+    _CLIP_ID_PATTERN_RX = re.compile(
+        r"\[ValidatePattern\('(?P<pattern>[^']+)'\)\]\s*\r?\n\s*\[string\]\$ClipId"
+    )
+
+    def setUp(self) -> None:
+        self.text = _read(ATTRIBUTION_JOB)
+        match = self._CLIP_ID_PATTERN_RX.search(self.text)
+        self.assertIsNotNone(match, "could not find the -ClipId ValidatePattern in the generator")
+        self.clip_id_pattern = match.group("pattern")
+
+    def match_in_powershell(self, candidates: dict[str, bool]) -> None:
+        """Evaluate the pattern in the engine that ENFORCES it.
+
+        The pattern is .NET's, not Python's: it carries a scoped inline flag `(?-i:...)` and the
+        `\\z` anchor, and Python's `re` accepts neither on every supported version -- compiling it
+        with `re` made these tests error on the CI runner while passing locally, and it would have
+        been testing a different engine's semantics either way.
+        """
+        if PWSH is None:
+            self.skipTest("pwsh is not on PATH")
+        lines = ["$pattern = " + _pwsh_quote(self.clip_id_pattern)]
+        for candidate in candidates:
+            lines.append(
+                "Write-Output ('CANDIDATE ' + " + _pwsh_quote(candidate) + " + ' -> ' + "
+                "([bool](" + _pwsh_quote(candidate) + " -cmatch $pattern)))"
+            )
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "\n".join(lines)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        for candidate, expected in candidates.items():
+            with self.subTest(clip_id=candidate):
+                self.assertIn(f"CANDIDATE {candidate} -> {expected}", proc.stdout, proc.stdout)
+
+    def test_owner_clip_id_pattern_still_works(self) -> None:
+        self.match_in_powershell({"M16-1243": True, "a99-123": True, "Z00-9999": True})
+
+    def test_fixture_clip_ids_are_accepted(self) -> None:
+        self.match_in_powershell({"tiny_dual_iso": True, "large_dual_iso": True})
+
+    def test_an_unknown_or_miscased_stem_is_refused(self) -> None:
+        # TINY_DUAL_ISO and a trailing newline were both sol findings (PR #137 r1 and r2): each
+        # validated once and then failed the case-sensitive membership test.
+        self.match_in_powershell({
+            "some_other_clip": False,
+            "tiny_dual_iso_extra": False,
+            "TINY_DUAL_ISO": False,
+            "Tiny_Dual_Iso": False,
+            "medium_dual_iso": False,
+            "tiny_dual_iso\n": False,
+        })
+
+    def test_fixture_ids_are_a_literal_allowlist_not_a_loose_pattern(self) -> None:
+        # The flag is decided by an exact membership test against the two literals, never by
+        # re-deriving it from the ValidatePattern regex.
+        self.assertIn("$FixtureClipIds = @('tiny_dual_iso', 'large_dual_iso')", self.text)
+        self.assertIn("$FixtureClipIds -ccontains $ClipId", self.text)
+
+    def test_emitted_job_carries_the_flag_from_the_generators_membership_test(self) -> None:
+        self.assertIn("$FixtureRehearsal = __FIXTURE_REHEARSAL__", self.text)
+        self.assertIn("$fixtureRehearsalLiteral = if ($isFixtureRehearsal)", self.text)
+        self.assertIn("Replace('__FIXTURE_REHEARSAL__', $fixtureRehearsalLiteral)", self.text)
+
+    def test_flag_is_recorded_in_every_summary_and_in_the_evidence_manifest(self) -> None:
+        # summary.json is written on every early-exit venue; evidence-manifest.json only on
+        # the success path. Both carry the flag, so a fixture run is unmistakable either way.
+        # early-exit venues, the artifact index, and the success summary: every reader-facing output.
+        self.assertGreaterEqual(self.text.count("fixtureRehearsal=$FixtureRehearsal"), 6)
+        self.assertGreaterEqual(self.text.count("fixtureRehearsal = $FixtureRehearsal"), 3)  # provenance, manifest, success summary
+
+    def test_clip_path_cache_parent_and_basename_checks_are_unchanged(self) -> None:
+        self.assertIn("if ((Split-Path -Parent $clipPath) -ine $Cache)", self.text)
+        self.assertIn(
+            "if ([IO.Path]::GetFileNameWithoutExtension($clipPath) -cne $ClipId)", self.text
+        )
+        self.assertIn(
+            "if ($clipPath -notmatch '^[A-Za-z]:\\\\[A-Za-z0-9 _.\\\\-]+$')", self.text
+        )
+
+    def test_build_manifest_authentication_smoke_log_selection_and_eligibility_gate_are_unchanged(
+        self,
+    ) -> None:
+        # A fixture run is still subject to the same three gates as an owner-clip run.
+        self.assertIn(
+            "$buildManifest = Assert-AttrCudaBuildManifest -Path $buildManifestPath "
+            "-ExpectedSha256 $BuildManifestSha256 -ExpectedSourceCommit $SourceCommit",
+            self.text,
+        )
+        self.assertIn(
+            "Resolve-AttrCudaSmokeRunLog -ResultJsonPath $resultPath -ContainingRoot $Work",
+            self.text,
+        )
+        self.assertIn("if (-not $verdict.admitted)", self.text)
+        self.assertIn("exit $verdict.exitCode", self.text)
 
 
 class RetiredCompileJobTests(unittest.TestCase):
@@ -479,6 +588,39 @@ class SharedNamingContractTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, module)
                 self.assertIn(fragment, attribution)
+
+
+
+class FixtureRehearsalVisibilityTests(unittest.TestCase):
+    """sol PR #137 r1: a rehearsal must be unmistakable in EVERY reader-facing output."""
+
+    GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1"
+
+    def setUp(self) -> None:
+        self.text = self.GENERATOR.read_text(encoding="utf-8")
+        self.template = self.text[self.text.index("$template = @'"):]
+
+    def test_the_fixture_arm_of_the_clip_id_pattern_is_case_sensitive(self) -> None:
+        # ValidatePattern is case-insensitive by default, so the fixture ids carry (?-i:...);
+        # otherwise TINY_DUAL_ISO validates while the membership test calls it an owner clip.
+        line = [l for l in self.text.splitlines() if "ValidatePattern" in l and "dual_iso" in l]
+        self.assertEqual(len(line), 1, line)
+        self.assertIn("(?-i:", line[0])
+
+    def test_every_reader_facing_output_carries_the_flag(self) -> None:
+        for artifact in ("summary.json", "provenance.json", "evidence-manifest.json", "artifact-index.json"):
+            with self.subTest(artifact=artifact):
+                index = self.template.index(artifact)
+                window = self.template[max(0, index - 3000):index]
+                self.assertIn("fixtureRehearsal", window, f"{artifact} is written without the flag nearby")
+
+    def test_the_success_path_writes_a_summary_and_a_distinct_result_verb(self) -> None:
+        self.assertIn("FIXTURE_REHEARSAL_CAPTURED", self.template)
+        self.assertIn("FIXTURE_REHEARSAL=$FixtureRehearsal", self.template)
+        # the success path writes summary.json too, not only the failure paths
+        tail = self.template[self.template.index("$resultVerb ="):] if "$resultVerb =" in self.template else ""
+        self.assertTrue(tail, "no success result verb found")
+        self.assertIn("summary.json", self.template[self.template.index("artifact-index.v1") - 2500:])
 
 
 if __name__ == "__main__":

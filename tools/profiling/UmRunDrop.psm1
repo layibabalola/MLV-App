@@ -19,10 +19,81 @@ Set-StrictMode -Version Latest
 $script:AllowedSideFileExtensions = @('.zip', '.json', '.exe', '.dll', '.txt', '.csv')
 $script:DeviceNames = @('CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
     'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9')
+# The clip fixtures, by STEM. sol, PR #137 r2 BLOCKER: "tracked under tests/fixtures/clips" admits
+# every tracked file there, including that directory's README -- and a discovery helper that picked
+# the smallest tracked file then proved the bypass rather than the feature. The same two stems the
+# attribution generator accepts as -ClipId are the admissible set here, and no extension is named.
+$script:TrackedFixtureClipStems = @('tiny_dual_iso', 'large_dual_iso')
+
+function Test-UmRunTrackedFixtureSource {
+    <#
+    .SYNOPSIS
+    True when a side-file's SOURCE is a repository fixture clip, i.e. it sits in a
+    `tests/fixtures/clips` directory.
+    .DESCRIPTION
+    ATTR3-FIXTURE-REHEARSAL-1 has to stage a tracked fixture clip onto a measurement host. Its media
+    extension is deliberately NOT added to $AllowedSideFileExtensions: the board's NA-4 gate refuses a
+    bare media-extension token in a tools file without an authorization, and composing that token from
+    pieces to satisfy the gate's text scan would be routing around a guard rather than meeting it.
+    The admissible property is not the extension anyway -- it is that the bytes are a TRACKED FIXTURE
+    in THIS repository, which is exactly what NA-4 itself admits. So that is what this tests.
+
+    sol, PR #137 r1 BLOCKER: a lexical segment match admitted any lookalike `tests\fixtures\clips`
+    tree anywhere on the machine, including a UNC share and a path THROUGH a junction. Admission is
+    therefore anchored to the repository this module ships in, and compared on REAL paths: the
+    source's directory, with links resolved, must be the resolved `<repoRoot>\tests\fixtures\clips`
+    itself, and the file must be tracked there by git.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        # The repository this module ships in: tools\profiling\UmRunDrop.psm1 -> two levels up.
+        [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+    )
+
+    $fixturesDir = Join-Path (Join-Path (Join-Path $RepoRoot 'tests') 'fixtures') 'clips'
+    if (-not (Test-Path -LiteralPath $fixturesDir -PathType Container)) { return $false }
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { return $false }
+
+    # Real paths, so a junction/symlink cannot present an outside file as a fixture.
+    $resolvedDir = Resolve-UmRunRealDirectory -Path $fixturesDir
+    $sourceItem = Get-Item -LiteralPath $SourcePath -Force
+    $link = $sourceItem.ResolveLinkTarget($true)
+    if ($null -ne $link) { $sourceItem = $link }
+    $sourceDir = Resolve-UmRunRealDirectory -Path ([IO.Path]::GetDirectoryName($sourceItem.FullName))
+    if (-not [string]::Equals($sourceDir, $resolvedDir, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+
+    # A CLIP fixture, not merely a tracked file in that directory (sol r2: README.md is tracked there).
+    $name = [IO.Path]::GetFileName($sourceItem.FullName)
+    $stem = [IO.Path]::GetFileNameWithoutExtension($name)
+    if ($script:TrackedFixtureClipStems -cnotcontains $stem) { return $false }
+
+    # Tracked in this repository: a file merely dropped into the fixtures directory is not a fixture.
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($null -eq $git) { return $false }
+    $tracked = & $git.Source -C $RepoRoot ls-files --error-unmatch -- ("tests/fixtures/clips/" + $name) 2>$null
+    return ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($tracked | Out-String)))
+}
+
+function Resolve-UmRunRealDirectory {
+    <# Full path of a directory with every link in the chain resolved; '' when it does not exist. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return '' }
+    $link = $item.ResolveLinkTarget($true)
+    if ($null -ne $link) { $item = $link }
+    return $item.FullName.TrimEnd('\')
+}
 
 function Assert-UmRunSideFileName {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][string]$Inbox)
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Inbox,
+        [string]$SourcePath = ''
+    )
 
     if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)+$') {
         throw "UMRUN_SIDEFILE_NAME_INVALID '$Name' is not a plain basename (letters, digits, '_', '-', single dots between parts)"
@@ -31,8 +102,9 @@ function Assert-UmRunSideFileName {
         throw "UMRUN_SIDEFILE_NAME_INVALID '$Name' is job-shaped or executable-script-shaped"
     }
     $extension = [IO.Path]::GetExtension($Name).ToLowerInvariant()
-    if ($script:AllowedSideFileExtensions -notcontains $extension) {
-        throw "UMRUN_SIDEFILE_NAME_INVALID '$Name' extension '$extension' is not in the allowlist"
+    $trackedFixture = $SourcePath -and (Test-UmRunTrackedFixtureSource -SourcePath $SourcePath)
+    if (-not $trackedFixture -and $script:AllowedSideFileExtensions -notcontains $extension) {
+        throw "UMRUN_SIDEFILE_NAME_INVALID '$Name' extension '$extension' is not in the allowlist and its source is not a tracked fixture clip"
     }
     $stem = $Name.Split('.')[0].ToUpperInvariant()
     if ($script:DeviceNames -contains $stem) {
@@ -84,7 +156,7 @@ function Invoke-UmRunDrop {
         if ([IO.Path]::GetFileName($path) -cne $name) {
             throw "UMRUN_SIDEFILE_NAME_INVALID '$([IO.Path]::GetFileName($path))' is an alias of '$name'"
         }
-        $destination = Assert-UmRunSideFileName -Name $name -Inbox $Inbox
+        $destination = Assert-UmRunSideFileName -Name $name -Inbox $Inbox -SourcePath $sourceItem.FullName
         $localSha = (Get-FileHash -LiteralPath $sourceItem.FullName -Algorithm SHA256).Hash
 
         if (Test-Path -LiteralPath $destination) {
@@ -134,4 +206,4 @@ function Invoke-UmRunDrop {
     Write-Output "UMRUN_JOBID=$id"
 }
 
-Export-ModuleMember -Function Assert-UmRunSideFileName, Invoke-UmRunDrop
+Export-ModuleMember -Function Assert-UmRunSideFileName, Test-UmRunTrackedFixtureSource, Resolve-UmRunRealDirectory, Invoke-UmRunDrop
