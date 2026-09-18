@@ -48,7 +48,7 @@ class OutputBudgetTests(unittest.TestCase):
             "shippingDefaults": {"path": "tools/gates/shipping-defaults.json", "sha256": output_budget.sha256_file(self.shipping)},
             "baseline": {"status": "reviewed_instrumented_known_good", "commit": "a" * 40, "executableSha256": "A" * 64, "artifact": "fixture://reviewed-baseline"},
             "receipt": {"path": str(self.receipt), "length": 7, "sha256": output_budget.sha256_file(self.receipt)},
-            "profiles": [{"id": "wb_locked", "disableLookAssist": True, "playbackProcessing": "none", "qualityMode": "1", "expectedQualityMode": 1, "scaleFactor": "", "expectedScaleRequest": 4, "selectionAuthority": "shipping-default-controlled"}],
+            "profiles": [{"id": "wb_locked", "disableLookAssist": True, "useReceipt": False, "playbackProcessing": "receipt", "qualityMode": "1", "expectedQualityMode": 1, "scaleFactor": "", "expectedScaleRequest": 4, "selectionAuthority": "shipping-default-controlled"}],
             "clips": [{"id": "clip", "required": True, "path": str(self.clip), "length": 4, "sha256": output_budget.sha256_file(self.clip), "startFrame": 4,
                        "parts": [{"path": str(self.clip), "length": 4, "sha256": output_budget.sha256_file(self.clip)}],
                        "aspect": {"mode": "presented-playback-stretch", "stretchX": 3.0, "stretchY": 1.0, "hStretchIndex": 0, "vStretchIndex": 3}}],
@@ -84,7 +84,7 @@ class OutputBudgetTests(unittest.TestCase):
             "requestSerialOffset": 1, "screenshotMethod": "presented", "screenshotWidth": 2, "screenshotHeight": 2,
             "screenshotPath": str(screenshot),
             "presentedHistory": [{"index": 1, "displayFrame": 4, "serial": 2, "serialOffset": 1, "requestedFrame": 4, "generation": 8}],
-            "effectiveState": {"visualState": {"scale": 4}, "playbackPolicy": {"processing": "none"}, "frame": {"scale": 4}, "renderManifest": {"path": "render_thread"}},
+            "effectiveState": {"visualState": {"scale": 4}, "playbackPolicy": {"processing": "receipt"}, "frame": {"scale": 4}, "renderManifest": {"path": "render_thread"}},
         }
         result = {
             "schema": "mlvapp-gui-smoke-result.v1", "exePath": exe, "clipPath": str(self.clip),
@@ -95,7 +95,7 @@ class OutputBudgetTests(unittest.TestCase):
             },
             "validation": {"ok": True, "screenshotProvenance": provenance},
             "screenshot": {"path": str(screenshot), "capture": {"image": {"sha256": output_budget.sha256_file(screenshot)}}},
-            "visualQuality": {"playbackPolicy": {"playback_processing_selected": "none"}, "visualState": {"look_assist_enabled": 0, "quality_mode": 1, "scale_request": 4}, "aspectEvidence": {"mode": "presented-playback-stretch", "stretchX": 3.0, "stretchY": 1.0, "hStretchIndex": 0, "vStretchIndex": 3}},
+            "visualQuality": {"playbackPolicy": {"playback_processing_selected": "receipt"}, "visualState": {"look_assist_enabled": 0, "quality_mode": 1, "scale_request": 4}, "aspectEvidence": {"mode": "presented-playback-stretch", "stretchX": 3.0, "stretchY": 1.0, "hStretchIndex": 0, "vStretchIndex": 3}},
         }
         path = self.root / name
         path.write_text(json.dumps(result), encoding="utf-8")
@@ -118,6 +118,20 @@ class OutputBudgetTests(unittest.TestCase):
         self.assertEqual("PASS", report["blockingVerdict"])
         self.assertEqual("INDETERMINATE", report["cadenceVerdict"])
         self.assertTrue(report["authorizing"])
+        route = report["pairs"][0]["effectiveRoute"]
+        self.assertEqual({"processed8_cache_hit": 0, "raw_prefetch": None, "path_source": "render_thread"}, route["baseline"])
+        self.assertEqual({}, route["differences"])
+
+    def test_input_prefetch_difference_is_reported_without_vetoing_fresh_pixels(self):
+        for path, value in ((self.base_result, 1), (self.cand_result, 0)):
+            result = json.loads(path.read_text())
+            result["validation"]["screenshotProvenance"]["rawPrefetch"] = value
+            path.write_text(json.dumps(result))
+        with mock.patch.object(output_budget, "validate_exe", return_value={}):
+            report, code = output_budget.evaluate(output_budget.validate_spec(self.spec), self.evidence(), self.spec_path)
+        self.assertEqual(0, code)
+        self.assertTrue(report["authorizing"])
+        self.assertEqual({"raw_prefetch": [1, 0]}, report["pairs"][0]["effectiveRoute"]["differences"])
 
     def test_last_pixel_change_is_not_hidden_by_sampling(self):
         original_validate_exe = output_budget.validate_exe
@@ -168,7 +182,7 @@ class OutputBudgetTests(unittest.TestCase):
 
     def test_committed_receipt_profile_requires_exact_launch_time_receipt_binding(self):
         self._stub_exe_validation()
-        self.spec["profiles"][0]["playbackProcessing"] = "receipt"
+        self.spec["profiles"][0]["useReceipt"] = True
         self.spec_path.write_text(json.dumps(self.spec), encoding="utf-8")
         for path in (self.base_result, self.cand_result):
             result = json.loads(path.read_text())
@@ -176,6 +190,111 @@ class OutputBudgetTests(unittest.TestCase):
             path.write_text(json.dumps(result), encoding="utf-8")
         with self.assertRaises(output_budget.ContractError):
             output_budget.evaluate(output_budget.validate_spec(self.spec), self.evidence(), self.spec_path)
+
+    def test_receipt_loading_is_independent_of_processing_selection(self):
+        self._stub_exe_validation()
+        profile = self.spec["profiles"][0]
+        profile.update(useReceipt=False, playbackProcessing="receipt")
+        for path in (self.base_result, self.cand_result):
+            result = json.loads(path.read_text())
+            result["visualQuality"]["playbackPolicy"]["playback_processing_selected"] = "receipt"
+            path.write_text(json.dumps(result))
+        for use_receipt in (False, True):
+            with self.subTest(useReceipt=use_receipt):
+                profile["useReceipt"] = use_receipt
+                self.spec_path.write_text(json.dumps(self.spec))
+                binding = {"path": str(self.receipt), "length": 7,
+                           "sha256": output_budget.sha256_file(self.receipt)}
+                for path in (self.base_result, self.cand_result):
+                    result = json.loads(path.read_text())
+                    result["inputBindings"]["receipt"] = binding if use_receipt else None
+                    path.write_text(json.dumps(result))
+                report, code = output_budget.evaluate(output_budget.validate_spec(self.spec), self.evidence(), self.spec_path)
+                self.assertEqual(0, code, report)
+                result = json.loads(self.cand_result.read_text())
+                result["inputBindings"]["receipt"] = None if use_receipt else binding
+                self.cand_result.write_text(json.dumps(result))
+                with self.assertRaises(output_budget.ContractError):
+                    output_budget.evaluate(output_budget.validate_spec(self.spec), self.evidence(), self.spec_path)
+
+    def test_profile_requires_explicit_boolean_receipt_selection(self):
+        profile = self.spec["profiles"][0]
+        profile.update(useReceipt=False, playbackProcessing="receipt")
+        self.assertIs(output_budget.validate_spec(self.spec), self.spec)
+        for invalid in (None, "false", 0, 1, [], {}):
+            with self.subTest(useReceipt=invalid):
+                profile["useReceipt"] = invalid
+                with self.assertRaises(output_budget.ContractError):
+                    output_budget.validate_spec(self.spec)
+        del profile["useReceipt"]
+        with self.assertRaises(output_budget.ContractError):
+            output_budget.validate_spec(self.spec)
+
+    def test_profile_rejects_non_receipt_processing_modes(self):
+        self.spec["profiles"][0]["useReceipt"] = False
+        for mode in ("none", "auto", "subset"):
+            with self.subTest(mode=mode):
+                self.spec["profiles"][0]["playbackProcessing"] = mode
+                with self.assertRaises(output_budget.ContractError):
+                    output_budget.validate_spec(self.spec)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is required for collection integration")
+    def test_collection_passes_receipt_only_to_explicit_receipt_profile(self):
+        # Exercise the real wrapper's collection/splat path. Only the external
+        # preflight/evaluation and app runner are disposable test doubles.
+        gates = self.root / "tools/gates"
+        profiling = self.root / "tools/profiling"
+        profiling.mkdir()
+        shutil.copyfile(Path(__file__).with_name("compare-output-budget.ps1"), gates / "compare-output-budget.ps1")
+        (gates / "output_budget.py").write_text("raise SystemExit(0)\n")
+        (profiling / "gui-smoke-screenshot-provenance.ps1").write_text(
+            "function Test-GuiSmokeScreenshotPair { param($Left, $Right) return @{ validComparable = $true } }\n")
+        names = ("RepoRoot ExePath ClipPath Output Seconds StartFrame NoLoop SettleMs Threads QualityMode "
+                 "ScaleFactor ExpectedScaleRequest ExpectedQualityMode ExpectedStretchX ExpectedStretchY "
+                 "ExpectedHStretchIndex ExpectedVStretchIndex ExpectedAspectMode FrameTelemetry CaptureScreenshot "
+                 "RequireFreshScreenshotRender ScreenshotOutputDir PlaybackProcessing DisableLookAssist RequireLookAssist Receipt").split()
+        parameters = ", ".join("$" + name for name in names)
+        (profiling / "run-release-gui-smoke.ps1").write_text(
+            "param(" + parameters + ")\n"
+            "@{processing=$PlaybackProcessing; receiptPresent=$PSBoundParameters.ContainsKey('Receipt'); receipt=$Receipt; output=$Output} "
+            "| ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $RepoRoot 'calls.jsonl')\n"
+            "@{validation=@{screenshotProvenance=@{}}} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Output\n"
+            "$global:LASTEXITCODE=0\n")
+        self.spec["profiles"][0].update(useReceipt=False, playbackProcessing="receipt")
+        second = dict(self.spec["profiles"][0], id="committed_receipt", useReceipt=True)
+        self.spec["profiles"].append(second)
+        self.spec_path.write_text(json.dumps(self.spec))
+        command = [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+                   str(gates / "compare-output-budget.ps1"), "-RepoRoot", str(self.root),
+                   "-SpecPath", str(self.spec_path), "-BaselineExe", self.baseline["path"],
+                   "-BaselineCommit", self.baseline["commit"], "-BaselineSha256", self.baseline["sha256"],
+                   "-CandidateExe", self.candidate["path"], "-CandidateCommit", self.candidate["commit"],
+                   "-CandidateSha256", self.candidate["sha256"]]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text(encoding="utf-8-sig").splitlines()]
+        self.assertEqual(4, len(calls))
+        self.assertEqual(["receipt"] * 4, [call["processing"] for call in calls])
+        self.assertEqual([False, False, True, True], [call["receiptPresent"] for call in calls])
+        self.assertTrue(all(call["receipt"] == str(self.receipt) for call in calls[2:]))
+
+    def test_receipt_profile_rejects_each_mismatched_receipt_field(self):
+        self._stub_exe_validation()
+        self.spec["profiles"][0].update(useReceipt=True, playbackProcessing="receipt")
+        self.spec_path.write_text(json.dumps(self.spec))
+        binding = {"path": str(self.receipt), "length": 7, "sha256": output_budget.sha256_file(self.receipt)}
+        for path in (self.base_result, self.cand_result):
+            result = json.loads(path.read_text())
+            result["visualQuality"]["playbackPolicy"]["playback_processing_selected"] = "receipt"
+            result["inputBindings"]["receipt"] = binding
+            path.write_text(json.dumps(result))
+        for field, wrong in (("path", str(self.root / "other.receipt")), ("length", 8), ("sha256", "0" * 64)):
+            with self.subTest(field=field):
+                result = json.loads(self.cand_result.read_text())
+                result["inputBindings"]["receipt"] = dict(binding, **{field: wrong})
+                self.cand_result.write_text(json.dumps(result))
+                with self.assertRaises(output_budget.ContractError):
+                    output_budget.evaluate(output_budget.validate_spec(self.spec), self.evidence(), self.spec_path)
 
     def test_runtime_failure_atomically_replaces_stale_authorizing_report(self):
         evidence_path = self.root / "evidence.json"

@@ -19,7 +19,8 @@
     {
       "id": "wb_locked",
       "disableLookAssist": true,
-      "playbackProcessing": "none",
+      "useReceipt": false,
+      "playbackProcessing": "receipt",
       "qualityMode": "1",
       "expectedQualityMode": 1,
       "scaleFactor": "",
@@ -29,6 +30,7 @@
     {
       "id": "committed_receipt",
       "disableLookAssist": true,
+      "useReceipt": true,
       "playbackProcessing": "receipt",
       "qualityMode": "1",
       "expectedQualityMode": 1,
