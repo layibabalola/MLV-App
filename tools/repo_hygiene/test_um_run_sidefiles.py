@@ -296,5 +296,96 @@ class UmRunEndToEndTests(_Share):
         self.assertEqual(self.names(), ["demo-build.json", "demo-source.zip", "demo.job.ps1"], proc.stdout + proc.stderr)
 
 
+def _git(args: list[str], cwd: Path) -> None:
+    subprocess.run([GIT, *args], cwd=str(cwd), capture_output=True, text=True, check=True)
+
+
+def _env_without_git() -> dict[str, str] | None:
+    """A copy of os.environ with every PATH entry that carries git.exe removed, or None if a probe
+    subprocess still finds git afterwards (some hosts resolve git through a mechanism PATH-editing
+    alone cannot defeat, e.g. an app-execution alias) -- callers skip rather than false-fail then."""
+    env = dict(os.environ)
+    kept = [part for part in env.get("PATH", "").split(os.pathsep)
+            if part and not (Path(part) / "git.exe").exists()]
+    env["PATH"] = os.pathsep.join(kept)
+    probe = subprocess.run(
+        [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+         "if (Get-Command git -ErrorAction SilentlyContinue) { 'FOUND' } else { 'GONE' }"],
+        capture_output=True, text=True, env=env,
+    )
+    if "GONE" not in probe.stdout:
+        return None
+    return env
+
+
+@unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+@unittest.skipIf(GIT is None, "git is not on PATH")
+@unittest.skipUnless(os.name == "nt", "um-run.ps1 targets Windows agent shares")
+class UmRunFixtureContentPinTests(unittest.TestCase):
+    """ATTR3-ADMIT-CONTENT-PIN-1 (fable key on PR #137): admission must pin the WORKING-TREE bytes
+    to the committed blob, not merely a tracked name. Every repo here is a disposable, TEMPORARY git
+    repository built under a scratch tempdir -- never the real tests/fixtures tree -- so a
+    bytes-corrupting test can never touch a real fixture. The synthetic fixture uses the same
+    ".umrunprobe" suffix the existing untracked-fixture test already uses (never a new
+    media-extension literal), with a stem ("tiny_dual_iso") from the module's own admissible set.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="umrun-pin-")
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Path(os.path.realpath(self._tmp.name)) / "repo"
+        self.repo.mkdir()
+        _git(["init", "-q"], self.repo)
+        _git(["config", "user.email", "umrun-pin-test@example.invalid"], self.repo)
+        _git(["config", "user.name", "UmRun Pin Test"], self.repo)
+        self.clips = self.repo / "tests" / "fixtures" / "clips"
+        self.clips.mkdir(parents=True)
+        self.fixture = self.clips / "tiny_dual_iso.umrunprobe"
+        self.fixture.write_bytes(b"committed fixture bytes")
+        _git(["add", "tests/fixtures/clips/tiny_dual_iso.umrunprobe"], self.repo)
+        _git(["commit", "-q", "-m", "fixture"], self.repo)
+
+    def probe(self, path: Path, *, repo_root: Path | None = None, env: dict[str, str] | None = None) -> str:
+        script = self.repo.parent / f"probe-{abs(hash(str(path))) % 10**8}.ps1"
+        script.write_text(
+            "Import-Module " + _q(MODULE) + " -Force\n"
+            "Write-Output ('RESULT=' + (Test-UmRunTrackedFixtureSource -SourcePath " + _q(path) +
+            " -RepoRoot " + _q(repo_root if repo_root is not None else self.repo) + "))\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                              capture_output=True, text=True, env=env)
+        return proc.stdout + proc.stderr
+
+    def test_identical_working_tree_bytes_are_admitted(self) -> None:
+        self.assertIn("RESULT=True", self.probe(self.fixture))
+
+    def test_altered_working_tree_bytes_are_refused(self) -> None:
+        # THE DEFECT: the old name-plus-tracked check admitted this unconditionally.
+        self.fixture.write_bytes(b"foreign bytes staged over the fixture")
+        self.assertIn("RESULT=False", self.probe(self.fixture))
+
+    def test_an_untracked_fixture_shaped_file_is_refused(self) -> None:
+        untracked = self.clips / "large_dual_iso.umrunprobe"
+        untracked.write_bytes(b"never committed")
+        self.assertIn("RESULT=False", self.probe(untracked))
+
+    def test_a_fixture_shaped_file_outside_any_repo_is_refused(self) -> None:
+        # No `git init` anywhere under orphan_root: the directory shape and stem are admissible,
+        # but there is no repository at all to hold a committed blob.
+        orphan_root = Path(os.path.realpath(self._tmp.name)) / "orphan"
+        orphan_clips = orphan_root / "tests" / "fixtures" / "clips"
+        orphan_clips.mkdir(parents=True)
+        orphan = orphan_clips / "tiny_dual_iso.umrunprobe"
+        shutil.copy2(self.fixture, orphan)
+        self.assertIn("RESULT=False", self.probe(orphan, repo_root=orphan_root))
+
+    def test_no_git_on_path_is_refused(self) -> None:
+        env = _env_without_git()
+        if env is None:
+            self.skipTest("could not remove git from PATH in this environment")
+        self.assertIn("RESULT=False", self.probe(self.fixture, env=env))
+
+
 if __name__ == "__main__":
     unittest.main()

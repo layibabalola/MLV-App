@@ -12,7 +12,10 @@
 #   - renames never overwrite: a destination that appeared concurrently makes the rename fail, and
 #     the result is accepted only if that destination already holds identical bytes (side-file) --
 #     a job file is never replaced;
-#   - every side-file is in place before the job is dropped.
+#   - every side-file is in place before the job is dropped;
+#   - a tracked fixture clip is admitted only when its WORKING-TREE bytes are exactly the committed
+#     blob at HEAD, never by name/tracked-status alone (ATTR3-ADMIT-CONTENT-PIN-1, fable key on
+#     PR #137) -- see Test-UmRunFixtureContentPin.
 
 Set-StrictMode -Version Latest
 
@@ -24,6 +27,11 @@ $script:DeviceNames = @('CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM
 # the smallest tracked file then proved the bypass rather than the feature. The same two stems the
 # attribution generator accepts as -ClipId are the admissible set here, and no extension is named.
 $script:TrackedFixtureClipStems = @('tiny_dual_iso', 'large_dual_iso')
+# tools/profiling/bachelor/AttrCudaArtifacts.psm1's Assert-AttrCudaFixtureCommittedBytes -- the twin
+# check ATTR3-FIXTURE-STAGE-1 already wrote for this identical defect class -- is reused by
+# Test-UmRunFixtureContentPin below, imported ON DEMAND from this path so a host that never ships
+# the bachelor module still runs every other um-run side-file rule unchanged.
+$script:AttrCudaArtifactsModulePath = Join-Path (Join-Path $PSScriptRoot 'bachelor') 'AttrCudaArtifacts.psm1'
 
 function Test-UmRunTrackedFixtureSource {
     <#
@@ -43,6 +51,13 @@ function Test-UmRunTrackedFixtureSource {
     therefore anchored to the repository this module ships in, and compared on REAL paths: the
     source's directory, with links resolved, must be the resolved `<repoRoot>\tests\fixtures\clips`
     itself, and the file must be tracked there by git.
+
+    ATTR3-ADMIT-CONTENT-PIN-1 (fable key on PR #137): being tracked under that name says nothing
+    about whether the WORKING-TREE bytes at that path are still the committed ones -- a working
+    copy overwritten with foreign bytes was still admitted and staged onto the measurement host
+    under the fixture's name. Test-UmRunFixtureContentPin closes that: admission now requires the
+    bytes on disk to equal the committed blob at HEAD, and fails closed (git missing, not a repo,
+    untracked/absent from HEAD, or a bytes mismatch) rather than admitting on name alone.
     #>
     [CmdletBinding()]
     param(
@@ -68,11 +83,48 @@ function Test-UmRunTrackedFixtureSource {
     $stem = [IO.Path]::GetFileNameWithoutExtension($name)
     if ($script:TrackedFixtureClipStems -cnotcontains $stem) { return $false }
 
-    # Tracked in this repository: a file merely dropped into the fixtures directory is not a fixture.
-    $git = Get-Command git -ErrorAction SilentlyContinue
-    if ($null -eq $git) { return $false }
-    $tracked = & $git.Source -C $RepoRoot ls-files --error-unmatch -- ("tests/fixtures/clips/" + $name) 2>$null
-    return ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($tracked | Out-String)))
+    # Tracked AND content-pinned: git rev-parse HEAD:<path> (inside Test-UmRunFixtureContentPin)
+    # fails the same way for "never committed" and "committed but the working copy has drifted", so
+    # a single fail-closed call covers both -- see that function for the distinct thrown reasons.
+    try {
+        Test-UmRunFixtureContentPin -Path $sourceItem.FullName
+    } catch {
+        Write-Verbose $_.Exception.Message
+        return $false
+    }
+    return $true
+}
+
+function Test-UmRunFixtureContentPin {
+    <#
+    .SYNOPSIS
+    Throw unless a fixture's working-tree bytes are exactly its committed blob at HEAD.
+    .DESCRIPTION
+    ATTR3-ADMIT-CONTENT-PIN-1. Reuses tools/profiling/bachelor/AttrCudaArtifacts.psm1's
+    Assert-AttrCudaFixtureCommittedBytes -- the twin check ATTR3-FIXTURE-STAGE-1 already wrote for
+    the identical defect class, comparing `git hash-object` of the working-tree file to
+    `git rev-parse HEAD:<repo-relative path>` -- rather than re-deriving the same comparison here
+    and letting the two drift. The bachelor module is imported ON DEMAND, and only if present, so a
+    host that never ships it still runs every OTHER um-run side-file rule unchanged: it simply
+    cannot admit a tracked fixture by content, and this fails closed instead of admitting on name
+    alone. Deliberately NO -Force: a caller (attr3-stage-fixture-job.ps1) already imports this same
+    module itself before calling Test-UmRunTrackedFixtureSource, and Import-Module -Force first
+    REMOVES any existing same-named module from the whole session -- unbinding it from that
+    caller's own scope, not just this one -- before rebinding it here alone. Plain Import-Module is
+    a no-op when the module is already loaded, so the caller's binding survives untouched.
+    Throws UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE when the bachelor module is not present, or one of
+    Assert-AttrCudaFixtureCommittedBytes's own distinct tokens: ATTR3_FIXTURE_GIT_UNAVAILABLE (git
+    missing), ATTR3_FIXTURE_NOT_IN_A_REPO (not inside a repo), ATTR3_FIXTURE_NOT_COMMITTED
+    (untracked or absent from HEAD), or ATTR3_FIXTURE_WORKING_TREE_DIRTY (bytes differ).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $script:AttrCudaArtifactsModulePath -PathType Leaf)) {
+        throw "UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE $($script:AttrCudaArtifactsModulePath) is not present; cannot verify '$Path' against its committed blob"
+    }
+    Import-Module $script:AttrCudaArtifactsModulePath -ErrorAction Stop
+    [void](Assert-AttrCudaFixtureCommittedBytes -Path $Path)
 }
 
 function Resolve-UmRunRealDirectory {
