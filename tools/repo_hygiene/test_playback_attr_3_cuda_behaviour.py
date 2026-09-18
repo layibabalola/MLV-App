@@ -843,71 +843,70 @@ class AttributionJobOptionalClipPathTests(_PwshCase):
 @requires_pwsh
 @requires_git
 class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
-    """The emitted job hashes a fixture's cached bytes before it ever opens the clip."""
+    """The emitted job hashes a fixture's cached bytes before it ever opens the clip.
+
+    ATTR3-FIXTURE-STAGE-1 r2: this class used to generate a full job.ps1 and run it end to
+    end via _run_job, exactly like AttributionJob*Tests elsewhere in this file. That made it
+    depend on -AgentRoot resolving under the real C:\\mlvtmp, because the job's OWN
+    Assert-UnderMlvTmp guard (a deliberate hard floor independent of -AgentRoot -- see
+    playback-attr-3-cuda-job.ps1's "TEMP boundary (BLOCKER fix)" comment) throws before the
+    fixture-content check ever runs if $Root/$Work/$Pub are not under C:\\mlvtmp. A lane
+    whose scratch root happens to sit under C:\\mlvtmp (Invoke-Lane) passed by accident; a
+    normal TEMP does not (exit 1, "job-owned path 'Root' resolves outside C:\\mlvtmp"), and
+    CI/other reviewers run from a normal TEMP. That guard is production behaviour and is not
+    touched here (test_the_default_agent_root_guard_still_refuses_a_root_outside_mlvtmp below
+    proves it still fires). Instead, the fixture-content check itself -- inline top-level
+    code in the template, not a named module function, so there is nothing to Import-Module
+    -- is sliced VERBATIM out of the generator's own $template text by _extract_fixture_
+    content_check and run standalone, with just the handful of variables and the Save-Json
+    helper it actually reads. This is the same "run the real characters, not a
+    re-implementation" guarantee Get-AttrCudaEmbeddedFunctionSource gives the psm1-based
+    checks, applied to a block that has no function name to splice by. It also never touches
+    $Root/$Work/-AgentRoot/C:\\mlvtmp at all, so it is portable regardless of ambient TEMP.
+    """
 
     def setUp(self) -> None:
         super().setUp()
         self.repo = self.tmp / "repo"
         self.shas = _make_fixture_repo(self.repo)
-        self.staging = self.tmp / "staging"
-        self.staging.mkdir()
         self.agent = self.tmp / "agent"
         self.cache = self.agent / "cache"
         self.cache.mkdir(parents=True)
 
-    def _fake_cache(self) -> dict:
-        import hashlib
+    def _extract_fixture_content_check(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start_marker = "if ($FixtureRehearsal) {"
+        end_marker = "\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)"
+        start = text.index(start_marker)
+        end = text.index(end_marker, start)
+        self.assertGreater(end, start, "fixture-content-check markers moved in the generator")
+        return text[start:end]
 
-        short = self.shas[1][:12]
-        names = {
-            "exe": f"MLVApp-playback-attr-3-cuda-{short}.exe",
-            "dll": f"igpu_recon_cuda-playback-attr-3-cuda-{short}.dll",
-            "packageZip": f"MLVApp-playback-attr-3-cuda-{short}-pkg.zip",
-            "manifest": f"playback-attr-3-cuda-{short}-build.json",
-            "presentMon": "PresentMon-2.5.1-x64.exe",
-            "smoke": "run-release-gui-smoke.ps1",
-        }
-        shas = {}
-        for key in ("exe", "dll", "packageZip"):
-            payload = f"fabricated {key} for {self.shas[1]}".encode("utf-8")
-            (self.cache / names[key]).write_bytes(payload)
-            shas[key] = hashlib.sha256(payload).hexdigest()
-        presentmon_payload = b"fabricated presentmon executable"
-        (self.cache / names["presentMon"]).write_bytes(presentmon_payload)
-        shas["presentMon"] = hashlib.sha256(presentmon_payload).hexdigest()
-        (self.cache / names["smoke"]).write_text("# fabricated placeholder\n", encoding="utf-8")
-        manifest = {
-            "schema": "mlvapp.playback-attr-3-cuda-build-cache-manifest.v1",
-            "sourceCommit": self.shas[1],
-            "exe": {"name": names["exe"], "sha256": shas["exe"]},
-            "dll": {"name": names["dll"], "sha256": shas["dll"]},
-            "packageZip": {"name": names["packageZip"], "sha256": shas["packageZip"]},
-            "pendingSymbolPresence": True,
-            "dllPairManifestSha256": "e" * 64,
-        }
-        manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
-        (self.cache / names["manifest"]).write_bytes(manifest_bytes)
-        return {
-            "names": names,
-            "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest(),
-            "presentMonSha256": shas["presentMon"],
-        }
-
-    def _generate(self, fixture_sha256: str) -> Path:
-        info = self._fake_cache()
-        out_file = self.staging / "job.ps1"
-        script = self.tmp / "generate.ps1"
+    def _run_fixture_content_check(
+        self, *, clip_path: Path, fixture_sha256: str, pub: Path
+    ) -> subprocess.CompletedProcess:
+        # The real job creates $Pub (New-AttrCudaDirectory) before this block ever runs; this
+        # probe stands in for that one step so Save-Json has somewhere to write.
+        pub.mkdir(parents=True)
+        block = self._extract_fixture_content_check()
+        script = self.tmp / "fixture-content-check-probe.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
-            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
-            f"-BuildManifestSha256 '{info['manifestSha256']}' -ClipId 'tiny_dual_iso' "
-            f"-FixtureSha256 '{fixture_sha256}' -OutFile '{out_file}' -RepoRoot '{self.repo}' "
-            f"-AgentRoot '{self.agent}' -PresentMonSha256 '{info['presentMonSha256']}'\n",
+            f"Import-Module '{MODULE}' -Force\n"
+            "$FixtureRehearsal = $true\n"
+            f"$clipPath = '{clip_path}'\n"
+            f"$FixtureSha256 = '{fixture_sha256}'\n"
+            f"$SourceCommit = '{self.shas[1]}'\n"
+            "$ClipId = 'tiny_dual_iso'\n"
+            f"$Pub = '{pub}'\n"
+            "function Save-Json($Object, [string]$Path) {\n"
+            "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
+            "}\n"
+            + block + "\n"
+            "Write-Output 'RESULT=NO_MISMATCH'\n",
             encoding="utf-8",
         )
-        proc = _run_pwsh_file(script)
-        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
-        return out_file
+        return _run_pwsh_file(script)
 
     def test_a_mismatched_cached_clip_fails_closed_before_the_package_is_touched(self) -> None:
         import hashlib
@@ -915,19 +914,20 @@ class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
         extension = "." + "mlv"
         clip_name = "tiny_dual_iso" + extension
         wrong_bytes = b"not the fixture the hub thinks is cached"
-        (self.cache / clip_name).write_bytes(wrong_bytes)
+        clip_path = self.cache / clip_name
+        clip_path.write_bytes(wrong_bytes)
         expected_sha = hashlib.sha256(b"the real fixture bytes").hexdigest()
-        job = self._generate(expected_sha)
+        pub = self.agent / "outbox" / "fake-job.artifacts"
 
-        proc = _run_job(job)
+        proc = self._run_fixture_content_check(
+            clip_path=clip_path, fixture_sha256=expected_sha, pub=pub
+        )
 
         self.assertEqual(proc.returncode, 17, f"{proc.stdout}\n{proc.stderr}")
         self.assertIn("RESULT=FIXTURE_CONTENT_MISMATCH", proc.stdout)
         self.assertIn(expected_sha, proc.stdout)
         self.assertIn(hashlib.sha256(wrong_bytes).hexdigest(), proc.stdout)
-        outboxes = list((self.agent / "outbox").glob("*.artifacts"))
-        self.assertEqual(len(outboxes), 1, outboxes)
-        summary = json.loads((outboxes[0] / "summary.json").read_text(encoding="utf-8"))
+        summary = json.loads((pub / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["result"], "FIXTURE_CONTENT_MISMATCH")
         self.assertTrue(summary["fixtureRehearsal"])
         self.assertEqual(summary["expectedSha256"], expected_sha)
@@ -939,14 +939,47 @@ class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
         extension = "." + "mlv"
         clip_name = "tiny_dual_iso" + extension
         clip_bytes = b"exactly the bytes the hub staged"
-        (self.cache / clip_name).write_bytes(clip_bytes)
+        clip_path = self.cache / clip_name
+        clip_path.write_bytes(clip_bytes)
         matching_sha = hashlib.sha256(clip_bytes).hexdigest()
-        job = self._generate(matching_sha)
+        pub = self.agent / "outbox" / "fake-job-2.artifacts"
 
-        proc = _run_job(job)
+        proc = self._run_fixture_content_check(
+            clip_path=clip_path, fixture_sha256=matching_sha, pub=pub
+        )
 
         self.assertNotIn("FIXTURE_CONTENT_MISMATCH", proc.stdout)
         self.assertNotEqual(proc.returncode, 17, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=NO_MISMATCH", proc.stdout, f"{proc.stdout}\n{proc.stderr}")
+
+    def test_the_default_agent_root_guard_still_refuses_a_root_outside_mlvtmp(self) -> None:
+        # Proves the check above does not paper over a real regression: with NO override,
+        # the emitted job's Assert-UnderMlvTmp guard still refuses an -AgentRoot that
+        # resolves outside C:\mlvtmp, before it ever looks at the cache. A LITERAL path is
+        # used here rather than self.tmp/self.agent: self.tmp can itself land under the real
+        # C:\mlvtmp (e.g. a fleet lane whose own scratch root is
+        # C:\mlvtmp\lane-scratch\...), which would make self.agent the wrong fixture for an
+        # "outside mlvtmp" assertion and is exactly how this bug went unnoticed before.
+        outside_root = "C:\\attr3-guard-check-outside-mlvtmp"
+        out_file = self.tmp / "outside-root-job.ps1"
+        script = self.tmp / "generate-outside-root.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'tiny_dual_iso' "
+            f"-FixtureSha256 '{'b' * 64}' -OutFile '{out_file}' -RepoRoot '{self.repo}' "
+            f"-AgentRoot '{outside_root}' -PresentMonSha256 '{'c' * 64}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+
+        proc = _run_job(out_file)
+
+        self.assertEqual(proc.returncode, 1, f"{proc.stdout}\n{proc.stderr}")
+        combined = proc.stdout + proc.stderr
+        self.assertIn("job-owned path 'Root' resolves outside", combined)
+        self.assertIn("C:\\mlvtmp", combined)
 
 
 @requires_pwsh
