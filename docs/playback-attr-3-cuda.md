@@ -199,6 +199,28 @@ The owner's consent for the clip on this card is recorded at
 authorization is the owner-typed path line. The job cites the receipt's file name in
 `evidence-manifest.json`.
 
+## 4b. Fixture rehearsal (no footage)
+
+The chain above can be rehearsed end to end WITHOUT any owner footage, and should be, before a real
+clip is ever opened. Pass `-ClipId tiny_dual_iso` or `-ClipId large_dual_iso`: the two clips tracked
+in this repository under `tests/fixtures/clips`. NA-4 admits those already, with no `CLIP_OR_NONE`
+line and no consent receipt, because they are repository fixtures rather than the owner's footage.
+
+- **Staging.** `tools/profiling/um-run.ps1 -SideFile <repo>/tests/fixtures/clips/<name>` places the
+  fixture in the agent cache by the same verified route as every other side-file. It is admitted by
+  its SOURCE (a `tests/fixtures/clips` directory), not by its extension: see
+  `Test-UmRunTrackedFixtureSource` in `tools/profiling/UmRunDrop.psm1`. A file with the same name from
+  any other directory is refused.
+- **Unchanged for a fixture run.** `-ClipPath` must still resolve into the agent cache with
+  `BaseName -ceq $ClipId`; `-BuildManifestSha256` still authenticates the staged manifest; the
+  eligibility gate still exits 15 unless `cuda_backend_available=1` and `r16_available=1`.
+- **What it establishes.** That staging, backend load, the eligibility gate, PresentMon capture and
+  artifact publication all work on the measurement host, against the exact package under test.
+- **What it does NOT establish.** Anything about performance. Both fixtures are small dual-ISO files;
+  their timing is a plumbing proof, never a measurement. A fixture run records
+  `fixtureRehearsal: true` in `summary.json` and `evidence-manifest.json` so it cannot be read as an
+  attribution result, and a fixture run's numbers never enter a verdict in section 6.
+
 ## 5. Extract the histogram
 
 Pull `presentmon-series.csv` and `logs\smoke-run.log` from the attribution artifacts, then:
