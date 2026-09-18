@@ -14,10 +14,14 @@
 # FOOTAGE (NA-4, docs/never-authorized.json): the job opens exactly ONE clip, the exact
 # canonical path passed as -ClipPath. There is NO id-to-file resolution anywhere; an
 # earlier resolver was ruled an NA-4 evasion (sol, PR #131 r2) and removed. NA-4 admits
-# a real clip only as the single path on the CLIP_OR_NONE line of the running lane's own
-# MLV_LANE_PROMPT, which the owner types by hand (agents cannot write it). Run this
-# generator INSIDE that owner-granted lane with -ClipPath equal to that line, so the hook
-# sees the path in the lane's tool input. A two-part clip's continuation part is opened
+# a real clip by one of two routes: the single path on the CLIP_OR_NONE line of the running
+# lane's own MLV_LANE_PROMPT, which the owner types by hand (agents cannot write it), or a
+# literal path whose norm hash is in the hook's frozen owner-consented table
+# (NA4-OWNER-CONSENTED-FOOTAGE-1). Either admission binds the PATH, not the bytes, so this
+# generator REFUSES every owner-clip id until card ATTR3-FOOTAGE-BIND-1 wires
+# tools/gates/verify_consented_footage.py in (see the refusal below the fixture test). When
+# that lands, run it with -ClipPath equal to the admitted path, so the hook sees the path in
+# the lane's tool input. A two-part clip's continuation part is opened
 # by the application itself, never named by this code. The owner's consent record
 # (receipts/owner-footage-consent-20260916.json and its -correction.json) is evidence of
 # consent, never an authorization. Adjudication:
@@ -71,7 +75,8 @@
 # Usage:
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
 #       -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> `
-#       -ClipId M16-1243 -ClipPath <the lane's CLIP_OR_NONE path> -OutFile <path>\<jobId>.job.ps1
+#       -ClipId tiny_dual_iso -ClipPath <the agent-cache path of that fixture> -OutFile <path>\<jobId>.job.ps1
+# (an owner-clip -ClipId is refused until ATTR3-FOOTAGE-BIND-1; see FOOTAGE above)
 #
 # -BuildManifestSha256 is the sha the assembler printed (MANIFEST_SHA256= on its RESULT line)
 # and the staging generator echoed as buildManifestSha256; see docs/playback-attr-3-cuda.md.
@@ -185,6 +190,14 @@ $reconName = "igpu_recon_cuda-playback-attr-3-cuda-$shortSha.dll"
 $FixtureClipIds = @('tiny_dual_iso', 'large_dual_iso')
 $isFixtureRehearsal = $FixtureClipIds -ccontains $ClipId
 $fixtureRehearsalLiteral = if ($isFixtureRehearsal) { '$true' } else { '$false' }
+
+# NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (B): FAIL CLOSED until content binding is wired. NA-4
+# binds a consented clip by PATH only; nothing on this route yet checks the bytes against the
+# frozen table with tools/gates/verify_consented_footage.py, so an owner-clip id is refused
+# outright (no override switch) until card ATTR3-FOOTAGE-BIND-1 wires that verifier in.
+if (-not $isFixtureRehearsal) {
+    throw "REFUSED: owner-clip id '$ClipId' emits no job until card ATTR3-FOOTAGE-BIND-1 wires tools/gates/verify_consented_footage.py into this route; only the fixture ids 'tiny_dual_iso' and 'large_dual_iso' are emitted today."
+}
 
 # --- job body template (placeholders are substituted below; the body itself never
 #     touches this generator's variables directly, so there is no accidental capture
