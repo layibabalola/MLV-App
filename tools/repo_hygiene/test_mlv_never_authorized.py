@@ -576,6 +576,7 @@ READONLY_AUTH_STATUS = " ".join(("claude", "au" + "th", "status"))
 # the board root, which is where hook evolution is authored.
 NA10_SETTINGS = "{REPO}/.claude/settings.json"
 NA10_HOOK_SCRIPT = "{REPO}/tools/hooks/mlv-never-authorized.py"
+NA10_VERIFIER = "{REPO}/tools/gates/verify_consented_footage.py"
 NA10_UNRELATED = "{REPO}/src/mlv/video_mlv.c"
 NA10_NEW_TEXT = "# rewritten by the lane this gate governs\n"
 
@@ -3356,8 +3357,20 @@ CASES = [
         "fixture": "venue_at_worktree",
     },
     {
+        # NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (E): the consent table's content verifier is
+        # the fourth gate tail.  A lane that rewrites it rewrites the content half of NA-4.
+        "name": "na10 lane rewrites the consented footage verifier",
+        "group": "na10",
+        "tool": "Write",
+        "input": {"file_path": NA10_VERIFIER, "content": NA10_NEW_TEXT},
+        "expect": "DENY",
+        "na": "NA-10",
+        "reason_contains": "OWN gate",
+        "fixture": "venue_at_worktree",
+    },
+    {
         # THE CONTROL.  An ordinary source edit in the same worktree at the same venue: NA-10
-        # is about three files, not about a lane's right to edit code.
+        # is about four files, not about a lane's right to edit code.
         "name": "na10 control unrelated worktree edit at a lane venue",
         "group": "na10",
         "tool": "Edit",
@@ -5991,10 +6004,11 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # persistent verbs covered, plus the in-process `$env:` ALLOW control that keeps the
         # rule about PERSISTENCE.  `na10` is the hub extension: two DENY writes at a lane
         # venue, the same two ALLOW at the board venue, the shell arm, and the unrelated-file
-        # control that keeps it about the GATE and not about the worktree.
+        # control that keeps it about the GATE and not about the worktree.  `na10` grew 6 -> 7
+        # at NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (E): the consent verifier's DENY row.
         self.assertEqual(counts.get("na3"), 5, "5 NA-3 claude-auth rows")
         self.assertEqual(counts.get("na3_persistent"), 6, "6 NA-3 O129 persistent-scope rows")
-        self.assertEqual(counts.get("na10"), 6, "6 NA-10 self-edit rows")
+        self.assertEqual(counts.get("na10"), 7, "7 NA-10 self-edit rows")
         # PINNED, NEW at the thirteenth commit (S131): a NEW group, 3 rows -- the `setx.exe`
         # credential-prefix bypass, the `setx.exe` persistent-name bypass, and the fully
         # qualified `[System.Environment]::SetEnvironmentVariable` persistent-name bypass.
@@ -6779,6 +6793,401 @@ class EnableCompoundIsFailClosedTests(unittest.TestCase):
         self.assertFalse(
             os.path.exists(self.marker), "the marker should be gone" + detail
         )
+
+
+# ------------------------------------ NA4-OWNER-CONSENTED-FOOTAGE-1: the consent record
+#
+# ROUND 6 (NARROW).  Rounds 1-5 tested an exception (3) that admitted a consented path named in
+# command text; that admission is removed, and with it every row of its machinery (the
+# literal-token allowlist, the whole-shell-word span test, ``is_owner_consented_path``).  The
+# frozen ``OWNER_CONSENTED_FOOTAGE`` table stays as the consent record, value-pinned here, and a
+# consented-footage path in command text is DENIED by NA-4 like any other footage path.  Every
+# row uses synthetic, extension-free names under a synthetic CLIP CACHE root -- NA-4 treats the
+# cache root as footage exactly as it treats a clip extension -- and an injected fixture table
+# whose path hashes are computed from the hook's own ``norm``, so the DENY rows run against a
+# table under which each path WOULD have been consented.  No row reads real footage.
+
+CONSENTED_IDS_PINNED = (
+    "M16-1243",
+    "M16-1327",
+    "M16-1347",
+    "M17-1207",
+    "M15-1320",
+    "M16-1210",
+)
+# sha256 of the raw JSONL line bytes EXCLUDING the line terminator.
+OWNER_CONSENT_LINE = 1739
+OWNER_CONSENT_LINE_SHA256 = "461af7a5291099e009230a8abcfe547e064435287a23f40cf93e5ba4ddb0a066"
+OWNER_CONSENT_QUESTION_LINE = 1718
+OWNER_CONSENT_QUESTION_LINE_SHA256 = (
+    "88484275b4ef158bdaf0a98a3755c70fb65be34c514ae406c6603446dee4a38a"
+)
+OWNER_DIRECTIVE_LINE = 2137
+OWNER_DIRECTIVE_LINE_SHA256 = "254075c85a821758067f7d37dbc5a26a05ae8e2a2368f1e02af0fa2110ac8e41"
+REGISTER_DOC = os.path.join(REPO_ROOT, "docs", "never-authorized.json")
+# ROUND 3 (A; sol BLOCKER, fable MAJOR).  The VALUES of the frozen table, pinned: the sha256 of
+# `_canonical_consent_table` over the WHOLE table (ids, per-part length, content sha256 and
+# path_norm_sha256, part counts, purposes and citations), and each id's part count.  An
+# in-place hash swap or an appended part row changes the digest; the latter also a count.
+OWNER_CONSENT_TABLE_SHA256 = "38a4e60b7f4e1a484d361d175d839314c87d49063adb5760ac3a9f07aa9c860a"
+OWNER_CONSENT_PART_COUNTS = {
+    "M16-1243": 2,
+    "M16-1327": 2,
+    "M16-1347": 2,
+    "M17-1207": 2,
+    "M15-1320": 2,
+    "M16-1210": 2,
+}
+
+
+def _plain_consent_value(value):
+    """Mapping proxies and tuples -> plain dicts and lists, so the table serialises as JSON."""
+    if hasattr(value, "items") and hasattr(value, "keys"):
+        return {str(key): _plain_consent_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain_consent_value(item) for item in value]
+    return value
+
+
+def _canonical_consent_table(table):
+    """-> the canonical UTF-8 serialisation the pinned digest is taken over."""
+    return json.dumps(
+        _plain_consent_value(table), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+
+
+class OwnerConsentedFootageTests(unittest.TestCase):
+    """NA-4 consent record: frozen and value-pinned; a consented path in command text is DENIED."""
+
+    def setUp(self):
+        self.module = _load_hook_module()
+        self.tmp = tempfile.mkdtemp(prefix="mlv-na4c-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        # SYNTHETIC drive-letter roots, never the temp dir: portable across the ubuntu and
+        # windows legs.  NA-4 decides on strings alone, so nothing here has to exist.
+        self.board = "C:/synthetic-board"
+        self.cache = "C:/synthetic-board/cache"
+        self.part0 = os.path.join(self.cache, "mirror", "consented", "clip-a.part0")
+        self.part1 = os.path.join(self.cache, "mirror", "consented", "clip-a.part1")
+        self.unconsented = os.path.join(self.cache, "mirror", "unconsented", "clip-z.part0")
+        self.saved_env = dict(os.environ)
+        self.addCleanup(self._restore_env)
+        for key in list(os.environ):
+            if key.startswith("MLV_"):
+                del os.environ[key]
+        os.environ["MLV_BOARD_ROOT"] = self.board
+        os.environ["MLV_CLIP_CACHE_ROOT"] = self.cache
+        self.table = self._table({"M16-1243": (self.part0, self.part1)})
+
+    def _restore_env(self):
+        os.environ.clear()
+        os.environ.update(self.saved_env)
+
+    # ------------------------------------------------------------------ fixtures
+
+    def _path_hash(self, path):
+        return hashlib.sha256(self.module.norm(path).encode("utf-8")).hexdigest()
+
+    def _table(self, clips):
+        return {
+            "clips": {
+                clip_id: tuple(
+                    (
+                        index + 1,
+                        hashlib.sha256(b"fixture part %d" % index).hexdigest(),
+                        self._path_hash(path),
+                    )
+                    for index, path in enumerate(paths)
+                )
+                for clip_id, paths in clips.items()
+            },
+            "purposes": ("fixture purpose",),
+            "authority": {},
+        }
+
+    def _decide(self, path, consent="fixture"):
+        consent = self.table if consent == "fixture" else consent
+        saved = self.module.OWNER_CONSENTED_FOOTAGE
+        if consent is not None:
+            self.module.OWNER_CONSENTED_FOOTAGE = consent
+        try:
+            return self.module.decide(
+                {"tool_name": "Bash", "tool_input": {"command": 'mlv_dump -v "%s"' % path}},
+                None,
+            )
+        finally:
+            self.module.OWNER_CONSENTED_FOOTAGE = saved
+
+    def _decide_command(self, command):
+        saved = self.module.OWNER_CONSENTED_FOOTAGE
+        self.module.OWNER_CONSENTED_FOOTAGE = self.table
+        try:
+            return self.module.decide(
+                {"tool_name": "Bash", "tool_input": {"command": command}}, None
+            )
+        finally:
+            self.module.OWNER_CONSENTED_FOOTAGE = saved
+
+    def assertAllow(self, decision):
+        self.assertEqual(decision, (0, ""), decision)
+
+    def assertNa4Deny(self, decision):
+        self.assertEqual(decision[0], 2, decision)
+        self.assertTrue(decision[1].startswith("NA-4: "), decision)
+
+    # ---------------------------------------------------------------------- rows
+
+    def test_deny_a_consented_footage_path_in_command_text(self):
+        # ROUND 6 (NARROW).  The fixture table consents `self.part0` and `self.part1` -- their
+        # norm hashes ARE in it -- and NA-4 still denies each one named in command text, in
+        # every spelling, as a whole shell word, alone or joined to a neighbour.  Every row was
+        # an ALLOW at d4bd9721 (exception (3)); consented footage is reachable only through
+        # tracked, id-addressed consumers, never through a path in agent command text.
+        path = self.part0.replace("\\", "/")
+        self.assertIn(self._path_hash(self.part0), [p[2] for p in self.table["clips"]["M16-1243"]])
+        for spelling in (self.part0, self.part1, self.part1.upper().replace("\\", "/")):
+            with self.subTest(spelling=spelling):
+                self.assertNa4Deny(self._decide(spelling))
+        for command in (
+            "probe %s" % path,
+            'probe "%s"' % path,
+            "probe '%s'" % path,
+            'probe "%s";echo done' % path,
+            '(probe "%s")' % path,
+        ):
+            with self.subTest(command=command):
+                self.assertNa4Deny(self._decide_command(command))
+
+    def test_deny_the_same_basename_in_a_different_directory(self):
+        moved = os.path.join(self.cache, "mirror", "elsewhere", "clip-a.part0")
+        self.assertNa4Deny(self._decide(moved))
+
+    def test_deny_m02_1344(self):
+        # The fixture table carries a consented id only; a synthetic M02-1344 part is not in it,
+        # and the FROZEN table has no M02-1344 row at all.
+        m02 = os.path.join(self.cache, "mirror", "M02-1344", "M02-1344.part0")
+        self.assertNa4Deny(self._decide(m02))
+        self.assertNa4Deny(self._decide(m02, consent=None))
+        self.assertNotIn("M02-1344", self.module.OWNER_CONSENTED_FOOTAGE["clips"])
+
+    def test_deny_any_token_whose_norm_hash_is_absent(self):
+        self.assertNa4Deny(self._decide(self.unconsented))
+        # The real frozen table: synthetic paths are never its hashes.
+        self.assertNa4Deny(self._decide(self.part0, consent=None))
+        self.assertNa4Deny(self._decide(self.unconsented, consent=None))
+
+    def test_deny_a_path_hash_under_a_malformed_table(self):
+        malformed = {"clips": {"M16-1243": ((1, "0" * 64),)}}  # no path_norm_sha256 column
+        self.assertNa4Deny(self._decide(self.part0, consent=malformed))
+        self.assertNa4Deny(self._decide(self.part0, consent={}))
+
+    # ------------------------------------------------------------- values pinned (A)
+
+    def test_the_whole_frozen_table_is_value_pinned(self):
+        table = self.module.OWNER_CONSENTED_FOOTAGE
+        self.assertEqual(
+            hashlib.sha256(_canonical_consent_table(table)).hexdigest(),
+            OWNER_CONSENT_TABLE_SHA256,
+            "the frozen consent table's VALUES changed; a change here is a consent change",
+        )
+        self.assertEqual(
+            {clip_id: len(parts) for clip_id, parts in table["clips"].items()},
+            OWNER_CONSENT_PART_COUNTS,
+        )
+
+    def test_the_pin_sees_a_swapped_hash_and_an_appended_part(self):
+        # The two edits both reviewers named: each would have kept round 2's shape tests green.
+        plain = _plain_consent_value(self.module.OWNER_CONSENTED_FOOTAGE)
+        pinned = hashlib.sha256(_canonical_consent_table(plain)).hexdigest()
+        swapped = json.loads(json.dumps(plain))
+        swapped["clips"]["M16-1243"][0][2] = "f" * 64
+        appended = json.loads(json.dumps(plain))
+        appended["clips"]["M16-1243"].append([1, "a" * 64, "b" * 64])
+        for label, edited in (("swapped path hash", swapped), ("appended part", appended)):
+            with self.subTest(edit=label):
+                self.assertNotEqual(
+                    hashlib.sha256(_canonical_consent_table(edited)).hexdigest(), pinned
+                )
+        self.assertEqual(len(appended["clips"]["M16-1243"]), 3)
+        self.assertNotEqual(OWNER_CONSENT_PART_COUNTS["M16-1243"], 3)
+
+    def test_limits_state_the_value_pin_the_residual_and_the_trailing_dot_gap(self):
+        with open(self.module.__file__, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        for needle in (
+            # Round 6 (NARROW): no command-text admission, and the id-only route.
+            "this hook admits NO consented path from command text",
+            "No rule in this hook reads the table.",
+            "(1) Consented footage is reachable ONLY through\n"
+            "# tracked, id-addressed consumers that verify content against this table",
+            # The honesty statement: scope, not exposure; the interpreter residual stands.
+            "(2) THE NARROWING REDUCES\n# SCOPE, NOT EXPOSURE.",
+            "The interpreter-one-liner residual is UNCHANGED:",
+            "so such a one-liner can open\n# any path, consented or not,",
+            "VALUE-pinned by tests",
+            "A board-rooted actor can still edit the table transiently:",
+            "bounded by the NA-10 venue gate and the 0.05\n# hook-enforced receipt that Invoke-Lane checks.",
+            "until then the CUDA job generator refuses every owner-clip id.",
+            "(5) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the\n"
+            "# cache",
+            "NA4-CLIP-NAME-TRIM-1",
+            "(6) Exceptions (1) and (2) still compare the EXPANDED token,",
+            "NA4-EXC12-LITERAL-TOKENS-1",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, source)
+        # The removed machinery is gone, not dormant.
+        for removed in (
+            "is_owner_consented_path", "is_literal_canonical_token", "is_whole_shell_word",
+            "token_spans", "_consented_path_norm_hashes",
+        ):
+            with self.subTest(removed=removed):
+                self.assertFalse(hasattr(self.module, removed), removed)
+
+    def test_no_subprocess_on_the_na4_path(self):
+        cases = (self.part0, self.part1, self.unconsented, os.path.join(self.tmp, "x.txt"))
+        baseline = [self._decide(path) for path in cases]
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("NA-4 must not start a process")
+
+        patched = [
+            (subprocess, "Popen"), (subprocess, "run"), (subprocess, "check_output"),
+            (os, "system"), (os, "popen"),
+        ]
+        saved = [(owner, name, getattr(owner, name)) for owner, name in patched]
+        for owner, name in patched:
+            setattr(owner, name, refuse)
+        try:
+            refused = [self._decide(path) for path in cases]
+        finally:
+            for owner, name, value in saved:
+                setattr(owner, name, value)
+        self.assertEqual(refused, baseline)
+        self.assertEqual(baseline[0][0], 2)  # round 6: a consented path is denied too
+        self.assertEqual(baseline[2][0], 2)
+        self.assertFalse(hasattr(self.module, "_read_merged_output_budget"))
+        self.assertNotIn("subprocess", vars(self.module))
+
+    def test_the_real_hook_process_denies_an_unconsented_cache_path(self):
+        env = dict(os.environ)
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        env["PYTHONIOENCODING"] = "utf-8"
+        payload = json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": 'mlv_dump -v "%s"' % self.part0}}
+        )
+        refused = subprocess.run(
+            [sys.executable, HOOK], input=payload, capture_output=True, text=True,
+            encoding="utf-8", env=env, cwd=self.tmp,
+        )
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertTrue(refused.stderr.startswith("NA-4: "), refused.stderr)
+
+    def test_the_frozen_consent_table_is_exactly_the_six_consented_ids(self):
+        table = self.module.OWNER_CONSENTED_FOOTAGE
+        self.assertEqual(len(table["clips"]), 6)
+        self.assertEqual(sorted(table["clips"]), sorted(CONSENTED_IDS_PINNED))
+        self.assertNotIn("M02-1344", table["clips"])
+        path_hashes = []
+        for clip_id, parts in table["clips"].items():
+            self.assertTrue(parts, clip_id)
+            for part in parts:
+                self.assertEqual(len(part), 3, clip_id)
+                length, digest, path_hash = part
+                self.assertIsInstance(length, int, clip_id)
+                self.assertGreater(length, 0, clip_id)
+                self.assertRegex(digest, r"\A[0-9a-f]{64}\Z", clip_id)
+                self.assertRegex(path_hash, r"\A[0-9a-f]{64}\Z", clip_id)
+                path_hashes.append(path_hash)
+        self.assertEqual(len(path_hashes), len(set(path_hashes)), "a path hash is listed twice")
+        self.assertEqual(
+            tuple(table["purposes"]), ("#72b delta-baseline gate", "PLAYBACK-ATTR-3-CUDA")
+        )
+        with self.assertRaises(TypeError):
+            table["clips"]["M02-1344"] = ()  # frozen: a mapping proxy refuses assignment
+
+    def test_the_authority_citations_are_distinct_and_hashed(self):
+        authority = self.module.OWNER_CONSENTED_FOOTAGE["authority"]
+        self.assertEqual(
+            authority["hash_convention"], "sha256 of the raw line bytes excluding the terminator"
+        )
+        consent = authority["consent"]
+        self.assertIn("peaceful-rubin-701ecd", consent["transcript"])
+        self.assertIn("a482bbe6-87e2-4332-970e-8accb08b1663.jsonl", consent["transcript"])
+        self.assertEqual(consent["line"], OWNER_CONSENT_LINE)
+        self.assertEqual(consent["sha256"], OWNER_CONSENT_LINE_SHA256)
+        self.assertEqual(consent["answers_line"], OWNER_CONSENT_QUESTION_LINE)
+        self.assertEqual(consent["answers_line_sha256"], OWNER_CONSENT_QUESTION_LINE_SHA256)
+        directive = authority["directive_no_manual_paths"]
+        self.assertIn("f9010ab1-55f2-4f4c-967c-467cf19c04ef.jsonl", directive["transcript"])
+        self.assertEqual(directive["line"], OWNER_DIRECTIVE_LINE)
+        self.assertEqual(directive["sha256"], OWNER_DIRECTIVE_LINE_SHA256)
+        self.assertIn("derived by the hub", authority["scope_derivation"])
+        self.assertIn("M02-1344 excluded (not acquired)", authority["scope_derivation"])
+
+    def test_the_frozen_consent_table_matches_the_register_text(self):
+        with open(REGISTER_DOC, "r", encoding="utf-8") as handle:
+            register = json.load(handle)
+        na4 = [item for item in register["items"] if item["id"] == "NA-4"]
+        self.assertEqual(len(na4), 1)
+        act = na4[0]["act"]
+        listed = re.search(r"consented ids \[([^\]]*)\]", act)
+        self.assertIsNotNone(listed, "NA-4 act text must list the consented ids")
+        ids = [value.strip() for value in listed.group(1).split(",")]
+        self.assertEqual(sorted(ids), sorted(self.module.OWNER_CONSENTED_FOOTAGE["clips"]))
+        self.assertIn("M02-1344 is NOT consented", act)
+        self.assertIn("path_norm_sha256", act)
+        self.assertIn("tools/gates/verify_consented_footage.py", act)
+        self.assertIn("agent-reviewed and CI-test-pinned", act)
+        self.assertIn("NOT yet wired", act)
+        # Round 4 (fable minor 2): the register's disclosures are pinned, not only the hook's.
+        for needle in (
+            "value-pinned (the tests pin a sha256 of the whole canonical table plus each id's part"
+            " count)",
+            "a board-rooted actor can still edit the table transiently",
+            "clip detection does not strip trailing dots or spaces from a clip name outside the"
+            " cache (follow-up card NA4-CLIP-NAME-TRIM-1)",
+            "until then the CUDA job generator refuses every owner-clip id",
+            "exceptions (1) and (2) still compare the expanded token",
+            "NA4-EXC12-LITERAL-TOKENS-1",
+            # Round 6 (NARROW): no third exception, the id-only route, and the honest residual.
+            "there is NO third exception",
+            "a consented-footage path named in command text is DENIED exactly like any other"
+            " clip outside (1) and (2)",
+            "no hook rule reads it",
+            "Consented footage is reachable ONLY through tracked, id-addressed consumers",
+            "the narrowing reduces scope, not exposure: the interpreter-one-liner residual is"
+            " unchanged",
+            "such a one-liner can open any path, consented or not",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, act)
+        self.assertNotIn("fork/master", act)
+        self.assertNotIn("exception (3) admits", act)
+        for purpose in self.module.OWNER_CONSENTED_FOOTAGE["purposes"]:
+            self.assertIn(purpose, act)
+        enforced = na4[0]["enforced_after_0_1"]
+        self.assertNotIn("exception (3)", enforced)
+        self.assertIn(
+            "a consented-footage path in command text is denied like any other footage path",
+            enforced,
+        )
+        self.assertIn(
+            "consented footage is reachable only through tracked, id-addressed consumers",
+            enforced,
+        )
+        for needle in (
+            OWNER_CONSENT_LINE_SHA256, OWNER_CONSENT_QUESTION_LINE_SHA256,
+            OWNER_DIRECTIVE_LINE_SHA256, "line 1739", "line 1718", "line 2137",
+            "excluding the terminator",
+        ):
+            self.assertIn(needle, register["authority"])
+        # Round 1's spec tail is gone with the spec read: the table lives in the hook script.
+        self.assertNotIn("tools/gates/output-budget.json", self.module.NA10_GUARDED_TAILS)
+        # Round 3 (E): the content verifier IS a gate tail, and the NA-10 register row says so.
+        self.assertIn("tools/gates/verify_consented_footage.py", self.module.NA10_GUARDED_TAILS)
+        na10 = [item for item in register["items"] if item["id"] == "NA-10"]
+        self.assertIn("tools/gates/verify_consented_footage.py", na10[0]["act"])
 
 
 def _slug(name):

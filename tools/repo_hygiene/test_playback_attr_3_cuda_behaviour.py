@@ -818,17 +818,20 @@ class AttributionJobOptionalClipPathTests(_PwshCase):
         self.assertIn("PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED", proc.stdout + proc.stderr)
         self.assertFalse(out_file.exists())
 
+    # NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (B): every owner-clip id is refused outright until
+    # ATTR3-FOOTAGE-BIND-1, BEFORE the -ClipPath / -FixtureSha256 checks, so these two cases now
+    # assert that refusal instead of PLAYBACK_ATTR3_CLIPPATH_REQUIRED / _FIXTURE_SHA_REFUSED.
     def test_an_owner_id_without_clippath_is_refused(self) -> None:
         proc, out_file = self._generate(ClipId="M16-1243")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REQUIRED", proc.stdout + proc.stderr)
+        self.assertIn("ATTR3-FOOTAGE-BIND-1", proc.stdout + proc.stderr)
         self.assertFalse(out_file.exists())
 
     def test_an_owner_id_with_fixture_sha_is_refused(self) -> None:
         owner_path = "C:\\mlvtmp\\mlv-agent\\cache\\M16-1243.raw"
         proc, out_file = self._generate(ClipId="M16-1243", ClipPath=owner_path, FixtureSha256="c" * 64)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED", proc.stdout + proc.stderr)
+        self.assertIn("ATTR3-FOOTAGE-BIND-1", proc.stdout + proc.stderr)
         self.assertFalse(out_file.exists())
 
     def test_a_fixture_id_with_an_explicit_clippath_is_still_accepted(self) -> None:
