@@ -576,6 +576,7 @@ READONLY_AUTH_STATUS = " ".join(("claude", "au" + "th", "status"))
 # the board root, which is where hook evolution is authored.
 NA10_SETTINGS = "{REPO}/.claude/settings.json"
 NA10_HOOK_SCRIPT = "{REPO}/tools/hooks/mlv-never-authorized.py"
+NA10_VERIFIER = "{REPO}/tools/gates/verify_consented_footage.py"
 NA10_UNRELATED = "{REPO}/src/mlv/video_mlv.c"
 NA10_NEW_TEXT = "# rewritten by the lane this gate governs\n"
 
@@ -3356,8 +3357,20 @@ CASES = [
         "fixture": "venue_at_worktree",
     },
     {
+        # NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (E): the consent table's content verifier is
+        # the fourth gate tail.  A lane that rewrites it rewrites the content half of NA-4.
+        "name": "na10 lane rewrites the consented footage verifier",
+        "group": "na10",
+        "tool": "Write",
+        "input": {"file_path": NA10_VERIFIER, "content": NA10_NEW_TEXT},
+        "expect": "DENY",
+        "na": "NA-10",
+        "reason_contains": "OWN gate",
+        "fixture": "venue_at_worktree",
+    },
+    {
         # THE CONTROL.  An ordinary source edit in the same worktree at the same venue: NA-10
-        # is about three files, not about a lane's right to edit code.
+        # is about four files, not about a lane's right to edit code.
         "name": "na10 control unrelated worktree edit at a lane venue",
         "group": "na10",
         "tool": "Edit",
@@ -5991,10 +6004,11 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # persistent verbs covered, plus the in-process `$env:` ALLOW control that keeps the
         # rule about PERSISTENCE.  `na10` is the hub extension: two DENY writes at a lane
         # venue, the same two ALLOW at the board venue, the shell arm, and the unrelated-file
-        # control that keeps it about the GATE and not about the worktree.
+        # control that keeps it about the GATE and not about the worktree.  `na10` grew 6 -> 7
+        # at NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (E): the consent verifier's DENY row.
         self.assertEqual(counts.get("na3"), 5, "5 NA-3 claude-auth rows")
         self.assertEqual(counts.get("na3_persistent"), 6, "6 NA-3 O129 persistent-scope rows")
-        self.assertEqual(counts.get("na10"), 6, "6 NA-10 self-edit rows")
+        self.assertEqual(counts.get("na10"), 7, "7 NA-10 self-edit rows")
         # PINNED, NEW at the thirteenth commit (S131): a NEW group, 3 rows -- the `setx.exe`
         # credential-prefix bypass, the `setx.exe` persistent-name bypass, and the fully
         # qualified `[System.Environment]::SetEnvironmentVariable` persistent-name bypass.
@@ -6809,6 +6823,35 @@ OWNER_CONSENT_QUESTION_LINE_SHA256 = (
 OWNER_DIRECTIVE_LINE = 2137
 OWNER_DIRECTIVE_LINE_SHA256 = "254075c85a821758067f7d37dbc5a26a05ae8e2a2368f1e02af0fa2110ac8e41"
 REGISTER_DOC = os.path.join(REPO_ROOT, "docs", "never-authorized.json")
+# ROUND 3 (A; sol BLOCKER, fable MAJOR).  The VALUES of the frozen table, pinned: the sha256 of
+# `_canonical_consent_table` over the WHOLE table (ids, per-part length, content sha256 and
+# path_norm_sha256, part counts, purposes and citations), and each id's part count.  An
+# in-place hash swap or an appended part row changes the digest; the latter also a count.
+OWNER_CONSENT_TABLE_SHA256 = "38a4e60b7f4e1a484d361d175d839314c87d49063adb5760ac3a9f07aa9c860a"
+OWNER_CONSENT_PART_COUNTS = {
+    "M16-1243": 2,
+    "M16-1327": 2,
+    "M16-1347": 2,
+    "M17-1207": 2,
+    "M15-1320": 2,
+    "M16-1210": 2,
+}
+
+
+def _plain_consent_value(value):
+    """Mapping proxies and tuples -> plain dicts and lists, so the table serialises as JSON."""
+    if hasattr(value, "items") and hasattr(value, "keys"):
+        return {str(key): _plain_consent_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain_consent_value(item) for item in value]
+    return value
+
+
+def _canonical_consent_table(table):
+    """-> the canonical UTF-8 serialisation the pinned digest is taken over."""
+    return json.dumps(
+        _plain_consent_value(table), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
 
 
 class OwnerConsentedFootageTests(unittest.TestCase):
@@ -6936,6 +6979,51 @@ class OwnerConsentedFootageTests(unittest.TestCase):
                 self.assertEqual(self.module.norm(token), self.module.norm(resolved))
                 self.assertNa4Deny(self._decide(token, consent=table))
 
+    # ------------------------------------------------------------- values pinned (A)
+
+    def test_the_whole_frozen_table_is_value_pinned(self):
+        table = self.module.OWNER_CONSENTED_FOOTAGE
+        self.assertEqual(
+            hashlib.sha256(_canonical_consent_table(table)).hexdigest(),
+            OWNER_CONSENT_TABLE_SHA256,
+            "the frozen consent table's VALUES changed; a change here is a consent change",
+        )
+        self.assertEqual(
+            {clip_id: len(parts) for clip_id, parts in table["clips"].items()},
+            OWNER_CONSENT_PART_COUNTS,
+        )
+
+    def test_the_pin_sees_a_swapped_hash_and_an_appended_part(self):
+        # The two edits both reviewers named: each would have kept round 2's shape tests green.
+        plain = _plain_consent_value(self.module.OWNER_CONSENTED_FOOTAGE)
+        pinned = hashlib.sha256(_canonical_consent_table(plain)).hexdigest()
+        swapped = json.loads(json.dumps(plain))
+        swapped["clips"]["M16-1243"][0][2] = "f" * 64
+        appended = json.loads(json.dumps(plain))
+        appended["clips"]["M16-1243"].append([1, "a" * 64, "b" * 64])
+        for label, edited in (("swapped path hash", swapped), ("appended part", appended)):
+            with self.subTest(edit=label):
+                self.assertNotEqual(
+                    hashlib.sha256(_canonical_consent_table(edited)).hexdigest(), pinned
+                )
+        self.assertEqual(len(appended["clips"]["M16-1243"]), 3)
+        self.assertNotEqual(OWNER_CONSENT_PART_COUNTS["M16-1243"], 3)
+
+    def test_limits_state_the_value_pin_the_residual_and_the_trailing_dot_gap(self):
+        with open(self.module.__file__, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        for needle in (
+            "VALUE-pinned by tests",
+            "A board-rooted actor can still edit the table transiently:",
+            "bounded by the NA-10 venue\n# gate and the 0.05 hook-enforced receipt that Invoke-Lane checks.",
+            "until then the CUDA job generator refuses every owner-clip id.",
+            "(4) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the\n"
+            "# cache",
+            "NA4-CLIP-NAME-TRIM-1",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, source)
+
     def test_no_subprocess_on_the_na4_path(self):
         cases = (self.part0, self.part1, self.unconsented, os.path.join(self.tmp, "x.txt"))
         baseline = [self._decide(path) for path in cases]
@@ -7044,6 +7132,10 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             self.assertIn(needle, register["authority"])
         # Round 1's spec tail is gone with the spec read: the table lives in the hook script.
         self.assertNotIn("tools/gates/output-budget.json", self.module.NA10_GUARDED_TAILS)
+        # Round 3 (E): the content verifier IS a gate tail, and the NA-10 register row says so.
+        self.assertIn("tools/gates/verify_consented_footage.py", self.module.NA10_GUARDED_TAILS)
+        na10 = [item for item in register["items"] if item["id"] == "NA-10"]
+        self.assertIn("tools/gates/verify_consented_footage.py", na10[0]["act"])
 
 
 def _slug(name):

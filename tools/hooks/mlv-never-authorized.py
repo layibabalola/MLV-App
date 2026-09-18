@@ -51,7 +51,8 @@ assume the hub":
     its content -- see THE PRE-FLIGHT ARTIFACT ACT below).
   * NA-10, O129 (hub extension) -- a lane editing its own gate.  Any write to
     ``.claude/settings.json``, ``.claude/settings.local.json`` or
-    ``tools/hooks/mlv-never-authorized.py``, UNDER ANY ROOT, is denied away from the board
+    ``tools/hooks/mlv-never-authorized.py`` or ``tools/gates/verify_consented_footage.py``
+    (NA-4's content verifier), UNDER ANY ROOT, is denied away from the board
     venue: this hook is re-read on every tool call, so a lane's edit of its registration or
     of this script would take effect on its next call.  Hook evolution stays hub-authored.
 
@@ -810,11 +811,15 @@ MANIFEST_PROMPTS_PREFIX = "prompts/v2/"
 # segment-wise against the END of the path, UNDER ANY ROOT -- the rule is about which file
 # is being written, not about which tree it sits in, because every lane worktree carries its
 # own copy of all three and each one governs that lane's next tool call.  (NA-4's owner-
-# consented footage table lives IN the hook script, so the third tail already guards it.)
+# consented footage table lives IN the hook script, so the third tail already guards it.  The
+# FOURTH tail is that table's content verifier (NA4-OWNER-CONSENTED-FOOTAGE-1 round 3, E):
+# every footage consumer must call it before opening a clip, so a lane that rewrites it
+# rewrites the content half of the consent gate.)
 NA10_GUARDED_TAILS = (
     ".claude/settings.json",
     ".claude/settings.local.json",
     "tools/hooks/mlv-never-authorized.py",
+    "tools/gates/verify_consented_footage.py",
 )
 
 
@@ -3304,14 +3309,23 @@ FIXTURE_TAIL = "tests/fixtures/clips"
 # a ref move, a shadowing tag or branch, ``git replace`` or a substituted remote could steer).
 #
 # LIMITS, stated rather than papered over.  (1) Widening needs a change to THIS table, which is
-# visible in the diff and pinned by tests (tools/repo_hygiene/test_mlv_never_authorized.py); the
-# merge path is agent-reviewed and CI-test-pinned, NOT an un-mintable owner gate -- the repo has
-# zero required reviews and one shared account.  (2) The purposes are recorded, not enforced.
+# visible in the diff and VALUE-pinned by tests (tools/repo_hygiene/test_mlv_never_authorized.py
+# pins the sha256 of a canonical serialisation of the WHOLE table -- ids, per-part length,
+# content sha256 and path_norm_sha256, part counts, purposes and citations -- plus each id's
+# part count, so an in-place hash swap or an appended part row goes red); the merge path is
+# agent-reviewed and CI-test-pinned, NOT an un-mintable owner gate -- the repo has zero required
+# reviews and one shared account.  A board-rooted actor can still edit the table transiently:
+# that is the same residual as every NA rule at the board venue, bounded by the NA-10 venue
+# gate and the 0.05 hook-enforced receipt that Invoke-Lane checks.  (2) The purposes are
+# recorded, not enforced.
 # (3) This hook binds PATHS only and never reads footage.  CONTENT binding exists only where a
 # consumer calls tools/gates/verify_consented_footage.py, which checks every part's existence,
 # length and sha256 against this table: EVERY footage consumer MUST call it before opening a
 # clip.  The CUDA job and the delta-A/B jobs are NOT yet wired to it (card ATTR3-FOOTAGE-BIND-1
-# and the #72b tooling).
+# and the #72b tooling); until then the CUDA job generator refuses every owner-clip id.
+# (4) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the
+# cache, so such a spelling is not detected as a clip; this predates the card, and a follow-up
+# card (NA4-CLIP-NAME-TRIM-1) fixes it.
 OWNER_CONSENTED_FOOTAGE = types.MappingProxyType(
     {
         # clip id -> ((length, content sha256, path_norm_sha256), ...) in part order.
@@ -3881,12 +3895,12 @@ def rule_na9(ctx):
 #     `hook-unregistered` refusals at dispatch and the sol review of every PR diff.
 #
 # NA-10 runs LAST, in register order.  Every specified row is attributable there: NA-7
-# allows a lane's own worktree by construction, and none of the three tails is an NA-2
+# allows a lane's own worktree by construction, and none of the four tails is an NA-2
 # protected path, so nothing else fires first and steals the reason line.
 
 
 def _na10_guarded(path_norm):
-    """Does this path END with one of the three gate tails, under any root?"""
+    """Does this path END with one of the four gate tails, under any root?"""
     if not path_norm:
         return False
     return any(
