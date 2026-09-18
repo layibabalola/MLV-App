@@ -3484,7 +3484,10 @@ def rule_na4(ctx):
             continue  # tracked fixtures are always allowed
         if allowed is not None and path_norm == allowed:
             continue
-        if is_owner_consented_path(path_norm):
+        # Exception (3) admits LITERAL tokens only, checked on the RAW token before `norm`
+        # expands it: a known reference is resolved with THIS hook's value, and a child shell
+        # may reassign it at process scope, so the hash and the opened target could differ.
+        if not _ENV_REF_RX.search(str(token)) and is_owner_consented_path(path_norm):
             continue  # owner-consented footage: its norm hash is in the frozen table
         if allowed is None:
             raise Deny(

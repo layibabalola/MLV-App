@@ -6917,6 +6917,25 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         )
         self.assertFalse(self.module.is_owner_consented_path("relative/clip", consent=self.table))
 
+    def test_a_known_env_reference_is_never_admitted_by_the_consent_exception(self):
+        # ROUND 3 (sol MAJOR C).  `norm` expands a KNOWN variable with the PARENT hook's value,
+        # while a child shell may reassign it at process scope, so the admitted hash and the
+        # opened target could differ.  Exception (3) therefore admits only LITERAL tokens.  The
+        # rows go through `_decide`: `is_owner_consented_path` alone sees an already-resolved,
+        # consented path and would pass for the wrong reason.
+        os.environ["MLV_CLIP_CACHE_ROOT"] = os.path.join(self.board, "cache")
+        resolved = os.path.join(self.board, "cache", "mirror", "consented", "clip-a.part0")
+        table = self._table({"M16-1243": (resolved,)})
+        self.assertAllow(self._decide(resolved, consent=table))  # the literal is admitted
+        for token in (
+            r"$env:MLV_BOARD_ROOT\cache\mirror\consented\clip-a.part0",
+            r"${env:MLV_BOARD_ROOT}\cache\mirror\consented\clip-a.part0",
+            r"%MLV_BOARD_ROOT%\cache\mirror\consented\clip-a.part0",
+        ):
+            with self.subTest(token=token):
+                self.assertEqual(self.module.norm(token), self.module.norm(resolved))
+                self.assertNa4Deny(self._decide(token, consent=table))
+
     def test_no_subprocess_on_the_na4_path(self):
         cases = (self.part0, self.part1, self.unconsented, os.path.join(self.tmp, "x.txt"))
         baseline = [self._decide(path) for path in cases]
