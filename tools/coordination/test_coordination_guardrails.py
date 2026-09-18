@@ -1309,6 +1309,172 @@ def test_invoke_lane_propagates_a_refusal_as_125_ahead_of_the_child_code():
     i_refused = body.index("{ $null -ne $providerRefusal } { 125; break }")
     i_timeout = body.index("-1      { 124 }")
     assert i_refused < i_timeout
+
+
+# =============================================================================================
+# ASTRA-LANE-1: close the name-keyed edit hole, make Claude-lane effort real, add a read-only
+# Astra judgement lane.
+# =============================================================================================
+
+
+def test_invoke_lane_edit_refusal_is_keyed_on_engine_not_lane_name():
+    """THE HOLE: the old guard was `$Lane -eq 'sol' -or $Lane -eq 'luna'`, an enumerated list of
+    lane NAMES. A new codex row (astra) added to $LANES without also being added to that list
+    would silently pass -AllowEdits through to codex exec with workspace-write and no Claude
+    hook watching it. Keying on `$LANES[$Lane].engine -eq 'codex'` makes every future codex row
+    refuse edits by construction, with nothing left to remember to update."""
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "$AllowEdits -and $LANES[$Lane].engine -eq 'codex'" in body, (
+        "the edit-refusal guard must read the engine out of the lane table, not enumerate names"
+    )
+    assert "$Lane -eq 'sol' -or $Lane -eq 'luna'" not in body, (
+        "the name-enumerated guard is exactly the hole this change closes"
+    )
+
+
+def test_invoke_lane_astra_edit_is_refused_before_any_rundir_is_created(tmp_path):
+    cmd = (
+        "try { & '%s' -Lane astra -Prompt 'x' -WorkDir '%s' -AllowEdits -AllowedTools 'Read' } "
+        "catch { $_.Exception.Message }" % (LANE_RUNNER.as_posix(), tmp_path.as_posix())
+    )
+    result = run_pwsh_command(cmd)
+    assert "codex-lane-never-edits" in (result.stdout + result.stderr), result.stdout + result.stderr
+    assert not (tmp_path / ".claude-state" / "fleet-runs").exists(), (
+        "a run dir was created before the edit refusal fired -- the refusal must precede any "
+        "run-dir or receipt-slot creation"
+    )
+
+
+def test_invoke_lane_sol_edit_refusal_still_works_after_the_engine_rekey(tmp_path):
+    # Regression: re-keying the guard from lane name to engine must not change sol/luna's own
+    # outcome, only how it is decided.
+    cmd = (
+        "try { & '%s' -Lane sol -Prompt 'x' -WorkDir '%s' -AllowEdits -AllowedTools 'Read' } "
+        "catch { $_.Exception.Message }" % (LANE_RUNNER.as_posix(), tmp_path.as_posix())
+    )
+    result = run_pwsh_command(cmd)
+    assert "codex-lane-never-edits" in (result.stdout + result.stderr), result.stdout + result.stderr
+
+
+def test_invoke_lane_sonnet_edit_is_not_refused_by_the_codex_only_guard(tmp_path):
+    # Control: a claude-engine lane must still reach the (separate) allowlist-required guard,
+    # never the codex-only refusal -- proves the rekey did not widen the refusal to every engine.
+    cmd = (
+        "try { & '%s' -Lane sonnet -Prompt 'x' -WorkDir '%s' -AllowEdits -AllowedTools 'ALL' } "
+        "catch { $_.Exception.Message }" % (LANE_RUNNER.as_posix(), tmp_path.as_posix())
+    )
+    result = run_pwsh_command(cmd)
+    blob = result.stdout + result.stderr
+    assert "allowlist-required" in blob, blob
+    assert "codex-lane-never-edits" not in blob, blob
+
+
+def test_lane_provider_refusal_classifies_by_engine_not_lane_name():
+    """Astra needs no new branch here: Get-ProviderRefusal / Get-RefusalKind take only
+    -Engine (never a lane id), and Invoke-Lane.ps1 always calls it with -Engine $cfg.engine.
+    A new codex-engine lane is classified identically to sol/luna with zero changes to this
+    file -- confirmed rather than assumed, per the packet's own instruction to check which."""
+    refusal_body = REFUSAL_HELPER.read_text(encoding="utf-8")
+    assert "function Get-RefusalKind" in refusal_body
+    assert "$Lane" not in refusal_body, (
+        "lane-provider-refusal.ps1 must stay engine-keyed; a lane-name branch here would need "
+        "a matching astra arm and silently miss the next new lane too"
+    )
+    lane_body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "Get-ProviderRefusal -Text $stderrText -Answer $stdout -Engine $cfg.engine -Prompt $Prompt" in lane_body
+
+
+def test_claude_lane_child_effort_applies_the_resolved_table_effort_not_only_an_override():
+    """THE BUG: only an explicit -ReasoningEffort ever reached CLAUDE_CODE_EFFORT_LEVEL, so a
+    lane dispatched with no override (the common case) ran at whatever the claude CLI's own
+    default effort is -- while the receipt recorded $cfg.effort (the table value) as if it had
+    been applied. $cfg.effort already IS the effective value by this point (the table default,
+    overridden by -ReasoningEffort when supplied at line ~281), so gating the environment
+    variable on $cfg.effort instead of the raw override makes what runs match what is recorded,
+    and an explicit override still wins because it already mutated $cfg.effort upstream."""
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "if ($cfg.engine -eq 'claude' -and $cfg.effort) {" in body, (
+        "the environment-variable gate must key on the resolved $cfg.effort, not the raw override"
+    )
+    assert "$psi.Environment['CLAUDE_CODE_EFFORT_LEVEL'] = $cfg.effort" in body
+    assert "$psi.Environment['CLAUDE_CODE_EFFORT_LEVEL'] = $ReasoningEffort" not in body, (
+        "the old gate ignored every table-default effort for a lane with no explicit override"
+    )
+    # the override must still take effect, and must do so BEFORE the environment variable is set
+    i_override = body.index("if ($ReasoningEffort) { $cfg.effort = $ReasoningEffort }")
+    i_applied = body.index("if ($cfg.engine -eq 'claude' -and $cfg.effort) {")
+    assert i_override < i_applied, "an explicit -ReasoningEffort must resolve into $cfg.effort before it is applied"
+
+
+def test_receipt_effort_field_already_records_the_same_resolved_value_that_is_applied():
+    # The receipt's `effort` field reads $cfg.effort -- the same variable now gating the
+    # environment variable above -- so a claude lane's receipt can never again claim an effort
+    # that was not actually requested of the child process.
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "effort       = $cfg.effort" in body
+
+
+def test_fable_lane_resolves_to_high_effort_by_default():
+    # Binding fleet owner ruling, 2026-09-08: Fable spends tokens only on important complex
+    # reviews and runs at high effort by default (agents/orchestration-tiering.md).
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "fable  = @{ engine = 'claude'; model = 'claude-fable-5'; effort = 'high';" in body
+
+
+def test_astra_lane_row_is_a_read_only_xhigh_codex_judgement_lane():
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    assert "astra  = @{ engine = 'codex';  model = 'gpt-6-astra';    effort = 'xhigh';  role = 'judgement-design-arbiter' }" in body
+    assert "ValidateSet('opus', 'sonnet', 'fable', 'sol', 'luna', 'astra')" in body
+
+
+def test_astra_reuses_the_engine_generic_codex_argv_branch_verbatim():
+    """No lane-specific branch exists or is needed: the codex argv-build block keys off
+    $cfg.engine/$cfg.model/$cfg.effort/$sandbox, all resolved from the SAME table row lookup
+    every other codex lane goes through -- so astra gets `-s read-only` (the $AllowEdits-false
+    default, since astra is never granted edits) and `-c model_reasoning_effort="xhigh"` by
+    construction, the same way sol/luna already do, without a new conditional to test."""
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    start = body.index("} else {\n    $exe  = $CODEX_EXE")
+    end = body.index("# ---------------------------------------------------------------- run, bounded")
+    codex_branch = body[start:end]
+    assert "$sandbox = if ($AllowEdits) { 'workspace-write' } else { 'read-only' }" in codex_branch
+    assert "'-s', $sandbox" in codex_branch
+    assert 'model_reasoning_effort=`"{0}`"' in codex_branch and "-f $cfg.effort" in codex_branch
+    assert "$Lane -eq" not in codex_branch, (
+        "the codex argv build must stay lane-name-agnostic; a per-name branch here is exactly "
+        "the pattern that left the edit-refusal guard stale"
+    )
+
+
+def test_xhigh_effort_is_never_assigned_to_a_claude_engine_table_row():
+    body = LANE_RUNNER.read_text(encoding="utf-8")
+    lanes_block = body[body.index("$LANES = @{"):body.index("# Absolute launcher paths")]
+    for line in lanes_block.splitlines():
+        if "engine = 'claude'" in line:
+            assert "xhigh" not in line, "a claude-engine lane row claims an xhigh effort: %s" % line
+    # The table is the only place a lane's effort is authored (line ~119's own comment); the sole
+    # runtime path that can still change it is -ReasoningEffort, whose ValidateSet excludes
+    # 'xhigh' entirely, so neither a caller override nor a codex-only table value can put 'xhigh'
+    # onto a claude lane's child process.
+    assert "[ValidateSet('', 'low', 'medium', 'high')]" in body, (
+        "the -ReasoningEffort override must not admit 'xhigh' -- that is the only runtime path "
+        "that could otherwise push an engine-illegal effort onto a claude lane"
+    )
+
+
+def test_astra_is_absent_from_the_timer_reachable_lane_lists():
+    """Structural 'the top tier never runs a heartbeat': Invoke-Workstream.ps1 and
+    Invoke-WorkstreamLoop.ps1 own SEPARATE -Lane ValidateSets and are explicitly out of scope
+    for this change. Leaving them untouched is what keeps astra unreachable from anything on a
+    schedule; this test pins that as a fact rather than an assumption."""
+    workstream_body = WORKSTREAM.read_text(encoding="utf-8")
+    loop_body = LOOP.read_text(encoding="utf-8")
+    assert "ValidateSet('opus','sonnet','fable','sol','luna')" in workstream_body
+    assert "ValidateSet('', 'opus', 'sonnet', 'fable', 'sol', 'luna')" in loop_body
+    assert "astra" not in workstream_body
+    assert "astra" not in loop_body
+
+
 # =============================================================================================
 # TOOL-LOOP-PLUMBING-1: install-arg forwarding, kind-based lane resolution, the editing dispatch
 # (worktree + composer + reservations + kill-switch recheck), and the pre-dispatch PR-review
