@@ -1,4 +1,4 @@
-# ATTR3-ADMIT-CONTENT-PIN-1 -- check/use window table (round 2g, corrected round 2h)
+# ATTR3-ADMIT-CONTENT-PIN-1 -- check/use window table (round 2g, corrected round 2h, scoped round 2i)
 
 Round 2g responded to round 2f's two independent keys (`sol`, `fable`), both CHANGES_REQUESTED,
 both converging on the same structural finding: the table itself carried the defect it exists to
@@ -14,6 +14,28 @@ counted under CLOSED while its own status line read OPEN); a whole window (the a
 enumerate-then-execute step) was never enumerated; and two of round 2g's own fixes shipped
 without a falsifying test. Round 2h's fixes are enumerated in each affected row/section below
 and are not restated here.
+
+Round 2i responds to `KERNEL-SAME-CLASS-STOP-RULE-1` firing -- three consecutive rounds (2f, 2g,
+2h) found the same root mechanism, pathname resolution standing in for handle identity at a
+rename or an execution boundary -- and the hub's required design swarm. **The ruling is NARROW:
+this card lands on its content-pin substance (SUBJECT 4's four acceptance criteria, all about the
+content pin itself, none about the placement race), and the remaining check/use windows are
+explicitly NOT fixed here.** This round makes NO code change and adds NO mechanism; it is
+documentation and scoping only. It (1) adds the generator-to-submitter window as its own row,
+Row I, found independently by both keys and confirmed by the hub; (2) brings `um-run.ps1` inside
+the table's own declared walk boundary, which had never named it despite the file sitting
+squarely inside that boundary; (3) adds the two acceptance-branch line citations sol's round-2h
+finding identified for Row F, whose prose already described both branches without citing them;
+(4) corrects Row H's residual wording, which read as though a hash-sidecar provenance channel
+would CLOSE that window rather than merely narrow it one step further, to the moment the child
+process itself opens the pathname; (5) records sol's round-2h second blocker -- that the
+HEAD-lookup and show-toplevel classification-table rows are called CLOSED despite an
+unanchored-substring escape remaining live -- as REFUTED, on the strength of this table's own
+pre-existing convention that the classification mechanism and the tokens it governs are tallied
+separately, and makes that convention harder to miss on a skim; (6) records the deliberate
+scoping decision this ruling requires, naming the dropped coverage gap by its tracking card,
+`ATTR3-SHARED-SLOT-RACE-1`; and (7) records the reachability finding that decided the ruling,
+together with the one measurement limit (the share's actual ACL) that finding does not close.
 
 **Rule this table follows (round-2g ruling, extended round 2h, binding going forward): a row is
 CLOSED only when the window is CLOSED, not narrowed. A mechanism is named as what it is (a
@@ -41,6 +63,10 @@ rounds never declared this and so could not be checked for completeness by anyon
 their own authors):** this table walks the PRODUCER side only, from admission through to the
 final write of an artifact this round considers "published" -- `Get-UmRunFixtureAdmission` ->
 `Test-UmRunFixtureContentPin` -> `Assert-AttrCudaFixtureCommittedBytes` (admission) ->
+`um-run.ps1`'s submission call (round 2i, new -- this file sits squarely inside the boundary
+already declared here and had never been named in this table before this round; see Row I) --
+in this seam `um-run.ps1` carries no hash of the job script and holds no handle on it, only the
+bare pathname string crosses from its caller into `Invoke-UmRunDrop` -- ->
 `Invoke-UmRunDrop`'s pre-copy re-hash, share-side `.sidepart` hash-then-rename, and job-file
 hash-then-rename (placement onto the agent's SMB share) -> `attr3-stage-fixture-job.ps1`'s
 generator-time bake AND the emitted job's own arrival-hash and cache-`.partial` hash-then-rename
@@ -149,8 +175,9 @@ card's scope; it is named here as unexamined, not as closed, and not as absent f
   which hash this same mutable `$cachePath` and then report SUCCESS without ever holding its
   identity across the report:**
   - **Existing-cache branch** (`if (Test-Path -LiteralPath $cachePath -PathType Leaf) { if
-    ((Get-ShaLower $cachePath) -eq $FixtureSha256) { Complete-AlreadyStaged ... } }`, near the top
-    of the staging job, before the copy-to-`.partial` path above is ever reached): if the cache
+    ((Get-ShaLower $cachePath) -eq $FixtureSha256) { Complete-AlreadyStaged ... } }`,
+    `attr3-stage-fixture-job.ps1:238-240`, near the top of the staging job, before the
+    copy-to-`.partial` path above is ever reached): if the cache
     already holds a file matching `$FixtureSha256`, the job hashes it once, then calls
     `Complete-AlreadyStaged`, which publishes `result.json` naming `$cachePath` and
     `$FixtureSha256` together as a verified pair -- with the file handle from the hash already
@@ -159,7 +186,8 @@ card's scope; it is named here as unexamined, not as closed, and not as absent f
     even involved here), but it is the identical "hash a mutable path, then use the path's name
     as if the hash still describes it" defect this row exists to name.
   - **Lost-publish-race branch** (the `catch` after `Publish-AttrCudaFileMoveNonOverwriting`
-    fails because a concurrent publisher already occupies `$cachePath`): the job re-hashes
+    fails because a concurrent publisher already occupies `$cachePath`,
+    `attr3-stage-fixture-job.ps1:264-265`): the job re-hashes
     `$cachePath`, and on a match calls the SAME `Complete-AlreadyStaged` as the branch above, on
     the theory that the concurrent publisher finished the identical fixture. Same shape, same
     absence of a held handle between the hash and the report.
@@ -229,11 +257,66 @@ card's scope; it is named here as unexamined, not as closed, and not as absent f
   protocol does not currently have (the agent has no expected hash to check the job against at
   execution time; Row G's verification is consumed entirely at placement and produces no artifact
   the agent could re-check later, unlike, e.g., a hash sidecar written alongside the job and
-  re-read immediately before `Start-Process`). Adding that channel is a two-sided protocol change
+  re-read immediately before `Start-Process`). **Wording corrected, round 2i, item 4: that sidecar
+  channel is named here only as a POSSIBLE remedy, not as one that would CLOSE this window on its
+  own.** Re-hashing a sidecar immediately before `Start-Process` still leaves a race until the
+  moment the CHILD process itself actually opens and reads the pathname -- the same
+  pathname-resolution-rather-than-handle-identity shape this whole table exists to name, simply
+  moved one step later, from "the agent's enumeration is stale" to "the agent's own re-check is
+  stale by the time the child process gets around to opening the file." A sidecar narrows the
+  window; it does not close it, absent the same native rename/open-by-handle work named as out of
+  scope for Rows C and G. Adding even the narrowing channel is a two-sided protocol change
   (`Invoke-UmRunDrop` plus `ultra-magnus-agent.ps1`) of comparable size to round 2g's Row G fix,
   and was judged out of this round's scope under the same scope-discipline directive Row F and
   Row C's own residuals were judged under. Recorded OPEN, not CLOSED on the strength of Row G's
   placement-time check, which is exactly the upstream-check reasoning this item warned against.
+
+## Row I -- generator-to-submitter: emitted job file handoff into `Invoke-UmRunDrop` (round 2i, item 1)
+
+**Position note:** chronologically this window opens BEFORE Row G's mechanism runs (the job file
+must reach `Invoke-UmRunDrop` before `Invoke-UmRunDrop` can hash and place it) and before
+`um-run.ps1`'s seam named in the walk boundary above. It is lettered I, after Row H, rather than
+inserted and renumbered between F and G, so that no existing row's letter or cross-reference in
+this table (including the tally and the known-coverage-gaps list) drifts.
+
+- **Mechanism:** `attr3-stage-fixture-job.ps1` -- here acting as the GENERATOR process, not as the
+  emitted job's own runtime body that Rows D/E/F describe -- writes the finished job script to
+  disk with `[IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))`
+  (`attr3-stage-fixture-job.ps1:316`), which opens, writes, and disposes its own handle internally
+  and holds nothing across the call. The generator process's own involvement ends there (or
+  continues on to other work); nothing it does links `$jobPath`'s bytes to any later read of that
+  pathname. Some later, unbounded, cross-process gap follows -- `um-run.ps1:59` calls
+  `Invoke-UmRunDrop -Inbox $inbox -Outbox $outbox -ScriptPath $ScriptPath -JobId $JobId -SideFile
+  $SideFile`, passing `$ScriptPath` (the same path as `$jobPath`) as a bare pathname string; no
+  hash and no handle travel with it, per the walk-boundary note on `um-run.ps1`'s seam above.
+  Inside `Invoke-UmRunDrop`, `$jobLocalSha = (Get-FileHash -LiteralPath $ScriptPath -Algorithm
+  SHA256).Hash` (`UmRunDrop.psm1:491`) opens a brand-new, independent handle to that same pathname
+  and hashes whatever now occupies it -- this is the value Row G's mechanism later treats as
+  ground truth for the share round-trip check.
+- **Escape hatches:** the entire window, end to end. Nothing binds the generator's `WriteAllText`
+  output bytes to `Get-FileHash`'s later read at `UmRunDrop.psm1:491` -- not a returned hash
+  compared on the far side (the shape Row B uses for the fixture), not a held handle spanning both
+  events (the shape Rows C/G use for their own narrower residual), not even a size or mtime check.
+  Whoever can write to `$jobPath` between the two events -- a retry, a stray script, a second
+  submitter reusing the path, the generator's own caller substituting a different file at the same
+  name -- determines what `$jobLocalSha` actually pins, and every downstream check in this table
+  (Row G's share round-trip, Row H's eventual execution) verifies AGAINST that possibly-substituted
+  value, not against what the generator actually wrote.
+- **Status: OPEN.** Newly named this round (round 2i, item 1; found independently by both keys and
+  confirmed by the hub); not fixed -- this round makes no code change of any kind. Closing it would
+  need the generator to return a hash that `um-run.ps1` threads through to `Invoke-UmRunDrop` for a
+  bind-back check (Row B's shape, adapted across a process boundary rather than within one), since
+  holding one handle across two separate script invocations is not possible as currently
+  structured. Judged out of this round's scope under the same scope-discipline directive Rows C,
+  F, G, and H's own residuals were judged under.
+- **Reachability (round 2i, item 7 -- see also the dedicated note below the classification
+  table):** writing to `$jobPath` between the generator's `WriteAllText` and `Invoke-UmRunDrop`'s
+  read requires filesystem write access to wherever the generator stages its output before
+  submission -- a location under the caller's own control, not the agent's inbox share. This does
+  not by itself say the window is unreachable by a remote actor; it says the actor capable of
+  winning this particular race is already positioned to control what gets submitted as the job in
+  the first place, which is the same reachability shape the other rows' escape hatches share (see
+  the reachability note below the classification table for the full statement and its limit).
 
 ## Round-2e/2g/2h classification theme (cross-cutting, not a single check/use window)
 
@@ -248,6 +331,28 @@ refusal" (an evidenced verdict about the fixture's bytes):
 | `UMRUN_SIDEFILE_ADMISSION_INDETERMINATE` / `ATTR3_FIXTURE_ADMISSION_INDETERMINATE` | side-file and generator admission-refusal callers branch on `.Indeterminate` | CLOSED, tested |
 | `ATTR3_FIXTURE_GIT_UNAVAILABLE` (repository-discovery leg) | **round-2g fix, round-2h anchor tightening:** `git rev-parse --show-toplevel` inside `Assert-AttrCudaFixtureCommittedBytes` (`AttrCudaArtifacts.psm1`) used to discard stderr (`2>$null`) and fold EVERY failure -- dubious ownership, corrupted config, I/O error -- into the definite `ATTR3_FIXTURE_NOT_IN_A_REPO`. Now inspects stderr the same way the HEAD:<path> lookup already did: only git's own `fatal: not a git repository` text (round 2h: anchored to the `fatal: ` prefix git itself always emits ahead of it, narrowing the round-2g match, which was a bare, unanchored `not a git repository` substring test -- the same shape as the HEAD:<path> lookup's own known-open `invalid object name` edge below) is the definite refusal; everything else is `ATTR3_FIXTURE_GIT_UNAVAILABLE` (already a registered indeterminate token) | **CLOSED, round 2g, anchor tightened round 2h. Falsifier added round 2h:** `test_a_corrupted_repo_config_is_indeterminate_not_not_in_a_repo` (`test_playback_attr_3_cuda_behaviour.py`) corrupts `.git/config` so `--show-toplevel` fails with git's own `fatal: bad config line` text and asserts `ATTR3_FIXTURE_GIT_UNAVAILABLE`, not `ATTR3_FIXTURE_NOT_IN_A_REPO`. Manually verified to go RED (throws `ATTR3_FIXTURE_NOT_IN_A_REPO`) against a scratch copy of the module with this round's stderr inspection reverted. |
 | the classification mechanism itself | `UmRunDrop.psm1`'s `$UmRunIndeterminateAdmissionTokens` | **OPEN -- named honestly, round 2g/2h: this is a TOKEN ALLOWLIST over a closed, documented set of throw sites, not an exhaustive classification.** It is only as complete as every throw site actually using one of its tokens. Round 2g found and fixed one gap where a throw site used a definite token it should not have (the show-toplevel leg above). Three narrower, prose-only escape hatches remain and are named in `Assert-AttrCudaFixtureCommittedBytes`'s docstring rather than fixed: an unanchored `invalid object name` stderr match; the show-toplevel `fatal: not a git repository` match, round-2h-narrowed but still a substring match rather than a fully anchored one; and a large-fixture OOM that surfaces as a raw untokened exception instead of `ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE`. Carrying THREE live escape hatches, this row is OPEN as a whole even though two of the three tokens it governs are individually CLOSED above -- the allowlist mechanism and the tokens it classifies are tracked separately in this tally (see below). |
+
+**Reviewer note (round 2i, item 5 -- refuted, not fixed):** sol's round-2h second blocker argued
+that the HEAD-lookup and show-toplevel rows above are marked CLOSED even though an
+unanchored-substring escape hatch remains live for each (the `invalid object name` match and the
+round-2h-narrowed-but-still-substring `fatal: not a git repository` match respectively). **This
+table already carries the answer, in the row directly above -- "the classification mechanism
+itself" -- and did so before this blocker was raised.** Read plainly: this table tracks TWO
+different things at TWO different granularities on purpose, and conflating them is the reading
+that produces the blocker. (1) Each TOKEN row states whether that specific classification, as
+coded today, is CLOSED or OPEN -- the HEAD-lookup and show-toplevel rows are CLOSED because, for
+the throw sites those two fixes govern, the definite-vs-indeterminate split each describes is
+correct as shipped. (2) The escape hatches sol's blocker names are not a defect IN those two rows'
+own fixes -- they are pre-existing substring-match looseness in the same docstring those fixes
+narrowed, and are exactly what the mechanism row directly above exists to carry: it is marked
+OPEN, by name, listing all three live escape hatches (the unanchored `invalid object name` match;
+the round-2h-narrowed-but-still-substring `fatal: not a git repository` match; the untokened OOM
+edge), with its own prose stating explicitly that "this row is OPEN as a whole even though two of
+the three tokens it governs are individually CLOSED above." **Nothing here is re-scored by this
+note -- the tally is unchanged.** This note only makes the table's own pre-existing convention
+(token-row granularity and mechanism-row coverage are tracked as separate lines, on purpose, and
+are not double-counted or under-counted against each other) harder to miss on a skim, since a
+skim is exactly what produced this blocker.
 
 ## Known-item accounting (round-2g completion of item 4)
 
@@ -274,10 +379,63 @@ refusal" (an evidenced verdict about the fixture's bytes):
   **Status: test-hygiene item, CLOSED as test hygiene; does not change the disposition of the
   clean-filter preimage row above.**
 
+## Scoping decision (round 2i, item 6)
+
+`KERNEL-SAME-CLASS-STOP-RULE-1` fired because rounds 2f, 2g, and 2h found the same root mechanism
+three rounds running -- pathname resolution standing in for handle identity at a rename or an
+execution boundary -- and the hub's required design swarm ruled this card's scope NARROW. Per
+RESUME.md STEP 2.5, a narrowing is recorded as a decision that names the dropped coverage gap, not
+left to be inferred:
+
+- **What this card DOES close:** the content pin itself and its fail-closed classification --
+  Rows A, B, D, E of this table (the admission read, the admission-pin-to-local-rehash bind-back,
+  the generator's reuse of the admission pin, and the emitted job's arrival-hash check), plus the
+  classification-table tokens marked CLOSED above. This is the full scope of SUBJECT 4's four
+  acceptance criteria: working-tree bytes equal the committed blob, fail-closed on mismatch, a
+  RED-then-GREEN test proving it, and a non-author-verifiable green with KF-10 bookends. None of
+  the four criteria mention the placement race; landing the pin satisfies the declaration as
+  written.
+- **What is explicitly NOT closed, deferred:** every window in this table whose defect shape is
+  "verified by pathname, used by pathname, with nothing binding the two moments together" -- Row C
+  (share-side `.sidepart`), Row F (cache `.partial`, both its main mechanism and its two acceptance
+  branches), Row G (job-file placement), Row H (inbox execution), and Row I (the generator-to-
+  submitter handoff, new this round). All five share the identical root mechanism the stop-rule
+  fired on. They are tracked as **`ATTR3-SHARED-SLOT-RACE-1`**, an existing card that has sat
+  `queued, owner=""` since 2026-09-18 -- the hub is re-scoping that card to cover this set rather
+  than filing a duplicate, which is a hub action, not this round's.
+- **The named remedy, out of scope here:** a native `FILE_RENAME_INFO`-via-handle rename (and, for
+  Row H, an equivalent open-by-handle or provenance-channel primitive at execution time) would
+  close all five deferred windows by binding the verified handle's identity to the rename/open
+  target instead of re-resolving the pathname. `.NET` has no managed API for this; it requires
+  P/Invoke against the Win32 API, is a materially larger and harder-to-verify change than any
+  single fix this table's rounds have shipped so far, and was judged out of scope for every round
+  that touched these rows (2g for Row C/G, this round for Row F/H/I). It remains the named remedy
+  for `ATTR3-SHARED-SLOT-RACE-1` to pick up.
+
+## Reachability finding (round 2i, item 7)
+
+Every open row this table defers (Rows C, F, G, H, I) requires an actor who can already write to
+`\\Ultra-Magnus\...\agent\inbox` -- a private single-user SMB share whose own agent header states
+it *"intentionally executes scripts dropped into inbox."* **Anyone who can win one of these races
+can already drop their own job file onto that share outright, which is strictly easier than timing
+a rename or an execution race.** So these windows do not raise risk above what the protocol's own
+documented design already accepts: a share that executes whatever lands on it is already trusting
+every writer to that share with code execution, and none of these races grants a writer any
+capability beyond what a direct drop already grants them.
+
+**Limit on this finding, stated plainly so it is not read as more than it is:** the share's actual
+ACL -- who, in practice, holds write access to that inbox path -- is **UNMEASURED**. It is host
+configuration, not something derivable from this repository, and this round did not check it. This
+finding says the races do not raise risk ABOVE the protocol's accepted design; it does not say the
+protocol's accepted design is itself safe, and it is not evidence that the ACL is in fact narrow.
+It is "therefore not above the accepted design risk, pending an ACL nobody here has checked" -- not
+"therefore harmless."
+
 ## Tally
 
-**Counting convention (round 2h, item 1 -- stated explicitly for the first time):** each primary
-row (A-H) and each classification-table token/mechanism row is counted exactly ONCE, by its own
+**Counting convention (round 2h, item 1 -- stated explicitly for the first time; round 2i adds no
+new convention, only a ninth primary row under the existing one):** each primary row (A-I as of
+this round) and each classification-table token/mechanism row is counted exactly ONCE, by its own
 stated Status line -- never re-described or re-derived in this section. A residual named in a
 row's own prose that is NOT reflected in that row's Status line (an inspected-correct-but-untested
 code path, i.e. a coverage gap) is not a second, separate OPEN entry here; it lives only in
@@ -290,18 +448,18 @@ moved from a single row's text into the arithmetic that summarizes all of them.
 - **CLOSED (8):** Row A, Row B, Row D, Row E (4 primary rows); `ATTR3_FIXTURE_HEAD_LOOKUP_UNAVAILABLE`,
   `UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE`, the indeterminate-branching callers, and the
   `ATTR3_FIXTURE_GIT_UNAVAILABLE` show-toplevel fix (4 classification-table rows).
-- **OPEN (7):** Row C, Row F, Row G, Row H (4 primary rows -- Row G's own Status line has read
-  OPEN since the sentence was first written in round 2g; round 2g's tally miscounted it as
-  CLOSED, corrected here); the `UMRUN_FIXTURE_ADMISSION_PATH_RESOLUTION_UNAVAILABLE` token and
-  the classification allowlist mechanism itself, both by their own stated Status (2
-  classification-table rows); the pre-existing clean-filter preimage gap (1, tracked under
-  "Known-item accounting" above).
+- **OPEN (8):** Row C, Row F, Row G, Row H, Row I (5 primary rows -- Row G's own Status line has
+  read OPEN since the sentence was first written in round 2g, round 2g's tally miscounted it as
+  CLOSED, corrected round 2h; Row I is new this round, round 2i item 1); the
+  `UMRUN_FIXTURE_ADMISSION_PATH_RESOLUTION_UNAVAILABLE` token and the classification allowlist
+  mechanism itself, both by their own stated Status (2 classification-table rows); the
+  pre-existing clean-filter preimage gap (1, tracked under "Known-item accounting" above).
 - **Not tallied (test-hygiene, neither a window nor a gap):** the `core.autocrlf` fixture-repo
   pinning, tracked under "Known-item accounting" above.
-- **Total: 8 CLOSED / 7 OPEN, 15 tallied.** Lower than round 2g's stated headline (9 CLOSED / 8
-  OPEN) because Row G is no longer counted twice under two different verdicts (CLOSED in the
-  headline list, its residual separately named under OPEN) -- it is one row, tallied once, at the
-  verdict its own Status line has stated since round 2g.
+- **Total: 8 CLOSED / 8 OPEN, 16 tallied.** Up by one OPEN item from round 2h's 8 CLOSED / 7 OPEN,
+  15 tallied, entirely because Row I is newly named this round (round 2i, item 1) -- no existing
+  row's verdict changed. No row is double-counted: Row I's addition is the only arithmetic change
+  this round makes to this section.
 
 ## Known coverage gaps (not tallied; follow-up, not a defect)
 
@@ -363,3 +521,28 @@ claim doesn't already prove).
   than given a falsifier, since no fix was made to falsify against (see Row H's own residual).
   The `UMRUN_FIXTURE_ADMISSION_PATH_RESOLUTION_UNAVAILABLE` TOCTOU throw path and the
   large-fixture-OOM edge remain undriven by any test, unchanged from round 2g.
+
+## Verification, round 2i (documentation and scoping only -- no code change)
+
+This round is narrow by ruling: it makes no code fix and adds no mechanism, so there is no
+falsifier to add and no RED-then-GREEN pair to demonstrate. The gate exists here only to prove the
+suite is unchanged, bracketed by HEAD and `git status --porcelain` on both sides, with every exit
+code taken directly from its own `pytest` invocation, never through a pipe.
+
+- **Before this round's first edit:** HEAD `313c0a51` (tip of round 2h, `product/ATTR3-ADMIT-CONTENT-PIN-1`),
+  `git status --porcelain` clean.
+- **Pre-edit gate run:** `test_um_run_sidefiles.py` 32 passed / 10 subtests passed, exit 0;
+  `test_playback_attr_3_cuda_behaviour.py` 76 passed / 103 subtests passed, exit 0;
+  `test_attr3_stage_fixture_job.py` 12 passed, exit 0. Total 120 passed (32 + 76 + 12), matching
+  round 2h's reported total exactly.
+- **Edits made this round:** this table file only -- the walk boundary, Row F (two line
+  citations), Row H (wording correction), a new Row I, the classification-table reviewer note,
+  the new "Scoping decision" and "Reachability finding" sections, the tally, and this section. No
+  `.ps1`/`.psm1`/`.py` file was opened for editing.
+- **Post-edit gate run:** `test_um_run_sidefiles.py` 32 passed / 10 subtests passed, exit 0;
+  `test_playback_attr_3_cuda_behaviour.py` 76 passed / 103 subtests passed, exit 0;
+  `test_attr3_stage_fixture_job.py` 12 passed, exit 0. Total 120 passed (32 + 76 + 12) --
+  **unchanged from the pre-edit run, as expected for a documentation-only round.**
+- **`git diff --name-only` against the pre-edit HEAD shows exactly one path:**
+  `tools/profiling/bachelor/ATTR3-ADMIT-CONTENT-PIN-1-check-use-windows.md` -- confirming no code
+  behaviour changed.
