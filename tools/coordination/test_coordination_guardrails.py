@@ -3939,3 +3939,42 @@ def test_ratio_coverage_marker_is_carried_by_both_shipped_writers_and_the_guard(
     marker = "MLV-DISPATCH-LEDGER-WRITER-V3-SERIALIZED"
     for path in (LANE_RUNNER, RATIO_WORKSTREAM, RATIO_SOURCE_GUARD):
         assert marker in path.read_text(encoding="utf-8"), path
+
+
+def test_retire_lane_worktree_does_not_silently_drop_unreadable_command_lines():
+    """An unreadable command line must be a THIRD STATE, never an absent process.
+
+    THIS IS A SOURCE-TEXT PIN, NOT A BEHAVIOURAL PROOF, and the distinction matters enough to
+    state in the test itself: faking Win32_Process output well enough to exercise the live-process
+    branch would need a CIM shim this suite does not have, so what is pinned here is the SHAPE of
+    the guard, not its runtime effect. A reader must not cite this test as evidence that the guard
+    fires.
+
+    What it does catch is the specific regression that was live until 2026-09-20: the process
+    enumeration filtered on `$_.CommandLine -and`, which DISCARDS every process whose command line
+    cannot be read -- measured at 182 of 451 processes, 40%, on the board host, because Windows
+    hides the command line of processes owned by another user or protected by the OS. The live
+    holder set was therefore a FLOOR rather than a count, and a worktree genuinely held by such a
+    process classified as not-live and became eligible for removal. A sibling board filed the shape
+    as a trap on the fleet doctrine bus; MLV-App's doctrine-fold lane verified it here.
+    """
+    source = (ROOT / "tools" / "coordination" / "Retire-LaneWorktree.ps1").read_text(encoding="utf-8")
+
+    enumeration = [
+        line for line in source.splitlines()
+        if "Get-CimInstance Win32_Process" in line and "Where-Object" in line
+    ]
+    assert enumeration, "expected a Win32_Process enumeration guarded by Where-Object"
+    for line in enumeration:
+        assert "$_.CommandLine -and" not in line, (
+            "the process enumeration filters out unreadable command lines, so the live-holder set "
+            "is a floor rather than a count: " + line.strip()
+        )
+
+    assert "$unreadable" in source, "expected unreadable command lines to be carried, not dropped"
+    assert "cannot-determine:" in source, "expected the file's own third-state idiom to be used"
+    refusal = [
+        line for line in source.splitlines()
+        if "$unreadable.Count" in line and "cannot-determine:" in line
+    ]
+    assert refusal, "expected a refusal keyed on the count of unreadable command lines"

@@ -69,10 +69,22 @@ function Invoke-RetireLaneWorktree {
 
         $self = @($PID)
         try { $pp = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId; while ($pp -and $self -notcontains $pp) { $self += $pp; $pp = (Get-CimInstance Win32_Process -Filter "ProcessId=$pp" -ErrorAction Stop).ParentProcessId } } catch { }
-        $procs = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.CommandLine -and $self -notcontains $_.ProcessId })
+        # 2026-09-20: this used to filter on `$_.CommandLine -and`, which DROPS every process whose
+        # command line is unreadable -- routine on Windows for processes owned by another user or
+        # protected by the OS. The live-process set was therefore a FLOOR, not a count, and a
+        # worktree genuinely held by such a process read as not-live and was eligible for removal.
+        # Unreadable is now carried as the THIRD STATE and refused below, using this file's own
+        # established `cannot-determine:` idiom rather than a new one. A sibling board's trap on the
+        # bus named this shape; the fold lane verified it here.
+        $allProcs = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $self -notcontains $_.ProcessId })
+        $unreadable = @($allProcs | Where-Object { -not $_.CommandLine })
+        $procs = @($allProcs | Where-Object { $_.CommandLine })
         $slash = $wd -replace '\\', '/'
         $live = @($procs | Where-Object { $_.CommandLine.IndexOf($wd, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $_.CommandLine.IndexOf($slash, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
         if ($live.Count) { $d.reason = 'live-process: ' + (($live | ForEach-Object { "$($_.ProcessId) $($_.Name)" }) -join ', '); return [pscustomobject]$d }
+        # A DEFINITE live hit above wins and is reported as such. Only when none was found does an
+        # unreadable command line matter -- at that point "no holder found" is unproven, not false.
+        if ($unreadable.Count) { $d.reason = "cannot-determine: $($unreadable.Count) process(es) have an unreadable command line, so no holder of this worktree can be excluded"; return [pscustomobject]$d }
 
         $s = Run-Git $wd @('status', '--porcelain', '-uall'); if ($s.code) { $d.reason = 'cannot-determine: status'; return [pscustomobject]$d }
         $dirty = @($s.out | Where-Object { $_ })
