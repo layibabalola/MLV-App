@@ -443,13 +443,24 @@ function Assert-AttrCudaFixtureCommittedBytes {
     ATTR3_FIXTURE_HEAD_LOOKUP_UNAVAILABLE.
     round 2g (sol/fable MAJOR): the repository-DISCOVERY call (`git rev-parse --show-toplevel`,
     below) had the identical any-failure-becomes-a-verdict defect and is fixed the same way --
-    stderr inspected, only git's own "not a git repository" text is the definite
+    stderr inspected, only git's own "fatal: not a git repository" text is the definite
     ATTR3_FIXTURE_NOT_IN_A_REPO refusal, everything else (dubious ownership, a corrupted repo
-    config, an I/O error) is ATTR3_FIXTURE_GIT_UNAVAILABLE. Two smaller edges are KNOWN and left
-    OPEN, not fixed here: the HEAD:<path> lookup's stderr match for "invalid object name" is
-    unanchored and could in principle match a corrupted-ref message that is not actually an unborn
-    HEAD; and a fixture between int32.MaxValue and the practical process-memory ceiling can OOM the
-    `byte[]` allocation below and surface as a raw, untokened exception rather than
+    config, an I/O error) is ATTR3_FIXTURE_GIT_UNAVAILABLE.
+    round 2h (sol/fable MAJOR, independently found): the show-toplevel match landed with the exact
+    same unanchored-substring shape the HEAD:<path> match below already carried -- a bare
+    'not a git repository' match, matchable by any stderr line that happens to contain that
+    phrase, not only git's own fatal verdict. Anchored to require the 'fatal: ' prefix git itself
+    always emits ahead of it (confirmed empirically: `git rev-parse --show-toplevel` outside any
+    repository prints exactly "fatal: not a git repository (or any of the parent directories):
+    .git" on this git version), narrowing, not closing, the edge -- this is still a substring
+    match on the joined stderr text, not an anchored `^fatal: ...$` match against a single known
+    line, so a hypothetical advisory line that itself echoes "fatal: not a git repository" as
+    quoted text (rather than as git's own verdict) would still match. Three edges are now KNOWN
+    and left OPEN, not fixed here: the HEAD:<path> lookup's stderr match for "invalid object name"
+    is unanchored and could in principle match a corrupted-ref message that is not actually an
+    unborn HEAD; the show-toplevel match above, narrowed but not fully anchored, for the same
+    reason; and a fixture between int32.MaxValue and the practical process-memory ceiling can OOM
+    the `byte[]` allocation below and surface as a raw, untokened exception rather than
     ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE.
     #>
     [CmdletBinding()]
@@ -476,7 +487,9 @@ function Assert-AttrCudaFixtureCommittedBytes {
     # dubious ownership, a corrupted repo config, a git I/O error -- into the definite refusal
     # ATTR3_FIXTURE_NOT_IN_A_REPO, exactly the any-failure-becomes-a-verdict shape the HEAD:<path>
     # lookup below was already fixed for in round 2e. stderr is now inspected the same way: only
-    # git's own distinct "not a git repository" text is a genuine not-in-a-repo verdict; every other
+    # git's own distinct "fatal: not a git repository" text is a genuine not-in-a-repo verdict
+    # (round 2h: anchored to the "fatal: " prefix git itself always emits ahead of it, narrowing --
+    # not closing -- the unanchored-substring edge round 2g shipped); every other
     # failure is ATTR3_FIXTURE_GIT_UNAVAILABLE (already a registered indeterminate token), not a
     # content verdict.
     $rawShowToplevel = & git -C $dir rev-parse --show-toplevel 2>&1
@@ -484,7 +497,7 @@ function Assert-AttrCudaFixtureCommittedBytes {
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($discoveredRoot)) {
         $stderrText = (($rawShowToplevel | Where-Object { $_ -is [Management.Automation.ErrorRecord] } |
             ForEach-Object { $_.ToString() }) -join ' ')
-        if ($stderrText -match 'not a git repository') {
+        if ($stderrText -match 'fatal: not a git repository') {
             throw "ATTR3_FIXTURE_NOT_IN_A_REPO $full is not inside a git working tree: $stderrText"
         }
         throw "ATTR3_FIXTURE_GIT_UNAVAILABLE git rev-parse --show-toplevel for '$dir' failed for a reason other than the path not being inside a git working tree: $stderrText"

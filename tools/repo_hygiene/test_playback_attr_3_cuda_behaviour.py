@@ -1051,6 +1051,27 @@ class FixtureCommittedBytesTests(_PwshCase):
         proc = self.run_with_module(_guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{outside}'"))
         self.assert_throws(proc, "ATTR3_FIXTURE_NOT_IN_A_REPO")
 
+    def test_a_corrupted_repo_config_is_indeterminate_not_not_in_a_repo(self) -> None:
+        # sol/fable, PR #140 r2g/r2h MAJOR, independently found and previously undriven by any
+        # test: `git rev-parse --show-toplevel` used to fold ANY failure (stderr discarded via
+        # 2>$null) into the definite refusal ATTR3_FIXTURE_NOT_IN_A_REPO -- classifying a
+        # corrupted repository config identically to a path genuinely outside any repository.
+        # This corrupts .git/config with an invalid line so `git rev-parse --show-toplevel` fails
+        # with git's own "fatal: bad config line ... in file .git/config" (verified empirically --
+        # exit 128, that exact stderr text) -- a real repository git simply cannot read right now,
+        # which must classify as ATTR3_FIXTURE_GIT_UNAVAILABLE (could not determine), never as the
+        # definite ATTR3_FIXTURE_NOT_IN_A_REPO verdict. This is the falsifier for the round-2g fix:
+        # reverting the show-toplevel stderr inspection makes this test fail (it would throw
+        # ATTR3_FIXTURE_NOT_IN_A_REPO instead).
+        config_path = self.repo / ".git" / "config"
+        with config_path.open("a", encoding="utf-8") as handle:
+            handle.write("[this is not valid\n")
+
+        proc = self.run_with_module(_guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{self.tracked_path}'"))
+
+        self.assert_throws(proc, "ATTR3_FIXTURE_GIT_UNAVAILABLE")
+        self.assertNotIn("THREW ATTR3_FIXTURE_NOT_IN_A_REPO", proc.stdout, proc.stdout + proc.stderr)
+
     def test_an_explicit_trusted_root_is_accepted_and_returns_the_committed_hash(self) -> None:
         # The positive control for -RepoRoot: passing the SAME repository the nearest-repo
         # discovery would have found anyway must still admit and still return the verified hash.

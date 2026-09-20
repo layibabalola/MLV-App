@@ -82,6 +82,8 @@ class _Share(unittest.TestCase):
 OBSERVING = "{ param($s, $d) Add-Content -LiteralPath $log -Value $d; Copy-Item -LiteralPath $s -Destination $d }"
 CORRUPTING = ("{ param($s, $d) Copy-Item -LiteralPath $s -Destination $d; "
               "if ($d -like '*.sidepart') { [IO.File]::AppendAllText($d, 'x') } }")
+CORRUPTING_JOB = ("{ param($s, $d) Copy-Item -LiteralPath $s -Destination $d; "
+                   "if ($d -like '*.job.tmp') { [IO.File]::AppendAllText($d, 'x') } }")
 RACING_SIDE = ("{ param($s, $d) Copy-Item -LiteralPath $s -Destination $d; "
                "if ($d -like '*.sidepart') { $final = $d -replace '\\.[0-9a-f]{32}\\.sidepart$', ''; "
                "[IO.File]::WriteAllText($final, 'another submitter') } }")
@@ -109,6 +111,18 @@ class UmRunDropModuleTests(_Share):
         proc = self.drop(CORRUPTING)
         self.assertIn("THREW UMRUN_SIDEFILE_VERIFY_FAILED", proc.stdout, proc.stdout + proc.stderr)
         self.assertEqual(self.names(), [], "neither the side-file, its temporary, nor the job may remain")
+
+    def test_job_bytes_altered_on_the_share_are_refused_and_the_job_is_not_placed(self) -> None:
+        # This is the falsifier for round 2g's UMRUN_JOB_VERIFY_FAILED fix (item 5, PR #140
+        # round 2h): before round 2g, the job's own .job.tmp was renamed with NO round-trip
+        # verification at all, so this exact corruption would have been published as
+        # inbox/demo.job.ps1 unnoticed. Removing the fix makes this test fail (NO_THROW, and the
+        # corrupted job present at demo.job.ps1) instead of throwing UMRUN_JOB_VERIFY_FAILED.
+        proc = self.drop(CORRUPTING_JOB)
+        self.assertIn("THREW UMRUN_JOB_VERIFY_FAILED", proc.stdout, proc.stdout + proc.stderr)
+        # Side-file placement precedes the job attempt (proven above) and is not rolled back on a
+        # later job-stage failure, so the side-file remains; the job itself must not.
+        self.assertEqual(self.names(), ["demo-source.zip"], "the corrupted job must not be placed")
 
     def test_a_side_file_that_appears_concurrently_with_other_bytes_is_not_overwritten(self) -> None:
         proc = self.drop(RACING_SIDE)
