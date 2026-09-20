@@ -6947,12 +6947,22 @@ def _assert_no_exclusive_route_claim(case, text, label):
 # any of its bounds is absent from the derived set without a word.
 #
 # ROUND 11.  Round 10 wrote "FOUR `continue` paths ... all four, named", and BOTH halves of
-# that were wrong.  The function contains exactly THREE `continue` statements -- (a), (c) and
-# (d) below; (b) is a `dirnames[:]` filter, not a `continue`, and was miscounted into the
-# total.  And the list was not all: two `os.walk` defaults, (f) and (g), skip carriers and
-# appeared in NO disclosure, here or in the PR body.  So the closure framing is GONE.  What
-# follows is an HONESTLY PARTIAL list -- the bounds that are known, with no claim that
-# knowing seven means there is no eighth:
+# that were wrong: (b) below is a `dirnames[:]` filter rather than a `continue` and was
+# counted into that total, and the `os.walk` defaults tagged (f) and (g) below skip carriers
+# and appeared in NO disclosure, here or in the PR body.  So the closure framing is GONE.
+#
+# ROUND 12.  Round 11 then wrote its OWN counts about this list -- "exactly THREE `continue`
+# statements", "two `os.walk` defaults", "knowing seven means there is no eighth" -- and, by
+# adding (f) and (g) here, left THREE references to this list's extent pointing at the shape
+# it had BEFORE that edit: `_derive_claim_carriers`'s docstring said "the four skips
+# documented above", the `_CLAIM_CARRIERS_PINNED` preamble said "skips (a)-(e)", and the
+# carrier-coverage row said "five documented bounds".  A count of this list is a thing an
+# edit to this list can falsify, and did.  So the counts and the RANGES are DELETED -- here
+# and at those three sites -- rather than recounted, and references now point at the list
+# itself.  A single label like (f) still names one entry; a range like (a)-(g) asserts where
+# the list ends, which is the thing that goes stale.  What follows is an HONESTLY PARTIAL
+# list, each entry tagged with the mechanism it actually is; the bounds named in it are no
+# claim about bounds not named in it:
 #   (a) [continue] its extension is not in `_CARRIER_SUFFIXES` -- a `.rst`, `.adoc` or
 #       extensionless carrier is invisible;
 #   (b) [dirnames filter, NOT a `continue`] it is under a pruned directory
@@ -6999,7 +7009,7 @@ def _derive_claim_carriers(root=REPO_ROOT):
     """-> sorted repo-relative paths of the carriers THIS WALK SEES, by the bounds above.
 
     Not a hand list, and agreed with ``git grep -l`` 8-for-8 when it was written.  It is a
-    SEARCH, not a census: bounded by the subject regex and the four skips documented above,
+    SEARCH, not a census: bounded by the subject regex and by the bounds documented above,
     and a carrier outside those bounds is returned by neither this walk nor the pin it feeds.
     """
     found = []
@@ -7024,7 +7034,8 @@ def _derive_claim_carriers(root=REPO_ROOT):
 # The derived set AS PINNED.  This is not the coverage list -- coverage is whatever the
 # derivation returns.  This exists so that a new carrier THE WALK RETURNS fails loudly instead
 # of quietly widening the set the needle is asked to trust.  A carrier the walk does not
-# return reaches neither side of the equality and fails nothing; see skips (a)-(e) above.
+# return reaches neither side of the equality and fails nothing; see the bounds documented
+# above `_derive_claim_carriers`.
 _CLAIM_CARRIERS_PINNED = (
     "docs/never-authorized.json",
     "tools/gates/verify_consented_footage.py",
@@ -7328,12 +7339,13 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         #
         # ROUND 10.  Round 9 wrote that as "the failure mode it exhibited is not available".
         # One failure mode is traded for another: this row covers THE CARRIERS THE WALK FINDS,
-        # and the walk has five documented bounds (`_derive_claim_carriers`).  A carrier in any
-        # of them is covered by neither this loop nor the pin.
+        # and the walk has the bounds documented above `_derive_claim_carriers`.  A carrier in
+        # any of them is covered by neither this loop nor the pin.
         carriers = _derive_claim_carriers()
         # FAIL LOUDLY on a new carrier THE WALK RETURNED -- which, quoted on its own, is
-        # narrower than "a new carrier": a carrier inside bounds (a)-(g) above reaches neither
-        # side of this equality and fails nothing.  Within that scope: not because a new
+        # narrower than "a new carrier": a carrier inside the bounds documented above
+        # `_derive_claim_carriers` reaches neither side of this equality and fails nothing.
+        # Within that scope: not because a new
         # carrier is wrong, but because it must be looked at, since silently widening the
         # derived set is how a hand list rots without anyone noticing.
         self.assertEqual(
@@ -7454,9 +7466,20 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         # returns None and the DENY comes from rule_na4's default branch.  Deleting
         # OWNER_CONSENTED_FOOTAGE outright left it green.
         #
-        # KEPT, not deleted: its real property is end-to-end and nothing else covers it -- the
-        # REAL hook, as a separate process, exits 2 with an "NA-4: " reason, so the in-process
-        # `decide()` rows are not testing a different code path than production.
+        # KEPT, not deleted: its property is end-to-end -- the REAL hook, as a separate
+        # process, exits 2 with an "NA-4: " reason, so the in-process `decide()` rows are not
+        # testing a different code path than production.
+        #
+        # ROUND 12 (sol).  Round 9 wrote that as "end-to-end AND NOTHING ELSE COVERS IT", and
+        # the added clause is FALSE.  The table-driven rows at the top of this module run the
+        # REAL hook as a separate process through `_invoke`, and `_run_case` asserts
+        # returncode 2, exactly one stderr line, and that the line starts with the row's own
+        # `na` id -- so "r1 open an unnamed clip" and "na4 same basename different clip",
+        # both `"na": "NA-4"` with `"expect": "DENY"`, already assert that the real hook, in
+        # a separate process, exits 2 with an "NA-4: " reason.  The clause is DELETED rather
+        # than narrowed.  What this row carries that those two do not is its INPUT -- a
+        # synthetic clip-cache path shape -- which is a different input, not a property no
+        # other row reaches.
         #
         # ROUND 10 (sol) -- DISCLOSED, NOT FIXED, and here is which and why.  Round 9 renamed
         # this row `..._whatever_its_consent_status` and added the fixture precondition below,
