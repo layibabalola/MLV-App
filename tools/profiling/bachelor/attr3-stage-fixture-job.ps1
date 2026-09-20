@@ -66,7 +66,10 @@ if (-not (Test-Path -LiteralPath $FixturePath -PathType Leaf)) {
 }
 $admission = Get-UmRunFixtureAdmission -SourcePath $FixturePath -RepoRoot $RepoRoot
 if (-not $admission.IsFixture) {
-    throw "ATTR3_FIXTURE_NOT_TRACKED $FixturePath is not a tracked, content-pinned clip fixture of this repository"
+    # round 2d (sol/fable MAJOR): carry admission's own distinct reason out rather than folding
+    # every refusal into this one generic token.
+    $reasonSuffix = if ($admission.Reason) { " ($($admission.Reason))" } else { '' }
+    throw "ATTR3_FIXTURE_NOT_TRACKED $FixturePath is not a tracked, content-pinned clip fixture of this repository$reasonSuffix"
 }
 $fixture = Get-Item -LiteralPath $FixturePath -Force
 if ([IO.Path]::GetFileNameWithoutExtension($fixture.Name) -cne $ClipStem) {

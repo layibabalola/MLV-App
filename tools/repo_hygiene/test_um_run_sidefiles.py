@@ -58,17 +58,19 @@ class _Share(unittest.TestCase):
     def names(self) -> list[str]:
         return sorted(p.name for p in self.inbox.iterdir())
 
-    def drop(self, copier: str, *, side: list[Path] | None = None, job_id: str = "demo") -> subprocess.CompletedProcess:
+    def drop(self, copier: str, *, side: list[Path] | None = None, job_id: str = "demo",
+              module: Path | None = None, repo_root: Path | None = None) -> subprocess.CompletedProcess:
         sides = ",".join(_q(p) for p in (side if side is not None else [self.side]))
         script = self.tmp / "drop.ps1"
+        repo_root_arg = f" -RepoRoot {_q(repo_root)}" if repo_root is not None else ""
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
-            f"Import-Module {_q(MODULE)} -Force\n"
+            f"Import-Module {_q(module or MODULE)} -Force\n"
             f"$log = {_q(self.log)}\n"
             f"$copier = {copier}\n"
             "try {\n"
             f"  Invoke-UmRunDrop -Inbox {_q(self.inbox)} -Outbox {_q(self.outbox)} -ScriptPath {_q(self.job)} "
-            f"-JobId '{job_id}' -SideFile @({sides}) -Copier $copier\n"
+            f"-JobId '{job_id}' -SideFile @({sides}) -Copier $copier{repo_root_arg}\n"
             "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
             encoding="utf-8",
         )
@@ -239,19 +241,18 @@ class UmRunDropModuleTests(_Share):
         # A "if present assert, else return" rewrite of Test-UmRunFixtureContentPin would make
         # Get-UmRunFixtureAdmission treat the tracked fixture below as admitted-but-unverified,
         # which -- because admission is what EXEMPTS a fixture from the extension allowlist --
-        # would place these bytes anyway despite the media extension the allowlist refuses. This
-        # moves the REAL bachelor module aside for the single subprocess call and restores it in
-        # a finally, so a test crash never leaves it missing for anything else.
+        # would place these bytes anyway despite the media extension the allowlist refuses.
+        # Round 2d: this used to RENAME the real, tracked bachelor module in the live working
+        # tree and restore it in a finally -- a hard-killed run left the checkout without it and
+        # dirty. A COPY of UmRunDrop.psm1 with no bachelor/ next to it produces the identical
+        # module-absent condition instead ($script:AttrCudaArtifactsModulePath is derived from the
+        # importing copy's own $PSScriptRoot), so the real tree is never touched; -RepoRoot pins
+        # the copy back to the real repository so the real fixture is still what gets admitted.
         clip = self.repo_fixture()
-        bachelor_module = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
-        moved_aside = bachelor_module.with_name(bachelor_module.name + ".moved-aside-for-test")
-        self.assertTrue(bachelor_module.is_file(), "the bachelor module must exist to be moved aside")
-        bachelor_module.rename(moved_aside)
-        try:
-            proc = self.drop(OBSERVING, side=[clip])
-        finally:
-            self.assertFalse(bachelor_module.exists(), "test invariant: nothing else restored it")
-            moved_aside.rename(bachelor_module)
+        module_copy = self.tmp / "no-bachelor" / "UmRunDrop.psm1"
+        module_copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(MODULE, module_copy)
+        proc = self.drop(OBSERVING, side=[clip], module=module_copy, repo_root=ROOT)
         self.assertIn("THREW UMRUN_SIDEFILE_NAME_INVALID", proc.stdout, proc.stdout + proc.stderr)
         self.assertEqual(self.names(), [], "a bachelor-less host must never place an unverified fixture")
 
@@ -367,7 +368,8 @@ class UmRunFixtureContentPinTests(unittest.TestCase):
         _git(["add", "tests/fixtures/clips/tiny_dual_iso.umrunprobe"], self.repo)
         _git(["commit", "-q", "-m", "fixture"], self.repo)
 
-    def probe(self, path: Path, *, repo_root: Path | None = None, env: dict[str, str] | None = None) -> str:
+    def probe(self, path: Path, *, repo_root: Path | None = None, env: dict[str, str] | None = None,
+              module: Path | None = None) -> str:
         # $VerbosePreference (not just -Verbose on the outer call) so Write-Verbose inside the
         # nested Get-UmRunFixtureAdmission catch block surfaces regardless of exactly how deep
         # the call chain runs -- the underlying ATTR3_FIXTURE_* / UMRUN_FIXTURE_CONTENT_PIN_*
@@ -375,7 +377,7 @@ class UmRunFixtureContentPinTests(unittest.TestCase):
         script = self.repo.parent / f"probe-{abs(hash(str(path))) % 10**8}.ps1"
         script.write_text(
             "$VerbosePreference = 'Continue'\n"
-            "Import-Module " + _q(MODULE) + " -Force\n"
+            "Import-Module " + _q(module or MODULE) + " -Force\n"
             "Write-Output ('RESULT=' + (Test-UmRunTrackedFixtureSource -SourcePath " + _q(path) +
             " -RepoRoot " + _q(repo_root if repo_root is not None else self.repo) + " -Verbose))\n",
             encoding="utf-8",
@@ -449,17 +451,16 @@ class UmRunFixtureContentPinTests(unittest.TestCase):
         # fail-open regression guard for the whole content pin, so a future change that quietly
         # turned "module missing" into "admit unpinned" would need to change this exact string, not
         # merely leave the end-to-end refusal (which a different bug could equally produce)
-        # looking unchanged. Moved aside for this one probe and restored in a finally, exactly the
-        # UmRunDropModuleTests precedent.
-        bachelor_module = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
-        moved_aside = bachelor_module.with_name(bachelor_module.name + ".moved-aside-for-test")
-        self.assertTrue(bachelor_module.is_file(), "the bachelor module must exist to be moved aside")
-        bachelor_module.rename(moved_aside)
-        try:
-            output = self.probe(self.fixture)
-        finally:
-            self.assertFalse(bachelor_module.exists(), "test invariant: nothing else restored it")
-            moved_aside.rename(bachelor_module)
+        # looking unchanged.
+        # Round 2d: this used to RENAME the real, tracked bachelor module in the live working
+        # tree and restore it in a finally -- a hard-killed run left the checkout without it and
+        # dirty. A COPY of UmRunDrop.psm1 with no bachelor/ next to it produces the identical
+        # module-absent condition without ever touching the real tree; -RepoRoot (via probe's
+        # default of self.repo) still pins the disposable git repo this test built in setUp.
+        module_copy = self.repo.parent / "no-bachelor" / "UmRunDrop.psm1"
+        module_copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(MODULE, module_copy)
+        output = self.probe(self.fixture, module=module_copy)
         self.assertIn("RESULT=False", output)
         self.assertIn("UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE", output, output)
 

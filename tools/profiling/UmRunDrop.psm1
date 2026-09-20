@@ -16,11 +16,19 @@
 #   - a tracked fixture clip is admitted only when its WORKING-TREE bytes are exactly the committed
 #     blob at HEAD, never by name/tracked-status alone (ATTR3-ADMIT-CONTENT-PIN-1, fable key on
 #     PR #137) -- see Test-UmRunFixtureContentPin;
-#   - that admission and the bytes actually placed on the share are the SAME bytes: admission
-#     hands back a SHA256 of the bytes it verified, and placement refuses to proceed if a later
-#     read of the source no longer matches it (sol, PR #140 r2 MAJOR: admission and placement
-#     used to be independent reads of the same source path, so a swap in that gap was never
-#     caught).
+#   - admission's OWN verification and the SHA256 it hands back are bound to ONE read: the
+#     working-tree bytes are opened once, through a single handle that denies concurrent writers
+#     for its whole lifetime, and both the committed-blob comparison and the returned pin are
+#     computed from that same in-memory buffer (sol BLOCKER / fable MAJOR, PR #140 r2c
+#     ATTR3-ADMIT-CONTENT-PIN-1 round 2d: the two used to be SEPARATE reads of the same mutable
+#     path inside admission itself -- Test-UmRunFixtureContentPin's own git comparison, then a
+#     second, independent Get-FileHash -- so bytes exchanged in that internal gap became the
+#     trusted pin, and every downstream binding below faithfully agreed on the swapped bytes
+#     because it never saw anything else to compare against);
+#   - that admission and the bytes actually placed on the share are the SAME bytes: placement
+#     refuses to proceed if a later read of the source no longer matches the pin admission handed
+#     back (sol, PR #140 r2 MAJOR: admission and placement used to be independent reads of the
+#     same source path, so a swap in THAT gap was never caught either).
 
 Set-StrictMode -Version Latest
 
@@ -32,6 +40,11 @@ $script:DeviceNames = @('CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM
 # the smallest tracked file then proved the bypass rather than the feature. The same two stems the
 # attribution generator accepts as -ClipId are the admissible set here, and no extension is named.
 $script:TrackedFixtureClipStems = @('tiny_dual_iso', 'large_dual_iso')
+# ATTR3-ADMIT-CONTENT-PIN-1 round 2d: the tokens Get-UmRunFixtureAdmission's content-pin check
+# throws when it could not even DETERMINE admissibility (git or the bachelor module missing, or
+# the single content-pin read could not be bound) -- as opposed to a definite refusal (untracked,
+# working tree dirty, foreign repo). See that function's .Indeterminate.
+$script:UmRunIndeterminateAdmissionTokens = @('UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE', 'ATTR3_FIXTURE_GIT_UNAVAILABLE', 'ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE')
 # tools/profiling/bachelor/AttrCudaArtifacts.psm1's Assert-AttrCudaFixtureCommittedBytes -- the twin
 # check ATTR3-FIXTURE-STAGE-1 already wrote for this identical defect class -- is reused by
 # Test-UmRunFixtureContentPin below, imported ON DEMAND from this path so a host that never ships
@@ -93,13 +106,24 @@ function Get-UmRunFixtureAdmission {
     to run inline, once, and hands back both the verdict and a hash so a caller can bind them
     together (see Invoke-UmRunDrop's use of -FixtureContentSha256).
 
-    ContentSha256 is a SHA256 of the file taken immediately after Test-UmRunFixtureContentPin
-    returns -- deliberately NOT that function's own return value, which is git's SHA-1
-    `hash-object` blob hash (Assert-AttrCudaFixtureCommittedBytes's established, separately
-    tested return contract). Every OTHER content-equality check in this module (the share-side
-    round-trip verification, the "already present" comparison) is a .NET SHA256, so binding
-    against a SHA-1 value would silently never match and refuse every legitimate placement --
-    that mismatch, not a real race, is what a first version of this fix produced.
+    ContentSha256 is the SHA256 Test-UmRunFixtureContentPin hands back on its returned object,
+    itself derived from the SAME single read Assert-AttrCudaFixtureCommittedBytes takes to compare
+    the working-tree bytes against the committed blob (round 2d, sol BLOCKER / fable MAJOR) -- NOT
+    a second, independent Get-FileHash of this mutable path taken afterward. That second read used
+    to be exactly the internal check/use gap this whole card exists to close: bytes exchanged
+    between the content-pin comparison and a later independent hash became the trusted pin, and
+    every downstream binding this module added (the drop race check below, the share round-trip,
+    the generator bake) then faithfully agreed on the swapped bytes, because nothing after
+    admission ever saw the original ones to compare against.
+
+    Reason / Indeterminate: round 2d (sol MAJOR / fable MAJOR). IsFixture=$false collapses THREE
+    different outcomes -- "definitely not this kind of file" (wrong directory, unknown stem,
+    untracked, working tree dirty, foreign repo), "could not determine" (git or the bachelor
+    module unavailable, or the single content-pin read could not be bound), and previously nothing
+    distinguished either from the other, so a caller reported one generic token and the real
+    reason survived only under -Verbose. Reason carries that message out always; Indeterminate is
+    $true only for the "could not determine" outcomes, so a caller can tell "refused" from
+    "unknown" instead of folding the third state into either of the other two.
 
     sol, PR #140 r2c: exported (not just called internally by Assert-UmRunSideFileName) so
     tools/profiling/bachelor/attr3-stage-fixture-job.ps1's generator-time bake of $fixtureSha
@@ -113,11 +137,17 @@ function Get-UmRunFixtureAdmission {
         [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
     )
 
-    $result = [pscustomobject]@{ IsFixture = $false; ContentSha256 = $null }
+    $result = [pscustomobject]@{ IsFixture = $false; ContentSha256 = $null; Reason = $null; Indeterminate = $false }
 
     $fixturesDir = Join-Path (Join-Path (Join-Path $RepoRoot 'tests') 'fixtures') 'clips'
-    if (-not (Test-Path -LiteralPath $fixturesDir -PathType Container)) { return $result }
-    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { return $result }
+    if (-not (Test-Path -LiteralPath $fixturesDir -PathType Container)) {
+        $result.Reason = "UMRUN_FIXTURE_ADMISSION_NO_FIXTURES_DIR '$fixturesDir' does not exist under '$RepoRoot'"
+        return $result
+    }
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
+        $result.Reason = "UMRUN_FIXTURE_ADMISSION_SOURCE_MISSING '$SourcePath' does not exist"
+        return $result
+    }
 
     # Real paths, so a junction/symlink cannot present an outside file as a fixture.
     $resolvedDir = Resolve-UmRunRealDirectory -Path $fixturesDir
@@ -125,24 +155,34 @@ function Get-UmRunFixtureAdmission {
     $link = $sourceItem.ResolveLinkTarget($true)
     if ($null -ne $link) { $sourceItem = $link }
     $sourceDir = Resolve-UmRunRealDirectory -Path ([IO.Path]::GetDirectoryName($sourceItem.FullName))
-    if (-not [string]::Equals($sourceDir, $resolvedDir, [StringComparison]::OrdinalIgnoreCase)) { return $result }
+    if (-not [string]::Equals($sourceDir, $resolvedDir, [StringComparison]::OrdinalIgnoreCase)) {
+        $result.Reason = "UMRUN_FIXTURE_ADMISSION_WRONG_DIRECTORY '$($sourceItem.FullName)' does not resolve inside '$resolvedDir'"
+        return $result
+    }
 
     # A tracked FIXTURE, not merely a tracked file in that directory (sol r2: README.md is tracked there).
     $name = [IO.Path]::GetFileName($sourceItem.FullName)
     $stem = [IO.Path]::GetFileNameWithoutExtension($name)
-    if ($script:TrackedFixtureClipStems -cnotcontains $stem) { return $result }
+    if ($script:TrackedFixtureClipStems -cnotcontains $stem) {
+        $result.Reason = "UMRUN_FIXTURE_ADMISSION_UNKNOWN_STEM '$stem' is not an admissible fixture stem"
+        return $result
+    }
 
     # Tracked AND content-pinned: git rev-parse HEAD:<path> (inside Test-UmRunFixtureContentPin)
     # fails the same way for "never committed" and "committed but the working copy has drifted", so
     # a single fail-closed call covers both -- see that function for the distinct thrown reasons.
     try {
-        [void](Test-UmRunFixtureContentPin -Path $sourceItem.FullName -RepoRoot $RepoRoot)
+        $pin = Test-UmRunFixtureContentPin -Path $sourceItem.FullName -RepoRoot $RepoRoot
     } catch {
-        Write-Verbose $_.Exception.Message
+        $message = $_.Exception.Message
+        Write-Verbose $message
+        $result.Reason = $message
+        $firstToken = ($message -split '\s+', 2)[0]
+        $result.Indeterminate = $script:UmRunIndeterminateAdmissionTokens -contains $firstToken
         return $result
     }
     $result.IsFixture = $true
-    $result.ContentSha256 = (Get-FileHash -LiteralPath $sourceItem.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $result.ContentSha256 = $pin.Sha256
     return $result
 }
 
@@ -150,11 +190,11 @@ function Test-UmRunFixtureContentPin {
     <#
     .SYNOPSIS
     Throw unless a fixture's working-tree bytes are exactly its committed blob at HEAD; return the
-    verified (matching) hash.
+    verified git blob hash AND a SHA256 pin of the SAME bytes.
     .DESCRIPTION
     ATTR3-ADMIT-CONTENT-PIN-1. Reuses tools/profiling/bachelor/AttrCudaArtifacts.psm1's
     Assert-AttrCudaFixtureCommittedBytes -- the twin check ATTR3-FIXTURE-STAGE-1 already wrote for
-    the identical defect class, comparing `git hash-object` of the working-tree file to
+    the identical defect class, comparing the working-tree file's git blob hash to
     `git rev-parse HEAD:<repo-relative path>` -- rather than re-deriving the same comparison here
     and letting the two drift. The bachelor module is imported ON DEMAND, and only if present, so a
     host that never ships it still runs every OTHER um-run side-file rule unchanged: it simply
@@ -168,11 +208,23 @@ function Test-UmRunFixtureContentPin {
     sol, PR #140 r2 BLOCKER: -RepoRoot is forwarded to Assert-AttrCudaFixtureCommittedBytes so a
     nested repository under the fixture's own directory cannot authorize its bytes -- see that
     function's docstring.
+
+    ROUND 2d (sol BLOCKER / fable MAJOR): Sha256 on the returned object comes from
+    Assert-AttrCudaFixtureCommittedBytes's -Sha256Pin out-parameter, which is derived from the
+    IDENTICAL byte buffer that function's own git-blob comparison used -- one held, write-denying
+    file handle, read once. The previous shape called this function for its verdict alone (its
+    return value discarded with [void] by Get-UmRunFixtureAdmission) and then took a completely
+    separate Get-FileHash of the same mutable path for the pin; bytes exchanged in that internal
+    gap became the trusted pin, undetected, because nothing else in admission ever compared
+    against the original bytes.
+
     Throws UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE when the bachelor module is not present, or one of
     Assert-AttrCudaFixtureCommittedBytes's own distinct tokens: ATTR3_FIXTURE_GIT_UNAVAILABLE (git
     missing), ATTR3_FIXTURE_NOT_IN_A_REPO (not inside a repo), ATTR3_FIXTURE_NOT_COMMITTED
-    (untracked or absent from HEAD), ATTR3_FIXTURE_WORKING_TREE_DIRTY (bytes differ), or
-    ATTR3_FIXTURE_FOREIGN_REPO (tracked by a repository other than the trusted -RepoRoot).
+    (untracked or absent from HEAD), ATTR3_FIXTURE_WORKING_TREE_DIRTY (bytes differ),
+    ATTR3_FIXTURE_FOREIGN_REPO (tracked by a repository other than the trusted -RepoRoot), or
+    ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE (the single read-locked handle could not be opened or
+    fully read) -- an honest refusal, never a hash it cannot stand behind.
     #>
     [CmdletBinding()]
     param(
@@ -184,7 +236,9 @@ function Test-UmRunFixtureContentPin {
         throw "UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE $($script:AttrCudaArtifactsModulePath) is not present; cannot verify '$Path' against its committed blob"
     }
     Import-Module $script:AttrCudaArtifactsModulePath -ErrorAction Stop
-    Assert-AttrCudaFixtureCommittedBytes -Path $Path -RepoRoot $RepoRoot
+    $sha256Ref = [ref]$null
+    $gitBlobHash = Assert-AttrCudaFixtureCommittedBytes -Path $Path -RepoRoot $RepoRoot -Sha256Pin $sha256Ref
+    [pscustomobject]@{ GitBlobSha1 = $gitBlobHash; Sha256 = $sha256Ref.Value }
 }
 
 function Resolve-UmRunRealDirectory {
@@ -223,10 +277,13 @@ function Assert-UmRunSideFileName {
         throw "UMRUN_SIDEFILE_NAME_INVALID '$Name' is job-shaped or executable-script-shaped"
     }
     $extension = [IO.Path]::GetExtension($Name).ToLowerInvariant()
-    $admission = if ($SourcePath) { Get-UmRunFixtureAdmission -SourcePath $SourcePath -RepoRoot $RepoRoot } else { [pscustomobject]@{ IsFixture = $false; ContentSha256 = $null } }
+    $admission = if ($SourcePath) { Get-UmRunFixtureAdmission -SourcePath $SourcePath -RepoRoot $RepoRoot } else { [pscustomobject]@{ IsFixture = $false; ContentSha256 = $null; Reason = $null; Indeterminate = $false } }
     $trackedFixture = $admission.IsFixture
     if (-not $trackedFixture -and $script:AllowedSideFileExtensions -notcontains $extension) {
-        throw "UMRUN_SIDEFILE_NAME_INVALID '$Name' extension '$extension' is not in the allowlist and its source is not a tracked fixture clip"
+        # round 2d (sol/fable MAJOR): the distinct admission-refusal reason used to survive only
+        # under -Verbose; carried out here so a caller sees WHY without needing verbose logging.
+        $reasonSuffix = if ($admission.Reason) { " ($($admission.Reason))" } else { '' }
+        throw "UMRUN_SIDEFILE_NAME_INVALID '$Name' extension '$extension' is not in the allowlist and its source is not a tracked fixture clip$reasonSuffix"
     }
     $stem = $Name.Split('.')[0].ToUpperInvariant()
     if ($script:DeviceNames -contains $stem) {

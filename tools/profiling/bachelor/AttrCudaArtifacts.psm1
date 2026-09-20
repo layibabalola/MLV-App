@@ -318,6 +318,61 @@ function Assert-AttrCudaBuildManifest {
     $manifest
 }
 
+function Get-AttrCudaGitBlobHashFromBytes {
+    <#
+    .SYNOPSIS
+    Git's blob hash of a byte buffer already in memory, exactly as `git hash-object` would compute
+    it for a file living at $RelativePath -- content filters (autocrlf, .gitattributes) included.
+    .DESCRIPTION
+    ATTR3-ADMIT-CONTENT-PIN-1 round 2d. `git hash-object -- <path>` opens and reads $Path itself --
+    a SECOND read of the same mutable file, which is exactly the internal check/use gap this whole
+    round closes. `git hash-object --stdin --path <RelativePath>` hashes whatever bytes are piped
+    to it on stdin while still selecting content filters BY that path (the same ones `--path` would
+    apply if it were reading the file itself), so this can feed it the identical buffer
+    Assert-AttrCudaFixtureCommittedBytes already read through its own single, write-denying handle
+    -- no second read of the file.
+
+    Round-2d SELF-CAUGHT DEFECT: an earlier version of this function computed
+    SHA1("blob " + <byte length> + "\0" + <content>) directly over the raw in-memory buffer,
+    entirely in .NET, with no git subprocess at all. That is only the correct git blob hash when
+    nothing normalises the bytes on the way into the object database. It silently disagreed with
+    the committed blob for any autocrlf/gitattributes-normalised text fixture -- caught by
+    FixtureCommittedBytesTests.test_an_unmodified_tracked_file_is_accepted (a `.c` source file)
+    failing closed on completely unmodified content, before this ever reached review. Filtering
+    is a repository-configuration concern only git itself can resolve correctly; reproducing its
+    hash FORMAT locally without also reproducing its FILTERS is not a safe shortcut.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$RelativePath
+    )
+
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'git'
+    foreach ($arg in @('-C', $RepoRoot, 'hash-object', '--stdin', '--path', $RelativePath)) {
+        [void]$psi.ArgumentList.Add($arg)
+    }
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $proc = [Diagnostics.Process]::Start($psi)
+    try {
+        $proc.StandardInput.BaseStream.Write($Bytes, 0, $Bytes.Length)
+    } finally {
+        $proc.StandardInput.Close()
+    }
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    if ($proc.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($stdout)) {
+        throw "ATTR3_FIXTURE_GIT_UNAVAILABLE could not hash-object (via stdin) '$RelativePath' in '$RepoRoot': $stderr"
+    }
+    $stdout.Trim().ToLowerInvariant()
+}
+
 function Assert-AttrCudaFixtureCommittedBytes {
     <#
     .SYNOPSIS
@@ -327,8 +382,8 @@ function Assert-AttrCudaFixtureCommittedBytes {
     (Test-UmRunTrackedFixtureSource, tools/profiling/UmRunDrop.psm1) -- but "tracked" says
     nothing about whether the WORKING-TREE bytes at that path are still the committed ones. A
     dirty or corrupted working copy would otherwise bake a sha256 into the staging job that
-    no reviewed commit ever produced. This compares `git hash-object` of the file on disk
-    to `git rev-parse HEAD:<repo-relative path>`.
+    no reviewed commit ever produced. This compares git's blob hash of the file on disk to
+    `git rev-parse HEAD:<repo-relative path>`.
     sol, PR #140 r2 BLOCKER (ATTR3-ADMIT-CONTENT-PIN-1): without -RepoRoot this discovered the
     repository from the FILE'S OWN DIRECTORY via `git rev-parse --show-toplevel` -- so a nested
     repository committed under the fixture's own directory could authorize bytes the OUTER
@@ -342,15 +397,30 @@ function Assert-AttrCudaFixtureCommittedBytes {
     behaviour -- the trusted-root check is opt-in via -RepoRoot, not universal.
     KNOWN LIMITATION (round-2 recon): neither side of the root comparison canonicalises an 8.3
     short name or a junction/symlink component; an equivalent root reached through one of those
-    can be falsely rejected as ATTR3_FIXTURE_FOREIGN_REPO rather than accepted. Untested and
-    undefended here -- callers that might pass such a root should resolve it themselves first.
+    can be falsely rejected as ATTR3_FIXTURE_FOREIGN_REPO rather than accepted. Undefended here --
+    callers that might pass such a root should resolve it themselves first -- but no longer
+    untested: test_a_root_reached_through_a_junction_is_falsely_refused_known_limitation
+    (tools/repo_hygiene/test_playback_attr_3_cuda_behaviour.py) pins the refusal empirically, so a
+    future change cannot silently start accepting -- or silently start crashing on -- a
+    junction-reached root without that test being touched.
+    .PARAMETER Sha256Pin
+    Optional [ref]; ATTR3-ADMIT-CONTENT-PIN-1 round 2d (sol BLOCKER / fable MAJOR, PR #140 r2c).
+    On a verified match, .Value is set to a SHA256 of the EXACT SAME byte buffer this function
+    hashed to produce the git blob comparison below -- one file handle, opened deny-write for its
+    whole lifetime and read once, feeds both hashes. The old shape (this function's own `git
+    hash-object` subprocess, then a caller's SEPARATE Get-FileHash afterward) read the mutable
+    path twice; bytes exchanged in that gap became the trusted pin, and stayed the trusted pin for
+    every downstream binding this module added, because nothing downstream ever saw the original
+    bytes to compare against. Left unset (the default) when this throws, since a caller must never
+    bind to a pin taken from bytes that failed verification.
     Throws with a distinguishable ATTR3_FIXTURE_* token; returns the verified (matching) hash.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path,
-        [string]$RepoRoot = ''
+        [string]$RepoRoot = '',
+        [ref]$Sha256Pin
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -382,11 +452,36 @@ function Assert-AttrCudaFixtureCommittedBytes {
         $repoRootForGit = $discoveredRoot
     }
     $relative = ($full.Substring($repoRootForGit.Length + 1)) -replace '\\', '/'
-    $workingHash = (& git -C $repoRootForGit hash-object -- $relative 2>$null)
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($workingHash)) {
-        throw "ATTR3_FIXTURE_GIT_UNAVAILABLE could not hash-object $relative in $repoRootForGit"
+
+    # ATTR3-ADMIT-CONTENT-PIN-1 round 2d: ONE handle, opened deny-write for its whole lifetime, is
+    # read ONCE into a buffer. Both the working-tree comparison hash below and -Sha256Pin's value
+    # (on success) are derived from that SAME buffer -- there is no internal gap left for a swap
+    # to win. FileShare.Read denies any concurrent writer for as long as this handle stays open
+    # (and, incidentally, blocks a rename-based swap too, since that needs delete access we never
+    # grant).
+    try {
+        $stream = [IO.File]::Open($full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    } catch {
+        throw "ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE could not open $full for a write-denying read: $($_.Exception.Message)"
     }
-    $workingHash = $workingHash.Trim().ToLowerInvariant()
+    try {
+        if ($stream.Length -gt [int32]::MaxValue) {
+            throw "ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE $full is too large ($($stream.Length) bytes) to hash from a single in-memory buffer"
+        }
+        $bytes = [byte[]]::new([int]$stream.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -le 0) {
+                throw "ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE ${full}: read stopped after $offset of $($bytes.Length) bytes"
+            }
+            $offset += $read
+        }
+    } finally {
+        $stream.Dispose()
+    }
+    $workingHash = Get-AttrCudaGitBlobHashFromBytes -Bytes $bytes -RepoRoot $repoRootForGit -RelativePath $relative
+
     $committedHash = (& git -C $repoRootForGit rev-parse "HEAD:$relative" 2>$null)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($committedHash)) {
         throw "ATTR3_FIXTURE_NOT_COMMITTED HEAD:$relative could not be resolved in $repoRootForGit"
@@ -394,6 +489,14 @@ function Assert-AttrCudaFixtureCommittedBytes {
     $committedHash = $committedHash.Trim().ToLowerInvariant()
     if ($workingHash -ne $committedHash) {
         throw "ATTR3_FIXTURE_WORKING_TREE_DIRTY $relative working-tree blob $workingHash differs from the committed blob $committedHash"
+    }
+    if ($null -ne $Sha256Pin) {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $Sha256Pin.Value = (($sha256.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '')
+        } finally {
+            $sha256.Dispose()
+        }
     }
     $workingHash
 }
