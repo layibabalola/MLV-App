@@ -6928,9 +6928,6 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         finally:
             self.module.OWNER_CONSENTED_FOOTAGE = saved
 
-    def assertAllow(self, decision):
-        self.assertEqual(decision, (0, ""), decision)
-
     def assertNa4Deny(self, decision):
         self.assertEqual(decision[0], 2, decision)
         self.assertTrue(decision[1].startswith("NA-4: "), decision)
@@ -6941,8 +6938,9 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         # ROUND 6 (NARROW).  The fixture table consents `self.part0` and `self.part1` -- their
         # norm hashes ARE in it -- and NA-4 still denies each one named in command text, in
         # every spelling, as a whole shell word, alone or joined to a neighbour.  Every row was
-        # an ALLOW at d4bd9721 (exception (3)); consented footage is reachable only through
-        # tracked, id-addressed consumers, never through a path in agent command text.
+        # an ALLOW at d4bd9721 (exception (3)).  This closes the COMMAND-TEXT route only:
+        # exception (2) still admits a consented clip's own path on the CLIP_OR_NONE line,
+        # with no content check against the table.
         path = self.part0.replace("\\", "/")
         self.assertIn(self._path_hash(self.part0), [p[2] for p in self.table["clips"]["M16-1243"]])
         for spelling in (self.part0, self.part1, self.part1.upper().replace("\\", "/")):
@@ -6958,16 +6956,11 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertNa4Deny(self._decide_command(command))
 
-    def test_deny_the_same_basename_in_a_different_directory(self):
-        moved = os.path.join(self.cache, "mirror", "elsewhere", "clip-a.part0")
-        self.assertNa4Deny(self._decide(moved))
-
-    def test_deny_m02_1344(self):
-        # The fixture table carries a consented id only; a synthetic M02-1344 part is not in it,
-        # and the FROZEN table has no M02-1344 row at all.
-        m02 = os.path.join(self.cache, "mirror", "M02-1344", "M02-1344.part0")
-        self.assertNa4Deny(self._decide(m02))
-        self.assertNa4Deny(self._decide(m02, consent=None))
+    def test_m02_1344_is_absent_from_the_frozen_consent_record(self):
+        # ROUND 7.  The two NA-4 DENY calls this row used to make were VACUOUS: no hook rule
+        # reads the consent table, so they passed for a reason unrelated to M02-1344 and
+        # would have passed with the table deleted outright.  What is left discriminates --
+        # it goes RED the moment M02-1344 is added to the FROZEN record.
         self.assertNotIn("M02-1344", self.module.OWNER_CONSENTED_FOOTAGE["clips"])
 
     def test_deny_any_token_whose_norm_hash_is_absent(self):
@@ -6975,11 +6968,6 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         # The real frozen table: synthetic paths are never its hashes.
         self.assertNa4Deny(self._decide(self.part0, consent=None))
         self.assertNa4Deny(self._decide(self.unconsented, consent=None))
-
-    def test_deny_a_path_hash_under_a_malformed_table(self):
-        malformed = {"clips": {"M16-1243": ((1, "0" * 64),)}}  # no path_norm_sha256 column
-        self.assertNa4Deny(self._decide(self.part0, consent=malformed))
-        self.assertNa4Deny(self._decide(self.part0, consent={}))
 
     # ------------------------------------------------------------- values pinned (A)
 
@@ -7018,8 +7006,16 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             # Round 6 (NARROW): no command-text admission, and the id-only route.
             "this hook admits NO consented path from command text",
             "No rule in this hook reads the table.",
-            "(1) Consented footage is reachable ONLY through\n"
-            "# tracked, id-addressed consumers that verify content against this table",
+            "(1) THE ROUTE THIS CARD PROVIDES for consented\n"
+            "# footage is tracked, id-addressed consumers that verify content against this"
+            " table",
+            # ROUND 7: the route this card provides is NOT the only way in.  Exception (2)
+            # reaches a consented clip today with no content check; CI holds that in place.
+            "THAT IS NOT THE ONLY WAY A\n"
+            "# CONSENTED CLIP CAN BE OPENED TODAY.",
+            "Exception (2) admits the ONE canonical path on the\n"
+            "# card's CLIP_OR_NONE line, and NOTHING EXCLUDES A CONSENTED CLIP'S OWN PATH"
+            " FROM IT",
             # The honesty statement: scope, not exposure; the interpreter residual stands.
             "(2) THE NARROWING REDUCES\n# SCOPE, NOT EXPOSURE.",
             "The interpreter-one-liner residual is UNCHANGED:",
@@ -7036,6 +7032,8 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, source)
+        # ROUND 7: the round-6 overclaim must not come back.
+        self.assertNotIn("Consented footage is reachable ONLY through", source)
         # The removed machinery is gone, not dormant.
         for removed in (
             "is_owner_consented_path", "is_literal_canonical_token", "is_whole_shell_word",
@@ -7155,7 +7153,12 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             "a consented-footage path named in command text is DENIED exactly like any other"
             " clip outside (1) and (2)",
             "no hook rule reads it",
-            "Consented footage is reachable ONLY through tracked, id-addressed consumers",
+            "The route this card provides for consented footage is tracked, id-addressed"
+            " consumers",
+            # ROUND 7: the act must NAME the route that reaches consented footage with no
+            # content check, so it agrees with its own LIMITS instead of contradicting them.
+            "exception (2) still admits a consented clip's own path on the CLIP_OR_NONE line"
+            " with no content check against the table and no id-addressed consumer",
             "the narrowing reduces scope, not exposure: the interpreter-one-liner residual is"
             " unchanged",
             "such a one-liner can open any path, consented or not",
@@ -7164,6 +7167,8 @@ class OwnerConsentedFootageTests(unittest.TestCase):
                 self.assertIn(needle, act)
         self.assertNotIn("fork/master", act)
         self.assertNotIn("exception (3) admits", act)
+        self.assertNotIn("reachable ONLY through", act)
+        self.assertNotIn("reachable only through", act)
         for purpose in self.module.OWNER_CONSENTED_FOOTAGE["purposes"]:
             self.assertIn(purpose, act)
         enforced = na4[0]["enforced_after_0_1"]
@@ -7173,9 +7178,16 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             enforced,
         )
         self.assertIn(
-            "consented footage is reachable only through tracked, id-addressed consumers",
+            "the route this card provides for consented footage is tracked, id-addressed"
+            " consumers",
             enforced,
         )
+        self.assertIn(
+            "exception (2) still admits a consented clip's own path on the CLIP_OR_NONE line"
+            " with no content check",
+            enforced,
+        )
+        self.assertNotIn("reachable only through", enforced)
         for needle in (
             OWNER_CONSENT_LINE_SHA256, OWNER_CONSENT_QUESTION_LINE_SHA256,
             OWNER_DIRECTIVE_LINE_SHA256, "line 1739", "line 1718", "line 2137",

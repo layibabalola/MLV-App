@@ -3314,11 +3314,15 @@ FIXTURE_TAIL = "tests/fixtures/clips"
 # content, and ``path_norm_sha256`` -- the sha256 of this hook's own ``norm()`` output for that
 # part's path, UTF-8 encoded.  NO PATH is stored.  No rule in this hook reads the table.
 #
-# LIMITS, stated rather than papered over.  (1) Consented footage is reachable ONLY through
-# tracked, id-addressed consumers that verify content against this table with
+# LIMITS, stated rather than papered over.  (1) THE ROUTE THIS CARD PROVIDES for consented
+# footage is tracked, id-addressed consumers that verify content against this table with
 # tools/gates/verify_consented_footage.py (each part's existence, length and sha256).  None is
 # wired yet: the CUDA job (card ATTR3-FOOTAGE-BIND-1) and the #72b delta tooling are not, and
-# until then the CUDA job generator refuses every owner-clip id.  (2) THE NARROWING REDUCES
+# until then the CUDA job generator refuses every owner-clip id.  THAT IS NOT THE ONLY WAY A
+# CONSENTED CLIP CAN BE OPENED TODAY.  Exception (2) admits the ONE canonical path on the
+# card's CLIP_OR_NONE line, and NOTHING EXCLUDES A CONSENTED CLIP'S OWN PATH FROM IT: a
+# consented clip named there is opened with NO content check against this table and by no
+# id-addressed consumer, exactly as before this card.  (2) THE NARROWING REDUCES
 # SCOPE, NOT EXPOSURE.  The interpreter-one-liner residual is UNCHANGED: a text-matching hook
 # never sees the path an interpreter one-liner or a script opens, so such a one-liner can open
 # any path, consented or not, exactly as before this card.  Removing exception (3) removes a

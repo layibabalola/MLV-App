@@ -17,8 +17,12 @@
 # a real clip named in command text only as the single path on the CLIP_OR_NONE line of the
 # running lane's own MLV_LANE_PROMPT, which the owner types by hand (agents cannot write it).
 # The hook's frozen owner-consented table (NA4-OWNER-CONSENTED-FOOTAGE-1) admits NO path from
-# command text (round 6, NARROW); consented footage is reachable only through a tracked,
-# id-addressed consumer that verifies content against that table. This generator is not yet
+# command text (round 6, NARROW); the route that card provides for consented footage is a
+# tracked, id-addressed consumer that verifies content against that table. That route is NOT
+# the only way a consented clip can be opened today: NA-4 exception (2) above still admits
+# the one CLIP_OR_NONE path, and nothing excludes a consented clip's own path from it, so a
+# consented clip named there is opened with no content check against the table and by no
+# id-addressed consumer. This generator is not yet
 # one, so it REFUSES every owner-clip id until card ATTR3-FOOTAGE-BIND-1 makes it id-only
 # (resolving via tools/gates/output-budget.json with a table-hash check) and wires
 # tools/gates/verify_consented_footage.py in (see the refusal below the fixture test). An

@@ -4,10 +4,13 @@
 NA4-OWNER-CONSENTED-FOOTAGE-1, round 6 (NARROW).  The project hook
 (tools/hooks/mlv-never-authorized.py) holds the frozen consent record ``OWNER_CONSENTED_FOOTAGE``
 but admits NO consented path from agent command text: such a path is denied by NA-4 exactly
-as on master.  Consented footage is reachable ONLY through tracked, id-addressed consumers
-that verify content against that table.  This module is that check: for one consented id it
-checks every part's existence, byte length and sha256 against the table, hashing in streaming
-chunks.
+as on master.  THE ROUTE THIS CARD PROVIDES for consented footage is tracked, id-addressed
+consumers that verify content against that table, and this module is that check: for one
+consented id it checks every part's existence, byte length and sha256 against the table,
+hashing in streaming chunks.  IT IS NOT THE ONLY WAY A CONSENTED CLIP CAN BE OPENED TODAY:
+NA-4 exception (2) still admits the ONE canonical path on the card's CLIP_OR_NONE line, and
+nothing excludes a consented clip's own path from it, so a consented clip named there is
+opened with NO call to this module, exactly as before this card.
 
 EVERY SUCH CONSUMER MUST CALL ``verify`` (or the CLI) BEFORE OPENING A CLIP, and must not open
 it unless the result is ``ok``.  As of this change no consumer is wired to it: the CUDA job is
