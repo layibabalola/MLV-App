@@ -6938,16 +6938,36 @@ def _assert_no_exclusive_route_claim(case, text, label):
 # not against that particular list.
 #
 # So coverage is DERIVED: scan the tree for files carrying the claim SUBJECT, and run the
-# needle over whatever comes back.  A new carrier cannot be silently uncovered, because it
-# is never enumerated by hand in the first place.
+# needle over whatever comes back.  Nothing is enumerated by hand, so the specific way round
+# 8's list rotted -- somebody forgetting to add a file -- is not how this one rots.
+#
+# ROUND 10.  That is a CHANGE of failure mode, not the removal of one, and round 9 wrote the
+# stronger sentence ("a new carrier cannot be silently uncovered").  What the walk actually
+# does: `_derive_claim_carriers` is a BOUNDED filesystem walk with FOUR `continue` paths, and
+# a carrier that lands in any of them is absent from the derived set without a word.  All
+# four, named, plus the bound that precedes them:
+#   (a) its extension is not in `_CARRIER_SUFFIXES` -- a `.rst`, `.adoc` or extensionless
+#       carrier is invisible;
+#   (b) it is under a pruned directory (`_CARRIER_PRUNE_DIRS`), notably `.claude-state/` and
+#       `worktrees/`;
+#   (c) it is larger than `_CARRIER_MAX_BYTES`;
+#   (d) reading it raises `OSError` or `UnicodeDecodeError` -- a non-UTF-8 carrier is skipped;
+#   (e) BEFORE any of those, `_CLAIM_SUBJECT_RX` matches a LITERAL subject family, so a file
+#       that words the subject differently ("owner-consented media", "the six ids") is not
+#       found however plainly it asserts the claim.
+# `_CLAIM_CARRIERS_PINNED` is NOT a backstop for any of these.  It is an equality test between
+# the derived set and a frozen copy of it; a file that never entered the derived set never
+# enters either side, so the equality stays true and nothing reds.  The pin catches a new
+# carrier THE WALK SEES.  It is blind to precisely what the walk is blind to.
 _CLAIM_SUBJECT_RX = re.compile(r"consented[ -](?:footage|clips?|parts?|paths?)", re.I)
 _CARRIER_PRUNE_DIRS = frozenset({
     ".git", ".claude-state", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache",
     "worktrees",
 })
-# Text the claim could plausibly be written in.  A carrier in some other extension would be
-# missed -- stated here rather than left to be discovered, and the pin below is the backstop:
-# it compares against `git grep`-equivalent breadth at the time it was taken.
+# Text the claim could plausibly be written in; skip (a) above.  Checked for AGREEMENT, not
+# for completeness: `git grep -l` on the same subject pattern returned the same 8 files when
+# this was written, which says the walk and git agree ON THIS TREE TODAY -- not that either
+# is complete, and not that the pin below covers what the walk misses.
 _CARRIER_SUFFIXES = (
     ".py", ".ps1", ".psm1", ".json", ".md", ".txt", ".yml", ".yaml", ".sh", ".cpp", ".h",
     ".hpp", ".c", ".pro", ".qrc", ".ui", ".bat", ".cmd", ".mjs", ".js", ".toml",
@@ -6956,9 +6976,11 @@ _CARRIER_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _derive_claim_carriers(root=REPO_ROOT):
-    """-> sorted repo-relative paths of every file carrying the consented-route claim SUBJECT.
+    """-> sorted repo-relative paths of the carriers THIS WALK SEES, by the bounds above.
 
-    Not a hand list.  Validated against ``git grep -l`` when it was written: identical, 8 of 8.
+    Not a hand list, and agreed with ``git grep -l`` 8-for-8 when it was written.  It is a
+    SEARCH, not a census: bounded by the subject regex and the four skips documented above,
+    and a carrier outside those bounds is returned by neither this walk nor the pin it feeds.
     """
     found = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -6980,8 +7002,9 @@ def _derive_claim_carriers(root=REPO_ROOT):
 
 
 # The derived set AS PINNED.  This is not the coverage list -- coverage is whatever the
-# derivation returns.  This exists so that a NEW carrier FAILS LOUDLY instead of quietly
-# widening the set that the needle is asked to trust.
+# derivation returns.  This exists so that a new carrier THE WALK RETURNS fails loudly instead
+# of quietly widening the set the needle is asked to trust.  A carrier the walk does not
+# return reaches neither side of the equality and fails nothing; see skips (a)-(e) above.
 _CLAIM_CARRIERS_PINNED = (
     "docs/never-authorized.json",
     "tools/gates/verify_consented_footage.py",
@@ -7280,8 +7303,13 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         # ROUND 9.  Round 8's needle ran over four HAND-LISTED surfaces and missed
         # `playback-attr-3-cuda-job.ps1`, which carries the same claim surface -- the round-7
         # defect shape, reappearing inside the round-8 mechanism built to prevent it.  Coverage
-        # is now DERIVED, so the failure mode it exhibited is not available: the needle runs
-        # over whatever the scan returns, not over what somebody remembered to list.
+        # is now DERIVED: the needle runs over whatever the scan returns, not over what
+        # somebody remembered to list.
+        #
+        # ROUND 10.  Round 9 wrote that as "the failure mode it exhibited is not available".
+        # One failure mode is traded for another: this row covers THE CARRIERS THE WALK FINDS,
+        # and the walk has five documented bounds (`_derive_claim_carriers`).  A carrier in any
+        # of them is covered by neither this loop nor the pin.
         carriers = _derive_claim_carriers()
         # FAIL LOUDLY on a new carrier.  Not because a new carrier is wrong, but because it
         # must be looked at: silently widening the derived set is how a hand list rots without
@@ -7303,7 +7331,12 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         self.assertEqual(len(_CARRIER_NEEDLE_EXCLUSIONS), 1)
         self.assertIn("tools/repo_hygiene/test_mlv_never_authorized.py",
                       _CARRIER_NEEDLE_EXCLUSIONS)
-        # And the previously-missed carrier is now genuinely covered, not merely listed.
+        # ROUND 10 (opus).  This is a LANDMARK, and it used to be commented "genuinely
+        # covered, not merely listed" -- which is the one thing it does NOT show.  The
+        # `assertEqual` four lines up already contains this path, so this line can never fail
+        # independently; what it records is that round 8's missed carrier is in the derived
+        # set.  COVERAGE comes from the loop above, and the only evidence the loop bites is the
+        # mutation that rewords this file's header back to the false claim and reds this row.
         self.assertIn("tools/profiling/bachelor/playback-attr-3-cuda-job.ps1", carriers)
 
     def test_the_anti_needle_does_not_catch_an_arbitrary_paraphrase(self):
@@ -7319,8 +7352,10 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         #
         # So this row pins the LIMIT ITSELF.  Each paraphrase below asserts the SAME false
         # claim the needle exists to kill, and each MUST pass the needle.  If a later round
-        # enlarges the phrase family to swallow one of them, this row goes RED -- forcing the
-        # honesty disclosure to be re-derived rather than quietly outgrown.
+        # enlarges the phrase family to swallow one of THESE FOUR STRINGS, this row goes RED.
+        # ROUND 10: that is the whole of its reach.  It pins four specific escapes, not the
+        # existence of escapes -- a round that widened the family around all four would leave
+        # this row green, and the disclosure would then be wrong with nothing to say so.
         escapes = (
             "The sole route for consented footage is the tracked verifier",
             "A consented clip cannot be opened except by an id-addressed consumer",
@@ -7388,7 +7423,7 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         self.assertFalse(hasattr(self.module, "_read_merged_output_budget"))
         self.assertNotIn("subprocess", vars(self.module))
 
-    def test_the_real_hook_process_denies_a_cache_path_whatever_its_consent_status(self):
+    def test_the_real_hook_process_denies_a_cache_path_as_a_separate_process(self):
         # ROUND 9 (FIFTH vacuous row -- opus, round 8).  This was named
         # ..._denies_an_unconsented_cache_path and fed `self.part0`, the path every other row
         # in this class calls CONSENTED.  It passed for a reason unrelated to the word
@@ -7398,10 +7433,47 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         #
         # KEPT, not deleted: its real property is end-to-end and nothing else covers it -- the
         # REAL hook, as a separate process, exits 2 with an "NA-4: " reason, so the in-process
-        # `decide()` rows are not testing a different code path than production.  The name now
-        # says that, and the row is made discriminating by running BOTH consent statuses and
-        # requiring the same outcome shape from the real process, which is the property round 6
-        # actually established.
+        # `decide()` rows are not testing a different code path than production.
+        #
+        # ROUND 10 (sol) -- DISCLOSED, NOT FIXED, and here is which and why.  Round 9 renamed
+        # this row `..._whatever_its_consent_status` and added the fixture precondition below,
+        # which made the vacuity enumeration call it discriminating.  IT IS NOT, AND IT CANNOT
+        # BE MADE SO HERE.  The subprocess loads the hook fresh and reads the module's REAL
+        # frozen table; `self.table` exists only in THIS process and is never passed to the
+        # child (the call passes argv, env and a JSON payload -- nothing else).  Under the
+        # child's own table NEITHER `self.part0` NOR `self.unconsented` is consented, so the
+        # two iterations below are two UNCONSENTED paths and the row observes exactly one
+        # consent status, whatever its name said.  It cannot be fixed by choosing a better
+        # path: the real table stores sha256 path hashes and no paths, so no input that the
+        # child would call consented can be constructed from it.  Fixing it would mean giving
+        # the hook a table-injection seam -- a change to executable hook behaviour, which this
+        # card is not permitted to make.
+        #
+        # So the row is moved to `_CONSENT_AGNOSTIC_DECIDERS` below, which is what that escape
+        # hatch is for, and it now promises only what it shows: the real hook, in a separate
+        # process, denies a cache path.  The two-path loop is kept because it does show that
+        # two DIFFERENT cache paths get the same outcome shape from the real process -- which
+        # is worth having and is not a consent property.
+        # ROUND 10.  The paragraph above is a claim about the child, so it is ASSERTED rather
+        # than only written down: under the module's REAL frozen table -- the one the child
+        # loads -- NEITHER of these two paths is consented.  If a later round ever makes one of
+        # them genuinely consented in the child, this goes RED and the disclosure above has to
+        # be rewritten instead of quietly becoming false.
+        real_path_hashes = {
+            part[2]
+            for parts in self.module.OWNER_CONSENTED_FOOTAGE["clips"].values()
+            for part in parts
+        }
+        for label, path in (("part0", self.part0), ("unconsented", self.unconsented)):
+            with self.subTest(child_table=label):
+                self.assertNotIn(
+                    self._path_hash(path), real_path_hashes,
+                    "%s is consented under the REAL table, so this row now DOES observe two "
+                    "consent statuses in the child -- rewrite the ROUND 10 note and reconsider "
+                    "the _CONSENT_AGNOSTIC_DECIDERS entry" % label,
+                )
+        # The labels below are the PARENT fixture's names for these paths.  The child consents
+        # neither; see the ROUND 10 note above, now backed by the assertion just made.
         outcomes = {}
         for label, path in (("consented", self.part0), ("unconsented", self.unconsented)):
             env = dict(os.environ)
@@ -7421,27 +7493,42 @@ class OwnerConsentedFootageTests(unittest.TestCase):
                 refused.returncode,
                 refused.stderr.replace(self.module.norm(path), "<PATH>"),
             )
-        # The precondition that makes the comparison mean something: part0 IS consented under
-        # the fixture table, clip-z is NOT.  (The real table is what the hook subprocess reads;
-        # the fixture only establishes that these two paths differ in consent status at all.)
+        # ROUND 10.  These two lines are a PARENT-PROCESS fact and nothing more: under the
+        # FIXTURE table, part0's norm hash is present and clip-z's is not.  They say nothing
+        # about the child, which never sees this table.  They are kept because they document
+        # why the two paths were chosen; they are NOT a precondition that makes the comparison
+        # below a consent comparison, and round 9's comment here said they were.
         table_hashes = [part[2] for part in self.table["clips"]["M16-1243"]]
         self.assertIn(self._path_hash(self.part0), table_hashes)
         self.assertNotIn(self._path_hash(self.unconsented), table_hashes)
         self.assertEqual(
             outcomes["consented"], outcomes["unconsented"],
-            "the real hook process must not give a consented path a different outcome",
+            "the real hook process must give these two cache paths the same outcome shape "
+            "(both are UNCONSENTED under the child's own table; the labels are the parent's)",
         )
 
-    # Rows that reach a DECISION but whose name promises nothing about consent status, so the
-    # ablation below has nothing to hold them to.  Kept as an explicit, reasoned list because
-    # an empty one would be a lie; a row added here must justify itself in review.
-    _CONSENT_AGNOSTIC_DECIDERS = frozenset()
+    # Rows that reach a DECISION but promise nothing about consent status, so the ablation
+    # below has nothing to hold them to.  Every entry carries its reason here.
+    #
+    # ROUND 10 (opus).  Round 9 commented this "an explicit, reasoned list because an empty one
+    # would be a lie" while it WAS empty -- a sentence that contradicted the line under it, in
+    # the card whose subject is comments that assert more than their code.  It is now non-empty
+    # and the sentence is gone.  Adding to this set WEAKENS the enumeration, so an entry is a
+    # disclosure, not a pass: it says out loud that this row is not held to the consent
+    # property, rather than letting an unearned green say the opposite.
+    _CONSENT_AGNOSTIC_DECIDERS = frozenset({
+        # The subprocess reads the module's REAL frozen table and never receives `self.table`,
+        # so both of its inputs are unconsented in the process that decides and the row cannot
+        # observe two consent statuses at all.  Full reasoning at the row itself.
+        "test_the_real_hook_process_denies_a_cache_path_as_a_separate_process",
+    })
 
     def test_every_decision_row_discriminates_on_consent_status(self):
         # ROUND 9.  FOUR rows of the same vacuity class were found ONE AT A TIME across rounds
         # 6, 7 and 8 (two deleted at round 7, one replaced at round 8, a fifth found by opus at
         # round 8).  Finding them one at a time IS the defect: each round declared the class
-        # closed and the next round reopened it.  This row closes it by ENUMERATION instead.
+        # closed and the next round reopened it.  So this row sweeps the class instead of
+        # waiting for a reviewer to hit the next member.
         #
         # THE PROPERTY.  A row is vacuous with respect to consent iff its assertions hold
         # identically when consent status is flipped.  So flip it and see whether the row
@@ -7451,6 +7538,31 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         # This found the fifth row independently AND a sixth -- the two consent-flavoured
         # assertions on `test_no_subprocess_on_the_na4_path` -- which three rounds of hand
         # auditing had walked past.  Both are fixed above.
+        #
+        # ROUND 10 -- WHAT THIS DOES NOT DO.  Round 9 said it "closes the class"; that was the
+        # card's own defect, reappearing in the mechanism built to prevent it.  This is a
+        # SOURCE-TEXT HEURISTIC over an ablation harness, and it has three escapes:
+        #
+        #  (i) DISCOVERY IS BY LITERAL SPELLING.  A row counts as a decider iff its own source
+        #      contains one of three exact strings (see the predicate below).  `_decide` is a
+        #      four-line wrapper over `self.module.decide(...)`, so a row calling
+        #      `self.module.decide(...)` directly is never classified as a decider, is never
+        #      ablated, and can be vacuous and green indefinitely.  So can one using
+        #      `subprocess.Popen` or `check_output` instead of `subprocess.run`.
+        #      `_CONSENT_AGNOSTIC_DECIDERS` is no backstop: such a row never reaches the
+        #      membership test.  THE REMEDY IS NOT A FOURTH SPELLING -- adding spellings and
+        #      re-claiming completeness is the defect with a longer list.
+        # (ii) DISCRIMINATION HERE MEANS "THE FIXTURE PRECONDITION BREAKS", NOT "THE ROW'S REAL
+        #      ASSERTIONS NOTICE".  Since round 6 removed the only rule that read the table, NO
+        #      row's substantive assertions CAN depend on consent -- that is the card's own
+        #      finding.  Every surviving decider therefore goes red under ablation because a
+        #      `self.assertIn(self._path_hash(self.part0), table_hashes)` line stops holding.
+        #      The practical consequence: two lines of that boilerplate satisfy this row around
+        #      an otherwise vacuous test.  What this actually detects is a decision row that
+        #      does not so much as RECORD the consent status of what it hands the decider.
+        #      That is weaker than "the row tests consent", and it is what is on offer.
+        #(iii) IT SEES ONLY THIS CLASS.  `vars(type(self))` is `OwnerConsentedFootageTests`; a
+        #      vacuous consent row in another class is outside it entirely.
         source_of = {}
         for name, function in vars(type(self)).items():
             if not name.startswith("test_") or name == self._testMethodName:
@@ -7459,6 +7571,8 @@ class OwnerConsentedFootageTests(unittest.TestCase):
                 source_of[name] = inspect.getsource(function)
             except (OSError, TypeError):  # pragma: no cover - source always available here
                 self.fail("cannot read the source of %s; the enumeration would be a lie" % name)
+        # HEURISTIC, by literal spelling -- escape (i) above.  These three strings are the
+        # whole of the discovery rule; a decision row worded any other way is invisible to it.
         deciders = sorted(
             name for name, src in source_of.items()
             if ("self._decide(" in src or "self._decide_command(" in src
