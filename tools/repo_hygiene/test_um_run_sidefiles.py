@@ -233,6 +233,28 @@ class UmRunDropModuleTests(_Share):
         self.addCleanup(lambda: intruder.exists() and intruder.unlink())
         self.assertIn("RESULT=False", self.probe_source(intruder))
 
+    @requires_git
+    def test_a_bachelor_less_host_refuses_a_tracked_fixture_rather_than_admitting_it_unpinned(self) -> None:
+        # fable MINOR: nothing previously proved the module-absent path fails CLOSED end to end.
+        # A "if present assert, else return" rewrite of Test-UmRunFixtureContentPin would make
+        # Get-UmRunFixtureAdmission treat the tracked fixture below as admitted-but-unverified,
+        # which -- because admission is what EXEMPTS a fixture from the extension allowlist --
+        # would place these bytes anyway despite the media extension the allowlist refuses. This
+        # moves the REAL bachelor module aside for the single subprocess call and restores it in
+        # a finally, so a test crash never leaves it missing for anything else.
+        clip = self.repo_fixture()
+        bachelor_module = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
+        moved_aside = bachelor_module.with_name(bachelor_module.name + ".moved-aside-for-test")
+        self.assertTrue(bachelor_module.is_file(), "the bachelor module must exist to be moved aside")
+        bachelor_module.rename(moved_aside)
+        try:
+            proc = self.drop(OBSERVING, side=[clip])
+        finally:
+            self.assertFalse(bachelor_module.exists(), "test invariant: nothing else restored it")
+            moved_aside.rename(bachelor_module)
+        self.assertIn("THREW UMRUN_SIDEFILE_NAME_INVALID", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), [], "a bachelor-less host must never place an unverified fixture")
+
     def test_names_that_are_not_plain_allowlisted_basenames_are_refused(self) -> None:
         cases = ["x.job.ps1", "x.job.tmp", "x.ps1", "x.sidepart", "x.zip.", "x.zip ", "CON.zip", "noext", "x..zip", "x.exe.cmd"]
         body = "Import-Module " + _q(MODULE) + " -Force\n"
@@ -346,11 +368,16 @@ class UmRunFixtureContentPinTests(unittest.TestCase):
         _git(["commit", "-q", "-m", "fixture"], self.repo)
 
     def probe(self, path: Path, *, repo_root: Path | None = None, env: dict[str, str] | None = None) -> str:
+        # $VerbosePreference (not just -Verbose on the outer call) so Write-Verbose inside the
+        # nested Get-UmRunFixtureAdmission catch block surfaces regardless of exactly how deep
+        # the call chain runs -- the underlying ATTR3_FIXTURE_* / UMRUN_FIXTURE_CONTENT_PIN_*
+        # token, which Test-UmRunTrackedFixtureSource's boolean return would otherwise discard.
         script = self.repo.parent / f"probe-{abs(hash(str(path))) % 10**8}.ps1"
         script.write_text(
+            "$VerbosePreference = 'Continue'\n"
             "Import-Module " + _q(MODULE) + " -Force\n"
             "Write-Output ('RESULT=' + (Test-UmRunTrackedFixtureSource -SourcePath " + _q(path) +
-            " -RepoRoot " + _q(repo_root if repo_root is not None else self.repo) + "))\n",
+            " -RepoRoot " + _q(repo_root if repo_root is not None else self.repo) + " -Verbose))\n",
             encoding="utf-8",
         )
         proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
@@ -363,12 +390,16 @@ class UmRunFixtureContentPinTests(unittest.TestCase):
     def test_altered_working_tree_bytes_are_refused(self) -> None:
         # THE DEFECT: the old name-plus-tracked check admitted this unconditionally.
         self.fixture.write_bytes(b"foreign bytes staged over the fixture")
-        self.assertIn("RESULT=False", self.probe(self.fixture))
+        output = self.probe(self.fixture)
+        self.assertIn("RESULT=False", output)
+        self.assertIn("ATTR3_FIXTURE_WORKING_TREE_DIRTY", output, output)
 
     def test_an_untracked_fixture_shaped_file_is_refused(self) -> None:
         untracked = self.clips / "large_dual_iso.umrunprobe"
         untracked.write_bytes(b"never committed")
-        self.assertIn("RESULT=False", self.probe(untracked))
+        output = self.probe(untracked)
+        self.assertIn("RESULT=False", output)
+        self.assertIn("ATTR3_FIXTURE_NOT_COMMITTED", output, output)
 
     def test_a_fixture_shaped_file_outside_any_repo_is_refused(self) -> None:
         # No `git init` anywhere under orphan_root: the directory shape and stem are admissible,
@@ -378,13 +409,129 @@ class UmRunFixtureContentPinTests(unittest.TestCase):
         orphan_clips.mkdir(parents=True)
         orphan = orphan_clips / "tiny_dual_iso.umrunprobe"
         shutil.copy2(self.fixture, orphan)
-        self.assertIn("RESULT=False", self.probe(orphan, repo_root=orphan_root))
+        output = self.probe(orphan, repo_root=orphan_root)
+        self.assertIn("RESULT=False", output)
+        self.assertIn("ATTR3_FIXTURE_NOT_IN_A_REPO", output, output)
 
     def test_no_git_on_path_is_refused(self) -> None:
         env = _env_without_git()
         if env is None:
             self.skipTest("could not remove git from PATH in this environment")
-        self.assertIn("RESULT=False", self.probe(self.fixture, env=env))
+        output = self.probe(self.fixture, env=env)
+        self.assertIn("RESULT=False", output)
+        self.assertIn("ATTR3_FIXTURE_GIT_UNAVAILABLE", output, output)
+
+    def test_a_nested_repository_beneath_the_trusted_root_cannot_authorize_the_fixture(self) -> None:
+        # sol, PR #140 r2 BLOCKER: without -RepoRoot pinned to the caller's trusted root, the old
+        # code discovered the repository from the FIXTURE'S OWN DIRECTORY -- so a nested
+        # repository committed under tests/fixtures/clips could authorize bytes the outer
+        # repository's HEAD never held. This repository is disposable and separate from the one
+        # setUp already built at self.repo; the outer repo's committed fixture bytes are
+        # untouched, and a nested repo underneath is the only thing that changes.
+        _git(["init", "-q"], self.clips)
+        _git(["config", "user.email", "umrun-pin-test@example.invalid"], self.clips)
+        _git(["config", "user.name", "UmRun Pin Test"], self.clips)
+        self.fixture.write_bytes(b"foreign bytes authorized only by the nested repo")
+        _git(["add", "tiny_dual_iso.umrunprobe"], self.clips)
+        _git(["commit", "-q", "-m", "foreign"], self.clips)
+        output = self.probe(self.fixture)
+        self.assertIn("RESULT=False", output)
+        self.assertIn("ATTR3_FIXTURE_FOREIGN_REPO", output, output)
+
+    def test_a_missing_bachelor_module_is_refused_as_content_pin_unavailable(self) -> None:
+        # Test-UmRunFixtureContentPin's own fail-closed branch: the bachelor module (which carries
+        # Assert-AttrCudaFixtureCommittedBytes) is the one thing this whole content-pin admission
+        # surface depends on being importable ON DEMAND. Earlier coverage
+        # (test_a_bachelor_less_host_refuses_a_tracked_fixture_rather_than_admitting_it_unpinned,
+        # UmRunDropModuleTests above) proves the END-TO-END placement outcome when the module is
+        # absent, but folds the reason into Test-UmRunTrackedFixtureSource's boolean return and
+        # never asserts the UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE token itself -- this is the
+        # fail-open regression guard for the whole content pin, so a future change that quietly
+        # turned "module missing" into "admit unpinned" would need to change this exact string, not
+        # merely leave the end-to-end refusal (which a different bug could equally produce)
+        # looking unchanged. Moved aside for this one probe and restored in a finally, exactly the
+        # UmRunDropModuleTests precedent.
+        bachelor_module = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
+        moved_aside = bachelor_module.with_name(bachelor_module.name + ".moved-aside-for-test")
+        self.assertTrue(bachelor_module.is_file(), "the bachelor module must exist to be moved aside")
+        bachelor_module.rename(moved_aside)
+        try:
+            output = self.probe(self.fixture)
+        finally:
+            self.assertFalse(bachelor_module.exists(), "test invariant: nothing else restored it")
+            moved_aside.rename(bachelor_module)
+        self.assertIn("RESULT=False", output)
+        self.assertIn("UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE", output, output)
+
+
+@unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+@unittest.skipIf(GIT is None, "git is not on PATH")
+@unittest.skipUnless(os.name == "nt", "um-run.ps1 targets Windows agent shares")
+class UmRunFixtureContentPinRaceTests(unittest.TestCase):
+    """sol, PR #140 r2 MAJOR: admission and placement used to be independent reads of the same
+    source path -- Assert-UmRunSideFileName's content-pin check returned, then the source was
+    re-read for its sha256 and for the copy, so bytes that changed in that gap were never bound
+    to the blob admission actually verified. A disposable git repository (never the real
+    tests/fixtures/clips tree) plus Invoke-UmRunDrop's -PostAdmissionHook test seam -- which
+    fires in exactly that gap and is never set in production -- exercises the race directly."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="umrun-race-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(os.path.realpath(self._tmp.name))
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        _git(["init", "-q"], self.repo)
+        _git(["config", "user.email", "umrun-race-test@example.invalid"], self.repo)
+        _git(["config", "user.name", "UmRun Race Test"], self.repo)
+        self.clips = self.repo / "tests" / "fixtures" / "clips"
+        self.clips.mkdir(parents=True)
+        self.fixture = self.clips / "tiny_dual_iso.umrunprobe"
+        self.fixture.write_bytes(b"committed fixture bytes")
+        _git(["add", "tests/fixtures/clips/tiny_dual_iso.umrunprobe"], self.repo)
+        _git(["commit", "-q", "-m", "fixture"], self.repo)
+
+        self.share = self.tmp / "agent"
+        self.inbox = self.share / "inbox"
+        self.outbox = self.share / "outbox"
+        self.inbox.mkdir(parents=True)
+        self.outbox.mkdir()
+        self.job = self.tmp / "demo.job.ps1"
+        self.job.write_text("Write-Output 'hi'\n", encoding="utf-8")
+
+    def names(self) -> list[str]:
+        return sorted(p.name for p in self.inbox.iterdir())
+
+    def drop(self, hook: str) -> subprocess.CompletedProcess:
+        script = self.tmp / "race-drop.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module {_q(MODULE)} -Force\n"
+            "try {\n"
+            f"  Invoke-UmRunDrop -Inbox {_q(self.inbox)} -Outbox {_q(self.outbox)} -ScriptPath {_q(self.job)} "
+            f"-JobId 'demo' -SideFile @({_q(self.fixture)}) -RepoRoot {_q(self.repo)} "
+            f"-PostAdmissionHook {hook}\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        return subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                              capture_output=True, text=True)
+
+    def test_a_fixture_swapped_after_admission_but_before_placement_is_refused(self) -> None:
+        hook = "{ param($p) [IO.File]::WriteAllBytes($p, [Text.Encoding]::UTF8.GetBytes('raced bytes')) }"
+        proc = self.drop(hook)
+        self.assertIn("THREW UMRUN_FIXTURE_CONTENT_PIN_RACE", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), [], "bytes swapped after admission must never reach the inbox")
+
+    def test_a_no_op_hook_still_admits_the_clean_fixture(self) -> None:
+        # Positive control: the new check must not false-positive when nothing raced.
+        proc = self.drop("{ param($p) }")
+        self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), sorted(["demo.job.ps1", "tiny_dual_iso.umrunprobe"]))
+        self.assertEqual(
+            hashlib.sha256((self.inbox / "tiny_dual_iso.umrunprobe").read_bytes()).hexdigest(),
+            hashlib.sha256(self.fixture.read_bytes()).hexdigest(),
+        )
 
 
 if __name__ == "__main__":

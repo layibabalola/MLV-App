@@ -1017,6 +1017,65 @@ class FixtureCommittedBytesTests(_PwshCase):
         proc = self.run_with_module(_guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{outside}'"))
         self.assert_throws(proc, "ATTR3_FIXTURE_NOT_IN_A_REPO")
 
+    def test_an_explicit_trusted_root_is_accepted_and_returns_the_committed_hash(self) -> None:
+        # The positive control for -RepoRoot: passing the SAME repository the nearest-repo
+        # discovery would have found anyway must still admit and still return the verified hash.
+        proc = self.run_with_module(
+            f"Write-Output (Assert-AttrCudaFixtureCommittedBytes -Path '{self.tracked_path}' -RepoRoot '{self.repo}')\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        expected = _git_run(["hash-object", "--", "src/mlv/llrawproc/llrawproc.c"], self.repo)
+        self.assertIn(expected, proc.stdout)
+
+    def test_a_nested_repository_cannot_authorize_foreign_bytes(self) -> None:
+        # sol, PR #140 r2 BLOCKER (ATTR3-ADMIT-CONTENT-PIN-1): without -RepoRoot pinned to the
+        # caller's trusted root, the removed nearest-repo discovery walked up from the FILE'S OWN
+        # DIRECTORY via `git rev-parse --show-toplevel` -- so a nested repository committed
+        # under the same path could authorize bytes the outer repository's HEAD never held. A
+        # nested repo is created directly in the tracked file's own directory, inside self.repo,
+        # and commits DIFFERENT bytes for that file than the outer repo's HEAD holds.
+        nested = self.tracked_path.parent
+        _git_run(["init", "-q", "-b", "main"], nested)
+        _git_run(["config", "commit.gpgsign", "false"], nested)
+        _git_run(["config", "user.email", "lane@example.invalid"], nested)
+        _git_run(["config", "user.name", "attr3 behaviour fixture"], nested)
+        self.tracked_path.write_text("/* bytes only the nested repo ever committed */\n", encoding="utf-8")
+        _git_run(["add", "-A"], nested)
+        _git_run(["commit", "-q", "-m", "foreign"], nested)
+
+        proc = self.run_with_module(
+            _guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{self.tracked_path}' -RepoRoot '{self.repo}'")
+        )
+        self.assert_throws(proc, "ATTR3_FIXTURE_FOREIGN_REPO")
+
+    def test_a_root_reached_through_a_junction_is_falsely_refused_known_limitation(self) -> None:
+        # KNOWN LIMITATION documented on Assert-AttrCudaFixtureCommittedBytes's docstring (round-2
+        # recon): neither side of the -RepoRoot comparison canonicalises a junction/symlink or an
+        # 8.3 short-name component, so an EQUIVALENT root reached through one of those is falsely
+        # rejected as ATTR3_FIXTURE_FOREIGN_REPO rather than accepted. Empirically confirmed here
+        # (not merely asserted from the docstring's prose): `git rev-parse --show-toplevel` run
+        # from inside a junction alias resolves to the REAL target path, while this function's own
+        # -RepoRoot/-Path containment check compares un-resolved path TEXT -- so -Path and
+        # -RepoRoot both passed consistently through the SAME alias still pass that first textual
+        # containment check, then fail the second (discoveredRoot-vs-trustedRoot) comparison
+        # purely because git silently resolved the reparse point and this function did not. This
+        # pins the documented behaviour so a future change cannot silently start accepting -- or
+        # silently start crashing on -- a junction-reached root without the docstring being
+        # updated alongside it (round-2 addendum: document AND test the refusal, or canonicalise;
+        # this is the testing half).
+        alias = self.tmp / "repo-alias"
+        proc = self.run_with_module(
+            f"New-Item -ItemType Junction -Path '{alias}' -Target '{self.repo}' | Out-Null\n"
+        )
+        if proc.returncode != 0 or not alias.exists():
+            self.skipTest(f"cannot create a junction here: {proc.stderr}")
+        aliased_tracked_path = alias / "src" / "mlv" / "llrawproc" / "llrawproc.c"
+
+        proc = self.run_with_module(
+            _guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{aliased_tracked_path}' -RepoRoot '{alias}'")
+        )
+        self.assert_throws(proc, "ATTR3_FIXTURE_FOREIGN_REPO")
+
 
 @requires_pwsh
 @requires_git
@@ -1024,8 +1083,15 @@ class StageFixtureJobCommittedBytesWiringTests(_PwshCase):
     """attr3-stage-fixture-job.ps1 calls the new check and prints the baked hash."""
 
     def test_generator_source_calls_the_committed_bytes_check(self) -> None:
+        # sol, PR #140 r2c: the generator no longer calls Assert-AttrCudaFixtureCommittedBytes
+        # directly -- it reuses Get-UmRunFixtureAdmission (tools/profiling/UmRunDrop.psm1), which
+        # already runs that identical check and hands back a SHA256 pinned to the bytes it
+        # verified, so the generator's own later read binds back to THAT value instead of
+        # re-deriving an independent one with a second, separately racy read.
         text = STAGE_FIXTURE_GENERATOR.read_text(encoding="utf-8")
-        self.assertIn("Assert-AttrCudaFixtureCommittedBytes -Path $fixture.FullName", text)
+        self.assertIn("Get-UmRunFixtureAdmission -SourcePath $FixturePath -RepoRoot $RepoRoot", text)
+        self.assertIn("$admission.ContentSha256", text)
+        self.assertIn("ATTR3_FIXTURE_CONTENT_PIN_RACE", text)
 
     def test_generator_prints_a_fixture_sha256_result_line(self) -> None:
         text = STAGE_FIXTURE_GENERATOR.read_text(encoding="utf-8")

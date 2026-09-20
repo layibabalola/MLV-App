@@ -328,16 +328,29 @@ function Assert-AttrCudaFixtureCommittedBytes {
     nothing about whether the WORKING-TREE bytes at that path are still the committed ones. A
     dirty or corrupted working copy would otherwise bake a sha256 into the staging job that
     no reviewed commit ever produced. This compares `git hash-object` of the file on disk
-    to `git rev-parse HEAD:<repo-relative path>`, run in whichever repository actually contains
-    the file (found from the file's own directory via `git rev-parse --show-toplevel`, never
-    assumed to be this module's own checkout), so a throwaway test repository is verified the
-    same way the real one is.
+    to `git rev-parse HEAD:<repo-relative path>`.
+    sol, PR #140 r2 BLOCKER (ATTR3-ADMIT-CONTENT-PIN-1): without -RepoRoot this discovered the
+    repository from the FILE'S OWN DIRECTORY via `git rev-parse --show-toplevel` -- so a nested
+    repository committed under the fixture's own directory could authorize bytes the OUTER
+    repository's HEAD never held. Every fixture-admission caller (Test-UmRunFixtureContentPin in
+    tools/profiling/UmRunDrop.psm1, and tools/profiling/bachelor/attr3-stage-fixture-job.ps1's
+    own generator-time check) now passes its trusted -RepoRoot; the discovered repository must
+    resolve to EXACTLY that root (case-insensitive, full-path normalised) or this throws
+    ATTR3_FIXTURE_FOREIGN_REPO, never merely trusting whichever .git happens to be nearest.
+    Callers that omit -RepoRoot (this function's generic "is a tracked source file unmodified"
+    use, unrelated to the measurement-fixture admission surface) keep the original nearest-repo
+    behaviour -- the trusted-root check is opt-in via -RepoRoot, not universal.
+    KNOWN LIMITATION (round-2 recon): neither side of the root comparison canonicalises an 8.3
+    short name or a junction/symlink component; an equivalent root reached through one of those
+    can be falsely rejected as ATTR3_FIXTURE_FOREIGN_REPO rather than accepted. Untested and
+    undefended here -- callers that might pass such a root should resolve it themselves first.
     Throws with a distinguishable ATTR3_FIXTURE_* token; returns the verified (matching) hash.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+        [string]$RepoRoot = ''
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -348,23 +361,35 @@ function Assert-AttrCudaFixtureCommittedBytes {
     }
     $full = [IO.Path]::GetFullPath($Path)
     $dir = [IO.Path]::GetDirectoryName($full)
-    $repoRoot = (& git -C $dir rev-parse --show-toplevel 2>$null)
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repoRoot)) {
+    $trustedRoot = if ([string]::IsNullOrWhiteSpace($RepoRoot)) { '' } else { ([IO.Path]::GetFullPath($RepoRoot)).TrimEnd('\') }
+    if ($trustedRoot -and -not $full.StartsWith($trustedRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "ATTR3_FIXTURE_NOT_IN_A_REPO $full does not resolve under the trusted repository root $trustedRoot"
+    }
+    $discoveredRoot = (& git -C $dir rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($discoveredRoot)) {
         throw "ATTR3_FIXTURE_NOT_IN_A_REPO $full is not inside a git working tree"
     }
-    $repoRoot = ($repoRoot.Trim()) -replace '/', '\'
-    if (-not $full.StartsWith($repoRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        throw "ATTR3_FIXTURE_NOT_IN_A_REPO $full does not resolve under its own repository root $repoRoot"
+    $discoveredRoot = (($discoveredRoot.Trim()) -replace '/', '\').TrimEnd('\')
+    if ($trustedRoot) {
+        if (-not [string]::Equals($discoveredRoot, $trustedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "ATTR3_FIXTURE_FOREIGN_REPO $full resolves to git repository '$discoveredRoot', not the trusted root '$trustedRoot' -- a nested repository cannot authorize this fixture's bytes"
+        }
+        $repoRootForGit = $trustedRoot
+    } else {
+        if (-not $full.StartsWith($discoveredRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "ATTR3_FIXTURE_NOT_IN_A_REPO $full does not resolve under its own repository root $discoveredRoot"
+        }
+        $repoRootForGit = $discoveredRoot
     }
-    $relative = ($full.Substring($repoRoot.Length + 1)) -replace '\\', '/'
-    $workingHash = (& git -C $repoRoot hash-object -- $relative 2>$null)
+    $relative = ($full.Substring($repoRootForGit.Length + 1)) -replace '\\', '/'
+    $workingHash = (& git -C $repoRootForGit hash-object -- $relative 2>$null)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($workingHash)) {
-        throw "ATTR3_FIXTURE_GIT_UNAVAILABLE could not hash-object $relative in $repoRoot"
+        throw "ATTR3_FIXTURE_GIT_UNAVAILABLE could not hash-object $relative in $repoRootForGit"
     }
     $workingHash = $workingHash.Trim().ToLowerInvariant()
-    $committedHash = (& git -C $repoRoot rev-parse "HEAD:$relative" 2>$null)
+    $committedHash = (& git -C $repoRootForGit rev-parse "HEAD:$relative" 2>$null)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($committedHash)) {
-        throw "ATTR3_FIXTURE_NOT_COMMITTED HEAD:$relative could not be resolved in $repoRoot"
+        throw "ATTR3_FIXTURE_NOT_COMMITTED HEAD:$relative could not be resolved in $repoRootForGit"
     }
     $committedHash = $committedHash.Trim().ToLowerInvariant()
     if ($workingHash -ne $committedHash) {

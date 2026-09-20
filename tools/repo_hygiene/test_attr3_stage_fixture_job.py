@@ -59,6 +59,23 @@ class StageFixtureJobTests(unittest.TestCase):
             capture_output=True, text=True,
         )
 
+    def generate_with_post_admission_hook(self, hook: str) -> subprocess.CompletedProcess:
+        # sol, PR #140 r2c: -PostAdmissionHook is a test-only seam (no-op in production, mirroring
+        # Invoke-UmRunDrop's identical seam in tools/profiling/UmRunDrop.psm1) that fires in the
+        # exact gap between admission verifying the fixture's committed bytes and this generator's
+        # own re-read of those bytes for the sha256 it bakes -- the gap a swap would need to win.
+        script = self.tmp / "generate-with-hook.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& {_q(GENERATOR)} -ClipStem {_q(self.clip.stem)} -FixturePath {_q(self.clip)} "
+            f"-OutDir {_q(self.out)} -AgentRoot {_q(self.agent)} -PostAdmissionHook {hook}\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+            capture_output=True, text=True,
+        )
+
     def job_path(self, proc: subprocess.CompletedProcess) -> Path:
         jobs = sorted(self.out.glob("*.job.ps1"))
         self.assertEqual(len(jobs), 1, proc.stdout + proc.stderr)
@@ -88,6 +105,37 @@ class StageFixtureJobTests(unittest.TestCase):
         proc = self.generate(stem=other)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("ATTR3_FIXTURE_STEM_MISMATCH", proc.stdout + proc.stderr)
+
+    # ---- generator-time admission/bake race (sol, PR #140 r2c) --------------------------------
+
+    def test_bytes_swapped_between_admission_and_the_baked_hash_are_refused(self) -> None:
+        # THE DEFECT this closes: the generator used to call Assert-AttrCudaFixtureCommittedBytes
+        # to verify the committed bytes, then take a SECOND, independent Get-FileHash read to bake
+        # into the job -- bytes swapped in that gap would silently bake the SWAPPED bytes' hash
+        # with no error at all. -PostAdmissionHook fires in exactly that gap and is never set in
+        # production; it stands in for a real attacker/race window. self.clip is the actual
+        # tracked repository fixture, so its bytes are captured and restored unconditionally.
+        original_bytes = self.clip.read_bytes()
+        self.addCleanup(lambda: self.clip.write_bytes(original_bytes))
+        hook = (
+            "{ param($p) [IO.File]::WriteAllBytes($p, "
+            "[Text.Encoding]::UTF8.GetBytes('raced bytes (attr3-stage-fixture-job test)')) }"
+        )
+
+        proc = self.generate_with_post_admission_hook(hook)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ATTR3_FIXTURE_CONTENT_PIN_RACE", proc.stdout + proc.stderr)
+        self.assertEqual(
+            sorted(self.out.iterdir()), [], "a raced fixture must never reach an emitted job"
+        )
+
+    def test_a_no_op_hook_still_bakes_the_correct_hash(self) -> None:
+        # Positive control: the new check must not false-positive when nothing raced.
+        proc = self.generate_with_post_admission_hook("{ param($p) }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(hashlib.sha256(self.clip.read_bytes()).hexdigest(), proc.stdout)
+        self.assertEqual(len(sorted(self.out.glob("*.job.ps1"))), 1, proc.stdout + proc.stderr)
 
     # ---- emitted job -------------------------------------------------------------------------
 
