@@ -6943,18 +6943,38 @@ def _assert_no_exclusive_route_claim(case, text, label):
 #
 # ROUND 10.  That is a CHANGE of failure mode, not the removal of one, and round 9 wrote the
 # stronger sentence ("a new carrier cannot be silently uncovered").  What the walk actually
-# does: `_derive_claim_carriers` is a BOUNDED filesystem walk with FOUR `continue` paths, and
-# a carrier that lands in any of them is absent from the derived set without a word.  All
-# four, named, plus the bound that precedes them:
-#   (a) its extension is not in `_CARRIER_SUFFIXES` -- a `.rst`, `.adoc` or extensionless
-#       carrier is invisible;
-#   (b) it is under a pruned directory (`_CARRIER_PRUNE_DIRS`), notably `.claude-state/` and
-#       `worktrees/`;
-#   (c) it is larger than `_CARRIER_MAX_BYTES`;
-#   (d) reading it raises `OSError` or `UnicodeDecodeError` -- a non-UTF-8 carrier is skipped;
+# does: `_derive_claim_carriers` is a BOUNDED filesystem walk, and a carrier that lands in
+# any of its bounds is absent from the derived set without a word.
+#
+# ROUND 11.  Round 10 wrote "FOUR `continue` paths ... all four, named", and BOTH halves of
+# that were wrong.  The function contains exactly THREE `continue` statements -- (a), (c) and
+# (d) below; (b) is a `dirnames[:]` filter, not a `continue`, and was miscounted into the
+# total.  And the list was not all: two `os.walk` defaults, (f) and (g), skip carriers and
+# appeared in NO disclosure, here or in the PR body.  So the closure framing is GONE.  What
+# follows is an HONESTLY PARTIAL list -- the bounds that are known, with no claim that
+# knowing seven means there is no eighth:
+#   (a) [continue] its extension is not in `_CARRIER_SUFFIXES` -- a `.rst`, `.adoc` or
+#       extensionless carrier is invisible;
+#   (b) [dirnames filter, NOT a `continue`] it is under a pruned directory
+#       (`_CARRIER_PRUNE_DIRS`), notably `.claude-state/` and `worktrees/`;
+#   (c) [continue] it is larger than `_CARRIER_MAX_BYTES`;
+#   (d) [continue] reading it raises `OSError` or `UnicodeDecodeError` -- a non-UTF-8 carrier
+#       is skipped;
 #   (e) BEFORE any of those, `_CLAIM_SUBJECT_RX` matches a LITERAL subject family, so a file
 #       that words the subject differently ("owner-consented media", "the six ids") is not
-#       found however plainly it asserts the claim.
+#       found however plainly it asserts the claim;
+#   (f) `os.walk(root)` takes the default `onerror=None`, so an `OSError` raised while
+#       SCANNING a directory -- permission denied, a vanished path, a long-path failure --
+#       is swallowed and that whole subtree contributes nothing, with no exception and no
+#       record.  This is NOT the (d) skip: (d) loses one file and this loses a subtree;
+#   (g) `os.walk(root)` takes the default `followlinks=False`, so a carrier reachable only
+#       through a symlinked directory is never visited.
+# A further bound on (e), which round 10 left unsaid: `_CLAIM_SUBJECT_RX` is matched against
+# the file's RAW text, so a carrier whose only subject mention is broken across two lines --
+# "consented" ending one comment line and "footage" opening the next -- never matches and the
+# needle never runs over it, even though `_normalised_claim_prose` would join those lines if
+# it were handed them.  DISCLOSED, NOT FIXED: reflow handling would be a new mechanism, and
+# this round adds none.
 # `_CLAIM_CARRIERS_PINNED` is NOT a backstop for any of these.  It is an equality test between
 # the derived set and a frozen copy of it; a file that never entered the derived set never
 # enters either side, so the equality stays true and nothing reds.  The pin catches a new
@@ -7299,7 +7319,7 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             with self.subTest(honest=text[:60]):
                 _assert_no_exclusive_route_claim(self, text, "probe")
 
-    def test_the_anti_needle_covers_every_derived_claim_carrier(self):
+    def test_the_anti_needle_runs_over_the_carriers_the_walk_returns(self):
         # ROUND 9.  Round 8's needle ran over four HAND-LISTED surfaces and missed
         # `playback-attr-3-cuda-job.ps1`, which carries the same claim surface -- the round-7
         # defect shape, reappearing inside the round-8 mechanism built to prevent it.  Coverage
@@ -7311,9 +7331,11 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         # and the walk has five documented bounds (`_derive_claim_carriers`).  A carrier in any
         # of them is covered by neither this loop nor the pin.
         carriers = _derive_claim_carriers()
-        # FAIL LOUDLY on a new carrier.  Not because a new carrier is wrong, but because it
-        # must be looked at: silently widening the derived set is how a hand list rots without
-        # anyone noticing, and that is the whole defect being fixed.
+        # FAIL LOUDLY on a new carrier THE WALK RETURNED -- which, quoted on its own, is
+        # narrower than "a new carrier": a carrier inside bounds (a)-(g) above reaches neither
+        # side of this equality and fails nothing.  Within that scope: not because a new
+        # carrier is wrong, but because it must be looked at, since silently widening the
+        # derived set is how a hand list rots without anyone noticing.
         self.assertEqual(
             carriers, list(_CLAIM_CARRIERS_PINNED),
             "the set of files carrying the consented-route claim changed.  Read the new "
@@ -7393,7 +7415,8 @@ class OwnerConsentedFootageTests(unittest.TestCase):
                 setattr(owner, name, value)
         self.assertEqual(refused, baseline)
         # ROUND 9 (SIXTH vacuous row, found by the ablation at
-        # `test_every_decision_row_discriminates_on_consent_status`, not by hand).  These two
+        # `test_the_discovered_decision_rows_discriminate_on_consent_status`, not by hand).
+        # These two
         # lines used to read `assertEqual(baseline[0][0], 2)  # round 6: a consented path is
         # denied too` and `assertEqual(baseline[2][0], 2)`.  Both passed for a reason unrelated
         # to consent: `setUp` clears every `MLV_*` key, so `allowed` is None and EVERY path
@@ -7437,17 +7460,27 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         #
         # ROUND 10 (sol) -- DISCLOSED, NOT FIXED, and here is which and why.  Round 9 renamed
         # this row `..._whatever_its_consent_status` and added the fixture precondition below,
-        # which made the vacuity enumeration call it discriminating.  IT IS NOT, AND IT CANNOT
-        # BE MADE SO HERE.  The subprocess loads the hook fresh and reads the module's REAL
+        # which made the vacuity enumeration call it discriminating.  IT IS NOT, and this
+        # round did not make it so.  The subprocess loads the hook fresh and reads the REAL
         # frozen table; `self.table` exists only in THIS process and is never passed to the
-        # child (the call passes argv, env and a JSON payload -- nothing else).  Under the
+        # child (the call passes argv, env, `cwd=self.tmp` and a JSON payload on stdin --
+        # read the `subprocess.run` below rather than this parenthesis).  Under the
         # child's own table NEITHER `self.part0` NOR `self.unconsented` is consented, so the
         # two iterations below are two UNCONSENTED paths and the row observes exactly one
-        # consent status, whatever its name said.  It cannot be fixed by choosing a better
-        # path: the real table stores sha256 path hashes and no paths, so no input that the
-        # child would call consented can be constructed from it.  Fixing it would mean giving
-        # the hook a table-injection seam -- a change to executable hook behaviour, which this
-        # card is not permitted to make.
+        # consent status, whatever its name said.
+        #
+        # ROUND 11 -- WHAT THE PATH-HASH FACT ACTUALLY SUPPORTS.  Round 10 argued: the real
+        # table stores sha256 path hashes and no paths, THEREFORE no input the child would
+        # call consented can be constructed from it.  The premise is true; the conclusion does
+        # not follow from it.  What follows is only that a consented path cannot be RECOVERED
+        # FROM THE TABLE, sha256 not being invertible.  It does NOT follow that no such path
+        # exists: the six consented clips are real files with real paths, and a row handed one
+        # of them WOULD be consented in the child.  What actually blocks that here is narrower,
+        # and is a fact about scope rather than an impossibility -- those paths are the owner's
+        # footage, deliberately absent from the repo and from this fixture, and materialising
+        # one is not something this card does.  A table-injection seam would be the other
+        # route, and that is executable hook behaviour this card may not change.  So: NOT FIXED
+        # HERE, on scope.  NOT proven unfixable.
         #
         # So the row is moved to `_CONSENT_AGNOSTIC_DECIDERS` below, which is what that escape
         # hatch is for, and it now promises only what it shows: the real hook, in a separate
@@ -7523,7 +7556,7 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         "test_the_real_hook_process_denies_a_cache_path_as_a_separate_process",
     })
 
-    def test_every_decision_row_discriminates_on_consent_status(self):
+    def test_the_discovered_decision_rows_discriminate_on_consent_status(self):
         # ROUND 9.  FOUR rows of the same vacuity class were found ONE AT A TIME across rounds
         # 6, 7 and 8 (two deleted at round 7, one replaced at round 8, a fifth found by opus at
         # round 8).  Finding them one at a time IS the defect: each round declared the class
@@ -7580,6 +7613,17 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             and name not in self._CONSENT_AGNOSTIC_DECIDERS
         )
         self.assertTrue(deciders, "no decision rows found -- the derivation broke, not the class")
+        # ROUND 11.  `_CONSENT_AGNOSTIC_DECIDERS` is an opt-out FROM this enumeration, and it
+        # was unpinned while its sibling `_CARRIER_NEEDLE_EXCLUSIONS` has been pinned by a
+        # length equality plus a membership check since round 9.  Pinned the SAME WAY, so a
+        # second entry has to be argued for in a diff instead of appearing quietly.  This is
+        # not a new mechanism: it is the two lines the sibling already runs, applied here.
+        # It pins the SIZE and the one member.  It does not make the opt-out safe.
+        self.assertEqual(len(self._CONSENT_AGNOSTIC_DECIDERS), 1)
+        self.assertIn(
+            "test_the_real_hook_process_denies_a_cache_path_as_a_separate_process",
+            self._CONSENT_AGNOSTIC_DECIDERS,
+        )
 
         original_setup = type(self).setUp
 
