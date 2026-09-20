@@ -6856,6 +6856,71 @@ def _canonical_consent_table(table):
     ).encode("utf-8")
 
 
+def _normalised_claim_prose(text):
+    """-> one lowercase line: ``#`` markers dropped, every whitespace run collapsed to a space.
+
+    ROUND 8.  Round 6's overclaim survived round 7 inside ``rule_na4``'s own comment as the
+    PARAPHRASE "reached only through", which walked straight past a literal, case-sensitive
+    anti-needle for "reachable ONLY through" -- and it was split across two ``#`` lines, so even
+    the right spelling would have needed the right wrap point.  Normalising first removes all
+    three escapes at once: case, line wrapping and the comment marker.
+    """
+    flat = re.sub(r"(?m)^[ \t]*#[ \t]?", " ", text)
+    return re.sub(r"\s+", " ", flat).lower()
+
+
+# One exclusivity claim about consented footage: the SUBJECT, then ``only``, then a route
+# preposition, all inside one sentence.  A literal ``.`` ends the window, which is deliberately
+# conservative -- a period inside a path (``verify_consented_footage.py``) or a version number
+# closes it early, so this UNDER-matches rather than firing on honest neighbouring prose.
+_EXCLUSIVE_ROUTE_CLAIM_RX = re.compile(
+    r"\bconsented[ -](?:footage|clips?|parts?|paths?)\b"
+    r"(?:(?!\.)[\s\S]){0,140}?"
+    r"\bonly\b"
+    r"(?:(?!\.)[\s\S]){0,60}?"
+    r"\b(?:through|via|by|with|using|from)\b"
+)
+
+# Spellings that assert exclusivity without naming the subject nearby, so the regex above
+# cannot see them.  Matched against NORMALISED prose, hence all lowercase and single-spaced.
+_EXCLUSIVE_ROUTE_PHRASINGS = (
+    "reachable only through", "reachable only via", "reachable only by",
+    "reached only through", "reached only via", "reached only by",
+    "accessible only through", "accessible only via",
+    "available only through", "available only via",
+    "opened only through", "opened only via", "opened only by",
+    "only reachable through", "only reached through", "only reachable via",
+    "only through tracked", "only via tracked", "only by tracked",
+    "only through id-addressed", "only via id-addressed", "only by id-addressed",
+)
+
+
+def _assert_no_exclusive_route_claim(case, text, label):
+    """Fail if ``text`` claims consented footage is reachable ONLY through the card's route.
+
+    WHAT THIS CATCHES: the claim re-cased, re-wrapped across comment lines, or reworded with
+    any of the subject/verb/preposition combinations enumerated above -- "reached only via",
+    "a consented clip is opened only by tracked consumers", and so on.
+    WHAT IT DOES NOT CATCH: it is a phrasing family, NOT a paraphrase detector.  A claim that
+    uses none of these words ("nothing else can open a consented clip", "exception (2) cannot
+    name a consented path") passes; so does one whose subject and ``only`` are separated by a
+    period, or by more than 140 characters.  It raises the cost of the overclaim; it does not
+    make the overclaim impossible.
+    """
+    prose = _normalised_claim_prose(text)
+    for phrasing in _EXCLUSIVE_ROUTE_PHRASINGS:
+        case.assertNotIn(
+            phrasing, prose, "%s: exclusive-route claim %r -- the route is NOT the only way "
+            "in; NA-4 exception (2) still admits a consented clip's own path" % (label, phrasing)
+        )
+    match = _EXCLUSIVE_ROUTE_CLAIM_RX.search(prose)
+    case.assertIsNone(
+        match,
+        "%s: exclusive-route claim %r -- the route is NOT the only way in; NA-4 exception (2) "
+        "still admits a consented clip's own path" % (label, match.group(0) if match else ""),
+    )
+
+
 class OwnerConsentedFootageTests(unittest.TestCase):
     """NA-4 consent record: frozen and value-pinned; a consented path in command text is DENIED."""
 
@@ -6963,11 +7028,39 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         # it goes RED the moment M02-1344 is added to the FROZEN record.
         self.assertNotIn("M02-1344", self.module.OWNER_CONSENTED_FOOTAGE["clips"])
 
-    def test_deny_any_token_whose_norm_hash_is_absent(self):
-        self.assertNa4Deny(self._decide(self.unconsented))
-        # The real frozen table: synthetic paths are never its hashes.
-        self.assertNa4Deny(self._decide(self.part0, consent=None))
-        self.assertNa4Deny(self._decide(self.unconsented, consent=None))
+    def test_the_consent_table_does_not_change_the_na4_decision(self):
+        # ROUND 8.  This row used to be named ...`_deny_any_token_whose_norm_hash_is_absent`
+        # and asserted NOTHING about norm hashes: `setUp` clears every `MLV_*` key, so
+        # `authorized_clip` returns None, `allowed` is None, and every DENY here came from
+        # rule_na4's DEFAULT branch -- the fourth vacuous row, green with the table deleted.
+        #
+        # What replaces it discriminates on the property round 6 actually established: NO HOOK
+        # RULE READS THE TABLE, so a token whose norm hash IS in the table and one whose norm
+        # hash is NOT get the SAME decision, byte for byte, under every table state.  Restore
+        # exception (3) -- the admission rounds 1-5 carried -- and `self.part0` becomes an
+        # ALLOW while `self.unconsented` stays a DENY, and this row goes red.
+        consented_hash = self._path_hash(self.part0)
+        absent_hash = self._path_hash(self.unconsented)
+        table_hashes = [part[2] for part in self.table["clips"]["M16-1243"]]
+        self.assertIn(consented_hash, table_hashes, "fixture precondition: part0 IS consented")
+        self.assertNotIn(absent_hash, table_hashes, "fixture precondition: clip-z is NOT")
+
+        empty = {"clips": {}, "purposes": ("fixture purpose",), "authority": {}}
+        for label, consent in (("fixture table", "fixture"), ("empty table", empty),
+                               ("real frozen table", None)):
+            with self.subTest(table=label):
+                consented = self._decide(self.part0, consent=consent)
+                absent = self._decide(self.unconsented, consent=consent)
+                self.assertNa4Deny(consented)
+                self.assertNa4Deny(absent)
+                # Same exit code and the same reason SHAPE: the two differ only in the path
+                # they name, never in whether the table admitted one of them.
+                self.assertEqual(consented[0], absent[0])
+                self.assertEqual(
+                    consented[1].replace(self.module.norm(self.part0), "<PATH>"),
+                    absent[1].replace(self.module.norm(self.unconsented), "<PATH>"),
+                    "a consented norm hash must not buy a different NA-4 outcome",
+                )
 
     # ------------------------------------------------------------- values pinned (A)
 
@@ -7006,34 +7099,53 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             # Round 6 (NARROW): no command-text admission, and the id-only route.
             "this hook admits NO consented path from command text",
             "No rule in this hook reads the table.",
-            "(1) THE ROUTE THIS CARD PROVIDES for consented\n"
+            "L1. THE ROUTE THIS CARD PROVIDES for consented\n"
             "# footage is tracked, id-addressed consumers that verify content against this"
             " table",
-            # ROUND 7: the route this card provides is NOT the only way in.  Exception (2)
+            # ROUND 7: the route this card provides is NOT the only way in.  NA-4 exception (2)
             # reaches a consented clip today with no content check; CI holds that in place.
             "THAT IS NOT THE ONLY WAY A\n"
             "# CONSENTED CLIP CAN BE OPENED TODAY.",
-            "Exception (2) admits the ONE canonical path on the\n"
+            "NA-4 exception (2) admits the ONE canonical path on the\n"
             "# card's CLIP_OR_NONE line, and NOTHING EXCLUDES A CONSENTED CLIP'S OWN PATH"
             " FROM IT",
+            # ROUND 8 (minor): the LIMITS block carries two numberings.  They are kept apart,
+            # and the rule that keeps them apart is stated where they meet.
+            "TWO NUMBERINGS MEET IN THIS BLOCK AND ARE KEPT",
+            "the limits below are labelled L1..L6, and the NA-4 exceptions keep their own (1)"
+            " and",
             # The honesty statement: scope, not exposure; the interpreter residual stands.
-            "(2) THE NARROWING REDUCES\n# SCOPE, NOT EXPOSURE.",
+            "L2. THE NARROWING REDUCES\n# SCOPE, NOT EXPOSURE.",
             "The interpreter-one-liner residual is UNCHANGED:",
             "so such a one-liner can open\n# any path, consented or not,",
             "VALUE-pinned by tests",
             "A board-rooted actor can still edit the table transiently:",
             "bounded by the NA-10 venue gate and the 0.05\n# hook-enforced receipt that Invoke-Lane checks.",
             "until then the CUDA job generator refuses every owner-clip id.",
-            "(5) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the\n"
+            "L5. NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the\n"
             "# cache",
             "NA4-CLIP-NAME-TRIM-1",
-            "(6) Exceptions (1) and (2) still compare the EXPANDED token,",
+            "L6. NA-4 exceptions (1) and (2) still compare the EXPANDED token,",
             "NA4-EXC12-LITERAL-TOKENS-1",
+            # ROUND 8: rule_na4's OWN comment carries the disclosure, beside the `continue`
+            # that refutes the overclaim.  Round 7 fixed the header block and left this one.
+            "THAT IS NOT THE ONLY WAY A CONSENTED CLIP CAN BE OPENED TODAY: the NA-4"
+            " exception (2)\n"
+            "        # ``continue`` DIRECTLY ABOVE admits a consented clip's own path on the"
+            " CLIP_OR_NONE\n"
+            "        # line, with NO content check against the table and by no id-addressed"
+            " consumer.",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, source)
-        # ROUND 7: the round-6 overclaim must not come back.
-        self.assertNotIn("Consented footage is reachable ONLY through", source)
+        # ROUND 8: the round-6 overclaim must not come back IN ANY SPELLING.  Round 7's
+        # anti-needle was one literal, case-sensitive string; the claim came back four lines
+        # away as "reached only through" and passed.  See _assert_no_exclusive_route_claim for
+        # what the replacement does and does not catch.
+        _assert_no_exclusive_route_claim(self, source, "hook source")
+        verifier = os.path.join(REPO_ROOT, "tools", "gates", "verify_consented_footage.py")
+        with open(verifier, "r", encoding="utf-8") as handle:
+            _assert_no_exclusive_route_claim(self, handle.read(), "verify_consented_footage.py")
         # The removed machinery is gone, not dormant.
         for removed in (
             "is_owner_consented_path", "is_literal_canonical_token", "is_whole_shell_word",
@@ -7041,6 +7153,41 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         ):
             with self.subTest(removed=removed):
                 self.assertFalse(hasattr(self.module, removed), removed)
+
+    def test_the_anti_needle_catches_the_round_6_and_round_7_residual_spellings(self):
+        # ROUND 8.  An anti-needle nobody exercised is the same defect as a vacuous DENY row:
+        # round 7's literal `assertNotIn("Consented footage is reachable ONLY through", ...)`
+        # was green while the claim sat four lines away in another spelling.  This row feeds
+        # the anti-needle the ACTUAL round-6 text, the ACTUAL round-7 residual, and several
+        # rewordings, and requires each to FAIL -- and requires today's honest text to pass.
+        caught = (
+            # Round 6, as the header block carried it.
+            "# Consented footage is reachable ONLY through tracked, id-addressed consumers.",
+            # Round 7's surviving residual at rule_na4:3496, wrapped exactly as it was.
+            "        # denied here exactly as on master.  Consented footage is reached only"
+            " through tracked,\n"
+            "        # id-addressed consumers that verify content against"
+            " OWNER_CONSENTED_FOOTAGE.",
+            # Rewordings of the same false claim.
+            "a consented clip is opened only by tracked, id-addressed consumers",
+            "consented footage is accessible only via the verifier",
+            "CONSENTED FOOTAGE IS REACHED ONLY THROUGH THE CARD'S ROUTE",
+            "consented parts are available only through id-addressed consumers",
+        )
+        for text in caught:
+            with self.subTest(text=text[:60]):
+                with self.assertRaises(AssertionError):
+                    _assert_no_exclusive_route_claim(self, text, "probe")
+        # And the honest disclosures the card actually ships must NOT trip it.
+        for text in (
+            "THAT IS NOT THE ONLY WAY A CONSENTED CLIP CAN BE OPENED TODAY.",
+            "The route this card provides for consented footage is tracked, id-addressed"
+            " consumers that verify content against tools/gates/verify_consented_footage.py",
+            "a consented clip named there is opened with NO content check against this table"
+            " and by no id-addressed consumer, exactly as before this card.",
+        ):
+            with self.subTest(honest=text[:60]):
+                _assert_no_exclusive_route_claim(self, text, "probe")
 
     def test_no_subprocess_on_the_na4_path(self):
         cases = (self.part0, self.part1, self.unconsented, os.path.join(self.tmp, "x.txt"))
@@ -7167,8 +7314,10 @@ class OwnerConsentedFootageTests(unittest.TestCase):
                 self.assertIn(needle, act)
         self.assertNotIn("fork/master", act)
         self.assertNotIn("exception (3) admits", act)
-        self.assertNotIn("reachable ONLY through", act)
-        self.assertNotIn("reachable only through", act)
+        # ROUND 8: was two literal, case-sensitive strings; "reached only through" would have
+        # passed both.  Now a normalised phrasing family -- see _assert_no_exclusive_route_claim
+        # for the bound on what that does and does not cover.
+        _assert_no_exclusive_route_claim(self, act, "NA-4 register act")
         for purpose in self.module.OWNER_CONSENTED_FOOTAGE["purposes"]:
             self.assertIn(purpose, act)
         enforced = na4[0]["enforced_after_0_1"]
@@ -7187,7 +7336,7 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             " with no content check",
             enforced,
         )
-        self.assertNotIn("reachable only through", enforced)
+        _assert_no_exclusive_route_claim(self, enforced, "NA-4 register enforced_after_0_1")
         for needle in (
             OWNER_CONSENT_LINE_SHA256, OWNER_CONSENT_QUESTION_LINE_SHA256,
             OWNER_DIRECTIVE_LINE_SHA256, "line 1739", "line 1718", "line 2137",

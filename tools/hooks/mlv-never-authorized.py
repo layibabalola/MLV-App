@@ -3302,31 +3302,39 @@ FIXTURE_TAIL = "tests/fixtures/clips"
 # clip.  The six ids are the HUB's derivation, not the owner's words (``scope_derivation``
 # below); M02-1344 is NOT here.  No lane, quorum or adjudication can widen this table.
 #
-# ROUND 6: NARROW.  Rounds 1-5 used this table for an exception (3) that ADMITTED a consented
-# path named in agent command text.  Every round found a new command-text bypass, because this
-# hook evaluates text that differs from what bash, PowerShell or cmd execute.  That admission
-# is REMOVED: this hook admits NO consented path from command text, and a consented-footage
-# path in command text is DENIED by NA-4 exactly as on master.  Only exceptions (1) tracked
-# fixtures and (2) CLIP_OR_NONE remain.  The table stays as the CONSENT RECORD that tracked,
-# id-addressed consumers verify content against.
+# ROUND 6: NARROW.  Rounds 1-5 used this table for an NA-4 exception (3) that ADMITTED a
+# consented path named in agent command text.  Every round found a new command-text bypass,
+# because this hook evaluates text that differs from what bash, PowerShell or cmd execute.
+# That admission is REMOVED: this hook admits NO consented path from command text, and a
+# consented-footage path in command text is DENIED by NA-4 exactly as on master.  Only NA-4
+# exceptions (1) tracked fixtures and (2) CLIP_OR_NONE remain.  The table stays as the CONSENT
+# RECORD that tracked, id-addressed consumers verify content against.
 #
 # WHAT IS FROZEN.  Per consented id, per part: the byte length, the lowercase sha256 of the
 # content, and ``path_norm_sha256`` -- the sha256 of this hook's own ``norm()`` output for that
 # part's path, UTF-8 encoded.  NO PATH is stored.  No rule in this hook reads the table.
 #
-# LIMITS, stated rather than papered over.  (1) THE ROUTE THIS CARD PROVIDES for consented
+# LIMITS, stated rather than papered over.  TWO NUMBERINGS MEET IN THIS BLOCK AND ARE KEPT
+# APART: the limits below are labelled L1..L6, and the NA-4 exceptions keep their own (1) and
+# (2) but are ALWAYS written as "NA-4 exception (n)", never as a bare number.
+#
+# L1. THE ROUTE THIS CARD PROVIDES for consented
 # footage is tracked, id-addressed consumers that verify content against this table with
 # tools/gates/verify_consented_footage.py (each part's existence, length and sha256).  None is
 # wired yet: the CUDA job (card ATTR3-FOOTAGE-BIND-1) and the #72b delta tooling are not, and
 # until then the CUDA job generator refuses every owner-clip id.  THAT IS NOT THE ONLY WAY A
-# CONSENTED CLIP CAN BE OPENED TODAY.  Exception (2) admits the ONE canonical path on the
+# CONSENTED CLIP CAN BE OPENED TODAY.  NA-4 exception (2) admits the ONE canonical path on the
 # card's CLIP_OR_NONE line, and NOTHING EXCLUDES A CONSENTED CLIP'S OWN PATH FROM IT: a
 # consented clip named there is opened with NO content check against this table and by no
-# id-addressed consumer, exactly as before this card.  (2) THE NARROWING REDUCES
+# id-addressed consumer, exactly as before this card.
+#
+# L2. THE NARROWING REDUCES
 # SCOPE, NOT EXPOSURE.  The interpreter-one-liner residual is UNCHANGED: a text-matching hook
 # never sees the path an interpreter one-liner or a script opens, so such a one-liner can open
-# any path, consented or not, exactly as before this card.  Removing exception (3) removes a
-# review surface; it does not close that hole.  (3) Widening needs a change to THIS table,
+# any path, consented or not, exactly as before this card.  Removing NA-4 exception (3) removes
+# a review surface; it does not close that hole.
+#
+# L3. Widening needs a change to THIS table,
 # which is visible in the diff and VALUE-pinned by tests
 # (tools/repo_hygiene/test_mlv_never_authorized.py pins the sha256 of a canonical
 # serialisation of the WHOLE table -- ids, per-part length, content sha256 and
@@ -3335,12 +3343,14 @@ FIXTURE_TAIL = "tests/fixtures/clips"
 # CI-test-pinned, NOT an un-mintable owner gate -- the repo has zero required reviews and one
 # shared account.  A board-rooted actor can still edit the table transiently: that is the same
 # residual as every NA rule at the board venue, bounded by the NA-10 venue gate and the 0.05
-# hook-enforced receipt that Invoke-Lane checks.  (4) The purposes are recorded, not enforced.
-# (5) NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the
+# hook-enforced receipt that Invoke-Lane checks.
+#
+# L4. The purposes are recorded, not enforced.
+# L5. NA-4 clip detection does not strip trailing dots or spaces from a clip name outside the
 # cache, so such a spelling is not detected as a clip; this predates the card, and a follow-up
 # card (NA4-CLIP-NAME-TRIM-1) fixes it.
-# (6) Exceptions (1) and (2) still compare the EXPANDED token, so a hook-read variable a child
-# shell reassigns can open a different target; this predates the card, and follow-up card
+# L6. NA-4 exceptions (1) and (2) still compare the EXPANDED token, so a hook-read variable a
+# child shell reassigns can open a different target; this predates the card, and follow-up card
 # NA4-EXC12-LITERAL-TOKENS-1 tracks it.
 OWNER_CONSENTED_FOOTAGE = types.MappingProxyType(
     {
@@ -3493,8 +3503,12 @@ def rule_na4(ctx):
         if allowed is not None and path_norm == allowed:
             continue
         # No exception (3) (round 6, NARROW): a consented-footage path in command text is
-        # denied here exactly as on master.  Consented footage is reached only through tracked,
-        # id-addressed consumers that verify content against OWNER_CONSENTED_FOOTAGE.
+        # denied here exactly as on master.  THE ROUTE THIS CARD PROVIDES for consented footage
+        # is tracked, id-addressed consumers that verify content against OWNER_CONSENTED_FOOTAGE.
+        # THAT IS NOT THE ONLY WAY A CONSENTED CLIP CAN BE OPENED TODAY: the NA-4 exception (2)
+        # ``continue`` DIRECTLY ABOVE admits a consented clip's own path on the CLIP_OR_NONE
+        # line, with NO content check against the table and by no id-addressed consumer.  See
+        # the LIMITS block above OWNER_CONSENTED_FOOTAGE.
         if allowed is None:
             raise Deny(
                 "NA-4",
