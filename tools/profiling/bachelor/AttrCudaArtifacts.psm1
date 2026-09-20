@@ -441,6 +441,16 @@ function Assert-AttrCudaFixtureCommittedBytes {
     (untracked working-tree file), or "invalid object name 'HEAD'" (unborn HEAD, no commits at
     all) -- are treated as the definite refusal; everything else is
     ATTR3_FIXTURE_HEAD_LOOKUP_UNAVAILABLE.
+    round 2g (sol/fable MAJOR): the repository-DISCOVERY call (`git rev-parse --show-toplevel`,
+    below) had the identical any-failure-becomes-a-verdict defect and is fixed the same way --
+    stderr inspected, only git's own "not a git repository" text is the definite
+    ATTR3_FIXTURE_NOT_IN_A_REPO refusal, everything else (dubious ownership, a corrupted repo
+    config, an I/O error) is ATTR3_FIXTURE_GIT_UNAVAILABLE. Two smaller edges are KNOWN and left
+    OPEN, not fixed here: the HEAD:<path> lookup's stderr match for "invalid object name" is
+    unanchored and could in principle match a corrupted-ref message that is not actually an unborn
+    HEAD; and a fixture between int32.MaxValue and the practical process-memory ceiling can OOM the
+    `byte[]` allocation below and surface as a raw, untokened exception rather than
+    ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE.
     #>
     [CmdletBinding()]
     param(
@@ -462,9 +472,22 @@ function Assert-AttrCudaFixtureCommittedBytes {
     if ($trustedRoot -and -not $full.StartsWith($trustedRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw "ATTR3_FIXTURE_NOT_IN_A_REPO $full does not resolve under the trusted repository root $trustedRoot"
     }
-    $discoveredRoot = (& git -C $dir rev-parse --show-toplevel 2>$null)
+    # round 2g (sol/fable MAJOR): this used to discard stderr (2>$null) and fold EVERY failure --
+    # dubious ownership, a corrupted repo config, a git I/O error -- into the definite refusal
+    # ATTR3_FIXTURE_NOT_IN_A_REPO, exactly the any-failure-becomes-a-verdict shape the HEAD:<path>
+    # lookup below was already fixed for in round 2e. stderr is now inspected the same way: only
+    # git's own distinct "not a git repository" text is a genuine not-in-a-repo verdict; every other
+    # failure is ATTR3_FIXTURE_GIT_UNAVAILABLE (already a registered indeterminate token), not a
+    # content verdict.
+    $rawShowToplevel = & git -C $dir rev-parse --show-toplevel 2>&1
+    $discoveredRoot = (($rawShowToplevel | Where-Object { $_ -is [string] }) -join '').Trim()
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($discoveredRoot)) {
-        throw "ATTR3_FIXTURE_NOT_IN_A_REPO $full is not inside a git working tree"
+        $stderrText = (($rawShowToplevel | Where-Object { $_ -is [Management.Automation.ErrorRecord] } |
+            ForEach-Object { $_.ToString() }) -join ' ')
+        if ($stderrText -match 'not a git repository') {
+            throw "ATTR3_FIXTURE_NOT_IN_A_REPO $full is not inside a git working tree: $stderrText"
+        }
+        throw "ATTR3_FIXTURE_GIT_UNAVAILABLE git rev-parse --show-toplevel for '$dir' failed for a reason other than the path not being inside a git working tree: $stderrText"
     }
     $discoveredRoot = (($discoveredRoot.Trim()) -replace '/', '\').TrimEnd('\')
     if ($trustedRoot) {

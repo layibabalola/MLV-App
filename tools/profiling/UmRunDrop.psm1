@@ -8,7 +8,13 @@
 #     still be exactly that name (sol r1 BLOCKER: 'evil.job.ps1.' resolves to 'evil.job.ps1');
 #   - every temporary name is unique per submission (GUID), so concurrent submitters never share
 #     a .sidepart or .job.tmp;
-#   - bytes are verified by re-reading the temporary copy FROM THE SHARE before it is renamed;
+#   - a temporary copy's bytes are re-read FROM THE SHARE and verified before it is renamed, under
+#     a handle that denies further WRITES to that path for its whole lifetime but does not deny
+#     delete-and-recreate at that same pathname (FileShare.Delete); Move-Item then resolves the
+#     PATHNAME, not this handle's identity, so a delete-and-recreate race is a real, OPEN residual,
+#     not a closed window -- see Row C in the check/use window table (round 2g applies this
+#     identical mechanism, with the identical residual, to the job file's own temporary copy too,
+#     which previously had no verification at all);
 #   - renames never overwrite: a destination that appeared concurrently makes the rename fail, and
 #     the result is accepted only if that destination already holds identical bytes (side-file) --
 #     a job file is never replaced;
@@ -48,6 +54,19 @@ $script:TrackedFixtureClipStems = @('tiny_dual_iso', 'large_dual_iso')
 # any reason OTHER than git's own "never committed" text (a corrupted object store, an I/O error,
 # an unexpected git-version message) is an operational failure, not a content verdict, and must
 # not be folded into the definite ATTR3_FIXTURE_NOT_COMMITTED refusal it used to share a token with.
+#
+# round 2g (sol/fable MAJOR): naming this honestly -- it is a TOKEN ALLOWLIST, not an exhaustive
+# classification, and it is only as complete as the closed, documented set of tokens
+# Test-UmRunFixtureContentPin / Assert-AttrCudaFixtureCommittedBytes / Get-AttrCudaGitBlobHash-
+# FromBytes actually throw (see the catch below, and that function's own docstring for the full
+# token list). A throw whose first token is NOT in this list is folded into the definite-refusal
+# branch by omission, not by evidence about the fixture's bytes -- this round found and fixed one
+# such gap (the repository-discovery `git rev-parse --show-toplevel` call discarding stderr and
+# always throwing the definite ATTR3_FIXTURE_NOT_IN_A_REPO token; see AttrCudaArtifacts.psm1).
+# Two narrower escape hatches remain, both named and left OPEN in that function's docstring rather
+# than fixed here: an unanchored "invalid object name" stderr match that could in principle
+# misclassify a corrupted-ref failure, and a large-fixture OOM that surfaces as a raw, untokened
+# exception instead of ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE.
 $script:UmRunIndeterminateAdmissionTokens = @('UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE', 'ATTR3_FIXTURE_GIT_UNAVAILABLE', 'ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE', 'ATTR3_FIXTURE_HEAD_LOOKUP_UNAVAILABLE', 'UMRUN_FIXTURE_ADMISSION_PATH_RESOLUTION_UNAVAILABLE')
 # tools/profiling/bachelor/AttrCudaArtifacts.psm1's Assert-AttrCudaFixtureCommittedBytes -- the twin
 # check ATTR3-FIXTURE-STAGE-1 already wrote for this identical defect class -- is reused by
@@ -425,7 +444,17 @@ function Invoke-UmRunDrop {
             # one, leaving a gap for the verified bytes to be swapped before the rename picked them
             # up. One handle, opened deny-write (FileShare.Delete only, so the rename below can
             # still succeed while this handle stays open), spans the hash AND the rename: nothing
-            # else can write $part for as long as it is held.
+            # else can WRITE $part for as long as it is held.
+            # round 2g (sol/fable MAJOR): naming the mechanism's own escape hatch rather than
+            # claiming full closure -- FileShare.Delete grants exactly what its name says: another
+            # process CAN delete $part's directory entry (and a third can then create a brand-new
+            # file at the identical pathname) while this handle stays open, because delete/rename
+            # rights are governed by the Delete share flag, not the Read/Write flags this handle
+            # denies. The Move-Item below then resolves $part by PATHNAME, not by this handle's
+            # identity, so it would publish whatever now occupies that path, not necessarily the
+            # bytes just hashed. This row is recorded OPEN in the check/use window table, not
+            # CLOSED, for exactly this reason; the write-attempt test just below proves only the
+            # narrower "in-place write is denied" property, not pathname-identity across the rename.
             $partStream = [IO.File]::Open($part, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::Read -bor [IO.FileShare]::Delete))
             try {
                 $sha256 = [Security.Cryptography.SHA256]::Create()
@@ -459,13 +488,38 @@ function Invoke-UmRunDrop {
         Write-Output ("side-file placed: {0} sha256={1}" -f $name, $localSha.ToLowerInvariant())
     }
 
+    $jobLocalSha = (Get-FileHash -LiteralPath $ScriptPath -Algorithm SHA256).Hash
     $tmp = Join-Path $Inbox "$id.$nonce.job.tmp"
     try {
         & $Copier $ScriptPath $tmp
+        # ATTR3-ADMIT-CONTENT-PIN-1 round 2g (fable MAJOR): the job's own temporary copy used to be
+        # renamed with NO verification at all -- contradicting this module's own header invariant
+        # (above) that a share-side temporary is re-read and verified before its rename, which the
+        # side-file path above already does. Same mechanism, applied here for the first time: one
+        # handle, opened deny-write (FileShare.Delete only, so the rename below can still succeed
+        # while the handle stays open), spans the round-trip hash and the rename. This closes "no
+        # verification at all"; it does NOT close Row C's own residual (recorded OPEN, not CLOSED,
+        # in the check/use window table) -- FileShare.Delete still permits another process to
+        # delete-and-recreate different bytes at $tmp's PATHNAME while this handle is held, and the
+        # Move-Item below resolves that pathname, not this handle's identity, at rename time.
+        $tmpStream = [IO.File]::Open($tmp, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::Read -bor [IO.FileShare]::Delete))
         try {
-            Move-Item -LiteralPath $tmp -Destination $final -ErrorAction Stop   # no -Force: a job is never replaced
-        } catch {
-            throw "UMRUN_JOBID_IN_USE inbox\$id.job.ps1 appeared concurrently; refusing to replace it"
+            $sha256 = [Security.Cryptography.SHA256]::Create()
+            try {
+                $tmpRemoteSha = [BitConverter]::ToString($sha256.ComputeHash($tmpStream)) -replace '-', ''
+            } finally {
+                $sha256.Dispose()
+            }
+            if ($tmpRemoteSha -ne $jobLocalSha) {
+                throw "UMRUN_JOB_VERIFY_FAILED $id.job.ps1 did not round-trip to the share (local $jobLocalSha, share $tmpRemoteSha)"
+            }
+            try {
+                Move-Item -LiteralPath $tmp -Destination $final -ErrorAction Stop   # no -Force: a job is never replaced
+            } catch {
+                throw "UMRUN_JOBID_IN_USE inbox\$id.job.ps1 appeared concurrently; refusing to replace it"
+            }
+        } finally {
+            $tmpStream.Dispose()
         }
     } finally {
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
