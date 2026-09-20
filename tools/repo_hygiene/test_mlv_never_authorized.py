@@ -188,6 +188,7 @@ drive letter that does not exist), never the board, and they SKIP rather than pr
 import datetime
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -6898,14 +6899,20 @@ _EXCLUSIVE_ROUTE_PHRASINGS = (
 def _assert_no_exclusive_route_claim(case, text, label):
     """Fail if ``text`` claims consented footage is reachable ONLY through the card's route.
 
-    WHAT THIS CATCHES: the claim re-cased, re-wrapped across comment lines, or reworded with
-    any of the subject/verb/preposition combinations enumerated above -- "reached only via",
-    "a consented clip is opened only by tracked consumers", and so on.
-    WHAT IT DOES NOT CATCH: it is a phrasing family, NOT a paraphrase detector.  A claim that
-    uses none of these words ("nothing else can open a consented clip", "exception (2) cannot
-    name a consented path") passes; so does one whose subject and ``only`` are separated by a
-    period, or by more than 140 characters.  It raises the cost of the overclaim; it does not
-    make the overclaim impossible.
+    WHAT THIS CATCHES -- and this is the WHOLE of it: the claim re-cased, re-wrapped across
+    comment lines, or reworded with one of the subject/verb/preposition combinations
+    enumerated above ("reached only via", "a consented clip is opened only by tracked
+    consumers"), plus the bounded subject/``only``/route-preposition regex.
+    WHAT IT DOES NOT CATCH: it is a phrasing family, NOT a paraphrase detector.  This is not a
+    caveat on an otherwise-complete check -- an arbitrary paraphrase of the false claim passes,
+    and ROUND 9 pins four that do, by execution, at
+    ``test_the_anti_needle_does_not_catch_an_arbitrary_paraphrase``: "the sole route for
+    consented footage is...", "a consented clip cannot be opened except by...", "there is no
+    other path for...", "nothing besides the verifier can reach...".  A claim whose subject is
+    reworded ("owner-consented media", "the six ids") escapes both the list and the regex, as
+    does one whose subject and ``only`` are separated by a period or by more than 140
+    characters.  It raises the COST of the overclaim; it does not make the overclaim
+    impossible, and no finite list of spellings could.
     """
     prose = _normalised_claim_prose(text)
     for phrasing in _EXCLUSIVE_ROUTE_PHRASINGS:
@@ -6919,6 +6926,81 @@ def _assert_no_exclusive_route_claim(case, text, label):
         "%s: exclusive-route claim %r -- the route is NOT the only way in; NA-4 exception (2) "
         "still admits a consented clip's own path" % (label, match.group(0) if match else ""),
     )
+
+
+# ---------------------------------------------------------------- derived carrier coverage
+#
+# ROUND 9.  Round 8 ran the anti-needle over a HAND-MAINTAINED list of four surfaces and was
+# one site short: `tools/profiling/bachelor/playback-attr-3-cuda-job.ps1` carries the same
+# claim surface and was uncovered, so rewording ITS header back to the false claim would have
+# left the whole suite green.  That is the EXACT defect shape of round 7 reappearing inside
+# the mechanism built at round 8 to prevent it -- which is the argument against hand lists,
+# not against that particular list.
+#
+# So coverage is DERIVED: scan the tree for files carrying the claim SUBJECT, and run the
+# needle over whatever comes back.  A new carrier cannot be silently uncovered, because it
+# is never enumerated by hand in the first place.
+_CLAIM_SUBJECT_RX = re.compile(r"consented[ -](?:footage|clips?|parts?|paths?)", re.I)
+_CARRIER_PRUNE_DIRS = frozenset({
+    ".git", ".claude-state", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache",
+    "worktrees",
+})
+# Text the claim could plausibly be written in.  A carrier in some other extension would be
+# missed -- stated here rather than left to be discovered, and the pin below is the backstop:
+# it compares against `git grep`-equivalent breadth at the time it was taken.
+_CARRIER_SUFFIXES = (
+    ".py", ".ps1", ".psm1", ".json", ".md", ".txt", ".yml", ".yaml", ".sh", ".cpp", ".h",
+    ".hpp", ".c", ".pro", ".qrc", ".ui", ".bat", ".cmd", ".mjs", ".js", ".toml",
+)
+_CARRIER_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _derive_claim_carriers(root=REPO_ROOT):
+    """-> sorted repo-relative paths of every file carrying the consented-route claim SUBJECT.
+
+    Not a hand list.  Validated against ``git grep -l`` when it was written: identical, 8 of 8.
+    """
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in _CARRIER_PRUNE_DIRS]
+        for name in filenames:
+            if not name.lower().endswith(_CARRIER_SUFFIXES):
+                continue
+            full = os.path.join(dirpath, name)
+            try:
+                if os.path.getsize(full) > _CARRIER_MAX_BYTES:
+                    continue
+                with open(full, "r", encoding="utf-8") as handle:
+                    text = handle.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if _CLAIM_SUBJECT_RX.search(text):
+                found.append(os.path.relpath(full, root).replace("\\", "/"))
+    return sorted(found)
+
+
+# The derived set AS PINNED.  This is not the coverage list -- coverage is whatever the
+# derivation returns.  This exists so that a NEW carrier FAILS LOUDLY instead of quietly
+# widening the set that the needle is asked to trust.
+_CLAIM_CARRIERS_PINNED = (
+    "docs/never-authorized.json",
+    "tools/gates/verify_consented_footage.py",
+    "tools/hooks/mlv-never-authorized.py",
+    "tools/profiling/bachelor/playback-attr-3-cuda-job.ps1",
+    "tools/repo_hygiene/test_mlv_never_authorized.py",
+    "tools/repo_hygiene/test_playback_attr_3_cuda_behaviour.py",
+    "tools/repo_hygiene/test_playback_attr_3_cuda_split_route.py",
+    "tools/repo_hygiene/test_verify_consented_footage.py",
+)
+
+# The ONE carrier the needle cannot be run over, with the reason.  This module must quote the
+# false claim verbatim -- the round-6 header and the round-7 residual are probe INPUTS at
+# `test_the_anti_needle_catches_the_round_6_and_round_7_residual_spellings`, and an anti-needle
+# that forbade its own test fixtures could never be exercised at all.
+_CARRIER_NEEDLE_EXCLUSIONS = {
+    "tools/repo_hygiene/test_mlv_never_authorized.py":
+        "quotes the false claim as anti-needle probe input; see the `caught` tuple",
+}
 
 
 class OwnerConsentedFootageTests(unittest.TestCase):
@@ -7138,10 +7220,15 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, source)
-        # ROUND 8: the round-6 overclaim must not come back IN ANY SPELLING.  Round 7's
-        # anti-needle was one literal, case-sensitive string; the claim came back four lines
-        # away as "reached only through" and passed.  See _assert_no_exclusive_route_claim for
-        # what the replacement does and does not catch.
+        # ROUND 9 (was: "must not come back IN ANY SPELLING").  That was an OVERCLAIM about
+        # an anti-overclaim needle, and sol disproved it by execution: four ordinary
+        # paraphrases walked straight through.  What this actually catches is the round-6 and
+        # round-7 spellings re-cased, re-wrapped or re-worded WITHIN the enumerated phrase
+        # family, plus the bounded subject/``only``/preposition regex -- and nothing else.  An
+        # arbitrary paraphrase passes, by construction and for good: a finite list of
+        # forbidden spellings can never be "any spelling", and enlarging the list each time a
+        # reviewer finds a new one has no end.  The bound is pinned by execution at
+        # ``test_the_anti_needle_does_not_catch_an_arbitrary_paraphrase``.
         _assert_no_exclusive_route_claim(self, source, "hook source")
         verifier = os.path.join(REPO_ROOT, "tools", "gates", "verify_consented_footage.py")
         with open(verifier, "r", encoding="utf-8") as handle:
@@ -7189,6 +7276,67 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             with self.subTest(honest=text[:60]):
                 _assert_no_exclusive_route_claim(self, text, "probe")
 
+    def test_the_anti_needle_covers_every_derived_claim_carrier(self):
+        # ROUND 9.  Round 8's needle ran over four HAND-LISTED surfaces and missed
+        # `playback-attr-3-cuda-job.ps1`, which carries the same claim surface -- the round-7
+        # defect shape, reappearing inside the round-8 mechanism built to prevent it.  Coverage
+        # is now DERIVED, so the failure mode it exhibited is not available: the needle runs
+        # over whatever the scan returns, not over what somebody remembered to list.
+        carriers = _derive_claim_carriers()
+        # FAIL LOUDLY on a new carrier.  Not because a new carrier is wrong, but because it
+        # must be looked at: silently widening the derived set is how a hand list rots without
+        # anyone noticing, and that is the whole defect being fixed.
+        self.assertEqual(
+            carriers, list(_CLAIM_CARRIERS_PINNED),
+            "the set of files carrying the consented-route claim changed.  Read the new "
+            "carrier, confirm it does not assert the false exclusivity claim, then update "
+            "_CLAIM_CARRIERS_PINNED.  Do NOT add it to an exclusion list to make this pass.",
+        )
+        for rel in carriers:
+            if rel in _CARRIER_NEEDLE_EXCLUSIONS:
+                continue
+            with self.subTest(carrier=rel):
+                with open(os.path.join(REPO_ROOT, rel), "r", encoding="utf-8") as handle:
+                    _assert_no_exclusive_route_claim(self, handle.read(), rel)
+        # The exclusion is a real hole, so it is named, reasoned, and held to ONE entry: a
+        # growing exclusion list would be the hand list again, wearing a different hat.
+        self.assertEqual(len(_CARRIER_NEEDLE_EXCLUSIONS), 1)
+        self.assertIn("tools/repo_hygiene/test_mlv_never_authorized.py",
+                      _CARRIER_NEEDLE_EXCLUSIONS)
+        # And the previously-missed carrier is now genuinely covered, not merely listed.
+        self.assertIn("tools/profiling/bachelor/playback-attr-3-cuda-job.ps1", carriers)
+
+    def test_the_anti_needle_does_not_catch_an_arbitrary_paraphrase(self):
+        # ROUND 9.  Round 8 shipped the needle under the heading "the overclaim must not come
+        # back IN ANY SPELLING", and the PR body called it something "a reword cannot pass".
+        # Both were overclaims ABOUT AN ANTI-OVERCLAIM NEEDLE, and sol disproved them by
+        # running four ordinary paraphrases through the helper: all four returned clean.
+        #
+        # The remedy is the one this card already applied to its own subject matter -- state
+        # the limit honestly -- NOT a longer list.  Adding these four spellings and re-claiming
+        # completeness would be the same error one round later: a finite list of forbidden
+        # spellings can never be "any spelling", and paraphrase has no end.
+        #
+        # So this row pins the LIMIT ITSELF.  Each paraphrase below asserts the SAME false
+        # claim the needle exists to kill, and each MUST pass the needle.  If a later round
+        # enlarges the phrase family to swallow one of them, this row goes RED -- forcing the
+        # honesty disclosure to be re-derived rather than quietly outgrown.
+        escapes = (
+            "The sole route for consented footage is the tracked verifier",
+            "A consented clip cannot be opened except by an id-addressed consumer",
+            "There is no other path for opening consented clips",
+            "Nothing besides the verifier can reach a consented clip",
+        )
+        for text in escapes:
+            with self.subTest(escapes=text[:60]):
+                # Not assertRaises: the POINT is that nothing is raised.
+                _assert_no_exclusive_route_claim(self, text, "paraphrase probe")
+        # And the documented bound must actually say so, so the code and the prose cannot
+        # drift apart the way the heading and the docstring did at round 8.
+        doc = _assert_no_exclusive_route_claim.__doc__
+        self.assertIn("NOT a paraphrase detector", doc)
+        self.assertIn("no finite list of spellings could", doc)
+
     def test_no_subprocess_on_the_na4_path(self):
         cases = (self.part0, self.part1, self.unconsented, os.path.join(self.tmp, "x.txt"))
         baseline = [self._decide(path) for path in cases]
@@ -7209,24 +7357,164 @@ class OwnerConsentedFootageTests(unittest.TestCase):
             for owner, name, value in saved:
                 setattr(owner, name, value)
         self.assertEqual(refused, baseline)
-        self.assertEqual(baseline[0][0], 2)  # round 6: a consented path is denied too
-        self.assertEqual(baseline[2][0], 2)
+        # ROUND 9 (SIXTH vacuous row, found by the ablation at
+        # `test_every_decision_row_discriminates_on_consent_status`, not by hand).  These two
+        # lines used to read `assertEqual(baseline[0][0], 2)  # round 6: a consented path is
+        # denied too` and `assertEqual(baseline[2][0], 2)`.  Both passed for a reason unrelated
+        # to consent: `setUp` clears every `MLV_*` key, so `allowed` is None and EVERY path
+        # here is denied by rule_na4's default branch.  Re-point `self.part0` at an unconsented
+        # path and both stayed green -- so the trailing comment claimed a consent-dependent
+        # property the assertions never tested.
+        #
+        # What replaces them discriminates the same way :7031 does: the consented and the
+        # unconsented path must get the SAME decision shape.  Restore exception (3) and
+        # `baseline[0]` becomes an ALLOW while `baseline[2]` stays a DENY, and this goes red.
+        #
+        # The PRECONDITION is what makes the comparison mean anything, and its absence is what
+        # made the old lines vacuous: without it, "these two paths get the same decision" is
+        # true of any two paths whatever.
+        table_hashes = [part[2] for part in self.table["clips"]["M16-1243"]]
+        self.assertIn(self._path_hash(self.part0), table_hashes, "part0 IS consented")
+        self.assertNotIn(self._path_hash(self.unconsented), table_hashes, "clip-z is NOT")
+        consented, unconsented = baseline[0], baseline[2]
+        self.assertNa4Deny(consented)
+        self.assertNa4Deny(unconsented)
+        self.assertEqual(
+            consented[1].replace(self.module.norm(self.part0), "<PATH>"),
+            unconsented[1].replace(self.module.norm(self.unconsented), "<PATH>"),
+            "a consented norm hash must not buy a different NA-4 outcome on the no-subprocess"
+            " path either",
+        )
         self.assertFalse(hasattr(self.module, "_read_merged_output_budget"))
         self.assertNotIn("subprocess", vars(self.module))
 
-    def test_the_real_hook_process_denies_an_unconsented_cache_path(self):
-        env = dict(os.environ)
-        env.pop("CLAUDE_PROJECT_DIR", None)
-        env["PYTHONIOENCODING"] = "utf-8"
-        payload = json.dumps(
-            {"tool_name": "Bash", "tool_input": {"command": 'mlv_dump -v "%s"' % self.part0}}
+    def test_the_real_hook_process_denies_a_cache_path_whatever_its_consent_status(self):
+        # ROUND 9 (FIFTH vacuous row -- opus, round 8).  This was named
+        # ..._denies_an_unconsented_cache_path and fed `self.part0`, the path every other row
+        # in this class calls CONSENTED.  It passed for a reason unrelated to the word
+        # "unconsented" in its name: `setUp` clears every `MLV_*` key, so `authorized_clip`
+        # returns None and the DENY comes from rule_na4's default branch.  Deleting
+        # OWNER_CONSENTED_FOOTAGE outright left it green.
+        #
+        # KEPT, not deleted: its real property is end-to-end and nothing else covers it -- the
+        # REAL hook, as a separate process, exits 2 with an "NA-4: " reason, so the in-process
+        # `decide()` rows are not testing a different code path than production.  The name now
+        # says that, and the row is made discriminating by running BOTH consent statuses and
+        # requiring the same outcome shape from the real process, which is the property round 6
+        # actually established.
+        outcomes = {}
+        for label, path in (("consented", self.part0), ("unconsented", self.unconsented)):
+            env = dict(os.environ)
+            env.pop("CLAUDE_PROJECT_DIR", None)
+            env["PYTHONIOENCODING"] = "utf-8"
+            payload = json.dumps(
+                {"tool_name": "Bash", "tool_input": {"command": 'mlv_dump -v "%s"' % path}}
+            )
+            refused = subprocess.run(
+                [sys.executable, HOOK], input=payload, capture_output=True, text=True,
+                encoding="utf-8", env=env, cwd=self.tmp,
+            )
+            with self.subTest(consent=label):
+                self.assertEqual(refused.returncode, 2, refused.stderr)
+                self.assertTrue(refused.stderr.startswith("NA-4: "), refused.stderr)
+            outcomes[label] = (
+                refused.returncode,
+                refused.stderr.replace(self.module.norm(path), "<PATH>"),
+            )
+        # The precondition that makes the comparison mean something: part0 IS consented under
+        # the fixture table, clip-z is NOT.  (The real table is what the hook subprocess reads;
+        # the fixture only establishes that these two paths differ in consent status at all.)
+        table_hashes = [part[2] for part in self.table["clips"]["M16-1243"]]
+        self.assertIn(self._path_hash(self.part0), table_hashes)
+        self.assertNotIn(self._path_hash(self.unconsented), table_hashes)
+        self.assertEqual(
+            outcomes["consented"], outcomes["unconsented"],
+            "the real hook process must not give a consented path a different outcome",
         )
-        refused = subprocess.run(
-            [sys.executable, HOOK], input=payload, capture_output=True, text=True,
-            encoding="utf-8", env=env, cwd=self.tmp,
+
+    # Rows that reach a DECISION but whose name promises nothing about consent status, so the
+    # ablation below has nothing to hold them to.  Kept as an explicit, reasoned list because
+    # an empty one would be a lie; a row added here must justify itself in review.
+    _CONSENT_AGNOSTIC_DECIDERS = frozenset()
+
+    def test_every_decision_row_discriminates_on_consent_status(self):
+        # ROUND 9.  FOUR rows of the same vacuity class were found ONE AT A TIME across rounds
+        # 6, 7 and 8 (two deleted at round 7, one replaced at round 8, a fifth found by opus at
+        # round 8).  Finding them one at a time IS the defect: each round declared the class
+        # closed and the next round reopened it.  This row closes it by ENUMERATION instead.
+        #
+        # THE PROPERTY.  A row is vacuous with respect to consent iff its assertions hold
+        # identically when consent status is flipped.  So flip it and see whether the row
+        # notices.  A row that stays GREEN under every flip is not testing what its name says,
+        # whatever its name says.
+        #
+        # This found the fifth row independently AND a sixth -- the two consent-flavoured
+        # assertions on `test_no_subprocess_on_the_na4_path` -- which three rounds of hand
+        # auditing had walked past.  Both are fixed above.
+        source_of = {}
+        for name, function in vars(type(self)).items():
+            if not name.startswith("test_") or name == self._testMethodName:
+                continue
+            try:
+                source_of[name] = inspect.getsource(function)
+            except (OSError, TypeError):  # pragma: no cover - source always available here
+                self.fail("cannot read the source of %s; the enumeration would be a lie" % name)
+        deciders = sorted(
+            name for name, src in source_of.items()
+            if ("self._decide(" in src or "self._decide_command(" in src
+                or "subprocess.run(" in src)
+            and name not in self._CONSENT_AGNOSTIC_DECIDERS
         )
-        self.assertEqual(refused.returncode, 2, refused.stderr)
-        self.assertTrue(refused.stderr.startswith("NA-4: "), refused.stderr)
+        self.assertTrue(deciders, "no decision rows found -- the derivation broke, not the class")
+
+        original_setup = type(self).setUp
+
+        def ablate(kind):
+            def setUp(case):
+                original_setup(case)
+                if kind == "UNCONSENT":
+                    # The fixture table still consents the ORIGINAL part0/part1; the row is now
+                    # handed paths that are NOT in it.  Consent status flipped, and because it
+                    # is flipped in the ARGUMENT, this reaches the real-hook subprocess row too.
+                    # Deliberately NOT `case.unconsented`: if the flipped path collided with
+                    # the row's own unconsented path, a consented-vs-unconsented comparison
+                    # would compare a path with itself and pass for a NEW vacuous reason.
+                    base = os.path.join(case.cache, "mirror", "unconsented")
+                    case.part0 = os.path.join(base, "clip-q.part0")
+                    case.part1 = os.path.join(base, "clip-q.part1")
+                else:  # EMPTYTABLE: the frozen module table consents nothing.
+                    case.module.OWNER_CONSENTED_FOOTAGE = {
+                        "clips": {}, "purposes": ("fixture purpose",), "authority": {},
+                    }
+            return setUp
+
+        def run_under(name, kind):
+            type(self).setUp = ablate(kind)
+            try:
+                suite = unittest.TestLoader().loadTestsFromName(name, type(self))
+                with open(os.devnull, "w") as sink:
+                    return unittest.TextTestRunner(stream=sink, verbosity=0).run(suite)
+            finally:
+                type(self).setUp = original_setup
+
+        vacuous = []
+        for name in deciders:
+            noticed = [
+                kind for kind in ("UNCONSENT", "EMPTYTABLE")
+                if not run_under(name, kind).wasSuccessful()
+            ]
+            with self.subTest(row=name):
+                if not noticed:
+                    vacuous.append(name)
+                self.assertTrue(
+                    noticed,
+                    "%s decides on a path but is GREEN under BOTH consent-status ablations: "
+                    "its assertions do not depend on consent at all. Make it discriminate (see "
+                    "test_the_consent_table_does_not_change_the_na4_decision for the shape), "
+                    "delete it, or -- if it genuinely promises nothing about consent -- add it "
+                    "to _CONSENT_AGNOSTIC_DECIDERS with a reason." % name,
+                )
+        self.assertEqual(vacuous, [], "the vacuity class is not empty: %s" % vacuous)
 
     def test_the_frozen_consent_table_is_exactly_the_six_consented_ids(self):
         table = self.module.OWNER_CONSENTED_FOOTAGE
