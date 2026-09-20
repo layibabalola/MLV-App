@@ -142,6 +142,19 @@ def _make_fixture_repo(path: Path) -> list[str]:
     _git_run(["config", "commit.gpgsign", "false"], path)
     _git_run(["config", "user.email", "lane@example.invalid"], path)
     _git_run(["config", "user.name", "attr3 behaviour fixture"], path)
+    # fable, PR #140 r2d MINOR: this repo's own text fixture (llrawproc.c below) is written via
+    # Path.write_text, which translates '\n' to os.linesep -- CRLF on Windows -- so its committed
+    # blob is only DIFFERENT from a naive raw-byte SHA1 whenever git actually normalises CRLF on
+    # the way in. Left to the HOST's global/system config, that normalisation (and therefore
+    # whether FixtureCommittedBytesTests.test_an_unmodified_tracked_file_is_accepted actually
+    # discriminates the round-2d self-caught defect -- a local SHA1 reimplementation that ignored
+    # git's clean filters entirely -- from a correct implementation) is UNPINNED: on a host whose
+    # global core.autocrlf is false, this fixture's bytes never get normalised, so a naive
+    # raw-byte hash and the real committed blob hash agree anyway, and the exact reimplementation
+    # bug this repo caught here once would pass silently. Pinned true so every host applies the
+    # same normalisation this suite depends on to catch that class of bug, regardless of the
+    # user's own global git config.
+    _git_run(["config", "core.autocrlf", "true"], path)
     (path / "src" / "mlv" / "llrawproc").mkdir(parents=True)
     (path / "tools" / "gpu" / "backend").mkdir(parents=True)
     shas = []
@@ -1000,6 +1013,27 @@ class FixtureCommittedBytesTests(_PwshCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         expected = _git_run(["hash-object", "--", "src/mlv/llrawproc/llrawproc.c"], self.repo)
         self.assertIn(expected, proc.stdout)
+
+    def test_a_corrupted_committed_object_is_indeterminate_not_not_committed(self) -> None:
+        # sol/fable, PR #140 r2e MAJOR: `git rev-parse HEAD:<path>` used to throw
+        # ATTR3_FIXTURE_NOT_COMMITTED for ANY failure -- non-zero exit or empty stdout -- which
+        # classified an outright git/repository operational failure (a corrupted object, disk
+        # I/O, an unexpected git message) identically to a genuinely untracked path. This
+        # corrupts the tracked file's own TREE object in the object database (not the working
+        # copy, and not the file's own blob) so `git rev-parse --show-toplevel` still succeeds
+        # (this repo is not generally broken) but the HEAD:<path> lookup fails with git's own
+        # "loose object ... is corrupt" -- a message that matches neither of the genuine
+        # not-committed patterns this function recognises.
+        tree_sha = _git_run(["rev-parse", "HEAD^{tree}"], self.repo)
+        object_path = self.repo / ".git" / "objects" / tree_sha[:2] / tree_sha[2:]
+        self.assertTrue(object_path.is_file(), object_path)
+        object_path.chmod(0o600)
+        object_path.write_bytes(bytes(range(10)))
+
+        proc = self.run_with_module(_guard(f"Assert-AttrCudaFixtureCommittedBytes -Path '{self.tracked_path}'"))
+
+        self.assert_throws(proc, "ATTR3_FIXTURE_HEAD_LOOKUP_UNAVAILABLE")
+        self.assertNotIn("THREW ATTR3_FIXTURE_NOT_COMMITTED", proc.stdout, proc.stdout + proc.stderr)
 
     def test_a_dirtied_working_tree_copy_is_refused(self) -> None:
         self.tracked_path.write_text("/* dirtied after the commit */\n", encoding="utf-8")

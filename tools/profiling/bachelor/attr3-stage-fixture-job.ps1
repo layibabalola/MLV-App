@@ -69,6 +69,12 @@ if (-not $admission.IsFixture) {
     # round 2d (sol/fable MAJOR): carry admission's own distinct reason out rather than folding
     # every refusal into this one generic token.
     $reasonSuffix = if ($admission.Reason) { " ($($admission.Reason))" } else { '' }
+    # round 2e (sol/fable MAJOR): a definite non-fixture and a could-not-determine outcome used to
+    # share this one token, distinguished only by prose in the parenthetical -- see the identical
+    # split in UmRunDrop.psm1's Assert-UmRunSideFileName.
+    if ($admission.Indeterminate) {
+        throw "ATTR3_FIXTURE_ADMISSION_INDETERMINATE $FixturePath admissibility could not be determined$reasonSuffix"
+    }
     throw "ATTR3_FIXTURE_NOT_TRACKED $FixturePath is not a tracked, content-pinned clip fixture of this repository$reasonSuffix"
 }
 $fixture = Get-Item -LiteralPath $FixturePath -Force

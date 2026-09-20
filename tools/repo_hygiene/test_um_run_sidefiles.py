@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 UM_RUN = ROOT / "tools" / "profiling" / "um-run.ps1"
 MODULE = ROOT / "tools" / "profiling" / "UmRunDrop.psm1"
+ATTR_CUDA_MODULE = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
 PWSH = shutil.which("pwsh")
 GIT = shutil.which("git")
 
@@ -114,6 +115,50 @@ class UmRunDropModuleTests(_Share):
         self.assertIn("THREW UMRUN_SIDEFILE_CONFLICT", proc.stdout, proc.stdout + proc.stderr)
         self.assertEqual((self.inbox / "demo-source.zip").read_text(encoding="utf-8"), "another submitter")
         self.assertEqual(self.names(), ["demo-source.zip"], "no job may be dropped after a conflict")
+
+    def test_a_write_attempt_between_the_share_hash_and_the_rename_is_denied(self) -> None:
+        # ATTR3-ADMIT-CONTENT-PIN-1 round 2e (sol BLOCKER): the share round-trip hash and the
+        # rename used to be two independent operations on the mutable .sidepart path, leaving a
+        # gap for a concurrent writer to swap the verified bytes before the rename picked them up.
+        # -PreRenameRaceHook fires in exactly that gap, with the module's own deny-write handle on
+        # the .sidepart STILL OPEN -- so the hook's own write attempt is racing the CLOSED window,
+        # not an open one. The hook catches its own exception (mirroring what an external writer's
+        # attempt would experience -- a failure on ITS side, invisible to Invoke-UmRunDrop) and
+        # logs the outcome, so this test can assert on what happened without relying on
+        # Invoke-UmRunDrop reacting to it. On the pre-2e shape (Get-FileHash opens and closes its
+        # own independent handle, then Move-Item opens a third one), this same hook's write would
+        # have SUCCEEDED and the corrupted bytes would have been renamed into place unverified.
+        hook = (
+            "{ param($p) try { "
+            "[IO.File]::WriteAllBytes($p, [Text.Encoding]::UTF8.GetBytes('raced sidepart bytes')); "
+            "Add-Content -LiteralPath $log -Value 'RACE_WRITE_SUCCEEDED' "
+            "} catch { Add-Content -LiteralPath $log -Value ('RACE_WRITE_DENIED: ' + $_.Exception.GetType().Name) } }"
+        )
+        script = self.tmp / "prerename-race-drop.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module {_q(MODULE)} -Force\n"
+            f"$log = {_q(self.log)}\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  Invoke-UmRunDrop -Inbox {_q(self.inbox)} -Outbox {_q(self.outbox)} -ScriptPath {_q(self.job)} "
+            f"-JobId 'demo' -SideFile @({_q(self.side)}) -PreRenameRaceHook $hook\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                              capture_output=True, text=True)
+
+        self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
+        log_text = self.log.read_text(encoding="utf-8")
+        self.assertIn("RACE_WRITE_DENIED", log_text, log_text)
+        self.assertNotIn("RACE_WRITE_SUCCEEDED", log_text, log_text)
+        self.assertEqual(self.names(), ["demo-source.zip", "demo.job.ps1"])
+        self.assertEqual(
+            hashlib.sha256((self.inbox / "demo-source.zip").read_bytes()).hexdigest(),
+            hashlib.sha256(self.side.read_bytes()).hexdigest(),
+            "the placed bytes must be the untampered originals, not the raced write attempt",
+        )
 
     def test_a_job_that_appears_concurrently_is_not_replaced(self) -> None:
         proc = self.drop(RACING_JOB, side=[])
@@ -253,7 +298,10 @@ class UmRunDropModuleTests(_Share):
         module_copy.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(MODULE, module_copy)
         proc = self.drop(OBSERVING, side=[clip], module=module_copy, repo_root=ROOT)
-        self.assertIn("THREW UMRUN_SIDEFILE_NAME_INVALID", proc.stdout, proc.stdout + proc.stderr)
+        # round 2e (sol/fable MAJOR): a module-missing host is a COULD-NOT-DETERMINE outcome, not
+        # a definite "this fixture is bad" -- distinct token from a real content refusal so a
+        # caller filtering on it does not conflate the two.
+        self.assertIn("THREW UMRUN_SIDEFILE_ADMISSION_INDETERMINATE", proc.stdout, proc.stdout + proc.stderr)
         self.assertEqual(self.names(), [], "a bachelor-less host must never place an unverified fixture")
 
     def test_names_that_are_not_plain_allowlisted_basenames_are_refused(self) -> None:
@@ -361,6 +409,12 @@ class UmRunFixtureContentPinTests(unittest.TestCase):
         _git(["init", "-q"], self.repo)
         _git(["config", "user.email", "umrun-pin-test@example.invalid"], self.repo)
         _git(["config", "user.name", "UmRun Pin Test"], self.repo)
+        # fable, PR #140 r2d MINOR (same fix as _make_fixture_repo in
+        # test_playback_attr_3_cuda_behaviour.py): this repo's own content-pin checks reuse the
+        # identical git-blob comparison, so its correctness should not depend on the host's
+        # unpinned global core.autocrlf either, even though this particular fixture's raw bytes
+        # (below) carry no CRLF for it to normalise today.
+        _git(["config", "core.autocrlf", "true"], self.repo)
         self.clips = self.repo / "tests" / "fixtures" / "clips"
         self.clips.mkdir(parents=True)
         self.fixture = self.clips / "tiny_dual_iso.umrunprobe"
@@ -464,6 +518,99 @@ class UmRunFixtureContentPinTests(unittest.TestCase):
         self.assertIn("RESULT=False", output)
         self.assertIn("UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE", output, output)
 
+    def test_a_present_but_unloadable_bachelor_module_is_indeterminate_not_untracked(self) -> None:
+        # sol/fable, PR #140 r2e MAJOR: Import-Module used to run with no try/catch of its own, so
+        # a PRESENT-but-broken module (corrupted file, a syntax error, a permission denial) let
+        # PowerShell's own raw exception message propagate unwrapped -- its first whitespace token
+        # is never one of $UmRunIndeterminateAdmissionTokens, so Get-UmRunFixtureAdmission's catch
+        # classified this exact could-not-determine scenario as a DEFINITE refusal purely because
+        # the message shape did not match, not because anything about the fixture's bytes failed.
+        # A syntax error (not a missing file) forces Import-Module itself to fail, distinct from
+        # test_a_missing_bachelor_module_is_refused_as_content_pin_unavailable above.
+        module_copy = self.repo.parent / "broken-bachelor" / "UmRunDrop.psm1"
+        module_copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(MODULE, module_copy)
+        broken_bachelor_dir = module_copy.parent / "bachelor"
+        broken_bachelor_dir.mkdir()
+        (broken_bachelor_dir / "AttrCudaArtifacts.psm1").write_text(
+            "function Assert-AttrCudaFixtureCommittedBytes { ( { }\n", encoding="utf-8"
+        )
+        output = self.probe(self.fixture, module=module_copy)
+        self.assertIn("RESULT=False", output)
+        self.assertIn("UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE", output, output)
+        self.assertIn("is present but failed to load", output, output)
+
+
+@unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+class UmRunFixtureContentPinInternalReadMechanismTests(unittest.TestCase):
+    """ATTR3-ADMIT-CONTENT-PIN-1 round 2d closed a DIFFERENT gap than
+    UmRunFixtureContentPinRaceTests below: not the OUTER race between admission returning and a
+    caller re-reading the source later (r2/r2c, closed by -PostAdmissionHook and tested there),
+    but an INNER one -- inside Assert-AttrCudaFixtureCommittedBytes itself, between its own
+    git-blob comparison and a caller's separate re-hash of the same mutable path for the pin it
+    handed back. Round 2d closed it structurally: the fixture is read ONCE into an in-memory
+    buffer, and BOTH the committed-blob comparison and the returned SHA256 pin are derived from
+    that single buffer -- there is no second file read left for a swap to land in between.
+
+    NO CONTENT-SWAP RED/GREEN TEST EXISTS FOR THIS SPECIFIC WINDOW, and none is added here --
+    stated plainly rather than left to be inferred from an absence. -PostAdmissionHook (the seam
+    UmRunFixtureContentPinRaceTests and attr3-stage-fixture-job.ps1's own race test use) fires
+    AFTER Get-UmRunFixtureAdmission has ALREADY RETURNED, i.e. after this internal window has
+    already opened, run and closed; it cannot inject anywhere near it. A hook placed deeper still
+    would have to sit inside Assert-AttrCudaFixtureCommittedBytes's own file read (lines ~462-482
+    of AttrCudaArtifacts.psm1 at the time of writing), and that read is itself held under a
+    deny-write file handle for its whole duration -- a same-host writer cannot open the path for
+    writing while the read is in progress (proven below), so there is no filesystem-level way to
+    win a race against it. Injecting a swap would require overwriting the read buffer in another
+    process's memory, which is not a thing a PowerShell test (or an attacker with ordinary
+    filesystem access) can do. What closure this window actually rests on, and what IS tested
+    here instead of a swap:
+      (1) STRUCTURE -- the comparison and the pin are read directly off the source as coming from
+          the identical buffer, since that is a static property of the code, not a runtime race
+          outcome a test could flip by timing;
+      (2) MECHANISM -- the deny-write guarantee the fix depends on: FileShare.Read really does
+          block a concurrent writer for as long as the handle stays open, exercised with the
+          IDENTICAL FileMode/FileAccess/FileShare triple the function opens its handle with.
+    """
+
+    def test_the_source_derives_both_hashes_from_one_read_buffer(self) -> None:
+        text = ATTR_CUDA_MODULE.read_text(encoding="utf-8")
+        # The single open call, deny-write, whose result is read into $bytes ONCE.
+        self.assertIn(
+            "[IO.File]::Open($full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
+            text,
+        )
+        # The committed-blob comparison consumes that buffer, not a fresh read of $full.
+        self.assertIn("Get-AttrCudaGitBlobHashFromBytes -Bytes $bytes", text)
+        # -Sha256Pin is computed from the SAME $bytes, not a second Get-FileHash of $full.
+        self.assertIn("$sha256.ComputeHash($bytes)", text)
+        self.assertNotRegex(text, r"Get-FileHash\s+-LiteralPath\s+\$full\b")
+
+    def test_a_deny_write_handle_blocks_a_concurrent_writer_for_its_whole_lifetime(self) -> None:
+        # The mechanism the fix depends on, proven with the EXACT FileMode/FileAccess/FileShare
+        # triple Assert-AttrCudaFixtureCommittedBytes opens its read handle with.
+        tmp = tempfile.TemporaryDirectory(prefix="umrun-denywrite-")
+        self.addCleanup(tmp.cleanup)
+        target = Path(os.path.realpath(tmp.name)) / "target.bin"
+        target.write_bytes(b"original bytes")
+        script = target.parent / "deny-write-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$stream = [IO.File]::Open({_q(target)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)\n"
+            "try {\n"
+            "  try {\n"
+            f"    $w = [IO.File]::Open({_q(target)}, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)\n"
+            "    $w.Dispose()\n"
+            "    Write-Output 'WRITE_UNEXPECTEDLY_SUCCEEDED'\n"
+            "  } catch { Write-Output ('WRITE_DENIED: ' + $_.Exception.GetType().Name) }\n"
+            "} finally { $stream.Dispose() }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                              capture_output=True, text=True)
+        self.assertIn("WRITE_DENIED", proc.stdout, proc.stdout + proc.stderr)
+        self.assertNotIn("WRITE_UNEXPECTEDLY_SUCCEEDED", proc.stdout)
+
 
 @unittest.skipIf(PWSH is None, "pwsh is not on PATH")
 @unittest.skipIf(GIT is None, "git is not on PATH")
@@ -474,7 +621,14 @@ class UmRunFixtureContentPinRaceTests(unittest.TestCase):
     re-read for its sha256 and for the copy, so bytes that changed in that gap were never bound
     to the blob admission actually verified. A disposable git repository (never the real
     tests/fixtures/clips tree) plus Invoke-UmRunDrop's -PostAdmissionHook test seam -- which
-    fires in exactly that gap and is never set in production -- exercises the race directly."""
+    fires in exactly that gap and is never set in production -- exercises the race directly.
+
+    THIS IS THE OUTER RACE, NOT ROUND 2D'S. -PostAdmissionHook fires after
+    Get-UmRunFixtureAdmission has ALREADY RETURNED -- i.e. after admission's own internal read is
+    long finished -- so nothing here exercises (or could ever exercise) the gap round 2d closed
+    inside Assert-AttrCudaFixtureCommittedBytes itself. See
+    UmRunFixtureContentPinInternalReadMechanismTests below for what round 2d actually closed and
+    why a content-swap RED/GREEN test cannot be built for that window specifically."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="umrun-race-")
@@ -485,6 +639,8 @@ class UmRunFixtureContentPinRaceTests(unittest.TestCase):
         _git(["init", "-q"], self.repo)
         _git(["config", "user.email", "umrun-race-test@example.invalid"], self.repo)
         _git(["config", "user.name", "UmRun Race Test"], self.repo)
+        # fable, PR #140 r2d MINOR: see the identical pin in UmRunFixtureContentPinTests.setUp.
+        _git(["config", "core.autocrlf", "true"], self.repo)
         self.clips = self.repo / "tests" / "fixtures" / "clips"
         self.clips.mkdir(parents=True)
         self.fixture = self.clips / "tiny_dual_iso.umrunprobe"

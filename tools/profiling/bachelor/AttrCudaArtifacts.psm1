@@ -358,15 +358,26 @@ function Get-AttrCudaGitBlobHashFromBytes {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
-    $proc = [Diagnostics.Process]::Start($psi)
+    # round 2e (sol/fable MAJOR): Process.Start (and the stream I/O around it) can throw a raw,
+    # untyped .NET exception -- e.g. Win32Exception if the git binary that
+    # Assert-AttrCudaFixtureCommittedBytes's earlier Get-Command probe found a moment ago is no
+    # longer resolvable when actually launched -- whose message never starts with an ATTR3_FIXTURE_*
+    # token. Left uncaught, that escaped Get-UmRunFixtureAdmission's classification entirely: an
+    # environmental failure with nothing to say about the fixture's bytes would be graded on
+    # whether its first word happened to match, not on what it actually was.
     try {
-        $proc.StandardInput.BaseStream.Write($Bytes, 0, $Bytes.Length)
-    } finally {
-        $proc.StandardInput.Close()
+        $proc = [Diagnostics.Process]::Start($psi)
+        try {
+            $proc.StandardInput.BaseStream.Write($Bytes, 0, $Bytes.Length)
+        } finally {
+            $proc.StandardInput.Close()
+        }
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        $proc.WaitForExit()
+    } catch {
+        throw "ATTR3_FIXTURE_GIT_UNAVAILABLE could not launch git to hash-object (via stdin) '$RelativePath' in '$RepoRoot': $($_.Exception.Message)"
     }
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
     if ($proc.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($stdout)) {
         throw "ATTR3_FIXTURE_GIT_UNAVAILABLE could not hash-object (via stdin) '$RelativePath' in '$RepoRoot': $stderr"
     }
@@ -414,6 +425,22 @@ function Assert-AttrCudaFixtureCommittedBytes {
     bytes to compare against. Left unset (the default) when this throws, since a caller must never
     bind to a pin taken from bytes that failed verification.
     Throws with a distinguishable ATTR3_FIXTURE_* token; returns the verified (matching) hash.
+    round 2e (sol/fable MAJOR): every throw here now lands in exactly one of DEFINITE REFUSAL
+    (ATTR3_FIXTURE_MISSING, ATTR3_FIXTURE_NOT_IN_A_REPO, ATTR3_FIXTURE_FOREIGN_REPO,
+    ATTR3_FIXTURE_NOT_COMMITTED, ATTR3_FIXTURE_WORKING_TREE_DIRTY -- a content verdict this
+    function stands behind) or COULD NOT DETERMINE (ATTR3_FIXTURE_GIT_UNAVAILABLE,
+    ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE, ATTR3_FIXTURE_HEAD_LOOKUP_UNAVAILABLE -- an
+    environmental/operational failure that says nothing about the bytes), never untyped and
+    never folded into the wrong bucket; see UmRunDrop.psm1's $UmRunIndeterminateAdmissionTokens,
+    which every one of the second group is registered in. The `git rev-parse HEAD:<path>` call
+    below used to throw ATTR3_FIXTURE_NOT_COMMITTED for ANY failure there (non-zero exit or empty
+    stdout), which classified a corrupted object store, a git I/O error or an unexpected git
+    version's message identically to a genuinely untracked path; stderr is now inspected, and only
+    git's own distinct messages for an actually-untracked path -- "path does not exist in
+    <tree-ish>" (never existed at that path), "exists on disk, but not in '<tree-ish>'"
+    (untracked working-tree file), or "invalid object name 'HEAD'" (unborn HEAD, no commits at
+    all) -- are treated as the definite refusal; everything else is
+    ATTR3_FIXTURE_HEAD_LOOKUP_UNAVAILABLE.
     #>
     [CmdletBinding()]
     param(
@@ -482,9 +509,21 @@ function Assert-AttrCudaFixtureCommittedBytes {
     }
     $workingHash = Get-AttrCudaGitBlobHashFromBytes -Bytes $bytes -RepoRoot $repoRootForGit -RelativePath $relative
 
-    $committedHash = (& git -C $repoRootForGit rev-parse "HEAD:$relative" 2>$null)
+    # round 2e (sol/fable, PR #140): stderr is captured (2>&1, not discarded) so a genuine "this
+    # path was never committed" refusal -- git's own distinct fatal text for a tree lookup that
+    # otherwise ran fine -- can be told apart from ANY OTHER git failure here (a corrupted object
+    # store, an I/O error, an unexpected git-version message). Only the former is a verdict this
+    # function can stand behind as a definite refusal; everything else fails toward "could not
+    # determine" rather than silently becoming the same refusal as a genuinely untracked file.
+    $rawHeadLookup = & git -C $repoRootForGit rev-parse "HEAD:$relative" 2>&1
+    $committedHash = (($rawHeadLookup | Where-Object { $_ -is [string] }) -join '').Trim()
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($committedHash)) {
-        throw "ATTR3_FIXTURE_NOT_COMMITTED HEAD:$relative could not be resolved in $repoRootForGit"
+        $stderrText = (($rawHeadLookup | Where-Object { $_ -is [Management.Automation.ErrorRecord] } |
+            ForEach-Object { $_.ToString() }) -join ' ')
+        if ($stderrText -match 'does not exist in|exists on disk, but not in|invalid object name') {
+            throw "ATTR3_FIXTURE_NOT_COMMITTED HEAD:$relative could not be resolved in $repoRootForGit"
+        }
+        throw "ATTR3_FIXTURE_HEAD_LOOKUP_UNAVAILABLE HEAD:$relative lookup in $repoRootForGit failed for a reason other than the path never having been committed: $stderrText"
     }
     $committedHash = $committedHash.Trim().ToLowerInvariant()
     if ($workingHash -ne $committedHash) {

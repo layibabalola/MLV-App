@@ -44,7 +44,11 @@ $script:TrackedFixtureClipStems = @('tiny_dual_iso', 'large_dual_iso')
 # throws when it could not even DETERMINE admissibility (git or the bachelor module missing, or
 # the single content-pin read could not be bound) -- as opposed to a definite refusal (untracked,
 # working tree dirty, foreign repo). See that function's .Indeterminate.
-$script:UmRunIndeterminateAdmissionTokens = @('UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE', 'ATTR3_FIXTURE_GIT_UNAVAILABLE', 'ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE')
+# round 2e: ATTR3_FIXTURE_HEAD_LOOKUP_UNAVAILABLE added -- `git rev-parse HEAD:<path>` failing for
+# any reason OTHER than git's own "never committed" text (a corrupted object store, an I/O error,
+# an unexpected git-version message) is an operational failure, not a content verdict, and must
+# not be folded into the definite ATTR3_FIXTURE_NOT_COMMITTED refusal it used to share a token with.
+$script:UmRunIndeterminateAdmissionTokens = @('UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE', 'ATTR3_FIXTURE_GIT_UNAVAILABLE', 'ATTR3_FIXTURE_CONTENT_PIN_UNBINDABLE', 'ATTR3_FIXTURE_HEAD_LOOKUP_UNAVAILABLE', 'UMRUN_FIXTURE_ADMISSION_PATH_RESOLUTION_UNAVAILABLE')
 # tools/profiling/bachelor/AttrCudaArtifacts.psm1's Assert-AttrCudaFixtureCommittedBytes -- the twin
 # check ATTR3-FIXTURE-STAGE-1 already wrote for this identical defect class -- is reused by
 # Test-UmRunFixtureContentPin below, imported ON DEMAND from this path so a host that never ships
@@ -150,11 +154,24 @@ function Get-UmRunFixtureAdmission {
     }
 
     # Real paths, so a junction/symlink cannot present an outside file as a fixture.
-    $resolvedDir = Resolve-UmRunRealDirectory -Path $fixturesDir
-    $sourceItem = Get-Item -LiteralPath $SourcePath -Force
-    $link = $sourceItem.ResolveLinkTarget($true)
-    if ($null -ne $link) { $sourceItem = $link }
-    $sourceDir = Resolve-UmRunRealDirectory -Path ([IO.Path]::GetDirectoryName($sourceItem.FullName))
+    #
+    # round 2e (sol/fable MAJOR): Get-Item/ResolveLinkTarget below can throw a RAW, untyped
+    # exception (e.g. the file vanishing in the narrow TOCTOU between the Test-Path existence
+    # check just above and this call) that used to propagate straight out of this function
+    # uncaught -- escaping the admit/refuse-with-reason/could-not-determine three-way split
+    # entirely rather than landing in any of the three. Wrapped so every path through this
+    # function returns the $result object.
+    try {
+        $resolvedDir = Resolve-UmRunRealDirectory -Path $fixturesDir
+        $sourceItem = Get-Item -LiteralPath $SourcePath -Force
+        $link = $sourceItem.ResolveLinkTarget($true)
+        if ($null -ne $link) { $sourceItem = $link }
+        $sourceDir = Resolve-UmRunRealDirectory -Path ([IO.Path]::GetDirectoryName($sourceItem.FullName))
+    } catch {
+        $result.Reason = "UMRUN_FIXTURE_ADMISSION_PATH_RESOLUTION_UNAVAILABLE could not resolve '$SourcePath': $($_.Exception.Message)"
+        $result.Indeterminate = $true
+        return $result
+    }
     if (-not [string]::Equals($sourceDir, $resolvedDir, [StringComparison]::OrdinalIgnoreCase)) {
         $result.Reason = "UMRUN_FIXTURE_ADMISSION_WRONG_DIRECTORY '$($sourceItem.FullName)' does not resolve inside '$resolvedDir'"
         return $result
@@ -235,7 +252,17 @@ function Test-UmRunFixtureContentPin {
     if (-not (Test-Path -LiteralPath $script:AttrCudaArtifactsModulePath -PathType Leaf)) {
         throw "UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE $($script:AttrCudaArtifactsModulePath) is not present; cannot verify '$Path' against its committed blob"
     }
-    Import-Module $script:AttrCudaArtifactsModulePath -ErrorAction Stop
+    try {
+        Import-Module $script:AttrCudaArtifactsModulePath -ErrorAction Stop
+    } catch {
+        # round 2e (sol/fable MAJOR): a PRESENT but unloadable module (corrupted file, a syntax
+        # error, a permission denial) used to propagate PowerShell's own raw exception message,
+        # whose first whitespace-delimited token is never one of $UmRunIndeterminateAdmissionTokens
+        # -- so Get-UmRunFixtureAdmission's catch classified this exact "could not determine"
+        # scenario as a DEFINITE refusal (Indeterminate=$false) purely because the message shape
+        # did not match, not because anything about the fixture's bytes was actually refused.
+        throw "UMRUN_FIXTURE_CONTENT_PIN_UNAVAILABLE $($script:AttrCudaArtifactsModulePath) is present but failed to load; cannot verify '$Path' against its committed blob: $($_.Exception.Message)"
+    }
     $sha256Ref = [ref]$null
     $gitBlobHash = Assert-AttrCudaFixtureCommittedBytes -Path $Path -RepoRoot $RepoRoot -Sha256Pin $sha256Ref
     [pscustomobject]@{ GitBlobSha1 = $gitBlobHash; Sha256 = $sha256Ref.Value }
@@ -283,6 +310,17 @@ function Assert-UmRunSideFileName {
         # round 2d (sol/fable MAJOR): the distinct admission-refusal reason used to survive only
         # under -Verbose; carried out here so a caller sees WHY without needing verbose logging.
         $reasonSuffix = if ($admission.Reason) { " ($($admission.Reason))" } else { '' }
+        # round 2e (sol/fable MAJOR): a DEFINITE non-fixture (wrong directory, unknown stem,
+        # untracked, dirty, foreign repo) and a COULD-NOT-DETERMINE outcome (git or the bachelor
+        # module unavailable, the content-pin read unbindable) used to throw the identical token
+        # here, distinguished only by prose buried in the parenthetical -- so a caller filtering on
+        # the token alone (the common case; UMRUN_SIDEFILE_NAME_INVALID is this function's one
+        # documented refusal token) could not tell "this fixture is bad" from "the environment
+        # could not tell". A refusal is still the fail-closed action either way -- unpinned
+        # admission is never safe -- but the outcome is now reported under its own token.
+        if ($admission.Indeterminate) {
+            throw "UMRUN_SIDEFILE_ADMISSION_INDETERMINATE '$Name' extension '$extension' is not in the allowlist and fixture admissibility could not be determined$reasonSuffix"
+        }
         throw "UMRUN_SIDEFILE_NAME_INVALID '$Name' extension '$extension' is not in the allowlist and its source is not a tracked fixture clip$reasonSuffix"
     }
     $stem = $Name.Split('.')[0].ToUpperInvariant()
@@ -310,6 +348,13 @@ function Invoke-UmRunDrop {
     check has returned and before its bytes are read again for placement -- the exact gap a
     swap would need to win the check/use race (sol, PR #140 r2 MAJOR). Defaults to a no-op;
     production never sets it.
+    .PARAMETER PreRenameRaceHook
+    Test-only seam (round 2e, sol BLOCKER): invoked with the share-side .sidepart's path after its
+    round-trip hash has been verified and while this function's own deny-write handle on it is
+    STILL OPEN, immediately before the rename that publishes it. A hook that attempts to write to
+    that path here is exercising the exact gap the held handle exists to close, not a gap that is
+    still open -- see Invoke-UmRunDrop's own comment at the file-open call. Defaults to a no-op;
+    production never sets it.
     #>
     [CmdletBinding()]
     param(
@@ -320,7 +365,8 @@ function Invoke-UmRunDrop {
         [string[]]$SideFile = @(),
         [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
         [scriptblock]$Copier = { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination },
-        [scriptblock]$PostAdmissionHook = { param($Source) }
+        [scriptblock]$PostAdmissionHook = { param($Source) },
+        [scriptblock]$PreRenameRaceHook = { param($PartPath) }
     )
 
     if ($JobId -and $JobId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "UMRUN_JOBID_INVALID '$JobId'" }
@@ -373,18 +419,39 @@ function Invoke-UmRunDrop {
         $part = Join-Path $Inbox "$name.$nonce.sidepart"
         try {
             & $Copier $sourceItem.FullName $part
-            $remoteSha = (Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash
-            if ($remoteSha -ne $localSha) {
-                throw "UMRUN_SIDEFILE_VERIFY_FAILED $name did not round-trip to the share (local $localSha, share $remoteSha)"
-            }
+            # ATTR3-ADMIT-CONTENT-PIN-1 round 2e (sol BLOCKER): the share round-trip hash and the
+            # rename used to be TWO separate operations on the mutable $part path -- Get-FileHash
+            # opened, read and closed its own handle, then Move-Item opened a completely different
+            # one, leaving a gap for the verified bytes to be swapped before the rename picked them
+            # up. One handle, opened deny-write (FileShare.Delete only, so the rename below can
+            # still succeed while this handle stays open), spans the hash AND the rename: nothing
+            # else can write $part for as long as it is held.
+            $partStream = [IO.File]::Open($part, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::Read -bor [IO.FileShare]::Delete))
             try {
-                Move-Item -LiteralPath $part -Destination $destination -ErrorAction Stop   # no -Force: never overwrite
-            } catch {
-                if ((Test-Path -LiteralPath $destination) -and (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -eq $localSha) {
-                    Write-Output "side-file placed concurrently with matching sha256: $name"
-                } else {
-                    throw "UMRUN_SIDEFILE_CONFLICT inbox\$name appeared concurrently with different content"
+                $sha256 = [Security.Cryptography.SHA256]::Create()
+                try {
+                    $remoteSha = [BitConverter]::ToString($sha256.ComputeHash($partStream)) -replace '-', ''
+                } finally {
+                    $sha256.Dispose()
                 }
+                if ($remoteSha -ne $localSha) {
+                    throw "UMRUN_SIDEFILE_VERIFY_FAILED $name did not round-trip to the share (local $localSha, share $remoteSha)"
+                }
+                # Test-only seam (no-op in production): fires while $partStream's deny-write handle
+                # is still held, so a hook that tries to write $part here is racing the closed
+                # window, not an open one.
+                & $PreRenameRaceHook $part
+                try {
+                    Move-Item -LiteralPath $part -Destination $destination -ErrorAction Stop   # no -Force: never overwrite
+                } catch {
+                    if ((Test-Path -LiteralPath $destination) -and (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -eq $localSha) {
+                        Write-Output "side-file placed concurrently with matching sha256: $name"
+                    } else {
+                        throw "UMRUN_SIDEFILE_CONFLICT inbox\$name appeared concurrently with different content"
+                    }
+                }
+            } finally {
+                $partStream.Dispose()
             }
         } finally {
             if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue }
