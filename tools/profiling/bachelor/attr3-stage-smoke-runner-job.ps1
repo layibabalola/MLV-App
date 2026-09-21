@@ -343,16 +343,20 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
 )
 
 $jobPath = Join-Path $OutDir "$jobId.job.ps1"
-# Fable minor (round 2, carried forward): __EMBEDDED_FUNCTIONS__ is spliced in LAST, after every
-# other placeholder is substituted -- mirroring playback-attr-3-cuda-job.ps1 -- so
-# placeholder-shaped text that happens to appear inside the verbatim module source (e.g. a
-# `__NAME__`-looking token in a comment) can never be rewritten by an earlier .Replace() call.
-$text = $template.
-    Replace('__JOB_ID__', $jobId).
-    Replace('__AGENT_ROOT__', $AgentRoot).
-    Replace('__CACHE_DIR_NAME__', $CacheDirName).
-    Replace('__CLOSURE_ENTRIES__', $closureEntriesLiteral)
-$text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
+# ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): a single-pass substitution over the WHOLE token
+# map at once -- see Expand-AttrCudaTemplate's own header in AttrCudaArtifacts.psm1.
+# -AgentRoot's own ValidatePattern admits underscores, so a value shaped like
+# 'C:\mlv_agent__EMBEDDED_FUNCTIONS__' used to collide with a later .Replace() call in the old
+# chained substitution; a single regex pass over the original template never rescans a
+# substituted value, so that collision class cannot occur here regardless of which token a
+# caller-controlled value happens to spell.
+$text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
+    JOB_ID = $jobId
+    AGENT_ROOT = $AgentRoot
+    CACHE_DIR_NAME = $CacheDirName
+    CLOSURE_ENTRIES = $closureEntriesLiteral
+    EMBEDDED_FUNCTIONS = $embeddedFunctions
+})
 [IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))
 
 # So the hub can pass the baked digest straight to playback-attr-3-cuda-job.ps1's verification

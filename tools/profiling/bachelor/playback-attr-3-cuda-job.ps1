@@ -1186,30 +1186,39 @@ Write-Output "RESULT=$resultVerb FIXTURE_REHEARSAL=$FixtureRehearsal SOURCE=$Sou
 exit 0
 '@
 
-$text = $template.
-    Replace('__SOURCE_COMMIT__', $SourceCommit).
-    Replace('__CLIP_ID__', $ClipId).
-    Replace('__BUILD_MANIFEST_SHA256__', $BuildManifestSha256.ToLowerInvariant()).
-    Replace('__CLIP_PATH__', $ClipPath.Replace("'", "''")).
-    Replace('__OWNER_PARTS_JSON__', $ownerPartsJson.Replace("'", "''")).
-    Replace('__RANGE_HEAD_SHA__', $SourceCommit).
-    Replace('__LLRAWPROC_BLOB_ID__', $llrawprocBlobId).
-    Replace('__EXE_NAME__', $exeName).
-    Replace('__RECON_NAME__', $reconName).
-    Replace('__BASE_PACKAGE_ZIP__', $BasePackageZip.Replace("'", "''")).
-    Replace('__BASE_PACKAGE_EXE_NAME__', $BasePackageExeName.Replace("'", "''")).
-    Replace('__PRESENTMON_NAME__', $PresentMonName.Replace("'", "''")).
-    Replace('__PRESENTMON_SHA256__', $PresentMonSha256).
-    Replace('__SMOKE_RUNNER_CLOSURE__', $smokeRunnerClosureLiteral).
-    Replace('__SMOKE_RUNNER_CLOSURE_DIR_NAME__', $smokeRunnerClosureDirName).
-    Replace('__SMOKE_RUNNER_NAME__', $smokeRunnerName).
-    Replace('__CONSENT_RECEIPT__', $ConsentReceiptFileName.Replace("'", "''")).
-    Replace('__FIXTURE_REHEARSAL__', $fixtureRehearsalLiteral).
-    Replace('__AGENT_ROOT__', $AgentRoot).
-    Replace('__FIXTURE_SHA256__', $FixtureSha256)
-# LAST: the module text is spliced in after every other substitution, so no placeholder rule can
-# rewrite a character inside the verbatim verifier source.
-$text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
+# ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): a single-pass substitution over the WHOLE
+# token map at once -- see Expand-AttrCudaTemplate's own header in AttrCudaArtifacts.psm1.
+# -ConsentReceiptFileName 'a__EMBEDDED_FUNCTIONS__b.json' (and every other underscore-permitting
+# value here -- -BasePackageZip, -BasePackageExeName, -PresentMonName) passes its own
+# ValidatePattern and used to collide with a LATER .Replace() call in the old chained
+# substitution, splicing the embedded verifier source into the middle of an unrelated string
+# literal. A single regex pass over the original template never rescans a substituted value, so
+# that collision class cannot occur here regardless of which token a caller-controlled value
+# happens to spell. Per-token quoting is unchanged: each value is still escaped for its
+# single-quoted literal context by the caller, exactly as before.
+$text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
+    SOURCE_COMMIT = $SourceCommit
+    CLIP_ID = $ClipId
+    BUILD_MANIFEST_SHA256 = $BuildManifestSha256.ToLowerInvariant()
+    CLIP_PATH = $ClipPath.Replace("'", "''")
+    OWNER_PARTS_JSON = $ownerPartsJson.Replace("'", "''")
+    RANGE_HEAD_SHA = $SourceCommit
+    LLRAWPROC_BLOB_ID = $llrawprocBlobId
+    EXE_NAME = $exeName
+    RECON_NAME = $reconName
+    BASE_PACKAGE_ZIP = $BasePackageZip.Replace("'", "''")
+    BASE_PACKAGE_EXE_NAME = $BasePackageExeName.Replace("'", "''")
+    PRESENTMON_NAME = $PresentMonName.Replace("'", "''")
+    PRESENTMON_SHA256 = $PresentMonSha256
+    SMOKE_RUNNER_CLOSURE = $smokeRunnerClosureLiteral
+    SMOKE_RUNNER_CLOSURE_DIR_NAME = $smokeRunnerClosureDirName
+    SMOKE_RUNNER_NAME = $smokeRunnerName
+    CONSENT_RECEIPT = $ConsentReceiptFileName.Replace("'", "''")
+    FIXTURE_REHEARSAL = $fixtureRehearsalLiteral
+    AGENT_ROOT = $AgentRoot
+    FIXTURE_SHA256 = $FixtureSha256
+    EMBEDDED_FUNCTIONS = $embeddedFunctions
+})
 
 $outDir = Split-Path -Parent $OutFile
 if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }

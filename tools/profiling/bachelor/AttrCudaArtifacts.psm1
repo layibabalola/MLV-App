@@ -57,6 +57,71 @@ function Get-AttrCudaEmbeddedFunctionSource {
     ($blocks -join "`r`n`r`n")
 }
 
+function Expand-AttrCudaTemplate {
+    <#
+    .SYNOPSIS
+    Single-pass job-template substitution: every __TOKEN__ placeholder in -Template is replaced
+    by -Tokens['TOKEN'] in ONE regex pass, so a substituted value is never rescanned for further
+    placeholders.
+    .DESCRIPTION
+    ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL). Every generator that emits a <jobId>.job.ps1
+    body used to substitute placeholders through a CHAINED .Replace(...).Replace(...) sequence:
+    each later .Replace call rescans the ENTIRE string, including text an earlier .Replace call
+    just spliced in. A caller-controlled value shaped like another placeholder's own token (e.g.
+    -ConsentReceiptFileName 'a__EMBEDDED_FUNCTIONS__b.json', which passes that parameter's own
+    ValidatePattern) therefore collided with the LATER __EMBEDDED_FUNCTIONS__ substitution and
+    spliced ~600 lines of verifier source into the middle of an unrelated string literal, breaking
+    the emitted job's own parse -- and the same window existed for every underscore-permitting
+    value and for every generated blob substituted early in the chain.
+    [regex]::Replace with a MatchEvaluator processes the ORIGINAL input in ONE pass: the
+    evaluator's return value for one match is never itself rescanned for further matches, so this
+    closes the whole class at once, for every token, in every generator, rather than patching one
+    collision at a time. Per-token quoting/escaping (e.g. doubling an embedded `'` for a
+    single-quoted literal context) stays the CALLER's job -- -Tokens values are expected to
+    already be escaped for the quoting context they land in, exactly as before this function
+    existed; this function only decides WHICH bytes replace WHICH placeholder, never how a value
+    is made safe for where it lands.
+    Throws AttrCudaTemplateUnknownToken for a template placeholder absent from -Tokens (a typo in
+    the template, or a caller who forgot a token), and AttrCudaTemplateUnusedToken for a -Tokens
+    entry the template never references (a caller who renamed a placeholder in one place and not
+    the other) -- both fail closed rather than silently emitting a literal placeholder or silently
+    dropping a caller-supplied value.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Template,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Specialized.OrderedDictionary]$Tokens
+    )
+
+    $consumed = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $unknown = [System.Collections.Generic.List[string]]::new()
+    $evaluator = {
+        param($match)
+        $name = $match.Value.Substring(2, $match.Value.Length - 4)
+        if (-not $Tokens.Contains($name)) {
+            [void]$unknown.Add($name)
+            return $match.Value
+        }
+        [void]$consumed.Add($name)
+        [string]$Tokens[$name]
+    }
+    $expanded = [regex]::Replace($Template, '__[A-Z0-9_]+__', $evaluator)
+
+    if ($unknown.Count -gt 0) {
+        $distinctUnknown = @($unknown | Select-Object -Unique)
+        throw "ATTRCUDA_TEMPLATE_UNKNOWN_TOKEN template placeholder(s) have no entry in -Tokens: $(($distinctUnknown | ForEach-Object { "__${_}__" }) -join ', ')"
+    }
+    $unusedKeys = @($Tokens.Keys | Where-Object { -not $consumed.Contains($_) })
+    if ($unusedKeys.Count -gt 0) {
+        throw "ATTRCUDA_TEMPLATE_UNUSED_TOKEN -Tokens entries never referenced by the template: $($unusedKeys -join ', ')"
+    }
+    $expanded
+}
+
 function Get-AttrCudaZipArchiveComment {
     <#
     .SYNOPSIS
@@ -1798,6 +1863,7 @@ Export-ModuleMember -Function `
     Get-AttrCudaArtifactNames, `
     New-AttrCudaBuildInfoHeader, `
     Get-AttrCudaEmbeddedFunctionSource, `
+    Expand-AttrCudaTemplate, `
     Get-AttrCudaZipArchiveComment, `
     Assert-AttrCudaSourceArchive, `
     Assert-AttrCudaSafeArtifactName, `

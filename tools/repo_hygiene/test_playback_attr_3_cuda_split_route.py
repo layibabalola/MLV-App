@@ -480,7 +480,10 @@ class SmokeRunnerPinTests(unittest.TestCase):
         self.assertNotIn("-RepoRelativePath $SmokeRunnerRelativePath", self.text)
         self.assertNotIn("SmokeRunnerRelativePath", self.text)
         self.assertIn("Get-AttrCudaClosureDigestHex -Closure $smokeRunnerClosure", self.text)
-        self.assertIn("Replace('__SMOKE_RUNNER_CLOSURE_DIR_NAME__', $smokeRunnerClosureDirName)", self.text)
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): substitution is now a single
+        # Expand-AttrCudaTemplate call over a token map, not a chained .Replace() sequence.
+        self.assertIn("SMOKE_RUNNER_CLOSURE_DIR_NAME = $smokeRunnerClosureDirName", self.text)
+        self.assertIn("Expand-AttrCudaTemplate -Template $template -Tokens", self.text)
 
     def test_the_refusal_runs_before_presentmon_and_before_deployment(self) -> None:
         refusal = self.text.index("ATTRCUDA_SMOKE_RUNNER_STALE")
@@ -673,7 +676,11 @@ class AttributionJobFixtureRehearsalTests(unittest.TestCase):
     def test_emitted_job_carries_the_flag_from_the_generators_membership_test(self) -> None:
         self.assertIn("$FixtureRehearsal = __FIXTURE_REHEARSAL__", self.text)
         self.assertIn("$fixtureRehearsalLiteral = if ($isFixtureRehearsal)", self.text)
-        self.assertIn("Replace('__FIXTURE_REHEARSAL__', $fixtureRehearsalLiteral)", self.text)
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): substitution is now a single
+        # Expand-AttrCudaTemplate call over a token map, not a chained .Replace() sequence -- see
+        # that function's own header in AttrCudaArtifacts.psm1.
+        self.assertIn("FIXTURE_REHEARSAL = $fixtureRehearsalLiteral", self.text)
+        self.assertIn("Expand-AttrCudaTemplate -Template $template -Tokens", self.text)
 
     def test_flag_is_recorded_in_every_summary_and_in_the_evidence_manifest(self) -> None:
         # summary.json is written on every early-exit venue; evidence-manifest.json only on

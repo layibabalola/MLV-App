@@ -213,15 +213,19 @@ Write-Output (([ordered]@{
 exit $exitCode
 '@
 
-    # __EMBEDDED_FUNCTIONS__ is spliced in LAST, after every other placeholder is substituted (the
-    # same ordering playback-attr-3-cuda-job.ps1 and attr3-stage-smoke-runner-job.ps1 use), so a
-    # placeholder-shaped token that happens to appear inside the verbatim module source can never
-    # be rewritten by an earlier .Replace() call.
-    $text = $template.
-        Replace('__JOB_ID__', $jobId).
-        Replace('__CLIP_ID__', $ClipId).
-        Replace('__PARTS_JSON__', $partsJson)
-    $text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
+    # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): a single-pass substitution over the WHOLE
+    # token map at once -- see Expand-AttrCudaTemplate's own header in AttrCudaArtifacts.psm1. A
+    # -ClipId shaped like 'a__PARTS_JSON__b' passes this function's own ValidatePattern (it is
+    # alnum/underscore/dot/hyphen only) and used to collide with a later .Replace() call in the
+    # old chained substitution; a single regex pass over the original template never rescans a
+    # substituted value, so that collision class cannot occur here regardless of which token a
+    # caller-controlled value happens to spell.
+    $text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
+        JOB_ID = $jobId
+        CLIP_ID = $ClipId
+        PARTS_JSON = $partsJson
+        EMBEDDED_FUNCTIONS = $embeddedFunctions
+    })
 
     if (-not (Test-Path -LiteralPath $OutDir)) { [void](New-Item -ItemType Directory -Path $OutDir -Force) }
     $OutDir = (Resolve-Path -LiteralPath $OutDir).Path

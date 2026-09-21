@@ -997,6 +997,32 @@ class GeneratorBakeTokenInjectionTests(_PwshCase):
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertFalse(out_file.exists())
 
+    def test_consent_receipt_filename_shaped_like_a_template_token_is_not_re_expanded(self) -> None:
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL). -ConsentReceiptFileName's own
+        # ValidatePattern is alnum/underscore/dot/hyphen, so 'a__EMBEDDED_FUNCTIONS__b.json'
+        # passes it -- and was the astra-cited concrete repro of the collision class this round
+        # closes: the old chained .Replace() calls substituted this value BEFORE
+        # __EMBEDDED_FUNCTIONS__, so the later call rescanned the already-substituted text and
+        # spliced ~600 lines of verifier source into the middle of the $ConsentReceiptFileName
+        # string literal, breaking the emitted job's own parse. A single-pass
+        # Expand-AttrCudaTemplate substitution never rescans a substituted value, so the job must
+        # now emit, parse cleanly, and carry the value literally.
+        colliding = "a__EMBEDDED_FUNCTIONS__b.json"
+        proc, out_file = self._generate_raw("-ConsentReceiptFileName", colliding)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(out_file.exists())
+        job_text = out_file.read_text(encoding="utf-8")
+        self.assertIn(f"$ConsentReceiptFileName = '{colliding}'", job_text)
+        parse_script = self.tmp / "parse_check.ps1"
+        parse_script.write_text(
+            "$t=$null; $e=$null\n"
+            f"[void][System.Management.Automation.Language.Parser]::ParseFile('{out_file}', [ref]$t, [ref]$e)\n"
+            "Write-Output $e.Count\n",
+            encoding="utf-8",
+        )
+        parse = _run_pwsh_file(parse_script)
+        self.assertEqual(parse.stdout.strip(), "0", parse.stdout + parse.stderr)
+
     def test_consent_receipt_filename_accepts_a_plain_name(self) -> None:
         # Proves the ValidatePattern above is not so strict it rejects the real default shape.
         proc, out_file = self._generate_raw(
@@ -1008,6 +1034,47 @@ class GeneratorBakeTokenInjectionTests(_PwshCase):
         self.assertIn(
             "$ConsentReceiptFileName = 'owner-footage-consent-20260916.json'", job_text
         )
+
+
+@requires_pwsh
+class ExpandAttrCudaTemplateTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): unit tests for the shared single-pass
+    templater every generator now calls instead of a chained .Replace() sequence."""
+
+    def test_a_value_containing_another_tokens_spelling_is_not_re_expanded(self) -> None:
+        proc = self.run_with_module(
+            "$tokens = [ordered]@{ FOO = 'hello'; BAR = 'a__FOO__b'; BAZ = 'z' }\n"
+            "$out = Expand-AttrCudaTemplate -Template 'X=__FOO__ Y=__BAR__ Z=__BAZ__' -Tokens $tokens\n"
+            "Write-Output $out\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("X=hello Y=a__FOO__b Z=z", proc.stdout)
+
+    def test_an_unknown_template_placeholder_throws(self) -> None:
+        proc = self.run_with_module(
+            _guard(
+                "Expand-AttrCudaTemplate -Template '__NOPE__' -Tokens ([ordered]@{ FOO = 'x' })"
+            )
+        )
+        self.assert_throws(proc, "ATTRCUDA_TEMPLATE_UNKNOWN_TOKEN")
+
+    def test_an_unconsumed_tokens_entry_throws(self) -> None:
+        proc = self.run_with_module(
+            _guard(
+                "Expand-AttrCudaTemplate -Template 'plain text, no placeholders' "
+                "-Tokens ([ordered]@{ FOO = 'x' })"
+            )
+        )
+        self.assert_throws(proc, "ATTRCUDA_TEMPLATE_UNUSED_TOKEN")
+
+    def test_every_token_consumed_and_no_unknown_placeholder_succeeds(self) -> None:
+        proc = self.run_with_module(
+            "$tokens = [ordered]@{ A = '1'; B = '2' }\n"
+            "$out = Expand-AttrCudaTemplate -Template '__A__-__B__' -Tokens $tokens\n"
+            "Write-Output $out\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("1-2", proc.stdout)
 
 
 @requires_pwsh
@@ -2366,6 +2433,30 @@ class SmokeRunnerStageJobTests(_PwshCase):
                 expected_sha = _git_blob_sha256(self.repo, self.shas[1], f"tools/profiling/{name}")
                 self.assertEqual(hashlib.sha256(staged.read_bytes()).hexdigest(), expected_sha)
         self.assertFalse((self.agent / "inbox").exists(), "no inbox should ever be created")
+
+    def test_agent_root_shaped_like_a_template_token_is_not_re_expanded(self) -> None:
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL). -AgentRoot's own ValidatePattern
+        # admits underscores, so a value shaped like '...__EMBEDDED_FUNCTIONS__' used to collide
+        # with the LATER embedded-function substitution in the old chained .Replace() calls,
+        # splicing verifier source into the middle of the $AgentRoot string literal and breaking
+        # the emitted job's own parse. A single-pass Expand-AttrCudaTemplate substitution cannot
+        # do that regardless of which token a caller-controlled value happens to spell.
+        colliding_agent_root = str(self.agent) + "__EMBEDDED_FUNCTIONS__"
+        proc = self._generate(AgentRoot=colliding_agent_root)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+        job_text = Path(payload["jobFile"]).read_text(encoding="utf-8")
+        self.assertIn(f"$AgentRoot = '{colliding_agent_root}'", job_text)
+        parse = subprocess.run(
+            [
+                PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                "$t=$null; $e=$null; "
+                f"[void][System.Management.Automation.Language.Parser]::ParseFile('{payload['jobFile']}', [ref]$t, [ref]$e); "
+                "Write-Output $e.Count",
+            ],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(parse.stdout.strip(), "0", parse.stdout + parse.stderr)
 
     def test_generation_refuses_when_a_pinned_sibling_is_no_longer_referenced(self) -> None:
         """ATTR3-SMOKE-RUNNER-DEPS-1 round 3: the stage generator calls
