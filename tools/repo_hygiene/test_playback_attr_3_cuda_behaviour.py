@@ -49,6 +49,10 @@ DLL_GENERATOR = ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-
 ATTRIBUTION_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1"
 STAGE_FIXTURE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-fixture-job.ps1"
 SMOKE_RUNNER_STAGE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-smoke-runner-job.ps1"
+# ATTR3-FOOTAGE-STAGE-1 round 3: these two also do a nested `Import-Module AttrCudaArtifacts.psm1`
+# from inside their own module body -- same fix, same regression coverage as OWNER_FOOTAGE_MODULE.
+STAGE_JOB_MODULE = ROOT / "tools" / "profiling" / "bachelor" / "Attr3FootageStageJob.psm1"
+PRESENCE_JOB_MODULE = ROOT / "tools" / "profiling" / "bachelor" / "Attr3FootagePresenceJob.psm1"
 
 PWSH = shutil.which("pwsh")
 GIT = shutil.which("git")
@@ -1758,6 +1762,101 @@ class OwnerFootagePrivateDirectoryLeakAndRefusalTests(_PwshCase):
         dumped = json.dumps(summary)
         self.assertNotIn(str(part0_path).replace("\\", "/"), dumped)
         self.assertNotIn(str(part1_path).replace("\\", "/"), dumped)
+
+
+@requires_pwsh
+class OwnerFootageModuleImportOrderTests(_PwshCase):
+    """ATTR3-FOOTAGE-STAGE-1 round 3: AttrCudaOwnerFootage.psm1's own nested
+    `Import-Module AttrCudaArtifacts.psm1 -Force` used to strip an already-loaded caller's global
+    copy of AttrCudaArtifacts.psm1 out from under it (Get-AttrCudaClosureDirectoryMismatch and
+    every other AttrCudaArtifacts export became unrecognized after the nested reimport), because a
+    -Force reimport from inside a module being loaded nests the target module under the loader's
+    own session state instead of leaving the caller's existing global module alone. Both import
+    orders must leave a global, callable copy of BOTH modules' exports behind."""
+
+    def test_artifacts_then_owner_footage_leaves_artifacts_globally_callable(self) -> None:
+        script = self.tmp / "order-artifacts-first.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            "Write-Output ('MISMATCH_RESULT=' + (Get-AttrCudaClosureDirectoryMismatch "
+            "-Dir 'C:\\attr3-no-such-directory' -Entries @(@{name='x';sha256=('a'*64)})))\n"
+            "Write-Output ('STAGING_NAME=' + (Get-AttrCudaOwnerFootageStagingName -Index 0))\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("MISMATCH_RESULT=", proc.stdout)
+        self.assertIn("STAGING_NAME=part-0", proc.stdout)
+
+    def test_owner_footage_then_artifacts_leaves_artifacts_globally_callable(self) -> None:
+        script = self.tmp / "order-owner-first.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            "Write-Output ('MISMATCH_RESULT=' + (Get-AttrCudaClosureDirectoryMismatch "
+            "-Dir 'C:\\attr3-no-such-directory' -Entries @(@{name='x';sha256=('a'*64)})))\n"
+            "Write-Output ('STAGING_NAME=' + (Get-AttrCudaOwnerFootageStagingName -Index 0))\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("MISMATCH_RESULT=", proc.stdout)
+        self.assertIn("STAGING_NAME=part-0", proc.stdout)
+
+    def test_production_import_order_leaves_every_module_globally_callable(self) -> None:
+        # The exact sequence attr3-footage-stage.ps1 itself uses: AttrCudaArtifacts.psm1, then
+        # AttrCudaOwnerFootage.psm1, then Attr3FootageStageJob.psm1 -- each of the latter two
+        # nested-`-Force`-reimports AttrCudaArtifacts.psm1 from inside its own module body, so a
+        # fix to only one of them still leaves the third import stripping the global copy again.
+        script = self.tmp / "production-order.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            f"Import-Module '{STAGE_JOB_MODULE}' -Force\n"
+            f"Import-Module '{PRESENCE_JOB_MODULE}' -Force\n"
+            "Write-Output ('MISMATCH_RESULT=' + (Get-AttrCudaClosureDirectoryMismatch "
+            "-Dir 'C:\\attr3-no-such-directory' -Entries @(@{name='x';sha256=('a'*64)})))\n"
+            "Write-Output ('STAGING_NAME=' + (Get-AttrCudaOwnerFootageStagingName -Index 0))\n"
+            "Write-Output ('SAFE_NAME=' + (Assert-AttrCudaSafeArtifactName -Name 'x.job.ps1'))\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("MISMATCH_RESULT=", proc.stdout)
+        self.assertIn("STAGING_NAME=part-0", proc.stdout)
+        self.assertIn("SAFE_NAME=x.job.ps1", proc.stdout)
+
+    def test_stage_job_module_first_leaves_artifacts_globally_callable(self) -> None:
+        script = self.tmp / "order-stagejob-first.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{STAGE_JOB_MODULE}' -Force\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            "Write-Output ('MISMATCH_RESULT=' + (Get-AttrCudaClosureDirectoryMismatch "
+            "-Dir 'C:\\attr3-no-such-directory' -Entries @(@{name='x';sha256=('a'*64)})))\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("MISMATCH_RESULT=", proc.stdout)
+
+    def test_presence_job_module_first_leaves_artifacts_globally_callable(self) -> None:
+        script = self.tmp / "order-presencejob-first.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{PRESENCE_JOB_MODULE}' -Force\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            "Write-Output ('MISMATCH_RESULT=' + (Get-AttrCudaClosureDirectoryMismatch "
+            "-Dir 'C:\\attr3-no-such-directory' -Entries @(@{name='x';sha256=('a'*64)})))\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("MISMATCH_RESULT=", proc.stdout)
 
 
 @requires_pwsh

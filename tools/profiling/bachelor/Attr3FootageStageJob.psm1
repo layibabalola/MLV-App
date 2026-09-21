@@ -13,14 +13,22 @@
 # and stages them itself through AttrCudaOwnerFootage.psm1's Send-AttrCudaOwnerFootagePartToStaging
 # before ever calling this function.
 #
-# WHAT THE EMITTED JOB DOES, ON BACHELOR. For each part: re-verifies the staged copy against the
-# length/sha256 this generator baked in (never trusting that a byte-identical local copy stayed
-# byte-identical once it crossed the share), creates the resolver's spec directory if it is
-# missing, and places the file at the resolver's spec path NON-OVERWRITING -- a file already there
-# with matching bytes is a no-op PASS, a file there with different bytes is refused and the target
-# is never touched. Either way the job removes only the staged neutral file IT created; nothing
-# else in the staging directory is ever enumerated or touched. Reports by part index and status
-# only -- never a path, in any branch, on any exit.
+# WHAT THE EMITTED JOB DOES, ON BACHELOR. First it proves the whole staging chain under
+# -AgentRoot, down to and including the per-job staging directory itself, carries no reparse
+# point -- before touching anything under it (ATTR3-FOOTAGE-STAGE-1 round 3). For each part: it
+# re-verifies the staged copy against the length/sha256 this generator baked in (never trusting
+# that a byte-identical local copy stayed byte-identical once it crossed the share), creates the
+# resolver's spec directory if it is missing, then PLACES the file at the resolver's spec path
+# NON-OVERWRITING via a same-volume verified copy: the staged bytes are copied into an owned,
+# per-attempt partial slot ON THE TARGET'S OWN VOLUME, verified there, renamed into place with a
+# same-volume atomic rename, and the bytes actually AT the spec path are re-hashed before the
+# part is ever reported PLACED -- so a cross-volume interruption can never expose a partial file
+# at the spec path, and PLACED always means "these exact bytes are confirmed there now" (round 3;
+# a direct cross-volume File.Move used to become copy-then-delete with no such guarantee). A file
+# already there with matching bytes is a no-op PASS, a file there with different bytes is refused
+# and the target is never touched. Either way the job removes only the staging-share neutral file
+# and the local partial slot IT created; nothing else in either directory is ever enumerated or
+# touched. Reports by part index and status only -- never a path, in any branch, on any exit.
 #
 # WHY BASE64, NOT A CHARACTER ALLOWLIST. Same reasoning as Attr3FootagePresenceJob.psm1's own
 # header: the job template wraps $PartsJson in a SINGLE-QUOTED PowerShell string literal, so a raw
@@ -32,7 +40,13 @@
 
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
+# ATTR3-FOOTAGE-STAGE-1 round 3: see AttrCudaOwnerFootage.psm1's own header for why an
+# unconditional `-Force` reimport here is wrong whenever a caller already imported
+# AttrCudaArtifacts.psm1 globally first (attr3-footage-stage.ps1 does exactly that before
+# importing this module) -- it strips the caller's existing global copy instead of reusing it.
+if (-not (Get-Command -Name 'Assert-AttrCudaSafeArtifactName' -ErrorAction SilentlyContinue)) {
+    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop
+}
 
 function New-Attr3FootageStageJob {
     <#
@@ -48,12 +62,18 @@ function New-Attr3FootageStageJob {
     encoding is, regardless of what this check would have allowed through (see
     Attr3FootagePresenceJob.psm1's identical validation for the same reasoning).
     Throws a distinguishable ATTR3_STAGE_* token on any refusal; returns a pscustomobject
-    describing the emitted job otherwise. The returned jobId is content-derived (a sha256 of the
-    clip id and every part's index/length/sha256) so a caller can name the SAME per-job staging
-    directory on the agent share before this job ever runs there.
+    describing the emitted job otherwise. The returned jobId carries a fresh random component
+    (round 3) so every call gets a unique id regardless of content -- a caller names the SAME
+    per-job staging directory on the agent share by using this RETURNED value, never by
+    recomputing it, and a retried invocation for the SAME clip and parts never collides with an
+    earlier attempt's own retained result receipt. sourceSha256 (also returned) is the stable,
+    content-derived audit/dedup key the id itself used to be.
     On Bachelor, the emitted job's per-part status is one of PLACED, ALREADY_PRESENT,
-    TARGET_CONFLICT, TARGET_PATH_UNSAFE, TARGET_DIR_FAILED, STAGE_SLOT_INVALID, or
-    STAGED_<Test-AttrCudaFootagePart status> (the staged copy itself failed verification); the
+    TARGET_CONFLICT, TARGET_PATH_UNSAFE, TARGET_STATE_UNKNOWN, TARGET_DIR_FAILED,
+    TARGET_VOLUME_COPY_FAILED, TARGET_VOLUME_VERIFY_<Test-AttrCudaFootagePart status> (the
+    same-volume partial copy failed verification), PLACED_VERIFY_<status> (the post-rename
+    re-hash at the spec path failed), STAGE_SLOT_INVALID, or STAGED_<status> (the staged copy
+    itself failed verification); the
     overall result is FOOTAGE_STAGED (exit 0) when every part is PLACED or ALREADY_PRESENT, else
     FOOTAGE_STAGE_REFUSED (exit 1). No exception's own text ever reaches this job's output, since
     it can contain a real path.
@@ -119,11 +139,10 @@ function New-Attr3FootageStageJob {
     # `[...]`, unless coerced -- the emitted job always expects a JSON array.
     if ($partsForJob.Count -eq 1) { $partsJson = "[$partsJson]" }
 
-    # A stable, content-derived disambiguator for the job id -- not a security control (the
-    # resolver's cross-check, upstream of this module, is), just a dedup/audit key that changes
-    # when the baked content does. The caller uses this SAME value to name the per-job staging
-    # directory on the agent share, so it is derived from clipId and parts alone, never from
-    # -AgentRoot (which can differ per host without changing what is being staged).
+    # A content-derived audit key -- not a security control (the resolver's cross-check, upstream
+    # of this module, is) -- reported separately as sourceSha256 below. It is NOT the job id: the
+    # caller uses the RETURNED jobId (below) to name the per-job staging directory on the agent
+    # share, so nothing requires the id itself to be content-derived.
     $canonicalPayload = ([ordered]@{ clipId = $ClipId; parts = $partsForJob }) | ConvertTo-Json -Compress -Depth 5
     $sha256Alg = [Security.Cryptography.SHA256]::Create()
     try {
@@ -134,7 +153,14 @@ function New-Attr3FootageStageJob {
         $sha256Alg.Dispose()
     }
 
-    $jobId = "attr3-footage-stage-$ClipId-$($sourceSha256.Substring(0, 12))"
+    # ATTR3-FOOTAGE-STAGE-1 round 3 (astra PR #148 MAJOR): a purely content-derived job id meant a
+    # rerun with the SAME clip and parts always submitted the SAME id, so once a prior attempt's
+    # result receipt existed on the share, um-run.ps1/UmRunDrop.psm1 refused every retry with
+    # UMRUN_JOBID_IN_USE -- forcing a full retransfer to look like the only option, when the real
+    # fix is a fresh id per attempt. The random component below makes every call's id unique
+    # regardless of content; $sourceSha256 (still reported) remains the stable audit/dedup key.
+    $attemptNonce = [guid]::NewGuid().ToString('N').Substring(0, 10)
+    $jobId = "attr3-footage-stage-$ClipId-$($sourceSha256.Substring(0, 12))-$attemptNonce"
     [void](Assert-AttrCudaSafeArtifactName -Name "$jobId.job.ps1")
 
     # ATTR3-FOOTAGE-STAGE-1: Test-AttrCudaFootagePart is the ONE shared per-part content
@@ -180,13 +206,47 @@ $PartCount = $RawParts.Count
 
 Say "START clip=$ClipId parts=$PartCount"
 
+# ATTR3-FOOTAGE-STAGE-1 round 3 (astra PR #148 MAJOR, containment): prove the ENTIRE staging
+# chain under $AgentRoot -- down to and including $StageDir itself -- carries no reparse point
+# BEFORE a single byte is read from or deleted under it. A junction planted at $StageDir (or any
+# existing ancestor above it) would otherwise redirect every Copy-Item/Remove-Item below outside
+# the owned staging directory. Checked once, up front, rather than per part: nothing under
+# $StageDir is touched at all if this refuses.
+$stagingChainSafe = $true
+try {
+    [void](Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $AgentRoot -Path $StageDir)
+} catch {
+    $stagingChainSafe = $false
+}
+
 $results = New-Object System.Collections.Generic.List[object]
+
+if (-not $stagingChainSafe) {
+    foreach ($rawPart in $RawParts) {
+        $results.Add([ordered]@{ index = [int]$rawPart.index; status = 'STAGE_SLOT_INVALID' })
+        Write-Output "PART=$([int]$rawPart.index) STATUS=STAGE_SLOT_INVALID"
+    }
+    Write-Output "RESULT=FOOTAGE_STAGE_REFUSED CLIP=$ClipId PARTS=$PartCount"
+    Write-Output (([ordered]@{
+        schema = 'mlvapp.attr3-footage-stage.v1'
+        jobId = $JobId
+        clipId = $ClipId
+        result = 'FOOTAGE_STAGE_REFUSED'
+        partCount = $PartCount
+        parts = $results
+    }) | ConvertTo-Json -Compress -Depth 5)
+    exit 1
+}
 
 # A single recorder so every one of the branches below cleans up its OWN staged neutral file (or
 # explicitly declines to, when there was never a resolvable slot to clean) the same way, rather
 # than each branch repeating the same three lines with room for one of them to forget it.
 function Record-PartResult([int]$Index, [string]$Status, [string]$CleanupPath) {
-    if ($CleanupPath) { [void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $CleanupPath) }
+    # -WarningAction SilentlyContinue (round 3, no path in any branch): Remove-AttrCudaPartialFile
+    # writes a Write-Warning diagnostic naming the path on a refused cleanup -- useful for a human
+    # operator tailing this job's own log on Bachelor directly, but this job's RESULT is what
+    # travels back to the submitter over um-run.ps1, and that channel must never carry a path.
+    if ($CleanupPath) { [void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $CleanupPath -WarningAction SilentlyContinue) }
     $results.Add([ordered]@{ index = $Index; status = $Status })
     Write-Output "PART=$Index STATUS=$Status"
 }
@@ -228,8 +288,18 @@ foreach ($rawPart in $RawParts) {
     }
 
     # Already present: a byte-identical target is a no-op PASS, a different one is refused --
-    # never overwritten -- and either way the staged copy is no longer needed.
-    if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+    # never overwritten -- and either way the staged copy is no longer needed. Wrapped (round 3,
+    # no path in any branch): under $ErrorActionPreference = 'Stop' an unwrapped Test-Path call
+    # can throw a TERMINATING provider error (e.g. an I/O fault) whose own exception text can
+    # carry $targetPath, escaping this loop entirely rather than mapping to a fixed status token.
+    $targetExists = $false
+    try {
+        $targetExists = Test-Path -LiteralPath $targetPath -PathType Leaf -ErrorAction Stop
+    } catch {
+        Record-PartResult -Index $index -Status 'TARGET_STATE_UNKNOWN' -CleanupPath $stagedPath
+        continue
+    }
+    if ($targetExists) {
         $existingStatus = Test-AttrCudaFootagePart -Path $targetPath -ExpectedLength $expectedLength -ExpectedSha256 $expectedSha256
         if ($existingStatus -eq 'PASS') {
             Record-PartResult -Index $index -Status 'ALREADY_PRESENT' -CleanupPath $stagedPath
@@ -262,13 +332,50 @@ foreach ($rawPart in $RawParts) {
         continue
     }
 
+    # ATTR3-FOOTAGE-STAGE-1 round 3 (sol BLOCKER, astra MAJOR x2): $stagedPath (under $AgentRoot,
+    # the agent SHARE staging area) and $targetPath (the resolver's spec path) are not guaranteed
+    # to be on the same volume -- a direct File.Move across volumes silently becomes copy-then-
+    # delete, which can expose a partial file AT THE SPEC PATH on interruption or a full target
+    # volume, with no post-move check that anything actually arrived intact. The fix: copy the
+    # already share-verified bytes into an OWNED, per-attempt partial slot ON THE TARGET'S OWN
+    # VOLUME (named from $JobId, which is unique per attempt -- so it can never collide with, or
+    # be mistaken for, a partial another attempt created), verify THAT copy, publish it with a
+    # same-volume non-overwriting rename (genuinely atomic, since both sides are now on one
+    # volume), then RE-HASH the bytes actually sitting at the spec path before ever reporting
+    # PLACED. Any failure along this path removes only the partial slot THIS attempt created --
+    # never $targetPath, never another attempt's partial.
+    $localPartialName = ".attr3-footage-stage-$JobId-part$index.partial"
+    $localPartialPath = $null
     try {
-        [void](Publish-AttrCudaFileMoveNonOverwriting -Source $stagedPath -Destination $targetPath)
+        $localPartialPath = Assert-AttrCudaDirectChild -Root $targetDir -Path (Join-Path $targetDir $localPartialName) -Label "local partial part $index"
+    } catch {
+        Record-PartResult -Index $index -Status 'TARGET_PATH_UNSAFE' -CleanupPath $stagedPath
+        continue
+    }
+
+    try {
+        Copy-Item -LiteralPath $stagedPath -Destination $localPartialPath -Force -ErrorAction Stop
+    } catch {
+        try { Remove-Item -LiteralPath $localPartialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        Record-PartResult -Index $index -Status 'TARGET_VOLUME_COPY_FAILED' -CleanupPath $stagedPath
+        continue
+    }
+
+    $localStatus = Test-AttrCudaFootagePart -Path $localPartialPath -ExpectedLength $expectedLength -ExpectedSha256 $expectedSha256
+    if ($localStatus -ne 'PASS') {
+        try { Remove-Item -LiteralPath $localPartialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        Record-PartResult -Index $index -Status "TARGET_VOLUME_VERIFY_$localStatus" -CleanupPath $stagedPath
+        continue
+    }
+
+    try {
+        [void](Publish-AttrCudaFileMoveNonOverwriting -Source $localPartialPath -Destination $targetPath)
     } catch {
         # A concurrent placer finished this exact part first -- re-check the bytes already there
-        # rather than assume either outcome. Either way the move never happened, so the staged
-        # copy this job made is still $stagedPath and still needs cleaning up.
+        # rather than assume either outcome. Either way the same-volume rename never happened, so
+        # the local partial this attempt made is still there and still needs cleaning up.
         $racedStatus = Test-AttrCudaFootagePart -Path $targetPath -ExpectedLength $expectedLength -ExpectedSha256 $expectedSha256
+        try { Remove-Item -LiteralPath $localPartialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
         if ($racedStatus -eq 'PASS') {
             Record-PartResult -Index $index -Status 'ALREADY_PRESENT' -CleanupPath $stagedPath
         } else {
@@ -276,8 +383,19 @@ foreach ($rawPart in $RawParts) {
         }
         continue
     }
-    # The move already relocated the staged copy -- there is nothing left at $stagedPath to clean.
-    Record-PartResult -Index $index -Status 'PLACED' -CleanupPath $null
+
+    # The rename succeeded -- re-hash the bytes actually AT THE SPEC PATH now. A same-volume
+    # rename is atomic against a concurrent READER or another RENAME, but never trust that alone
+    # proves the arrived bytes are correct: report PLACED only when a fresh read confirms it.
+    $placedStatus = Test-AttrCudaFootagePart -Path $targetPath -ExpectedLength $expectedLength -ExpectedSha256 $expectedSha256
+    if ($placedStatus -ne 'PASS') {
+        Record-PartResult -Index $index -Status "PLACED_VERIFY_$placedStatus" -CleanupPath $stagedPath
+        continue
+    }
+    # The rename already relocated the local partial -- nothing left there to clean -- but
+    # $stagedPath (the SHARE-side staged copy) was only ever COPIED from, never moved, so it is
+    # still there and still needs cleaning up now that its bytes are safely verified at the target.
+    Record-PartResult -Index $index -Status 'PLACED' -CleanupPath $stagedPath
 }
 
 # Overall-result mapping: only a part that is actually AT the target (placed just now, or
@@ -319,7 +437,10 @@ exit $exitCode
     $jobPath = Join-Path $OutDir "$jobId.job.ps1"
     [IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))
 
-    Write-Output "RESULT=FOOTAGE_STAGE_JOB_EMITTED CLIP=$ClipId PARTS=$($partsForJob.Count) SOURCE_SHA256=$sourceSha256 JOB=$jobPath"
+    # ATTR3-FOOTAGE-STAGE-1 round 3 (no path in any branch): JOB= now names the opaque job id,
+    # never the local job FILE path -- the id alone is enough for a caller to correlate this
+    # emission with the submission that follows.
+    Write-Output "RESULT=FOOTAGE_STAGE_JOB_EMITTED CLIP=$ClipId PARTS=$($partsForJob.Count) SOURCE_SHA256=$sourceSha256 JOB=$jobId"
 
     [pscustomobject]@{
         jobFile = $jobPath

@@ -36,6 +36,11 @@ param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')]
     [string]$ClipId,
 
+    # A FIXED SHAPE, not an arbitrary caller-controlled path: exactly `\\host\share`, matching
+    # the default's own shape (ATTR3-FOOTAGE-STAGE-1 round 3, sol/astra PR #148). This still
+    # admits a test's local stand-in share (a plain UNC-shaped path is not required to resolve
+    # to a real host) while refusing a deeper caller-chosen subpath.
+    [ValidatePattern('^\\\\[A-Za-z0-9_.-]+\\[A-Za-z0-9_.-]+$')]
     [string]$AgentShare = '\\bachelor\mlv-agent',
 
     # The LOCAL path the agent share above resolves to ON BACHELOR ITSELF -- baked into the
@@ -49,8 +54,6 @@ param(
     [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
     [string]$AgentRootOnHost = 'C:\mlvtmp\mlv-agent',
 
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path,
-
     [int]$TimeoutSec = 1800
 )
 
@@ -58,8 +61,13 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaOwnerFootage.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Attr3FootageStageJob.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Attr3FootagePresenceJob.psm1') -Force
 
-$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+# ATTR3-FOOTAGE-STAGE-1 round 3 (sol BLOCKER, astra MAJOR): -RepoRoot used to be a public
+# parameter, so a caller-supplied alternate tree could supply a replacement resolver and
+# submitter -- the id-only interface's actual authority boundary. The resolver and submitter
+# now come ONLY from the tracked checkout that holds THIS script, never from caller input.
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 
 function Resolve-Attr3StagePython {
     <#
@@ -86,7 +94,10 @@ function Resolve-Attr3StagePython {
 
 $ResolverPath = Join-Path $RepoRoot 'tools\gates\resolve_consented_clip.py'
 if (-not (Test-Path -LiteralPath $ResolverPath -PathType Leaf)) {
-    throw "ATTR3_FOOTAGE_STAGE_RESOLVER_MISSING resolver not found at $ResolverPath"
+    # ATTR3-FOOTAGE-STAGE-1 round 3 (no path in any branch): the resolver's location is fixed
+    # relative to this tracked script, never caller input, so naming it here has no diagnostic
+    # value a caller could act on and only ever leaked this host's own directory layout.
+    throw 'ATTR3_FOOTAGE_STAGE_RESOLVER_MISSING the tracked resolver script is missing from this checkout'
 }
 $py = Resolve-Attr3StagePython
 
@@ -119,7 +130,36 @@ if ($resolved.clipId -cne $ClipId) {
 $parts = @($resolved.parts | Sort-Object { [int]$_.index })
 Write-Output "RESOLVED clip=$ClipId parts=$($parts.Count)"
 
-# --- 2. VERIFY every source part on THIS host, before anything is sent anywhere ----------------
+$umRun = Join-Path $RepoRoot 'tools\profiling\um-run.ps1'
+
+# --- 2. PRESENCE PREFLIGHT: ask Bachelor whether it already holds every part, byte-exact, at its
+#        spec path, BEFORE verifying or transferring a single byte (ATTR3-FOOTAGE-STAGE-1 round 3,
+#        sol/astra PR #148 MAJOR: a successful prior run consumes its staged copies, so without
+#        this a rerun always retransfers before it can even ask). Reuses the existing footage-
+#        presence probe (Attr3FootagePresenceJob.psm1) -- never a second implementation of "does
+#        Bachelor already have this". Its jobId now carries a fresh random component on every
+#        call, so a retained receipt from an EARLIER attempt's own preflight never blocks this
+#        one (UMRUN_JOBID_IN_USE), which would otherwise silently fall through to a full
+#        retransfer.
+$presenceOutDir = Join-Path ([IO.Path]::GetTempPath()) ("attr3-footage-stage-presence-$([guid]::NewGuid().ToString('N'))")
+$presenceJob = New-Attr3FootagePresenceJob -ClipId $ClipId -Parts $parts -OutDir $presenceOutDir
+$alreadyPresent = $false
+try {
+    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec
+    if ($presenceResult.exitCode -eq 0) { $alreadyPresent = $true }
+} catch {
+    # Presence is an optimization, not a correctness requirement -- if the preflight itself could
+    # not be submitted or timed out, fall through to the normal verify-and-transfer path below
+    # rather than failing the whole run over an inconclusive probe.
+    Write-Output 'PRESENCE PREFLIGHT=INCONCLUSIVE'
+}
+
+if ($alreadyPresent) {
+    Write-Output "RESULT=FOOTAGE_STAGED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($presenceJob.jobId) ALREADY_PRESENT=true"
+    exit 0
+}
+
+# --- 3. VERIFY every source part on THIS host, before anything is sent anywhere ----------------
 foreach ($part in $parts) {
     $status = Test-AttrCudaFootagePart -Path $part.path -ExpectedLength ([int64]$part.length) -ExpectedSha256 ([string]$part.sha256)
     Write-Output "SOURCE PART=$($part.index) STATUS=$status"
@@ -128,13 +168,15 @@ foreach ($part in $parts) {
     }
 }
 
-# --- 3. BUILD the job first: its content-derived jobId names the SAME per-job staging directory
-#        this script transfers into next, so both sides agree on it without exchanging state. ---
+# --- 4. BUILD the job first: its jobId names the SAME per-job staging directory this script
+#        transfers into next, so both sides agree on it without exchanging state. A fresh random
+#        component in the jobId (round 3) means a retried invocation never collides with a
+#        retained receipt from an earlier attempt's own submission (UMRUN_JOBID_IN_USE).
 $stageOutDir = Join-Path ([IO.Path]::GetTempPath()) ("attr3-footage-stage-job-$([guid]::NewGuid().ToString('N'))")
 $job = New-Attr3FootageStageJob -ClipId $ClipId -Parts $parts -OutDir $stageOutDir -AgentRoot $AgentRootOnHost
 $shareStageDir = Join-Path $AgentShare ("footage-stage\" + $job.jobId)
 
-# --- 4. TRANSFER every verified source part to the agent share, under a neutral, index-derived
+# --- 5. TRANSFER every verified source part to the agent share, under a neutral, index-derived
 #        name, into that dedicated staging directory. -------------------------------------------
 foreach ($part in $parts) {
     try {
@@ -152,9 +194,16 @@ foreach ($part in $parts) {
     Write-Output "TRANSFER PART=$($part.index) STATUS=STAGED"
 }
 
-# --- 5. SUBMIT the pre-built job through um-run.ps1, the only tracked writer of the agent inbox.
-$umRun = Join-Path $RepoRoot 'tools\profiling\um-run.ps1'
-$result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec
+# --- 6. SUBMIT the pre-built job through um-run.ps1, the only tracked writer of the agent inbox.
+#        Any exception um-run.ps1 itself throws (a dead-agent heartbeat path, a missing script
+#        path, a poll timeout naming the result file) carries an operational path in its own
+#        text (round 3, no-path-in-any-branch) -- converted to a fixed token before it can ever
+#        reach this script's own output.
+try {
+    $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec
+} catch {
+    throw "ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED job could not be submitted or its result could not be retrieved"
+}
 
 if ($result.stdout) { Write-Output $result.stdout }
 if ($result.stderr) { Write-Output $result.stderr }

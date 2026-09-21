@@ -377,6 +377,30 @@ class FootagePresenceJobTests(unittest.TestCase):
         self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
         self._assert_no_token(run.stdout, run.stderr)
 
+    def test_repeated_builds_for_identical_content_get_different_job_ids(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 3: a purely content-derived job id meant a repeated presence
+        # check for the SAME clip and parts always submitted the SAME id, so a retained result
+        # receipt from an earlier probe refused every later one (UMRUN_JOBID_IN_USE). The id must
+        # differ per call; the reported SOURCE_SHA256 audit key must not.
+        first_proc = self.generate()
+        first_job = self.job_path(first_proc)
+        first_job_id = first_job.name[: -len(".job.ps1")]
+        first_job.unlink()
+        second_proc = self.generate()
+        second_job = self.job_path(second_proc)
+        second_job_id = second_job.name[: -len(".job.ps1")]
+        self.assertNotEqual(first_job_id, second_job_id)
+        first_sha = first_proc.stdout.split("SOURCE_SHA256=")[1].split()[0]
+        second_sha = second_proc.stdout.split("SOURCE_SHA256=")[1].split()[0]
+        self.assertEqual(first_sha, second_sha)
+
+    def test_job_emission_prints_the_job_id_never_the_local_job_file_path(self) -> None:
+        proc = self.generate()
+        job = self.job_path(proc)
+        job_id = job.name[: -len(".job.ps1")]
+        self.assertIn(f"JOB={job_id}", proc.stdout)
+        self.assertNotIn(str(job), proc.stdout + proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

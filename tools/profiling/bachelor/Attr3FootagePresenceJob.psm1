@@ -33,7 +33,13 @@
 
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
+# ATTR3-FOOTAGE-STAGE-1 round 3: see AttrCudaOwnerFootage.psm1's own header for why an
+# unconditional `-Force` reimport here is wrong whenever a caller already imported
+# AttrCudaArtifacts.psm1 globally first -- it strips the caller's existing global copy instead
+# of reusing it.
+if (-not (Get-Command -Name 'Assert-AttrCudaSafeArtifactName' -ErrorAction SilentlyContinue)) {
+    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop
+}
 
 function New-Attr3FootagePresenceJob {
     <#
@@ -112,8 +118,7 @@ function New-Attr3FootagePresenceJob {
     # `[...]`, unless coerced -- the emitted job always expects a JSON array.
     if ($partsForJob.Count -eq 1) { $partsJson = "[$partsJson]" }
 
-    # A stable, content-derived disambiguator for the job id -- not a security control (the
-    # resolver's cross-check is), just a dedup/audit key that changes when the baked content does.
+    # A content-derived audit key -- not a security control (the resolver's cross-check is).
     $canonicalPayload = ([ordered]@{ clipId = $ClipId; parts = $partsForJob }) | ConvertTo-Json -Compress -Depth 5
     $sha256Alg = [Security.Cryptography.SHA256]::Create()
     try {
@@ -124,7 +129,14 @@ function New-Attr3FootagePresenceJob {
         $sha256Alg.Dispose()
     }
 
-    $jobId = "attr3-footage-presence-$ClipId-$($sourceSha256.Substring(0, 12))"
+    # ATTR3-FOOTAGE-STAGE-1 round 3: a purely content-derived id meant a repeated presence check
+    # for the SAME clip and parts (e.g. a caller re-probing before every retry of a transfer)
+    # always submitted the SAME id, so a retained result receipt from an earlier probe refused
+    # every later one with UMRUN_JOBID_IN_USE -- indistinguishable, from the caller's side, from a
+    # submission failure. A fresh random component makes every call's id unique regardless of
+    # content; $sourceSha256 (still returned) remains the stable audit/dedup key.
+    $attemptNonce = [guid]::NewGuid().ToString('N').Substring(0, 10)
+    $jobId = "attr3-footage-presence-$ClipId-$($sourceSha256.Substring(0, 12))-$attemptNonce"
     [void](Assert-AttrCudaSafeArtifactName -Name "$jobId.job.ps1")
 
     # ATTR3-FOOTAGE-BIND-1 PR-B: Test-AttrCudaFootagePart is the ONE shared per-part content
@@ -232,7 +244,9 @@ exit $exitCode
     $jobPath = Join-Path $OutDir "$jobId.job.ps1"
     [IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))
 
-    Write-Output "RESULT=FOOTAGE_PRESENCE_JOB_EMITTED CLIP=$ClipId PARTS=$($partsForJob.Count) SOURCE_SHA256=$sourceSha256 JOB=$jobPath"
+    # ATTR3-FOOTAGE-STAGE-1 round 3 (no path in any branch): JOB= now names the opaque job id,
+    # never the local job FILE path.
+    Write-Output "RESULT=FOOTAGE_PRESENCE_JOB_EMITTED CLIP=$ClipId PARTS=$($partsForJob.Count) SOURCE_SHA256=$sourceSha256 JOB=$jobId"
 
     [pscustomobject]@{
         jobFile = $jobPath

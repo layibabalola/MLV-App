@@ -55,7 +55,20 @@
 
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
+# ATTR3-FOOTAGE-STAGE-1 round 3: this module calls Test-AttrCudaFootagePart (AttrCudaArtifacts.psm1)
+# unqualified from Send-AttrCudaOwnerFootagePartToStaging below. A plain `Import-Module ... -Force`
+# here is wrong whenever a caller already imported AttrCudaArtifacts.psm1 into its own (global)
+# session first: importing it again from inside THIS module's script body nests it under this
+# module's session state instead, and -Force compounds that by tearing down the caller's existing
+# global copy in the process -- so every OTHER already-loaded caller of AttrCudaArtifacts.psm1
+# (attr3-footage-stage.ps1, the job generators) loses its own commands out from under it. Importing
+# only when the needed command is not already available -- and, when we do import, doing it -Global
+# so a caller who loads THIS module first still ends up with AttrCudaArtifacts available globally --
+# leaves an already-loaded caller's copy alone and still satisfies a caller who loads only this
+# module.
+if (-not (Get-Command -Name 'Test-AttrCudaFootagePart' -ErrorAction SilentlyContinue)) {
+    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop
+}
 
 function Get-AttrCudaOwnerFootageStagingName {
     <#
@@ -97,6 +110,12 @@ function Send-AttrCudaOwnerFootagePartToStaging {
     Throws OWNER_FOOTAGE_STAGE_COPY_FAILED, OWNER_FOOTAGE_STAGE_VERIFY_FAILED (the share-side
     copy did not round-trip) or OWNER_FOOTAGE_STAGE_CONFLICT (index only, never a path). Returns
     the final staged path (a neutral share path, not the source) on success.
+    ATTR3-FOOTAGE-STAGE-1 round 3 (astra PR #148 MAJOR, containment): before anything is created
+    or copied, every EXISTING ancestor of -StagingDirectory, down to and including
+    -StagingDirectory itself, is proved free of reparse points -- a junction planted at or above
+    -StagingDirectory would otherwise redirect the copy, the stale-partial cleanup, or a later
+    read outside the owned staging directory. Throws OWNER_FOOTAGE_STAGE_COPY_FAILED (index only)
+    on that check alone, before anything under -StagingDirectory is touched.
     #>
     [CmdletBinding()]
     param(
@@ -106,6 +125,13 @@ function Send-AttrCudaOwnerFootagePartToStaging {
         [Parameter(Mandatory = $true)][int64]$ExpectedLength,
         [Parameter(Mandatory = $true)][string]$ExpectedSha256
     )
+
+    $stagingDriveRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($StagingDirectory))
+    try {
+        $StagingDirectory = Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $stagingDriveRoot -Path $StagingDirectory
+    } catch {
+        throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index staging directory chain contains a reparse point"
+    }
 
     try {
         if (-not (Test-Path -LiteralPath $StagingDirectory -PathType Container)) {
