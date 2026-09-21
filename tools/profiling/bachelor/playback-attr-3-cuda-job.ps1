@@ -122,8 +122,14 @@ param(
     # -ClipId, from the same agent root the template's own $Root already names.
     # REFUSED outright for an owner clip id (ATTR3-FOOTAGE-BIND-1): the owner's footage path is
     # resolved through tools/gates/resolve_consented_clip.py, never typed by a caller.
+    # NO ValidatePattern here (round 2, sol/astra BLOCKER): a parameter-level validator runs
+    # BEFORE this file's own owner/fixture classification, and PowerShell's binding-failure
+    # message echoes the rejected value verbatim -- so a forward-slash owner-clip path (real
+    # shape) was disclosed in the diagnostic instead of reaching the path-free
+    # PLAYBACK_ATTR3_CLIPPATH_REFUSED throw below. Validated in the body instead, AFTER
+    # classification: the owner arm never echoes the value, only the fixture arm's allowlist
+    # check does (a fixture path is never footage).
     [Parameter(Mandatory = $false)]
-    [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$')]
     [string]$ClipPath = '',
 
     # A fixture id's cached bytes, authenticated before this generator will bake -ClipPath
@@ -167,14 +173,29 @@ param(
     # of current master since its Qt runtime may not match). The hub must still verify the
     # derived package is actually staged in the Bachelor cache (built from -SourceCommit, not a
     # stale one) before submitting.
+    # ValidatePattern (round 2, astra BLOCKER audit): this plain filename is baked into the
+    # emitted job's single-quoted __BASE_PACKAGE_ZIP__ literal. \z, not $, matching -ClipId's
+    # own pattern above -- .NET's $ matches before a terminal newline too.
+    [ValidatePattern('^[A-Za-z0-9._-]+\.zip\z')]
     [string]$BasePackageZip = "MLVApp-playback-attr-3-cuda-$($SourceCommit.Substring(0,12))-pkg.zip",
+
+    [ValidatePattern('^[A-Za-z0-9._-]+\.exe\z')]
     [string]$BasePackageExeName = 'MLVApp.exe',
 
+    [ValidatePattern('^[A-Za-z0-9._-]+\.exe\z')]
     [string]$PresentMonName = 'PresentMon-2.5.1-x64.exe',
     [string]$PresentMonSha256 = '9BEC3083069F58F911E6A512F4806DB51A27BD096103087BC1D05EF54C80A191',
 
     # Owner consent for clip M16-1243 on this card; cited (never resolved to a path
     # here) in the evidence manifest for audit trail.
+    # ValidatePattern (round 2, astra BLOCKER): this value used to be baked into the emitted
+    # job's single-quoted __CONSENT_RECEIPT__ literal with no validation and no quote-escaping,
+    # so a receipt-name string shaped like "'; $OwnerPartsJson = '<forged parts>'; #" closed the
+    # literal early and re-assigned OwnerPartsJson before the job's own content gate ever ran --
+    # arbitrary paths/lengths/hashes, independent of the resolver. Restricted to a plain
+    # <name>.json basename, AND still escaped at bake time below (defense in depth, matching the
+    # -ClipPath / -OwnerPartsJson treatment): neither protection alone should be the only one.
+    [ValidatePattern('^[A-Za-z0-9._-]+\.json\z')]
     [string]$ConsentReceiptFileName = 'owner-footage-consent-20260916.json',
 
     [string]$LlrawprocRelativePath = 'src/mlv/llrawproc/llrawproc.c'
@@ -1166,14 +1187,14 @@ $text = $template.
     Replace('__LLRAWPROC_BLOB_ID__', $llrawprocBlobId).
     Replace('__EXE_NAME__', $exeName).
     Replace('__RECON_NAME__', $reconName).
-    Replace('__BASE_PACKAGE_ZIP__', $BasePackageZip).
-    Replace('__BASE_PACKAGE_EXE_NAME__', $BasePackageExeName).
-    Replace('__PRESENTMON_NAME__', $PresentMonName).
+    Replace('__BASE_PACKAGE_ZIP__', $BasePackageZip.Replace("'", "''")).
+    Replace('__BASE_PACKAGE_EXE_NAME__', $BasePackageExeName.Replace("'", "''")).
+    Replace('__PRESENTMON_NAME__', $PresentMonName.Replace("'", "''")).
     Replace('__PRESENTMON_SHA256__', $PresentMonSha256).
     Replace('__SMOKE_RUNNER_CLOSURE__', $smokeRunnerClosureLiteral).
     Replace('__SMOKE_RUNNER_CLOSURE_DIR_NAME__', $smokeRunnerClosureDirName).
     Replace('__SMOKE_RUNNER_NAME__', $smokeRunnerName).
-    Replace('__CONSENT_RECEIPT__', $ConsentReceiptFileName).
+    Replace('__CONSENT_RECEIPT__', $ConsentReceiptFileName.Replace("'", "''")).
     Replace('__FIXTURE_REHEARSAL__', $fixtureRehearsalLiteral).
     Replace('__AGENT_ROOT__', $AgentRoot).
     Replace('__FIXTURE_SHA256__', $FixtureSha256)

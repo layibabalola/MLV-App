@@ -917,6 +917,98 @@ class AttributionJobOptionalClipPathTests(_PwshCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn(f"$AuthorizedClipPath = '{explicit_path}'", out_file.read_text(encoding="utf-8"))
 
+    # ATTR3-FOOTAGE-BIND-1 PR-B round 2 (sol BLOCKER / astra MAJOR): -ClipPath used to carry a
+    # PARAMETER-LEVEL ValidatePattern that ran before owner/fixture classification, so a
+    # forward-slash value (the real owner-part path shape) failed PowerShell's own binding
+    # validation and got ECHOED in the diagnostic instead of reaching the path-free
+    # PLAYBACK_ATTR3_CLIPPATH_REFUSED throw. Validation now happens in the body, after
+    # classification, so an owner id's -ClipPath value never appears in any message.
+    def test_an_owner_id_with_a_forward_slash_clippath_is_refused_not_echoed(self) -> None:
+        owner_path = "C:/mlvtmp/mlv-agent/cache/M16-1243.raw"
+        proc, out_file = self._generate(ClipId="M16-1243", ClipPath=owner_path)
+        self.assertNotEqual(proc.returncode, 0)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REFUSED", message)
+        self.assertNotIn(owner_path, message)
+        self.assertFalse(out_file.exists())
+
+
+@requires_pwsh
+@requires_git
+class GeneratorBakeTokenInjectionTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 2 (astra BLOCKER): every __TOKEN__ this generator bakes
+    into the emitted job's single-quoted template literals must be either strictly validated to
+    a safe alphabet or escaped for its quoting context -- never neither. -ConsentReceiptFileName
+    was the astra-cited concrete repro (a value shaped like "'; $OwnerPartsJson = '<forged
+    parts>'; #" closed the literal early and re-assigned OwnerPartsJson before the job's own
+    content gate ever ran); -BasePackageZip, -BasePackageExeName and -PresentMonName carried the
+    identical defect (no ValidatePattern, no escaping at the Replace() call site) and are fixed
+    and tested the same way. Each is now restricted to a plain basename via ValidatePattern
+    (belt) and additionally escaped at bake time (suspenders), so a value containing a quote and
+    a newline is refused at parameter binding -- never silently baked."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+
+    def _generate_raw(self, extra_flag: str, malicious_value: str):
+        # Bypasses the simple `-Key 'Value'` formatter in AttributionJobOptionalClipPathTests
+        # (that formatter cannot carry a value containing a literal quote): the malicious value
+        # is doubled here exactly the way a caller's own shell/quoting layer would have to do it
+        # to deliver a literal `'` through to the generator's PowerShell parameter binder.
+        out_file = self.staging / "job.ps1"
+        escaped_for_outer_literal = malicious_value.replace("'", "''")
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'tiny_dual_iso' "
+            f"-FixtureSha256 '{'b' * 64}' "
+            f"{extra_flag} '{escaped_for_outer_literal}' "
+            f"-OutFile '{out_file}' -RepoRoot '{self.repo}'\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script), out_file
+
+    def test_consent_receipt_filename_with_quote_and_newline_is_refused(self) -> None:
+        malicious = "x'; $Global:Pwned = 'yes'; #\n.json"
+        proc, out_file = self._generate_raw("-ConsentReceiptFileName", malicious)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_base_package_zip_with_quote_and_newline_is_refused(self) -> None:
+        malicious = "x'; $Global:Pwned = 'yes'; #\n.zip"
+        proc, out_file = self._generate_raw("-BasePackageZip", malicious)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_base_package_exe_name_with_quote_and_newline_is_refused(self) -> None:
+        malicious = "x'; $Global:Pwned = 'yes'; #\n.exe"
+        proc, out_file = self._generate_raw("-BasePackageExeName", malicious)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_presentmon_name_with_quote_and_newline_is_refused(self) -> None:
+        malicious = "x'; $Global:Pwned = 'yes'; #\n.exe"
+        proc, out_file = self._generate_raw("-PresentMonName", malicious)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_consent_receipt_filename_accepts_a_plain_name(self) -> None:
+        # Proves the ValidatePattern above is not so strict it rejects the real default shape.
+        proc, out_file = self._generate_raw(
+            "-ConsentReceiptFileName", "owner-footage-consent-20260916.json"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(out_file.exists())
+        job_text = out_file.read_text(encoding="utf-8")
+        self.assertIn(
+            "$ConsentReceiptFileName = 'owner-footage-consent-20260916.json'", job_text
+        )
+
 
 @requires_pwsh
 @requires_git
