@@ -21,6 +21,7 @@ and on non-Windows platforms (the jobs validate drive-letter paths); CI Windows 
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import os
 import shutil
@@ -36,6 +37,7 @@ STAGE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-c
 DLL_GENERATOR = ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1"
 ATTRIBUTION_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1"
 STAGE_FIXTURE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-fixture-job.ps1"
+SMOKE_RUNNER_STAGE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-smoke-runner-job.ps1"
 
 PWSH = shutil.which("pwsh")
 GIT = shutil.which("git")
@@ -144,6 +146,13 @@ def _make_fixture_repo(path: Path) -> list[str]:
     _git_run(["config", "user.name", "attr3 behaviour fixture"], path)
     (path / "src" / "mlv" / "llrawproc").mkdir(parents=True)
     (path / "tools" / "gpu" / "backend").mkdir(parents=True)
+    (path / "tools" / "profiling").mkdir(parents=True)
+    # ATTR3-SMOKE-RUNNER-PIN-1: the attribution generator resolves this path's committed blob
+    # unconditionally (before the fixture/owner-clip branch), so every test that generates a
+    # job through it needs the path to exist in the throwaway repo too.
+    (path / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(
+        "# fixture stand-in for run-release-gui-smoke.ps1\n", encoding="utf-8"
+    )
     shas = []
     for index, text in enumerate(("first", "second")):
         (path / "src" / "mlv" / "llrawproc" / "llrawproc.c").write_text(
@@ -153,6 +162,17 @@ def _make_fixture_repo(path: Path) -> list[str]:
         _git_run(["commit", "-q", "-m", f"fixture {index}"], path)
         shas.append(_git_run(["rev-parse", "HEAD"], path))
     return shas
+
+
+def _git_blob_sha256(repo: Path, commit: str, rel_path: str) -> str:
+    """sha256 of a repo-relative path's exact COMMITTED bytes -- the ground truth this route's
+    pin is defined against (ATTR3-SMOKE-RUNNER-PIN-1). capture_output without text=True keeps
+    the bytes raw, so this is not itself subject to the newline-translation pitfall it exists
+    to catch elsewhere."""
+    completed = subprocess.run(
+        [GIT, "-C", str(repo), "show", f"{commit}:{rel_path}"], capture_output=True, check=True
+    )
+    return hashlib.sha256(completed.stdout).hexdigest()
 
 
 # --------------------------------------------------------------------------------------------
@@ -1033,6 +1053,188 @@ class StageFixtureJobCommittedBytesWiringTests(_PwshCase):
 
 
 # --------------------------------------------------------------------------------------------
+# ATTR3-SMOKE-RUNNER-PIN-1: the smoke runner is now hash-pinned, refused pre-flight when stale,
+# and staged into the cache by a sibling generator that reports the committed blob's sha256.
+# --------------------------------------------------------------------------------------------
+
+
+@requires_pwsh
+class SmokeRunnerStaleRefusalTests(_PwshCase):
+    """The attribution job's pre-flight pin check, run standalone.
+
+    Mirrors AttributionJobFixtureContentAuthenticationTests's approach: the check is inline
+    top-level code in the generator's $template text, not a named module function, so it is
+    sliced VERBATIM out of the generator source and run with just the couple of variables it
+    reads. This never touches $Root/$Work/-AgentRoot/C:\\mlvtmp, so it needs no fabricated
+    build manifest, package or PresentMon binary to reach -- exactly the code that decides
+    ATTRCUDA_SMOKE_RUNNER_STALE, and nothing else.
+    """
+
+    def _extract_pin_check(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start_marker = "$smokeRunnerCachePath = Join-Path $Cache 'run-release-gui-smoke.ps1'"
+        end_marker = "\n# NA-4: open exactly the one authorized path baked in by the generator -- no lookup."
+        start = text.index(start_marker)
+        end = text.index(end_marker, start)
+        self.assertGreater(end, start, "smoke-runner pin check markers moved in the generator")
+        return text[start:end]
+
+    def _run_pin_check(self, *, cache: Path, smoke_runner_sha256: str) -> subprocess.CompletedProcess:
+        block = self._extract_pin_check()
+        script = self.tmp / "pin-check-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$Cache = '{cache}'\n"
+            f"$SmokeRunnerSha256 = '{smoke_runner_sha256}'\n"
+            "function Get-Sha([string]$Path) {\n"
+            "    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()\n"
+            "}\n"
+            + block + "\n"
+            "Write-Output 'RESULT=NO_REFUSAL'\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script)
+
+    def test_a_stale_or_swapped_runner_is_refused_before_any_smoke_launch(self) -> None:
+        cache = self.tmp / "cache"
+        cache.mkdir()
+        (cache / "run-release-gui-smoke.ps1").write_bytes(b"# a stale pre-f401bf9a copy\n")
+        pinned_sha256 = hashlib.sha256(b"the real, current, tracked runner bytes").hexdigest()
+
+        proc = self._run_pin_check(cache=cache, smoke_runner_sha256=pinned_sha256)
+
+        combined = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, combined)
+        self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
+        self.assertIn("sha256 mismatch", combined, combined)
+        self.assertNotIn("RESULT=NO_REFUSAL", proc.stdout)
+
+    def test_a_missing_runner_is_refused_with_the_same_token(self) -> None:
+        # existence-only used to pass this case; it must now be refused too.
+        cache = self.tmp / "cache"
+        cache.mkdir()
+        pinned_sha256 = hashlib.sha256(b"anything").hexdigest()
+
+        proc = self._run_pin_check(cache=cache, smoke_runner_sha256=pinned_sha256)
+
+        combined = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, combined)
+        self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
+        self.assertIn("cache is missing run-release-gui-smoke.ps1", combined, combined)
+
+    def test_the_pinned_runner_passes_the_gate(self) -> None:
+        cache = self.tmp / "cache"
+        cache.mkdir()
+        runner_bytes = b"the real, current, tracked runner bytes"
+        (cache / "run-release-gui-smoke.ps1").write_bytes(runner_bytes)
+        pinned_sha256 = hashlib.sha256(runner_bytes).hexdigest()
+
+        proc = self._run_pin_check(cache=cache, smoke_runner_sha256=pinned_sha256)
+
+        combined = proc.stdout + proc.stderr
+        self.assertNotIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
+        self.assertIn("RESULT=NO_REFUSAL", proc.stdout, combined)
+
+
+@requires_pwsh
+@requires_git
+class SmokeRunnerStageJobTests(_PwshCase):
+    """attr3-stage-smoke-runner-job.ps1: one tracked file in, cache out, sha256 == the blob.
+
+    The throwaway fixture repository's own tracked file (src/mlv/llrawproc/llrawproc.c) stands
+    in for the runner via -RunnerRelativePath: what is under test is the STAGING MECHANISM
+    (committed-blob extraction, hash-pinned publish), not the real runner's contents.
+    """
+
+    RUNNER_PATH = "src/mlv/llrawproc/llrawproc.c"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+        self.agent = self.tmp / "agent"
+
+    def _generate(self, **overrides) -> subprocess.CompletedProcess:
+        args = {
+            "SourceCommit": self.shas[1],
+            "OutDir": str(self.staging),
+            "AgentRoot": str(self.agent),
+            "RepoRoot": str(self.repo),
+            "RunnerRelativePath": self.RUNNER_PATH,
+        }
+        args.update(overrides)
+        parts = [f"-{key} '{value}'" for key, value in args.items()]
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{SMOKE_RUNNER_STAGE_GENERATOR}' " + " ".join(parts) + " | ConvertTo-Json -Depth 5\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script)
+
+    def test_generator_stages_the_committed_blob_and_reports_its_sha256(self) -> None:
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # The generator both Write-Output's a RESULT= line (so the hub need not re-derive the
+        # hash) and returns the pscustomobject; piped through ConvertTo-Json that is an array
+        # of the two -- the object is the last element.
+        payload = json.loads(proc.stdout)[-1]
+
+        expected_sha = _git_blob_sha256(self.repo, self.shas[1], self.RUNNER_PATH)
+        self.assertEqual(payload["runnerSha256"], expected_sha)
+        side_file = Path(payload["sideFile"])
+        self.assertTrue(side_file.is_file())
+        self.assertEqual(hashlib.sha256(side_file.read_bytes()).hexdigest(), expected_sha)
+        self.assertEqual(side_file.name, "run-release-gui-smoke.ps1")
+
+        # Submit: drop the side-file into the inbox beside the job, exactly as um-run.ps1 does,
+        # and run the emitted job end to end.
+        inbox = self.agent / "inbox"
+        inbox.mkdir(parents=True)
+        shutil.copy2(side_file, inbox / "run-release-gui-smoke.ps1")
+
+        run_proc = _run_job(Path(payload["jobFile"]))
+
+        self.assertEqual(run_proc.returncode, 0, run_proc.stdout + run_proc.stderr)
+        self.assertIn("RESULT=SMOKE_RUNNER_STAGE_OK", run_proc.stdout)
+        cache_file = self.agent / "cache" / "run-release-gui-smoke.ps1"
+        self.assertTrue(cache_file.is_file())
+        self.assertEqual(hashlib.sha256(cache_file.read_bytes()).hexdigest(), expected_sha)
+        self.assertEqual(list(inbox.iterdir()), [], "side-file was left in the inbox")
+
+    def test_a_different_commit_stages_that_commits_bytes_not_the_others(self) -> None:
+        proc = self._generate(SourceCommit=self.shas[0])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # The generator both Write-Output's a RESULT= line (so the hub need not re-derive the
+        # hash) and returns the pscustomobject; piped through ConvertTo-Json that is an array
+        # of the two -- the object is the last element.
+        payload = json.loads(proc.stdout)[-1]
+
+        expected_first = _git_blob_sha256(self.repo, self.shas[0], self.RUNNER_PATH)
+        expected_second = _git_blob_sha256(self.repo, self.shas[1], self.RUNNER_PATH)
+        self.assertNotEqual(expected_first, expected_second)
+        self.assertEqual(payload["runnerSha256"], expected_first)
+
+    def test_a_tampered_inbox_copy_is_refused_and_nothing_is_published(self) -> None:
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # The generator both Write-Output's a RESULT= line (so the hub need not re-derive the
+        # hash) and returns the pscustomobject; piped through ConvertTo-Json that is an array
+        # of the two -- the object is the last element.
+        payload = json.loads(proc.stdout)[-1]
+        inbox = self.agent / "inbox"
+        inbox.mkdir(parents=True)
+        (inbox / "run-release-gui-smoke.ps1").write_bytes(b"swapped after the hash was baked")
+
+        run_proc = _run_job(Path(payload["jobFile"]))
+
+        self.assertEqual(run_proc.returncode, 4, run_proc.stdout + run_proc.stderr)
+        self.assertFalse((self.agent / "cache" / "run-release-gui-smoke.ps1").exists())
+
+
+# --------------------------------------------------------------------------------------------
 # cleanup never follows a link out of the job root (sol PR #133 r3)
 # --------------------------------------------------------------------------------------------
 
@@ -1342,6 +1544,7 @@ JOB_TEMPLATES = (
     # Every emitted job that runs unattended on a measurement host is scanned, including the
     # fixture stager: a template added without this line would run unscanned.
     ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-fixture-job.ps1",
+    ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-smoke-runner-job.ps1",
 )
 
 

@@ -373,6 +373,77 @@ function Assert-AttrCudaFixtureCommittedBytes {
     $workingHash
 }
 
+function Resolve-AttrCudaCommittedBlobId {
+    <#
+    .SYNOPSIS
+    Resolve the git blob id of a repo-relative path AS COMMITTED at a given commit.
+    .DESCRIPTION
+    Generator-only: never embedded into an emitted job, because the measurement host has no
+    checkout and no git. This lets two independent generators -- one that pins an expected
+    hash into the attribution job, one that stages the matching bytes into the cache -- each
+    derive the SAME blob id from the SAME -SourceCommit without either taking the other's word
+    for it (ATTR3-SMOKE-RUNNER-PIN-1).
+    Throws ATTRCUDA_BLOB_UNRESOLVED.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$Commit,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRelativePath
+    )
+
+    $blobId = (& git -C $RepoRoot rev-parse "${Commit}:${RepoRelativePath}" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($blobId)) {
+        throw "ATTRCUDA_BLOB_UNRESOLVED could not resolve ${Commit}:${RepoRelativePath} in $RepoRoot"
+    }
+    $blobId = $blobId.Trim()
+    if ($blobId -notmatch '^[0-9a-f]{40}$') {
+        throw "ATTRCUDA_BLOB_UNRESOLVED ${Commit}:${RepoRelativePath} did not resolve to a blob id (got '$blobId')"
+    }
+    $blobId
+}
+
+function Save-AttrCudaCommittedBlobBytes {
+    <#
+    .SYNOPSIS
+    Write a git blob's exact committed bytes to -Destination and return their sha256.
+    .DESCRIPTION
+    Generator-only, same reason as Resolve-AttrCudaCommittedBlobId. `git cat-file blob <id>` is
+    streamed to -Destination through Start-Process -RedirectStandardOutput, which redirects the
+    child process's raw stdout HANDLE straight to the file -- never through a PowerShell text
+    pipeline, which decodes/re-encodes command output and would silently rewrite CRLF sequences
+    on the way through. Byte-exactness is the entire point: hashing anything else (a working-tree
+    checkout, a captured `git show` string) would pin bytes that a core.autocrlf setting or a
+    dirty tree could quietly disagree with.
+    Throws ATTRCUDA_BLOB_READ_FAILED.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$BlobId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    $proc = Start-Process -FilePath 'git' -ArgumentList @('-C', $RepoRoot, 'cat-file', 'blob', $BlobId) `
+        -RedirectStandardOutput $Destination -NoNewWindow -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        throw "ATTRCUDA_BLOB_READ_FAILED git cat-file blob $BlobId exited $($proc.ExitCode)"
+    }
+    (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
 function Assert-AttrCudaWritableFileSlot {
     <#
     .SYNOPSIS
@@ -865,6 +936,8 @@ Export-ModuleMember -Function `
     Assert-AttrCudaDirectChild, `
     Assert-AttrCudaBuildManifest, `
     Assert-AttrCudaFixtureCommittedBytes, `
+    Resolve-AttrCudaCommittedBlobId, `
+    Save-AttrCudaCommittedBlobBytes, `
     Assert-AttrCudaWritableFileSlot, `
     Assert-AttrCudaNonOverwritingFileSlot, `
     Publish-AttrCudaText, `
