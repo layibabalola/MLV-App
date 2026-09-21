@@ -1118,7 +1118,11 @@ class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
         # residence-check block.
         pub_created = text.index("[void](New-AttrCudaDirectory -Path $Pub)")
         start_marker = "if ($FixtureRehearsal) {"
-        end_marker = "\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)"
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 4: everything from the owner/fixture if/else through the
+        # end of the job now runs inside one `try` (see the generator's own comment above it), so
+        # the slice must stop BEFORE that `try {` line -- stopping at the old Expand-Archive marker
+        # alone would now include an unclosed `try {` in the extracted text.
+        end_marker = "\ntry {\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)"
         start = text.index(start_marker, pub_created)
         end = text.index(end_marker, start)
         self.assertGreater(end, start, "fixture-content-check markers moved in the generator")
@@ -1238,7 +1242,12 @@ class AttributionJobOwnerContentAuthenticationTests(_PwshCase):
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
         pub_created = text.index("[void](New-AttrCudaDirectory -Path $Pub)")
         start = text.index("if ($FixtureRehearsal) {", pub_created)
-        end = text.index("\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)", start)
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 4: stop BEFORE the `try {` that now wraps everything
+        # from here to the end of the job (see the generator's own comment above it) -- the old
+        # Expand-Archive marker alone would now include that unclosed `try {` in the slice, and
+        # this range also needs to include the round-4 private-directory linking logic, which
+        # lives inside the SAME if/else block, before that `try {`.
+        end = text.index("\ntry {\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)", start)
         self.assertGreater(end, start, "owner/fixture content-check markers moved in the generator")
         return text[start:end]
 
@@ -1254,10 +1263,14 @@ class AttributionJobOwnerContentAuthenticationTests(_PwshCase):
         ]
         return json.dumps(baked)
 
-    def _run_owner_content_check(self, *, parts, pub: Path) -> subprocess.CompletedProcess:
-        # The real job creates $Pub (New-AttrCudaDirectory) before this block ever runs; this
-        # probe stands in for that one step so Save-Json has somewhere to write.
+    def _run_owner_content_check(self, *, parts, pub: Path, work: Path | None = None) -> subprocess.CompletedProcess:
+        # The real job creates $Pub (New-AttrCudaDirectory) and $Work before this block ever
+        # runs; this probe stands in for those two steps so Save-Json and the round-4 private
+        # directory (built under $Work) both have somewhere to write.
         pub.mkdir(parents=True)
+        if work is None:
+            work = self.tmp / "work"
+        work.mkdir(parents=True, exist_ok=True)
         block = self._extract_content_check()
         owner_parts_json = self._owner_parts_json(parts).replace("'", "''")
         script = self.tmp / "owner-content-check-probe.ps1"
@@ -1269,6 +1282,8 @@ class AttributionJobOwnerContentAuthenticationTests(_PwshCase):
             "$ClipId = 'FIX-OWNER-CONTENT-0001'\n"
             f"$SourceCommit = '{'d' * 40}'\n"
             f"$Pub = '{pub}'\n"
+            f"$Work = '{work}'\n"
+            "$ownerLinkHandles = [System.Collections.Generic.List[object]]::new()\n"
             "function Save-Json($Object, [string]$Path) {\n"
             "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
             "}\n"
@@ -1278,29 +1293,49 @@ class AttributionJobOwnerContentAuthenticationTests(_PwshCase):
         )
         return _run_pwsh_file(script)
 
-    def test_both_parts_pass_and_clippath_is_byte_equal_to_the_first_part(self) -> None:
+    def test_both_parts_pass_and_a_private_directory_is_built_from_neutral_hard_links(self) -> None:
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 4: the path this job opens is no longer the owner's own
+        # part path -- it is a neutrally-named HARD LINK under a private directory built inside
+        # $Work, byte-identical to (and the SAME file object as) the verified source part.
+        base_extension = "." + "MLV"
+        continuation_extension = "." + "M00"
         part0_dir = self.tmp / "owner-content-part0"
         part0_dir.mkdir()
-        part0_path = part0_dir / "clip.raw"
+        part0_path = part0_dir / ("source" + base_extension)
         part0_bytes = b"synthetic owner content part zero " * 97
         part0_path.write_bytes(part0_bytes)
-        part1_path = self.tmp / "clip.raw.part1"
+        part1_path = self.tmp / ("source" + continuation_extension)
         part1_bytes = b"synthetic owner content part one"
         part1_path.write_bytes(part1_bytes)
         part0 = str(part0_path).replace("\\", "/")
-        part1 = str(part1_path)
+        part1 = str(part1_path).replace("\\", "/")
         parts = [
             {"index": 0, "path": part0, "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()},
             {"index": 1, "path": part1, "length": len(part1_bytes), "sha256": hashlib.sha256(part1_bytes).hexdigest()},
         ]
         pub = self.tmp / "agent" / "outbox" / "owner-pass.artifacts"
+        work = self.tmp / "work"
 
-        proc = self._run_owner_content_check(parts=parts, pub=pub)
+        proc = self._run_owner_content_check(parts=parts, pub=pub, work=work)
 
         self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
         self.assertIn("RESULT=NO_MISMATCH", proc.stdout)
-        # The path this job opens is byte-equal to the DECODED first part -- never composed.
-        self.assertIn(f"clipPath={part0}", proc.stdout)
+        private_dir_name = "owner-" + "clip"
+        neutral0 = private_dir_name + base_extension
+        neutral1 = private_dir_name + continuation_extension
+        link0_path = work / private_dir_name / neutral0
+        link1_path = work / private_dir_name / neutral1
+        self.assertIn(f"clipPath={link0_path}", proc.stdout)
+        # Never the owner's real part path, anywhere in the job's own stdout.
+        self.assertNotIn(part0, proc.stdout)
+        self.assertNotIn(part1, proc.stdout)
+        self.assertTrue(link0_path.is_file())
+        self.assertTrue(link1_path.is_file())
+        self.assertEqual(link0_path.read_bytes(), part0_bytes)
+        self.assertEqual(link1_path.read_bytes(), part1_bytes)
+        # The SAME file object as its source, not a copy -- proven the same way the job proves it.
+        self.assertEqual(link0_path.stat().st_ino, part0_path.stat().st_ino)
+        self.assertEqual(link1_path.stat().st_ino, part1_path.stat().st_ino)
 
     def test_a_mismatched_part_fails_closed_before_the_package_is_touched(self) -> None:
         part0_path = self.tmp / "owner-content-mismatch-part0.raw"
