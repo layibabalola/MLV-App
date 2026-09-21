@@ -426,18 +426,26 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     # spliced verbatim into both, never two copies that can drift apart.
     'Read-AttrCudaBase64Payload',
     'Test-AttrCudaFootagePart',
-    'ConvertTo-AttrCudaUtf8String',
-    # ATTR3-FOOTAGE-BIND-1 PR-B round 4: the private verified-part directory. One hard link per
-    # verified part, under a neutral name derived from its index, so nothing downstream (the
-    # smoke runner's own sibling glob, the app's own continuation-part walk or sidecar) ever sees
-    # the owner's real directory.
+    'ConvertTo-AttrCudaUtf8String'
+)
+# ATTR3-FOOTAGE-BIND-1 PR-B round 4b: the private verified-part directory (one hard link per
+# verified part, under a neutral name derived from its index, so nothing downstream -- the smoke
+# runner's own sibling glob, the app's own continuation-part walk or sidecar -- ever sees the
+# owner's real directory) moved OUT of AttrCudaArtifacts.psm1 into AttrCudaOwnerFootage.psm1: that
+# shared module is embedded by every PLAYBACK-ATTR-3-CUDA build-route script (assemble/stage/
+# DLL-pair), none of which has any business knowing footage exists (NoFootageTokensTests, in
+# tools/repo_hygiene/test_playback_attr_3_cuda_split_route.py). This generator -- the owner-clip
+# attribution job, not in that test's NEW_SCRIPTS list -- is the only caller that still embeds
+# them, extracted from the new module by the SAME Get-AttrCudaEmbeddedFunctionSource this file
+# already imports, pointed at a different -ModulePath.
+$embeddedFunctions = $embeddedFunctions + "`r`n`r`n" + (Get-AttrCudaEmbeddedFunctionSource -ModulePath (Join-Path $PSScriptRoot 'AttrCudaOwnerFootage.psm1') -Name @(
     'Get-AttrCudaOwnerFootageNeutralName',
     'Assert-AttrCudaOwnerPartsNaming',
     'Get-AttrCudaFileIdentity',
     'New-AttrCudaOwnerFootageLink',
     'Open-AttrCudaReadOnlyHandle',
     'Close-AttrCudaOwnerFootageWorkspace'
-)
+))
 
 # --- resolve provenance locally, BEFORE the job ever touches Bachelor -------------
 # (round 2: moved here, AFTER the owner/fixture decision above -- see that block's comment.)

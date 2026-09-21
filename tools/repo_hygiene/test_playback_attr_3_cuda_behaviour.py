@@ -8,9 +8,12 @@ blockers that a text-level suite was green against, because "the script mentions
 against real directories and asserts on exit codes and on what ended up on disk.
 
 WHAT IS AND IS NOT EXERCISED. The verification logic lives in
-tools/profiling/bachelor/AttrCudaArtifacts.psm1 and is spliced VERBATIM into each emitted job by
-Get-AttrCudaEmbeddedFunctionSource, so a test that imports the module runs the same characters
-the job runs on Bachelor or Ultra-Magnus. What cannot run here is the compiling and measuring --
+tools/profiling/bachelor/AttrCudaArtifacts.psm1 (build-route verification, shared by every
+PLAYBACK-ATTR-3-CUDA generator) and tools/profiling/bachelor/AttrCudaOwnerFootage.psm1 (the
+private owner-footage workspace, embedded only by the attribution job), spliced VERBATIM into
+each emitted job by Get-AttrCudaEmbeddedFunctionSource, so a test that imports the module runs
+the same characters the job runs on Bachelor or Ultra-Magnus. What cannot run here is the
+compiling and measuring --
 no CUDA toolkit, no Qt/MinGW, no 4090, no measurement laptop -- so the jobs are exercised through
 their `-VerifyOnly` prefix and through the staging job end to end, which touches only files.
 
@@ -35,6 +38,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
+# ATTR3-FOOTAGE-BIND-1 PR-B round 4b: the private owner-footage workspace functions (neutral
+# naming, part-contiguity, Win32 file identity, hard-link creation, held read handles, link-only
+# cleanup) moved out of MODULE into their own module, so playback-attr-3-cuda-job.ps1's own
+# NoFootageTokensTests-exempt embedding is the only caller and MODULE stays free of composed
+# footage-word fragments. See that module's own header for why.
+OWNER_FOOTAGE_MODULE = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaOwnerFootage.psm1"
 STAGE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1"
 DLL_GENERATOR = ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1"
 ATTRIBUTION_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1"
@@ -126,7 +135,8 @@ class _PwshCase(unittest.TestCase):
         script = self.tmp / name
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
-            f"Import-Module '{MODULE}' -Force\n" + body,
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n" + body,
             encoding="utf-8",
         )
         return _run_pwsh_file(script)
@@ -1277,6 +1287,7 @@ class AttributionJobOwnerContentAuthenticationTests(_PwshCase):
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
             "$FixtureRehearsal = $false\n"
             f"$OwnerPartsJson = '{owner_parts_json}'\n"
             "$ClipId = 'FIX-OWNER-CONTENT-0001'\n"
@@ -1382,10 +1393,15 @@ class OwnerFootagePrivateDirectoryLeakAndRefusalTests(_PwshCase):
     cross-volume / identity-mismatch refusal paths for the private per-job directory.
 
     The cross-volume and identity-mismatch cases are exercised by MOCKING
-    Get-AttrCudaFileIdentity inside the module's own scope (`& $module { Set-Item -Path
-    function:... }`) rather than by requiring a second real volume or a real hardware race --
+    Get-AttrCudaFileIdentity inside AttrCudaOwnerFootage.psm1's own scope (`& $module { Set-Item
+    -Path function:... }`) rather than by requiring a second real volume or a real hardware race --
     New-AttrCudaOwnerFootageLink is called directly, so this is a statement about the CODE PATH
-    taken when the identity comparison itself reports a mismatch, not about the real OS.
+    taken when the identity comparison itself reports a mismatch, not about the real OS. The mock
+    and the mocked-from call MUST share one module (round 4b, verified empirically): PowerShell
+    resolves an unqualified command called from within a module function through that module's OWN
+    session-state function table, looked up fresh per call, so Set-Item only takes effect for
+    callers in the SAME module as the function it replaces -- a caller in a module that merely
+    imported the mocked one holds a snapshot from import time and never observes the override.
     """
 
     def _extract_content_check(self) -> str:
@@ -1426,6 +1442,7 @@ class OwnerFootagePrivateDirectoryLeakAndRefusalTests(_PwshCase):
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
             "$FixtureRehearsal = $false\n"
             f"$OwnerPartsJson = '{owner_parts_json}'\n"
             "$ClipId = 'FIX-OWNER-LEAK-0001'\n"
@@ -1583,7 +1600,8 @@ class OwnerFootagePrivateDirectoryLeakAndRefusalTests(_PwshCase):
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             f"Import-Module '{MODULE}' -Force\n"
-            "$mod = Get-Module AttrCudaArtifacts\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            "$mod = Get-Module AttrCudaOwnerFootage\n"
             f"$global:AttrCudaTestSourcePath = '{source_path}'\n"
             "& $mod {\n"
             "    Set-Item -Path function:Get-AttrCudaFileIdentity -Value {\n"
@@ -1615,7 +1633,8 @@ class OwnerFootagePrivateDirectoryLeakAndRefusalTests(_PwshCase):
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             f"Import-Module '{MODULE}' -Force\n"
-            "$mod = Get-Module AttrCudaArtifacts\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            "$mod = Get-Module AttrCudaOwnerFootage\n"
             f"$sourcePath = '{source_path}'\n"
             f"$directory = '{directory}'\n"
             "$global:AttrCudaTestExpectedLinkPath = Join-Path $directory (Get-AttrCudaOwnerFootageNeutralName -Index 0)\n"
