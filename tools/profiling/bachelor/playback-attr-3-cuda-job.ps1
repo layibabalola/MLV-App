@@ -177,12 +177,7 @@ param(
     # here) in the evidence manifest for audit trail.
     [string]$ConsentReceiptFileName = 'owner-footage-consent-20260916.json',
 
-    [string]$LlrawprocRelativePath = 'src/mlv/llrawproc/llrawproc.c',
-
-    # ATTR3-SMOKE-RUNNER-PIN-1: the smoke runner is a TRACKED repository script, not a build
-    # artifact, so its pin is derived from -SourceCommit locally rather than passed in -- see
-    # the __SMOKE_RUNNER_SHA256__ substitution below.
-    [string]$SmokeRunnerRelativePath = 'tools/profiling/run-release-gui-smoke.ps1'
+    [string]$LlrawprocRelativePath = 'src/mlv/llrawproc/llrawproc.c'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -198,6 +193,7 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Get-AttrCudaEligibilityVerdict',
     'Assert-AttrCudaWritableFileSlot',
     'Test-AttrCudaPathIsReparsePoint',
+    'Get-AttrCudaClosureDirectoryMismatch',
     'Publish-AttrCudaText',
     'Publish-AttrCudaFileCopy',
     'Publish-AttrCudaFileMove',
@@ -220,17 +216,22 @@ if ($PresentMonSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
     throw "PresentMonSha256 is not a 64-hex sha256: $PresentMonSha256"
 }
 
-# ATTR3-SMOKE-RUNNER-DEPS-1: the runner is not standalone -- it dot-sources
-# gui-smoke-screenshot-provenance.ps1 and provenance-stamp.ps1, and imports
+# ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN): the runner is not standalone -- it
+# dot-sources gui-smoke-screenshot-provenance.ps1 and provenance-stamp.ps1, and imports
 # gui-smoke-process-boundary.psm1, all resolved through $PSScriptRoot at runtime. Staging the
 # runner alone (ATTR3-SMOKE-RUNNER-PIN-1) left Bachelor unable to launch it at all: the runner
 # died at its own dot-source line, the app never launched, PresentMon never saw a target and
-# never exited, and PRESENTMON_TIMEOUT masked the real cause. The closure is derived
-# MECHANICALLY (Resolve-AttrCudaSmokeRunnerClosure scans the runner's own committed text for
-# $PSScriptRoot-relative loads, recursing into each dependency the same way) -- never a hand
-# list -- from COMMITTED bytes at $SourceCommit, exactly as attr3-stage-smoke-runner-job.ps1
-# resolves the same closure independently, with no value needing to be threaded between the two.
-$smokeRunnerClosure = @(Resolve-AttrCudaSmokeRunnerClosure -RepoRoot $RepoRoot -Commit $SourceCommit -RepoRelativePath $SmokeRunnerRelativePath)
+# never exited, and PRESENTMON_TIMEOUT masked the real cause. Round 1/2 discovered this closure
+# by SCANNING; a design swarm ruled that undiscoverable-by-patching (a literal-based scanner
+# cannot see an extension-less load or a bareword Import-Module, and a basename-only classifier
+# can be satisfied by an unrelated absolute path). The closure is now the EXPLICIT, pinned
+# manifest (Get-AttrCudaSmokeRunnerClosureManifest); Assert-AttrCudaClosureComplete is the
+# generator-time proof that the pinned list still matches what the real files load, using an AST
+# census instead of a scan. Resolve-AttrCudaSmokeRunnerClosure then does nothing but resolve each
+# pinned path's committed bytes -- exactly as attr3-stage-smoke-runner-job.ps1 resolves the same
+# closure independently, with no value needing to be threaded between the two.
+[void](Assert-AttrCudaClosureComplete -RepoRoot $RepoRoot -Commit $SourceCommit)
+$smokeRunnerClosure = @(Resolve-AttrCudaSmokeRunnerClosure -RepoRoot $RepoRoot -Commit $SourceCommit)
 foreach ($entry in $smokeRunnerClosure) {
     [void](Assert-AttrCudaSafeArtifactName -Name $entry.name)
     # Fable minor (round 2, carried forward): validated as 64 lowercase hex before it is
@@ -436,8 +437,16 @@ function Start-PresentMonCapture([string]$CsvPath) {
 
 function Wait-PresentMonCapture($Proc, [int]$TimeoutSeconds = 35) {
     if (-not $Proc.WaitForExit($TimeoutSeconds * 1000)) {
-        try { $Proc.Kill() } catch { }
-        throw "PRESENTMON_TIMEOUT: did not exit within $TimeoutSeconds s after playback"
+        # ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3, carried to round 3): the empty catch
+        # here used to swallow a Kill() failure outright -- a PresentMon that survived both the
+        # timeout and the kill attempt left no trace anywhere. Reported the same way
+        # Stop-PresentMonCapture already reports it: killError captured, confirmedExited read from
+        # $Proc itself AFTER the attempt, never assumed from "Kill() didn't throw".
+        $killError = $null
+        try { $Proc.Kill() } catch { $killError = $_.Exception.Message }
+        $confirmedExited = [bool]$Proc.HasExited
+        $killErrorText = if ($null -eq $killError) { '<none>' } else { $killError }
+        throw "PRESENTMON_TIMEOUT: did not exit within $TimeoutSeconds s after playback (confirmedExited=$confirmedExited killError=$killErrorText)"
     }
     [pscustomobject]@{ status = 'done'; exitCode = $Proc.ExitCode }
 }
@@ -566,39 +575,20 @@ foreach ($check in $manifestChecks) {
     if ((Get-Sha $check.path) -ne $check.expectedSha.ToUpperInvariant()) { throw "hash mismatch (vs build manifest $buildManifestName) for $($check.path)" }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $Cache $PresentMonName))) { throw "cache missing $PresentMonName" }
-# ATTR3-SMOKE-RUNNER-DEPS-1 (round 1 BLOCKER): the runner alone is not launchable -- it dot-
-# sources two siblings and imports a module, all resolved via $PSScriptRoot, and staging only
-# the runner (ATTR3-SMOKE-RUNNER-PIN-1) left Bachelor unable to reach line 1 of playback, which
-# PRESENTMON_TIMEOUT then mis-reported as a PresentMon problem. Every closure file is hash-
-# pinned exactly like PresentMon above, and checked HERE -- before PresentMon starts, before the
-# app launches, before any run is spent -- naming the failing file so a refusal says WHICH
-# dependency is stale or missing, not just that something is.
-# Content-addressed, mirroring ATTR3-SMOKE-RUNNER-PIN-1 round 2: the directory name is derived
-# from the very digest this check pins against, so a stager can never be asked to overwrite
-# whatever bytes already sit under a different closure's directory.
+# ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN): the runner alone is not launchable --
+# it dot-sources two siblings and imports a module, all resolved via $PSScriptRoot, and staging
+# only the runner (ATTR3-SMOKE-RUNNER-PIN-1) left Bachelor unable to reach line 1 of playback,
+# which PRESENTMON_TIMEOUT then mis-reported as a PresentMon problem. Round 1/2 checked the
+# closure directory with an inline exact-set loop DUPLICATED between this job and the stager's
+# own "already staged" check -- exactly the shape that lets the two silently drift apart. Both
+# jobs now embed the SAME Get-AttrCudaClosureDirectoryMismatch function text
+# (Get-AttrCudaEmbeddedFunctionSource), so there is only ever one definition of "matches exactly"
+# to drift from. Checked HERE -- before PresentMon starts, before the app launches, before any
+# run is spent -- naming the failing file so a refusal says WHICH dependency is stale or missing.
 $smokeRunnerClosureDir = Join-Path $Cache $SmokeRunnerClosureDirName
-if (-not (Test-Path -LiteralPath $smokeRunnerClosureDir -PathType Container)) {
-    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing closure directory $SmokeRunnerClosureDirName"
-}
-# ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): Test-Path/Get-FileHash both resolve THROUGH a
-# reparse point to its target, so a link at the closure directory (or at one of its members)
-# could satisfy every check below while the bytes actually launched come from outside the staged,
-# verified directory. Refused before a single hash is trusted.
-if (Test-AttrCudaPathIsReparsePoint -Path $smokeRunnerClosureDir) {
-    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache closure directory $SmokeRunnerClosureDirName is a reparse point"
-}
-foreach ($closureEntry in $SmokeRunnerClosure) {
-    $closureEntryPath = Join-Path $smokeRunnerClosureDir $closureEntry.name
-    if (-not (Test-Path -LiteralPath $closureEntryPath -PathType Leaf)) {
-        throw "ATTRCUDA_SMOKE_RUNNER_STALE cache $SmokeRunnerClosureDirName is missing $($closureEntry.name)"
-    }
-    if (Test-AttrCudaPathIsReparsePoint -Path $closureEntryPath) {
-        throw "ATTRCUDA_SMOKE_RUNNER_STALE cache $SmokeRunnerClosureDirName/$($closureEntry.name) is a reparse point"
-    }
-    $closureEntryActualSha = Get-Sha $closureEntryPath
-    if ($closureEntryActualSha -ne $closureEntry.sha256.ToUpperInvariant()) {
-        throw "ATTRCUDA_SMOKE_RUNNER_STALE cache $SmokeRunnerClosureDirName/$($closureEntry.name) sha256 mismatch: expected $($closureEntry.sha256), actual $closureEntryActualSha"
-    }
+$smokeRunnerClosureMismatch = Get-AttrCudaClosureDirectoryMismatch -Dir $smokeRunnerClosureDir -Entries $SmokeRunnerClosure
+if ($null -ne $smokeRunnerClosureMismatch) {
+    throw "ATTRCUDA_SMOKE_RUNNER_STALE $smokeRunnerClosureMismatch"
 }
 # NA-4: open exactly the one authorized path baked in by the generator -- no lookup.
 $clipPath = $AuthorizedClipPath

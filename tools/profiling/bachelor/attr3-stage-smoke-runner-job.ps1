@@ -60,9 +60,7 @@ param(
     [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
     [string]$AgentRoot = 'C:\mlvtmp\mlv-agent',
 
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path,
-
-    [string]$RunnerRelativePath = 'tools/profiling/run-release-gui-smoke.ps1'
+    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 )
 
 $ErrorActionPreference = 'Stop'
@@ -73,10 +71,15 @@ $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 if (-not (Test-Path -LiteralPath $OutDir)) { [void](New-Item -ItemType Directory -Path $OutDir -Force) }
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
 
-# Committed bytes, never the working tree (ATTR3-SMOKE-RUNNER-PIN-1): the same closure
+# PINNED, never scanned (ATTR3-SMOKE-RUNNER-DEPS-1 round 3, NARROW BY REDESIGN): the closure is
+# Get-AttrCudaSmokeRunnerClosureManifest, proved complete against the real committed files by
+# Assert-AttrCudaClosureComplete -- an AST census, not a text scan, so it cannot be fooled by an
+# extension-less load or a basename collision the way round 1/2's scanners could. Committed
+# bytes, never the working tree (ATTR3-SMOKE-RUNNER-PIN-1): the same closure
 # playback-attr-3-cuda-job.ps1 resolves independently from the same -SourceCommit, so the two
 # generators agree without either one taking the other's word for it.
-$closure = @(Resolve-AttrCudaSmokeRunnerClosure -RepoRoot $RepoRoot -Commit $SourceCommit -RepoRelativePath $RunnerRelativePath)
+[void](Assert-AttrCudaClosureComplete -RepoRoot $RepoRoot -Commit $SourceCommit)
+$closure = @(Resolve-AttrCudaSmokeRunnerClosure -RepoRoot $RepoRoot -Commit $SourceCommit)
 foreach ($entry in $closure) {
     [void](Assert-AttrCudaSafeArtifactName -Name $entry.name)
     # Fable minor (round 2, carried forward): validated as 64 lowercase hex before it is
@@ -229,32 +232,6 @@ try {
 }
 $StepLog['closureDecode'] = 0
 
-function Test-AttrCudaClosureDirectoryMatches([string]$Dir) {
-    # ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): "already staged" must mean the directory
-    # is EXACTLY the expected closure -- no extra entries, no reparse point at the directory or
-    # at any member, every member byte-identical -- never merely "a superset that happens to
-    # contain the right names with the right hashes".
-    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return $false }
-    if (Test-AttrCudaPathIsReparsePoint -Path $Dir) { return $false }
-    $actualEntries = @(Get-ChildItem -LiteralPath $Dir -Force)
-    if ($actualEntries.Count -ne $ClosureEntries.Count) { return $false }
-    # A plain array + -contains (not a HashSet): the template lint (attr3_publish_write_scan.ps1
-    # R4) only allowlists specific .NET static members/instance methods by name, and this closure
-    # is small (a handful of files), so an O(n) membership test costs nothing here.
-    $expectedNames = @($ClosureEntries | ForEach-Object { $_.name })
-    foreach ($actual in $actualEntries) {
-        if ($expectedNames -notcontains $actual.Name) { return $false }
-        if ($actual.PSIsContainer) { return $false }
-        if (Test-AttrCudaPathIsReparsePoint -Path $actual.FullName) { return $false }
-    }
-    foreach ($entry in $ClosureEntries) {
-        $path = Join-Path $Dir $entry.name
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
-        if ((Get-ShaLower $path) -ne $entry.sha256) { return $false }
-    }
-    return $true
-}
-
 # Everything above is read-only: no file has been created or written. -VerifyOnly stops here.
 if ($VerifyOnly) {
     Write-Output "RESULT=VERIFY_ONLY_OK CACHE_DIR=$CacheDirName FILES=$($ClosureEntries.Count)"
@@ -277,8 +254,11 @@ $env:TEMP = $Scratch
 $env:TMP = $Scratch
 
 # Already staged with identical content: nothing to do, and re-staging must not churn the cache.
+# ATTR3-SMOKE-RUNNER-DEPS-1 round 3: "already staged" means the directory is EXACTLY the expected
+# closure -- Get-AttrCudaClosureDirectoryMismatch (embedded, byte-identical to the attribution
+# job's copy) is the one definition of that rule now, never two inline copies that could drift.
 if (Test-Path -LiteralPath $cacheDirPath) {
-    if (Test-AttrCudaClosureDirectoryMatches -Dir $cacheDirPath) {
+    if ($null -eq (Get-AttrCudaClosureDirectoryMismatch -Dir $cacheDirPath -Entries $ClosureEntries)) {
         Complete-AlreadyStaged -CacheDirPathValue $cacheDirPath
     }
     Complete-Failed 21 'publishRename' "cache already holds $CacheDirName with DIFFERENT content"
@@ -309,7 +289,7 @@ try {
     # exact closure" (this run is simply done) from "something else is there" (fail closed at the
     # same code the pre-flight check above uses for that).
     Remove-AttrCudaTree -TrustedRoot $AgentRoot -Path $partialDirPath
-    if (Test-AttrCudaClosureDirectoryMatches -Dir $cacheDirPath) {
+    if ($null -eq (Get-AttrCudaClosureDirectoryMismatch -Dir $cacheDirPath -Entries $ClosureEntries)) {
         Complete-AlreadyStaged -CacheDirPathValue $cacheDirPath
     }
     Complete-Failed 21 'publishRename' $_.Exception.Message
@@ -334,6 +314,7 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Assert-AttrCudaWritableFileSlot',
     'Assert-AttrCudaNonOverwritingFileSlot',
     'Test-AttrCudaPathIsReparsePoint',
+    'Get-AttrCudaClosureDirectoryMismatch',
     'Read-AttrCudaBase64Payload',
     'Publish-AttrCudaBytes',
     'Publish-AttrCudaText',

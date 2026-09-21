@@ -36,6 +36,25 @@ def _pwsh_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+_ANSI_ESCAPE_RX = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_PWSH_ERROR_VIEW_CONTINUATION_RX = re.compile(r"(?m)^[ \t]*\|[ \t]?")
+
+
+def normalize_pwsh_message_text(text: str) -> str:
+    """Undo pwsh's console-width error-view wrapping before substring matching.
+
+    An uncaught terminating error is rendered by pwsh's own default host formatter, which wraps
+    the exception message at the console width and prefixes each continuation line with ANSI
+    colour codes and a '|' gutter -- so a phrase can land split across two lines on a narrower
+    console than this one, and assertIn looking for the unbroken phrase then fails even though
+    the thrown message is correct. Strip the ANSI codes and the '|' continuation prefixes, then
+    collapse whitespace runs (including the newline the wrap introduced) to one space.
+    """
+    text = _ANSI_ESCAPE_RX.sub("", text)
+    text = _PWSH_ERROR_VIEW_CONTINUATION_RX.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 ROOT = Path(__file__).resolve().parents[2]
 
 DLL_PAIR_JOB = ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1"
@@ -390,9 +409,11 @@ class SmokeRunnerPinTests(unittest.TestCase):
 
     Round 1 (ATTR3-SMOKE-RUNNER-PIN-1) hash-pinned only run-release-gui-smoke.ps1; Bachelor
     still could not launch it, because the runner dot-sources two siblings and imports a
-    module, all resolved via $PSScriptRoot, and none of those three was ever staged. The
-    closure is now derived mechanically (Resolve-AttrCudaSmokeRunnerClosure) and every file in
-    it is hash-pinned, from the committed git blob at -SourceCommit -- the same bytes
+    module, all resolved via $PSScriptRoot, and none of those three was ever staged. Round 1/2
+    then derived the closure by SCANNING; round 3 (NARROW BY REDESIGN) replaced discovery with
+    an EXPLICIT pinned manifest (Get-AttrCudaSmokeRunnerClosureManifest) proved complete by an
+    AST census (Assert-AttrCudaClosureComplete) at generation time -- every file in it is still
+    hash-pinned from the committed git blob at -SourceCommit -- the same bytes
     attr3-stage-smoke-runner-job.ps1 stages -- never from a working-tree file.
     """
 
@@ -412,26 +433,31 @@ class SmokeRunnerPinTests(unittest.TestCase):
             self.text,
         )
 
-    def test_the_emitted_job_hash_checks_every_closure_file_before_it_is_used(self) -> None:
+    def test_the_scan_based_member_loop_is_gone(self) -> None:
+        # round 3 (NARROW BY REDESIGN): the inline per-member loop is replaced by one call into
+        # the shared, embedded Get-AttrCudaClosureDirectoryMismatch.
+        self.assertNotIn("foreach ($closureEntry in $SmokeRunnerClosure) {", self.text)
+        self.assertNotIn(
+            "if ($closureEntryActualSha -ne $closureEntry.sha256.ToUpperInvariant()) {", self.text
+        )
+
+    def test_the_emitted_job_pins_the_closure_and_checks_it_with_the_shared_function(self) -> None:
         self.assertIn("$SmokeRunnerClosure = __SMOKE_RUNNER_CLOSURE__", self.text)
         self.assertIn("$SmokeRunnerClosureDirName = '__SMOKE_RUNNER_CLOSURE_DIR_NAME__'", self.text)
         self.assertIn(
             "$smokeRunnerClosureDir = Join-Path $Cache $SmokeRunnerClosureDirName", self.text
         )
         self.assertIn(
-            'throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing closure directory '
-            '$SmokeRunnerClosureDirName"',
-            self.text,
-        )
-        self.assertIn("foreach ($closureEntry in $SmokeRunnerClosure) {", self.text)
-        self.assertIn(
-            'throw "ATTRCUDA_SMOKE_RUNNER_STALE cache $SmokeRunnerClosureDirName is missing '
-            '$($closureEntry.name)"',
+            "$smokeRunnerClosureMismatch = Get-AttrCudaClosureDirectoryMismatch -Dir "
+            "$smokeRunnerClosureDir -Entries $SmokeRunnerClosure",
             self.text,
         )
         self.assertIn(
-            "if ($closureEntryActualSha -ne $closureEntry.sha256.ToUpperInvariant()) {", self.text
+            'throw "ATTRCUDA_SMOKE_RUNNER_STALE $smokeRunnerClosureMismatch"', self.text
         )
+
+    def test_the_shared_directory_mismatch_function_is_embedded(self) -> None:
+        self.assertIn("'Get-AttrCudaClosureDirectoryMismatch',", self.text)
 
     def test_the_closure_digest_is_validated_before_it_is_trusted(self) -> None:
         # Fable minor (round 2, carried forward): validated the same way -PresentMonSha256 is,
@@ -442,11 +468,17 @@ class SmokeRunnerPinTests(unittest.TestCase):
         self.assertIn("ATTRCUDA_BLOB_SHA_MALFORMED", self.text)
 
     def test_the_pin_is_baked_from_the_committed_git_blob_not_the_working_tree(self) -> None:
+        # round 3: the pinned manifest, never a -RepoRelativePath parameter -- and proved
+        # complete against the real files before it is trusted (Assert-AttrCudaClosureComplete).
         self.assertIn(
-            "Resolve-AttrCudaSmokeRunnerClosure -RepoRoot $RepoRoot -Commit $SourceCommit "
-            "-RepoRelativePath $SmokeRunnerRelativePath",
+            "Assert-AttrCudaClosureComplete -RepoRoot $RepoRoot -Commit $SourceCommit", self.text
+        )
+        self.assertIn(
+            "Resolve-AttrCudaSmokeRunnerClosure -RepoRoot $RepoRoot -Commit $SourceCommit",
             self.text,
         )
+        self.assertNotIn("-RepoRelativePath $SmokeRunnerRelativePath", self.text)
+        self.assertNotIn("SmokeRunnerRelativePath", self.text)
         self.assertIn("Get-AttrCudaClosureDigestHex -Closure $smokeRunnerClosure", self.text)
         self.assertIn("Replace('__SMOKE_RUNNER_CLOSURE_DIR_NAME__', $smokeRunnerClosureDirName)", self.text)
 
@@ -552,9 +584,9 @@ class StopPresentMonCaptureReportsFailuresTests(unittest.TestCase):
 
 
 class Attr3JobNeverActivatesExcludedDependencyTests(unittest.TestCase):
-    """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 1): the closure-scan exclusion for
-    tools/profiling/detect-playback-artifacts.ps1 (kept next to
-    Get-AttrCudaScriptFileLiteralReferences in AttrCudaArtifacts.psm1) is sound only as long as
+    """ATTR3-SMOKE-RUNNER-DEPS-1 round 3: the AST-census pinned exclusion for the dormant
+    detect-playback-artifacts.ps1 launch site (kept next to
+    Test-AttrCudaClosureScanExclusionMatch in AttrCudaArtifacts.psm1) is sound only as long as
     the ATTR-3 attribution job never passes -DetectPlaybackArtifacts -- the one switch that
     would make run-release-gui-smoke.ps1 actually execute that reference. Required test (per the
     review): if this job ever starts passing that switch, this test must fail before the
@@ -741,7 +773,9 @@ class AttributionJobOwnerClipRefusalTests(unittest.TestCase):
             out_file = Path(tmp) / "owner.job.ps1"
             proc = self._generate("M16-1243", out_file)
             self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            self.assertIn("ATTR3-FOOTAGE-BIND-1", proc.stdout + proc.stderr)
+            self.assertIn(
+                "ATTR3-FOOTAGE-BIND-1", normalize_pwsh_message_text(proc.stdout + proc.stderr)
+            )
             self.assertFalse(out_file.exists())
 
     def test_a_fixture_id_is_still_emitted(self) -> None:
