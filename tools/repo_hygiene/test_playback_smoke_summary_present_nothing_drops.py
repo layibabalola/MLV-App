@@ -1,8 +1,10 @@
 """Static tripwire: the playback_smoke.summary line must export present_nothing_drops.
 
 CUDA-SCALE4-ZERO-PRESENT-1: presentPlaybackPreparedFrame's silent-drop path
-(see test_present_playback_prepared_frame_traces_drops.py) is now counted by
-m_presentNothingDropCount and must surface in the same GUI-smoke summary line
+(the static lexer tripwire for it is re-homed as card STATIC-PRESENT-TRIPWIRE-1;
+see branch product/CUDA-SCALE4-ZERO-PRESENT-1 history for the reference
+implementation) is now counted by m_presentNothingDropCount and must surface
+in the same GUI-smoke summary line
 that already reports prep_stale_drops/prep_generation_drops, so a scale-4
 GL-window regression shows up as a nonzero counter instead of only a trace
 line an operator has to go looking for.
