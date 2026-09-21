@@ -86,12 +86,14 @@ Two precision items closed:
   comment-masked view -- a `return;` sitting only inside a string literal is
   no longer a phantom match.
 
-Fail-closed, strict-mode only (see below): a backslash-newline outside a
-comment or string literal; a digit separator (an apostrophe directly between
+Fail-closed, strict-mode only (see below): a backslash immediately followed
+by a newline (optionally `\r\n`) ANYWHERE in the scanned text -- in code, in
+a comment, or inside a string/char/raw-string literal; a `#` character
+ANYWHERE in the CODE view (i.e. outside a comment and outside a string/char
+literal), at any column; a digit separator (an apostrophe directly between
 two alphanumeric characters, e.g. `1'000`); an encoding-prefixed raw string
 (`LR"`, `uR"`, `UR"`, `u8R"`); a trigraph (`??=`, `??/`, `??'`, `??(`, `??)`,
-`??!`, `??<`, `??>`, `??-`); a preprocessor directive line (`#if`,
-`#define`, ...) at code depth. Each raises `UnsupportedConstructError` naming
+`??!`, `??<`, `??>`, `??-`). Each raises `UnsupportedConstructError` naming
 the construct and the 1-based line within the scanned text.
 
 Strictness is scoped to the EXTRACTED FUNCTION BODY only, never the whole
@@ -101,9 +103,34 @@ source file: `_lex` takes a `strict` flag (default `False`); only
 just to find the function's matching braces, and that file legitimately
 contains hundreds of preprocessor directives elsewhere -- failing closed
 there would break body extraction on constructs that have nothing to do with
-`presentPlaybackPreparedFrame`. Comment-continuation modeling itself is
-unconditional (both calls), since it is simply correct lexing, not a
-fail-closed policy.
+`presentPlaybackPreparedFrame`.
+
+Round 8 (hub ruling, refuse whole CLASSES instead of modelling more
+corners): round 7 left two lexical gaps, both traceable to the same root
+cause -- modelling individual spellings of "this construct is fine here"
+instead of refusing the whole construct class.
+
+- sol r7: a block-comment terminator formed by backslash-newline splicing
+  (`*` `\` newline `/`) is accepted but mis-lexed -- the round-7 lexer never
+  modeled line splicing inside a block comment, only inside a `//` comment.
+- fable r7: a preprocessor directive whose `#` is preceded on its line only
+  by a comment (e.g. `/* x */ #if 0`) is not the first non-space CHARACTER
+  on its line, so round 7's `_is_first_nonspace_on_line` check missed it
+  even though it IS the first code token on the line.
+
+Line splicing happens before tokenization in C++, so no lexical position is
+safe from it -- rather than model where a backslash-newline is "handled"
+(inside a string escape, inside a `//` comment) and where it isn't, round 8
+refuses it unconditionally, everywhere, in strict mode. This REMOVES the
+round-7 `//`-continuation modelling entirely (a `//` comment ending in a
+backslash-newline is now refused, not treated as continuing onto the next
+line) -- the modelling and its gap disappear together. Likewise, rather than
+special-case "a comment can precede a directive's `#` on its line", round 8
+refuses ANY `#` in the CODE view, at any column: a function body here never
+legitimately contains one outside a literal. Comment-continuation modelling
+is otherwise unconditional (both calls, i.e. `//` and block comments still
+close normally at a plain newline / `*/`), since that is simply correct
+lexing, not a fail-closed policy.
 """
 from pathlib import Path
 import re
@@ -141,11 +168,6 @@ def _line_at(text: str, index: int) -> int:
     return text.count("\n", 0, index) + 1
 
 
-def _is_first_nonspace_on_line(text: str, index: int) -> bool:
-    line_start = text.rfind("\n", 0, index) + 1
-    return text[line_start:index].strip(" \t") == ""
-
-
 def _lex(text: str, *, strict: bool = False):
     """Single pass over *text* producing two same-length views.
 
@@ -162,27 +184,30 @@ def _lex(text: str, *, strict: bool = False):
     Handles line comments, block comments, string literals, char literals
     and raw string literals (`R"delim( ... )delim"`, including a custom
     delimiter), with backslash escapes honoured inside normal string/char
-    literals (an escaped closing quote does not end the literal). A `//`
-    line comment followed by a backslash-newline continues onto the next
-    physical line (C++ phase-2 line splicing), rather than ending at that
-    newline. Both views are driven off ONE state machine over the ORIGINAL
-    text -- never a previously masked copy -- so a quote or apostrophe
-    encountered while already inside a comment can never flip literal
-    state, and a `//` or `/*` encountered while already inside a literal
-    can never start a comment. Newlines are preserved verbatim in both
-    views so line numbers stay accurate, and both views are exactly
-    ``len(text)`` long.
+    literals (an escaped closing quote does not end the literal). Both
+    views are driven off ONE state machine over the ORIGINAL text -- never
+    a previously masked copy -- so a quote or apostrophe encountered while
+    already inside a comment can never flip literal state, and a `//` or
+    `/*` encountered while already inside a literal can never start a
+    comment. Newlines are preserved verbatim in both views so line numbers
+    stay accurate, and both views are exactly ``len(text)`` long.
 
     When *strict* is True, raises `UnsupportedConstructError` (naming the
     construct and its 1-based line in *text*) on any construct this lexer
-    refuses to model: a backslash-newline outside a comment or string
-    literal; a digit separator (an apostrophe directly between two
-    alphanumeric characters); an encoding-prefixed raw string (`LR"`,
-    `uR"`, `UR"`, `u8R"`); a trigraph; or a preprocessor directive line at
-    code depth. *strict* must stay scoped to an already-extracted function
+    refuses to model: a backslash immediately followed by a newline
+    (optionally `\r\n`), ANYWHERE in *text* -- in code, in a comment, or
+    inside a string/char/raw-string literal (line splicing happens before
+    tokenization in C++, so no lexical position is safe from it, and this
+    is refused as a whole class rather than modelled corner by corner); a
+    `#` character ANYWHERE in the CODE view (outside a comment and outside
+    a string/char literal), at any column -- a function body here never
+    legitimately contains one outside a literal; a digit separator (an
+    apostrophe directly between two alphanumeric characters); an
+    encoding-prefixed raw string (`LR"`, `uR"`, `UR"`, `u8R"`); or a
+    trigraph. *strict* must stay scoped to an already-extracted function
     body -- the whole source file legitimately contains constructs (real
-    preprocessor directives, at minimum) that have nothing to do with any
-    one function.
+    preprocessor directives and line continuations, at minimum) that have
+    nothing to do with any one function.
     """
     if strict:
         trigraph_match = _TRIGRAPH.search(text)
@@ -190,6 +215,12 @@ def _lex(text: str, *, strict: bool = False):
             raise UnsupportedConstructError(
                 f"trigraph {trigraph_match.group(0)!r} at line "
                 f"{_line_at(text, trigraph_match.start())}"
+            )
+        splice_match = re.search(r"\\\r?\n", text)
+        if splice_match:
+            raise UnsupportedConstructError(
+                "backslash-newline line continuation at line "
+                f"{_line_at(text, splice_match.start())}"
             )
     length = len(text)
     comment_out = list(text)
@@ -202,14 +233,10 @@ def _lex(text: str, *, strict: bool = False):
         char = text[index]
 
         if state == _CODE:
-            if strict and char == "#" and _is_first_nonspace_on_line(text, index):
+            if strict and char == "#":
                 raise UnsupportedConstructError(
-                    f"preprocessor directive line at line {_line_at(text, index)}"
-                )
-            if strict and char == "\\" and index + 1 < length and text[index + 1] == "\n":
-                raise UnsupportedConstructError(
-                    "backslash-newline line continuation outside a comment "
-                    f"or string literal at line {_line_at(text, index)}"
+                    "'#' character outside a comment or string literal "
+                    f"at line {_line_at(text, index)}"
                 )
             if (
                 strict
@@ -278,16 +305,10 @@ def _lex(text: str, *, strict: bool = False):
 
         if state == _LINE_COMMENT:
             # A quote or apostrophe here NEVER changes state -- only an
-            # un-escaped newline ends a line comment. A backslash directly
-            # before the newline (C++ phase-2 line splicing) blanks the
-            # backslash as comment content and keeps the comment open past
-            # that newline -- the newline itself stays unblanked so line
-            # numbers stay accurate.
-            if char == "\\" and index + 1 < length and text[index + 1] == "\n":
-                comment_out[index] = " "
-                code_out[index] = " "
-                index += 2
-                continue
+            # un-escaped newline ends a line comment. Round 8 refuses any
+            # backslash-newline outright (in strict mode) rather than
+            # modelling phase-2 line splicing here, so this state no
+            # longer special-cases a trailing backslash.
             if char == "\n":
                 state = _CODE
             else:
@@ -606,10 +627,12 @@ class LexerDirectTests(unittest.TestCase):
                 " " * 28 + " after\n",
             ),
             (
-                "backslash-newline continues a // comment onto the next line (sol r6)",
+                "backslash-newline in a // comment is no longer modeled as a "
+                "continuation (round 8 removes the sol r6 splice modelling); "
+                "the comment just ends at the newline like any other",
                 "int a; // say hi \\\nstill comment\nint b;\n",
-                "int a; " + " " * 11 + "\n" + " " * 13 + "\nint b;\n",
-                "int a; " + " " * 11 + "\n" + " " * 13 + "\nint b;\n",
+                "int a; " + " " * 11 + "\nstill comment\nint b;\n",
+                "int a; " + " " * 11 + "\nstill comment\nint b;\n",
             ),
         ]
         for name, text, expected_comment_masked, expected_code_only in cases:
@@ -814,34 +837,75 @@ class ReturnScanCodeOnlyMatchTests(unittest.TestCase):
 
 
 class LexerStrictModeTests(unittest.TestCase):
-    """Round 7 (hub ruling): `_lex(text, strict=True)` fails closed --
-    raises `UnsupportedConstructError` naming the construct and its line --
-    on any construct this tripwire refuses to model, so a future edit that
+    """`_lex(text, strict=True)` fails closed -- raises
+    `UnsupportedConstructError` naming the construct and its line -- on any
+    construct this tripwire refuses to model, so a future edit that
     introduces one is forced to extend the tripwire instead of getting a
     silent pass. Strictness is scoped to an already-extracted function body
     only: non-strict lexing (the whole-source pass `_extract_function_body`
     uses to find a function's braces) must never raise on these, since the
     whole source legitimately contains them elsewhere (e.g. hundreds of
-    real preprocessor directives in MainWindow.cpp).
+    real preprocessor directives, and ordinary macro line continuations, in
+    MainWindow.cpp).
+
+    Round 8 (hub ruling) replaced two round-7 spelling-specific carve-outs
+    with whole-class refusals:
+      - EVERY backslash-newline is now refused, everywhere (previously a
+        `//`-comment continuation and a string-literal escape were each
+        modeled as fine; sol r7 found a block-comment-terminator splice
+        the modelling missed). See the "backslash-newline" tests below --
+        the round-7 "is not refused" cases are now "is refused" cases.
+      - EVERY `#` in the CODE view is now refused, regardless of column
+        (previously only a `#` that was the first non-space CHARACTER on
+        its line was refused; fable r7 found `/* x */ #if 0`, where a
+        comment -- not code -- precedes the `#`, evaded that check).
     """
 
-    def test_backslash_newline_outside_comment_or_string_is_refused(self):
+    def test_backslash_newline_in_code_is_refused(self):
         text = "int a = 1 + \\\n2;\n"
         with self.assertRaises(UnsupportedConstructError) as ctx:
             _lex(text, strict=True)
         self.assertIn("backslash-newline", str(ctx.exception))
         self.assertIn("line 1", str(ctx.exception))
 
-    def test_backslash_newline_inside_a_string_is_not_refused(self):
-        # Already handled as a string escape (the literal stays open across
-        # the newline) -- must not be flagged.
+    def test_backslash_newline_inside_a_string_is_refused(self):
+        # Round 8: previously "not refused" (treated as an ordinary string
+        # escape that keeps the literal open across the newline). Line
+        # splicing happens before tokenization, so no lexical position --
+        # including inside a literal -- is actually safe from it.
         text = 'x = "a\\\nb";\n'
-        _lex(text, strict=True)
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _lex(text, strict=True)
+        self.assertIn("backslash-newline", str(ctx.exception))
 
-    def test_backslash_newline_inside_a_line_comment_is_not_refused(self):
-        # Round 7 requirement 1: this is modeled, not refused.
+    def test_backslash_newline_inside_a_line_comment_is_refused(self):
+        # Round 8: previously modeled as a continued comment (sol r6); now
+        # refused along with every other backslash-newline case instead of
+        # being modeled as a spelling-specific exception.
         text = "// comment \\\nstill comment\nint a;\n"
-        _lex(text, strict=True)
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _lex(text, strict=True)
+        self.assertIn("backslash-newline", str(ctx.exception))
+
+    def test_line_comment_ending_in_a_backslash_is_refused(self):
+        text = "int a; // trailing backslash\\\nint b;\n"
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _lex(text, strict=True)
+        self.assertIn("backslash-newline", str(ctx.exception))
+
+    def test_backslash_newline_forming_a_block_comment_terminator_is_refused(
+        self,
+    ):
+        # sol r7's exact repro: `*` backslash-newline `/` splices into a
+        # `*/` terminator under C++ phase-2 line splicing, which the
+        # round-7 lexer accepted but mis-lexed (it never modeled splicing
+        # inside a block comment, only inside a `//` comment). Round 8
+        # refuses the whole backslash-newline class instead, so this is
+        # refused before the splice ambiguity ever has to be resolved.
+        text = "/* comment *\\\n/ int a;\n"
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _lex(text, strict=True)
+        self.assertIn("backslash-newline", str(ctx.exception))
 
     def test_digit_separator_is_refused(self):
         text = "int n = 1'000;\n"
@@ -872,11 +936,36 @@ class LexerStrictModeTests(unittest.TestCase):
         text = "    if( x )\n    {\n#if 1\n        return;\n    }\n"
         with self.assertRaises(UnsupportedConstructError) as ctx:
             _lex(text, strict=True)
-        self.assertIn("preprocessor directive line", str(ctx.exception))
+        self.assertIn("'#'", str(ctx.exception))
         self.assertIn("line 3", str(ctx.exception))
 
-    def test_hash_not_first_on_line_is_not_refused(self):
+    def test_hash_preceded_only_by_a_comment_on_its_line_is_refused(self):
+        # fable r7's exact repro: the `#` is not the first non-space
+        # CHARACTER on its line (a block comment precedes it), so round
+        # 7's `_is_first_nonspace_on_line` check missed it even though it
+        # IS the first CODE token on the line. Round 8 refuses any `#` in
+        # the code view regardless of column, so this is caught too.
+        text = "    if( x )\n    {\n        /* x */ #if 0\n        return;\n    }\n"
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _lex(text, strict=True)
+        self.assertIn("'#'", str(ctx.exception))
+        self.assertIn("line 3", str(ctx.exception))
+
+    def test_hash_mid_line_in_code_is_refused(self):
+        # Round 8: any `#` in the code view is refused, not only one that
+        # is the first non-space character on its line.
+        text = "    int x = 1; int y = x # 2;\n"
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _lex(text, strict=True)
+        self.assertIn("'#'", str(ctx.exception))
+        self.assertIn("line 1", str(ctx.exception))
+
+    def test_hash_inside_a_line_comment_is_not_refused(self):
         text = "    int x = 1; // trailing # is not a directive\n"
+        _lex(text, strict=True)
+
+    def test_hash_inside_a_string_literal_is_not_refused(self):
+        text = 'x = "a#b";\n'
         _lex(text, strict=True)
 
     def test_non_strict_mode_never_raises_on_any_refused_construct(self):
@@ -886,6 +975,7 @@ class LexerStrictModeTests(unittest.TestCase):
             'x = LR"(hi)";\n',
             "??/\n",
             "#define X 1\n",
+            "int a = 2 # 3;\n",
         ]
         for text in texts:
             with self.subTest(text=text):
