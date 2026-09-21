@@ -451,6 +451,128 @@ function Save-AttrCudaCommittedBlobBytes {
     (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-AttrCudaScriptRootDependencies {
+    <#
+    .SYNOPSIS
+    Scan PowerShell source text for $PSScriptRoot-relative dot-source and Import-Module loads.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1. Mechanical, never a hand list: matches a line beginning (after
+    optional indent) with `.` or `Import-Module`, followed by `(Join-Path $PSScriptRoot
+    '<name>')` -- the exact shape tools/profiling/run-release-gui-smoke.ps1 uses for both its
+    dot-sourced siblings and its one Import-Module. Trailing tokens on the same line (e.g.
+    `-Force`) are ignored. Returns the referenced basenames in first-encountered order, each
+    named once even if loaded more than once.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$ScriptText
+    )
+
+    $pattern = '(?m)^\s*(?:\.|Import-Module)\s+\(Join-Path\s+\$PSScriptRoot\s+''(?<name>[^'']+)''\)'
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($match in [regex]::Matches($ScriptText, $pattern)) {
+        $name = $match.Groups['name'].Value
+        if (-not $names.Contains($name)) { [void]$names.Add($name) }
+    }
+    return @($names)
+}
+
+function Resolve-AttrCudaSmokeRunnerClosure {
+    <#
+    .SYNOPSIS
+    Recursively resolve the full $PSScriptRoot-relative dependency closure of a tracked
+    PowerShell script, AS COMMITTED at a given commit.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1. Generator-only (git access; never embedded in an emitted job) --
+    same reason as Resolve-AttrCudaCommittedBlobId. Starts at -RepoRelativePath and scans its
+    committed text (Get-AttrCudaScriptRootDependencies) for $PSScriptRoot-relative loads; each
+    resolved dependency's own committed text is scanned the same way, so a dependency that
+    itself loads further siblings is followed rather than missed. Every sibling is assumed to
+    live in the SAME repository directory as -RepoRelativePath -- a $PSScriptRoot-relative load
+    can resolve nowhere else at runtime. Returns an ordered list of [pscustomobject]@{ name;
+    repoRelativePath; blobId; sha256 }, the root script first, then each further dependency in
+    first-discovered (breadth-first) order, never duplicated.
+    Throws ATTRCUDA_BLOB_UNRESOLVED (from Resolve-AttrCudaCommittedBlobId) if a referenced
+    sibling is not a committed blob at -Commit.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$Commit,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRelativePath
+    )
+
+    $normalized = $RepoRelativePath -replace '\\', '/'
+    $lastSlash = $normalized.LastIndexOf('/')
+    $directory = if ($lastSlash -ge 0) { $normalized.Substring(0, $lastSlash) } else { '' }
+    $rootName = if ($lastSlash -ge 0) { $normalized.Substring($lastSlash + 1) } else { $normalized }
+
+    $closure = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    [void]$queue.Enqueue($rootName)
+    [void]$seen.Add($rootName)
+
+    while ($queue.Count -gt 0) {
+        $name = $queue.Dequeue()
+        $relativePath = if ([string]::IsNullOrEmpty($directory)) { $name } else { "$directory/$name" }
+        $blobId = Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $Commit -RepoRelativePath $relativePath
+        $tempFile = Join-Path ([IO.Path]::GetTempPath()) "attrcuda-closure-$([Guid]::NewGuid().ToString('N')).tmp"
+        try {
+            $sha256 = Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $blobId -Destination $tempFile
+            $text = [IO.File]::ReadAllText($tempFile)
+        } finally {
+            if (Test-Path -LiteralPath $tempFile) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
+        }
+        [void]$closure.Add([pscustomobject]@{
+            name = $name
+            repoRelativePath = $relativePath
+            blobId = $blobId
+            sha256 = $sha256
+        })
+        foreach ($dependencyName in (Get-AttrCudaScriptRootDependencies -ScriptText $text)) {
+            if ($seen.Add($dependencyName)) { [void]$queue.Enqueue($dependencyName) }
+        }
+    }
+    return @($closure)
+}
+
+function Get-AttrCudaClosureDigestHex {
+    <#
+    .SYNOPSIS
+    The content-addressed digest of a resolved dependency closure.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1. sha256 of the sorted `<sha256>  <name>` lines (two-space
+    separator, sha256sum-shaped) of the closure's entries, newline-joined with a trailing
+    newline -- so any two generators that resolve the SAME closure at the SAME commit derive
+    the SAME digest regardless of discovery order, and the published cache directory name
+    (`smoke-runner-<digest16>`) is a pure function of the closure's content.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Closure
+    )
+
+    $lines = @($Closure | ForEach-Object { "$($_.sha256)  $($_.name)" }) | Sort-Object
+    $joined = ($lines -join "`n") + "`n"
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $stream = [IO.MemoryStream]::new($bytes)
+    try {
+        (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Assert-AttrCudaWritableFileSlot {
     <#
     .SYNOPSIS
@@ -653,6 +775,40 @@ function Publish-AttrCudaFileMoveNonOverwriting {
     $slot = Assert-AttrCudaNonOverwritingFileSlot -Path $Destination
     try {
         [IO.File]::Move($Source, $slot, $false)
+    } catch [IO.IOException] {
+        throw "ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS $slot already exists: $($_.Exception.Message)"
+    }
+    return $slot
+}
+
+function Publish-AttrCudaDirectoryMoveNonOverwriting {
+    <#
+    .SYNOPSIS
+    Atomically rename a directory into a destination outside the job-owned work tree WITHOUT
+    ever overwriting or deleting a same-named directory already there.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1: the smoke-runner closure directory is built under a temp name
+    and published in one rename, mirroring Publish-AttrCudaFileMoveNonOverwriting's race-free
+    publish for a single file. The parent is checked exactly like
+    Assert-AttrCudaNonOverwritingFileSlot (must exist, must not be a link); the destination slot
+    itself is never inspected or removed first. [System.IO.Directory]::Move throws IOException
+    when the destination already exists on Windows (no overwrite semantics for a directory
+    move), so there is no check-then-act window for a concurrent writer to land in between the
+    check and the rename.
+    On IOException the destination already exists; nothing has been moved, deleted or written --
+    the caller re-verifies the destination's content instead of this helper silently reporting
+    success either way.
+    Throws ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS when the destination is occupied.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $slot = Assert-AttrCudaNonOverwritingFileSlot -Path $Destination
+    try {
+        [IO.Directory]::Move($Source, $slot)
     } catch [IO.IOException] {
         throw "ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS $slot already exists: $($_.Exception.Message)"
     }
@@ -1000,6 +1156,9 @@ Export-ModuleMember -Function `
     Assert-AttrCudaFixtureCommittedBytes, `
     Resolve-AttrCudaCommittedBlobId, `
     Save-AttrCudaCommittedBlobBytes, `
+    Get-AttrCudaScriptRootDependencies, `
+    Resolve-AttrCudaSmokeRunnerClosure, `
+    Get-AttrCudaClosureDigestHex, `
     Assert-AttrCudaWritableFileSlot, `
     Assert-AttrCudaNonOverwritingFileSlot, `
     Read-AttrCudaBase64Payload, `
@@ -1008,6 +1167,7 @@ Export-ModuleMember -Function `
     Publish-AttrCudaFileCopy, `
     Publish-AttrCudaFileMove, `
     Publish-AttrCudaFileMoveNonOverwriting, `
+    Publish-AttrCudaDirectoryMoveNonOverwriting, `
     New-AttrCudaDirectory, `
     Remove-AttrCudaPartialFile, `
     Assert-AttrCudaNoLinkBelowRoot, `

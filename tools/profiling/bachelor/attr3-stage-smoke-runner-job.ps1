@@ -1,57 +1,50 @@
 # attr3-stage-smoke-runner-job.ps1 -- GENERATOR (runs locally; nothing here runs on Bachelor).
-# Emits a job that publishes ONE tracked repository file -- run-release-gui-smoke.ps1, the smoke
-# runner tools/profiling/bachelor/playback-attr-3-cuda-job.ps1 launches -- into the Bachelor
-# agent cache under a content-addressed cache name, so that job's hash pin
-# (ATTRCUDA_SMOKE_RUNNER_STALE) has verified bytes to match against (ATTR3-SMOKE-RUNNER-PIN-1).
+# Emits a job that publishes the FULL dependency CLOSURE of run-release-gui-smoke.ps1 -- the
+# smoke runner tools/profiling/bachelor/playback-attr-3-cuda-job.ps1 launches -- into the
+# Bachelor agent cache under one content-addressed cache DIRECTORY, so that job's closure pin
+# (ATTRCUDA_SMOKE_RUNNER_STALE) has verified bytes to match against every file in it
+# (ATTR3-SMOKE-RUNNER-DEPS-1).
 #
-# THE DEFECT THIS CLOSES. No tracked stage or assemble job ever copied the runner into the
-# Bachelor cache; the attribution job only ever checked that SOME file sat at that cache path.
-# Bachelor ran a copy of run-release-gui-smoke.ps1 from before commit f401bf9a, which used the
-# pre-f401bf9a log layout and wrote no evidence.runLogSnapshot -- correctly refused downstream by
-# Resolve-AttrCudaSmokeRunLog, but only after a scarce quiet venue window had already been spent.
+# THE DEFECT THIS CLOSES. ATTR3-SMOKE-RUNNER-PIN-1 staged the runner alone. Bachelor still could
+# not launch it: run-release-gui-smoke.ps1 dot-sources gui-smoke-screenshot-provenance.ps1 and
+# provenance-stamp.ps1, and imports gui-smoke-process-boundary.psm1, all resolved through
+# $PSScriptRoot at runtime -- none of the three was ever staged, so the runner died at its own
+# first dot-source line ("...gui-smoke-screenshot-provenance.ps1 is not recognized"). The app
+# never launched; PresentMon never saw its target and never exited; PRESENTMON_TIMEOUT masked
+# the real cause. The fix stages the runner's WHOLE closure together, under their original file
+# names, in one directory, so $PSScriptRoot resolves every one of them.
 #
-# WHY A SEPARATE GENERATOR, NOT A FOURTH ARTIFACT IN playback-attr-3-cuda-stage-job.ps1. That job
-# derives EXACTLY three artifact names from -SourceCommit and binds them to one build.json
-# published LAST, transactionally, as a set -- "manifest present" is read downstream as "all
-# three are complete and verified together". The smoke runner is not part of that build (it is
-# not compiled; it is a tracked repository script) and does not belong in that atomic set. This
-# generator follows attr3-stage-fixture-job.ps1's pattern instead: one file, addressed by its
-# exact baked name, published through the same slot-checked helpers.
+# THE CLOSURE IS DERIVED MECHANICALLY, NEVER A HAND LIST. Resolve-AttrCudaSmokeRunnerClosure
+# (AttrCudaArtifacts.psm1) scans the runner's own committed text for $PSScriptRoot-relative
+# dot-source and Import-Module loads, and recurses into each dependency's own committed text the
+# same way -- so a dependency that itself loads a further sibling is followed, not missed. A
+# test (tools/repo_hygiene/test_playback_attr_3_cuda_behaviour.py) asserts the scanned set equals
+# the staged set, including a synthetic recursive chain.
 #
-# WHAT IS BAKED AND WHAT IS CHECKED. The generator resolves the git blob for
-# tools/profiling/run-release-gui-smoke.ps1 AT -SourceCommit -- never the working tree, which may
-# be dirty or carry a different line-ending checkout -- streams its exact committed bytes to a
-# local staging file byte-for-byte (Save-AttrCudaCommittedBlobBytes), and bakes their sha256.
+# CONTENT-ADDRESSED DIRECTORY, NOT A FIXED NAME (mirrors ATTR3-SMOKE-RUNNER-PIN-1 round 2's
+# reasoning for the single-file cache name). The published directory is named
+# `smoke-runner-<first 16 hex of the closure digest>`, where the digest is the sha256 of the
+# sorted `<sha256>  <name>` lines of the closure's committed blobs (Get-AttrCudaClosureDigestHex).
+# Distinct closures publish under distinct directory names, so this stager never has to contend
+# with -- or touch -- whatever a prior commit's closure already staged.
 #
-# NO SIDE FILE (ATTR3-SMOKE-RUNNER-PIN-1, round 2 BLOCKER). The runner used to be dropped beside
-# the emitted job and submitted with `um-run.ps1 -SideFile`, but UmRunDrop.psm1's side-file name
-# policy rejects a bare `.ps1` (ATTRCUDA_SMOKE_RUNNER_PIN_1_UMRUN_SIDEFILE_NAME_INVALID), so no
-# generator could ever get the runner onto Bachelor that way. The emitted job instead carries the
-# runner's exact committed bytes INLINE, base64-encoded. On Bachelor the job decodes them and
-# verifies sha256 == the baked pin BEFORE a single byte is written to disk, then publishes through
-# the same slot-checked, non-overwriting rename every other staged artifact in this route uses.
-# There is nothing left to submit as a side file, and nothing to rename to dodge the filter --
-# routing around UmRunDrop's policy was considered and rejected; this removes the need for it.
+# NO SIDE FILE (mirrors ATTR3-SMOKE-RUNNER-PIN-1 round 2). Every closure file's exact committed
+# bytes travel INLINE in the emitted job, base64-encoded, one entry per file. On Bachelor the job
+# decodes and verifies EVERY file's sha256 against its own baked pin BEFORE a single byte is
+# written to disk, then publishes the whole directory through one atomic, non-overwriting rename
+# -- built under a temp name, verified, then renamed into place.
 #
-# CACHE NAME IS CONTENT-ADDRESSED, NOT FIXED (ATTR3-SMOKE-RUNNER-PIN-1, round 2 BLOCKER). The
-# previous fixed cache name (run-release-gui-smoke.ps1) meant a stager could never succeed against
-# a Bachelor whose cache already held different bytes under that exact name -- precisely the state
-# this card exists to fix. Both this generator and playback-attr-3-cuda-job.ps1 now derive the
-# cache file name as `run-release-gui-smoke-<first 16 hex of the sha256>.ps1`, so distinct commits
-# publish under distinct names and neither generator has to delete or rewrite whatever the OLD
-# fixed name still holds -- it is simply never referenced again.
+# `<jobId>.job.ps1 -VerifyOnly` runs the read-only prefix (name safety, base64 decode, hash for
+# every file) and exits without creating, publishing or deleting anything.
 #
-# `<jobId>.job.ps1 -VerifyOnly` runs the read-only prefix (name safety, base64 decode, hash) and
-# exits without creating, publishing or deleting anything.
-#
-# NO FOOTAGE. This job moves one tracked repository script. It never opens, names, globs or
-# resolves a media file, and it never enumerates the cache.
+# NO FOOTAGE. This job moves tracked repository scripts. It never opens, names, globs or resolves
+# a media file, and it never enumerates the cache.
 #
 # Usage:
 #   pwsh -NoProfile -File tools\profiling\bachelor\attr3-stage-smoke-runner-job.ps1 `
 #       -SourceCommit <40-hex> -OutDir <staging-dir>
 # then submit the emitted <jobId>.job.ps1 to Bachelor the same way any other job in this route is
-# submitted -- it needs no side file at all; the runner bytes travel inside the job.
+# submitted -- it needs no side file at all; every closure file's bytes travel inside the job.
 
 [CmdletBinding()]
 param(
@@ -75,47 +68,71 @@ param(
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
 
-$RunnerName = 'run-release-gui-smoke.ps1'
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 if (-not (Test-Path -LiteralPath $OutDir)) { [void](New-Item -ItemType Directory -Path $OutDir -Force) }
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
-$localCopy = Join-Path $OutDir $RunnerName
 
-# Committed bytes, never the working tree (ATTR3-SMOKE-RUNNER-PIN-1): the same blob id
+# Committed bytes, never the working tree (ATTR3-SMOKE-RUNNER-PIN-1): the same closure
 # playback-attr-3-cuda-job.ps1 resolves independently from the same -SourceCommit, so the two
 # generators agree without either one taking the other's word for it.
-$blobId = Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $SourceCommit -RepoRelativePath $RunnerRelativePath
-$runnerSha256 = Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $blobId -Destination $localCopy
-# Fable minor (round 2): validated as 64 lowercase hex before it is substituted into the emitted
-# job, the same way playback-attr-3-cuda-job.ps1 validates -PresentMonSha256 -- a value from this
-# helper is trusted enough to gate a publish decision and deserves the same shape check.
-if ($runnerSha256 -notmatch '^[0-9a-f]{64}$') {
-    throw "ATTRCUDA_BLOB_SHA_MALFORMED resolved smoke-runner sha256 is not 64 lowercase hex: '$runnerSha256'"
+$closure = @(Resolve-AttrCudaSmokeRunnerClosure -RepoRoot $RepoRoot -Commit $SourceCommit -RepoRelativePath $RunnerRelativePath)
+foreach ($entry in $closure) {
+    [void](Assert-AttrCudaSafeArtifactName -Name $entry.name)
+    # Fable minor (round 2, carried forward): validated as 64 lowercase hex before it is
+    # substituted into the emitted job, the same way playback-attr-3-cuda-job.ps1 validates
+    # -PresentMonSha256 -- a value from this helper is trusted enough to gate a publish decision
+    # and deserves the same shape check.
+    if ($entry.sha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "ATTRCUDA_BLOB_SHA_MALFORMED resolved closure file sha256 is not 64 lowercase hex for $($entry.name): '$($entry.sha256)'"
+    }
 }
 
-# Content-addressed: distinct commits publish under distinct cache names, so this stager never
-# has to contend with -- or touch -- whatever bytes already sit under the old fixed name.
-$CacheFileName = "run-release-gui-smoke-$($runnerSha256.Substring(0, 16)).ps1"
-[void](Assert-AttrCudaSafeArtifactName -Name $CacheFileName)
+$closureDigest = Get-AttrCudaClosureDigestHex -Closure $closure
+if ($closureDigest -notmatch '^[0-9a-f]{64}$') {
+    throw "ATTRCUDA_BLOB_SHA_MALFORMED closure digest is not 64 lowercase hex: '$closureDigest'"
+}
+# Content-addressed: a distinct closure publishes under a distinct directory name, so this
+# stager never has to contend with -- or touch -- whatever bytes already sit under another name.
+$CacheDirName = "smoke-runner-$($closureDigest.Substring(0, 16))"
+[void](Assert-AttrCudaSafeArtifactName -Name $CacheDirName)
 
-$runnerBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($localCopy))
+function ConvertTo-AttrCudaGeneratorPsLiteral([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
 
-$jobId = "attr3-stage-smoke-runner-$($SourceCommit.Substring(0,12))-$($runnerSha256.Substring(0,12))"
+# Save each file's committed bytes locally (for the base64 embed) and re-verify the sha256 the
+# closure resolver already computed -- one extra independent check before it is trusted into the
+# emitted job.
+$closureEntries = foreach ($entry in $closure) {
+    $localCopy = Join-Path $OutDir $entry.name
+    $savedSha256 = Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $entry.blobId -Destination $localCopy
+    if ($savedSha256 -ne $entry.sha256) {
+        throw "ATTRCUDA_BLOB_SHA_MALFORMED re-saved bytes for $($entry.name) hash to $savedSha256, expected $($entry.sha256)"
+    }
+    [pscustomobject]@{
+        name = $entry.name
+        sha256 = $entry.sha256
+        base64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($localCopy))
+    }
+}
+
+$jobId = "attr3-stage-smoke-runner-$($SourceCommit.Substring(0,12))-$($closureDigest.Substring(0,12))"
+
+$closureEntriesLiteral = "@(`r`n" + (($closureEntries | ForEach-Object {
+    "    [pscustomobject]@{ name = $(ConvertTo-AttrCudaGeneratorPsLiteral $_.name); sha256 = '$($_.sha256)'; base64 = '$($_.base64)' }"
+}) -join ",`r`n") + "`r`n)"
 
 # --- job body template (placeholders are substituted below) ------------------------------------
 $template = @'
-# -VerifyOnly runs the read-only prefix (name safety, base64 decode, hash) and exits WITHOUT
-# publishing or deleting anything. The agent never passes it; the behavioural tests do.
+# -VerifyOnly runs the read-only prefix (name safety, base64 decode, hash for every closure
+# file) and exits WITHOUT publishing or deleting anything. The agent never passes it; the
+# behavioural tests do.
 param([switch]$VerifyOnly)
 
 $ErrorActionPreference = 'Stop'
 $JobId = '__JOB_ID__'
 $AgentRoot = '__AGENT_ROOT__'
-$RunnerName = '__RUNNER_NAME__'
-$CacheFileName = '__CACHE_FILE_NAME__'
-$RunnerSha256 = '__RUNNER_SHA256__'
-$RunnerBase64 = '__RUNNER_BASE64__'
+$CacheDirName = '__CACHE_DIR_NAME__'
+$ClosureEntries = __CLOSURE_ENTRIES__
 $Cache = Join-Path $AgentRoot 'cache'
 $Work = Join-Path $AgentRoot "work\$JobId"
 $Pub = Join-Path $AgentRoot "outbox\$JobId.artifacts"
@@ -137,7 +154,7 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
     Say "FAIL step=$Step exit=$Code $Message"
     if ($PubReady -and (Test-Path -LiteralPath $Pub)) {
         $partial = [ordered]@{
-            schema = 'mlvapp.attr3-stage-smoke-runner.v1'
+            schema = 'mlvapp.attr3-stage-smoke-runner-deps.v1'
             jobId = $JobId
             exitCode = $Code
             failedStep = $Step
@@ -155,18 +172,19 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
     exit $Code
 }
 
-# ATTR3-SMOKE-RUNNER-PIN-1: one exit for "the cache already holds these exact bytes", whether
-# that was found by the pre-flight check or by losing the publish race to a concurrent
-# identical-bytes publisher -- mirrors attr3-stage-fixture-job.ps1's Complete-AlreadyStaged.
-function Complete-AlreadyStaged([string]$CachePathValue) {
+# ATTR3-SMOKE-RUNNER-DEPS-1: one exit for "the cache already holds this exact closure's content",
+# whether that was found by the pre-flight check or by losing the publish race to a concurrent
+# identical-content publisher -- mirrors attr3-stage-fixture-job.ps1's Complete-AlreadyStaged.
+function Complete-AlreadyStaged([string]$CacheDirPathValue) {
     $StepLog['publish'] = 0
     [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value (([ordered]@{
-        schema = 'mlvapp.attr3-stage-smoke-runner.v1'; jobId = $JobId
+        schema = 'mlvapp.attr3-stage-smoke-runner-deps.v1'; jobId = $JobId
         exitCode = 0; alreadyStaged = $true
-        runner = [ordered]@{ name = $RunnerName; cacheFileName = $CacheFileName; sha256 = $RunnerSha256; cachePath = $CachePathValue }
+        cacheDirName = $CacheDirName; cacheDirPath = $CacheDirPathValue
+        files = @($ClosureEntries | ForEach-Object { [ordered]@{ name = $_.name; sha256 = $_.sha256 } })
         stagedOnHost = $env:COMPUTERNAME; steps = $StepLog
     }) | ConvertTo-Json -Depth 10))
-    Write-Output "RESULT=SMOKE_RUNNER_STAGE_OK ALREADY=1 RUNNER=$CacheFileName SHA256=$RunnerSha256 CACHE=$CachePathValue"
+    Write-Output "RESULT=SMOKE_RUNNER_STAGE_OK ALREADY=1 CACHE_DIR=$CacheDirName PATH=$CacheDirPathValue"
     exit 0
 }
 
@@ -183,35 +201,47 @@ foreach ($check in @(
     @{ path = $Pub; label = 'Pub' }
 )) { Assert-UnderAgentRoot $check.path $check.label }
 
-Say "START runner name=$RunnerName cache=$CacheFileName sha256=$RunnerSha256"
+Say "START cacheDir=$CacheDirName files=$($ClosureEntries.Count)"
 
 # --- name safety, before anything is decoded, written or renamed ------------------------------
 try {
-    [void](Assert-AttrCudaSafeArtifactName -Name $CacheFileName)
-    $cachePath = Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache $CacheFileName) -Label "cache/$CacheFileName"
-    $partialPath = Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache "$CacheFileName.partial") -Label "cache/$CacheFileName.partial"
+    [void](Assert-AttrCudaSafeArtifactName -Name $CacheDirName)
+    foreach ($entry in $ClosureEntries) { [void](Assert-AttrCudaSafeArtifactName -Name $entry.name) }
+    $cacheDirPath = Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache $CacheDirName) -Label "cache/$CacheDirName"
+    $partialDirPath = Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache "$CacheDirName.partial") -Label "cache/$CacheDirName.partial"
 } catch {
     Complete-Failed 6 'artifactNameSafety' $_.Exception.Message
 }
 $StepLog['artifactNameSafety'] = 0
 
-# --- decode and verify the embedded payload BEFORE a single byte reaches disk ------------------
+# --- decode and verify EVERY embedded payload BEFORE a single byte reaches disk ----------------
+$decoded = @{}
 try {
-    $decoded = Read-AttrCudaBase64Payload -Base64 $RunnerBase64
+    foreach ($entry in $ClosureEntries) {
+        $payload = Read-AttrCudaBase64Payload -Base64 $entry.base64
+        if ($payload.sha256 -ne $entry.sha256) {
+            throw "sha256 mismatch for $($entry.name): baked $($entry.sha256), decoded $($payload.sha256)"
+        }
+        $decoded[$entry.name] = $payload.bytes
+    }
 } catch {
-    Complete-Failed 4 'runnerDecode' $_.Exception.Message
+    Complete-Failed 4 'closureDecode' $_.Exception.Message
 }
-$StepLog['runnerDecode'] = 0
-$runnerBytes = $decoded.bytes
+$StepLog['closureDecode'] = 0
 
-if ($decoded.sha256 -ne $RunnerSha256) {
-    Complete-Failed 4 'runnerHash' "sha256 mismatch for ${CacheFileName}: baked $RunnerSha256, decoded $($decoded.sha256)"
+function Test-AttrCudaClosureDirectoryMatches([string]$Dir) {
+    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return $false }
+    foreach ($entry in $ClosureEntries) {
+        $path = Join-Path $Dir $entry.name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+        if ((Get-ShaLower $path) -ne $entry.sha256) { return $false }
+    }
+    return $true
 }
-$StepLog['runnerHash'] = 0
 
 # Everything above is read-only: no file has been created or written. -VerifyOnly stops here.
 if ($VerifyOnly) {
-    Write-Output "RESULT=VERIFY_ONLY_OK RUNNER=$CacheFileName SHA256=$RunnerSha256"
+    Write-Output "RESULT=VERIFY_ONLY_OK CACHE_DIR=$CacheDirName FILES=$($ClosureEntries.Count)"
     exit 0
 }
 
@@ -230,49 +260,54 @@ $Scratch = Join-Path $Work '.job-tmp'
 $env:TEMP = $Scratch
 $env:TMP = $Scratch
 
-# Already staged with identical bytes: nothing to do, and re-staging must not churn the cache.
-# A file under the OLD fixed name (run-release-gui-smoke.ps1) is a different path entirely and is
-# never inspected, deleted or rewritten here.
-if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
-    if ((Get-ShaLower $cachePath) -eq $RunnerSha256) {
-        Complete-AlreadyStaged -CachePathValue $cachePath
+# Already staged with identical content: nothing to do, and re-staging must not churn the cache.
+if (Test-Path -LiteralPath $cacheDirPath) {
+    if (Test-AttrCudaClosureDirectoryMatches -Dir $cacheDirPath) {
+        Complete-AlreadyStaged -CacheDirPathValue $cacheDirPath
     }
-    Complete-Failed 21 'publishRename' "cache already holds $CacheFileName with DIFFERENT bytes"
+    Complete-Failed 21 'publishRename' "cache already holds $CacheDirName with DIFFERENT content"
 }
 
+# Build under a temp name; a leftover partial from a previous interrupted run is removed first.
+Remove-AttrCudaTree -TrustedRoot $AgentRoot -Path $partialDirPath
+[void](New-AttrCudaDirectory -Path $partialDirPath)
 try {
-    [void](Publish-AttrCudaBytes -Path $partialPath -Bytes $runnerBytes)
-    if ((Get-ShaLower $partialPath) -ne $RunnerSha256) { throw "sha256 did not round-trip into the cache for $CacheFileName" }
+    foreach ($entry in $ClosureEntries) {
+        $entryPath = Join-Path $partialDirPath $entry.name
+        [void](Publish-AttrCudaBytes -Path $entryPath -Bytes $decoded[$entry.name])
+        if ((Get-ShaLower $entryPath) -ne $entry.sha256) { throw "sha256 did not round-trip into the cache for $($entry.name)" }
+    }
 } catch {
-    [void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $partialPath)
+    Remove-AttrCudaTree -TrustedRoot $AgentRoot -Path $partialDirPath
     Complete-Failed 20 'publishPartial' $_.Exception.Message
 }
 $StepLog['publishPartial'] = 0
 
 try {
-    [void](Publish-AttrCudaFileMoveNonOverwriting -Source $partialPath -Destination $cachePath)
+    [void](Publish-AttrCudaDirectoryMoveNonOverwriting -Source $partialDirPath -Destination $cacheDirPath)
 } catch {
-    # A plain Move-Item -Force here would delete and replace whatever a concurrent publisher had
-    # just placed at $cachePath. The non-overwriting move above never touches an occupied
-    # destination -- it either renamed cleanly or the destination is exactly as some other writer
-    # left it. Re-hash it to tell "a concurrent publisher already finished this exact runner"
-    # (this run is simply done) from "something else is there" (fail closed at the same code the
-    # pre-flight check above uses for that).
-    [void](Remove-AttrCudaPartialFile -TrustedRoot $AgentRoot -Path $partialPath)
-    if ((Test-Path -LiteralPath $cachePath -PathType Leaf) -and (Get-ShaLower $cachePath) -eq $RunnerSha256) {
-        Complete-AlreadyStaged -CachePathValue $cachePath
+    # A plain directory move with overwrite here would delete and replace whatever a concurrent
+    # publisher had just placed at $cacheDirPath. The non-overwriting move above never touches an
+    # occupied destination -- it either renamed cleanly or the destination is exactly as some
+    # other writer left it. Re-verify it to tell "a concurrent publisher already finished this
+    # exact closure" (this run is simply done) from "something else is there" (fail closed at the
+    # same code the pre-flight check above uses for that).
+    Remove-AttrCudaTree -TrustedRoot $AgentRoot -Path $partialDirPath
+    if (Test-AttrCudaClosureDirectoryMatches -Dir $cacheDirPath) {
+        Complete-AlreadyStaged -CacheDirPathValue $cacheDirPath
     }
     Complete-Failed 21 'publishRename' $_.Exception.Message
 }
 $StepLog['publishRename'] = 0
 
 try { [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value (([ordered]@{
-    schema = 'mlvapp.attr3-stage-smoke-runner.v1'; jobId = $JobId
+    schema = 'mlvapp.attr3-stage-smoke-runner-deps.v1'; jobId = $JobId
     exitCode = 0; alreadyStaged = $false
-    runner = [ordered]@{ name = $RunnerName; cacheFileName = $CacheFileName; sha256 = $RunnerSha256; cachePath = $cachePath }
+    cacheDirName = $CacheDirName; cacheDirPath = $cacheDirPath
+    files = @($ClosureEntries | ForEach-Object { [ordered]@{ name = $_.name; sha256 = $_.sha256 } })
     stagedOnHost = $env:COMPUTERNAME; steps = $StepLog
 }) | ConvertTo-Json -Depth 10)) } catch { Complete-Failed 23 'publishResult' $_.Exception.Message }
-Write-Output "RESULT=SMOKE_RUNNER_STAGE_OK RUNNER=$CacheFileName SHA256=$RunnerSha256 CACHE=$cachePath"
+Write-Output "RESULT=SMOKE_RUNNER_STAGE_OK CACHE_DIR=$CacheDirName PATH=$cacheDirPath FILES=$($ClosureEntries.Count)"
 exit 0
 '@
 
@@ -285,40 +320,35 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Read-AttrCudaBase64Payload',
     'Publish-AttrCudaBytes',
     'Publish-AttrCudaText',
-    'Publish-AttrCudaFileMoveNonOverwriting',
+    'Publish-AttrCudaDirectoryMoveNonOverwriting',
     'New-AttrCudaDirectory',
-    'Remove-AttrCudaPartialFile',
     'Remove-AttrCudaTree'
 )
 
 $jobPath = Join-Path $OutDir "$jobId.job.ps1"
-# Fable minor (round 2): __EMBEDDED_FUNCTIONS__ is spliced in LAST, after every other placeholder
-# is substituted -- mirroring playback-attr-3-cuda-job.ps1 (its own lines 859-861) -- so
+# Fable minor (round 2, carried forward): __EMBEDDED_FUNCTIONS__ is spliced in LAST, after every
+# other placeholder is substituted -- mirroring playback-attr-3-cuda-job.ps1 -- so
 # placeholder-shaped text that happens to appear inside the verbatim module source (e.g. a
 # `__NAME__`-looking token in a comment) can never be rewritten by an earlier .Replace() call.
-# The previous ordering here replaced __EMBEDDED_FUNCTIONS__ FIRST, which had no such guarantee.
 $text = $template.
     Replace('__JOB_ID__', $jobId).
     Replace('__AGENT_ROOT__', $AgentRoot).
-    Replace('__RUNNER_NAME__', $RunnerName).
-    Replace('__CACHE_FILE_NAME__', $CacheFileName).
-    Replace('__RUNNER_SHA256__', $runnerSha256).
-    Replace('__RUNNER_BASE64__', $runnerBase64)
+    Replace('__CACHE_DIR_NAME__', $CacheDirName).
+    Replace('__CLOSURE_ENTRIES__', $closureEntriesLiteral)
 $text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
 [IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))
 
-# So the hub can pass the baked hash straight to playback-attr-3-cuda-job.ps1's verification
+# So the hub can pass the baked digest straight to playback-attr-3-cuda-job.ps1's verification
 # without re-deriving it, and so a reader can confirm the two generators agree.
-Write-Output "RESULT=SMOKE_RUNNER_STAGE_JOB_EMITTED SOURCE=$SourceCommit RUNNER_SHA256=$runnerSha256 CACHE_FILE_NAME=$CacheFileName JOB=$jobPath"
+Write-Output "RESULT=SMOKE_RUNNER_STAGE_JOB_EMITTED SOURCE=$SourceCommit CLOSURE_DIGEST=$closureDigest CACHE_DIR_NAME=$CacheDirName JOB=$jobPath"
 
 [pscustomobject]@{
     jobFile = $jobPath
     jobId = $jobId
     sourceCommit = $SourceCommit
-    runnerName = $RunnerName
-    cacheFileName = $CacheFileName
-    runnerSha256 = $runnerSha256
-    localCopy = $localCopy
+    closureDigest = $closureDigest
+    cacheDirName = $CacheDirName
+    files = @($closureEntries | ForEach-Object { [ordered]@{ name = $_.name; sha256 = $_.sha256 } })
     agentRoot = $AgentRoot
-    cachePath = (Join-Path (Join-Path $AgentRoot 'cache') $CacheFileName)
+    cacheDirPath = (Join-Path (Join-Path $AgentRoot 'cache') $CacheDirName)
 }

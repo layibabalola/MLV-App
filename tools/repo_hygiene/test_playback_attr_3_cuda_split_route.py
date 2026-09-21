@@ -385,12 +385,15 @@ class AttributionJobTests(unittest.TestCase):
 
 
 class SmokeRunnerPinTests(unittest.TestCase):
-    """ATTR3-SMOKE-RUNNER-PIN-1: existence of the cached runner is no longer enough.
+    """ATTR3-SMOKE-RUNNER-DEPS-1: the runner's FULL dependency closure is pinned, not the
+    runner alone.
 
-    Bachelor ran a copy of run-release-gui-smoke.ps1 from before commit f401bf9a because the
-    job only ever checked that SOME file sat at that cache path. It is now hash-pinned exactly
-    like PresentMon, and the pin is baked from the committed git blob at -SourceCommit -- the
-    same bytes attr3-stage-smoke-runner-job.ps1 stages -- never from a working-tree file.
+    Round 1 (ATTR3-SMOKE-RUNNER-PIN-1) hash-pinned only run-release-gui-smoke.ps1; Bachelor
+    still could not launch it, because the runner dot-sources two siblings and imports a
+    module, all resolved via $PSScriptRoot, and none of those three was ever staged. The
+    closure is now derived mechanically (Resolve-AttrCudaSmokeRunnerClosure) and every file in
+    it is hash-pinned, from the committed git blob at -SourceCommit -- the same bytes
+    attr3-stage-smoke-runner-job.ps1 stages -- never from a working-tree file.
     """
 
     def setUp(self) -> None:
@@ -401,43 +404,51 @@ class SmokeRunnerPinTests(unittest.TestCase):
             "foreach ($name in @($PresentMonName, 'run-release-gui-smoke.ps1')) {", self.text
         )
 
-    def test_the_emitted_job_hash_checks_the_runner_before_it_is_used(self) -> None:
-        self.assertIn("$SmokeRunnerSha256 = '__SMOKE_RUNNER_SHA256__'", self.text)
-        # round 2: the cache name is content-addressed (derived from the pinned sha256), not the
-        # old fixed literal -- a stager must never be asked to overwrite whatever bytes already
-        # sit under the old fixed name.
-        self.assertIn(
+    def test_single_file_pin_check_is_gone(self) -> None:
+        # ATTR3-SMOKE-RUNNER-PIN-1's single-file pin (round 2) is superseded by the closure.
+        self.assertNotIn("$SmokeRunnerSha256 = '__SMOKE_RUNNER_SHA256__'", self.text)
+        self.assertNotIn(
             '$SmokeRunnerCacheName = "run-release-gui-smoke-$($SmokeRunnerSha256.Substring(0, 16)).ps1"',
             self.text,
         )
+
+    def test_the_emitted_job_hash_checks_every_closure_file_before_it_is_used(self) -> None:
+        self.assertIn("$SmokeRunnerClosure = __SMOKE_RUNNER_CLOSURE__", self.text)
+        self.assertIn("$SmokeRunnerClosureDirName = '__SMOKE_RUNNER_CLOSURE_DIR_NAME__'", self.text)
         self.assertIn(
-            'throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing $SmokeRunnerCacheName"',
+            "$smokeRunnerClosureDir = Join-Path $Cache $SmokeRunnerClosureDirName", self.text
+        )
+        self.assertIn(
+            'throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing closure directory '
+            '$SmokeRunnerClosureDirName"',
+            self.text,
+        )
+        self.assertIn("foreach ($closureEntry in $SmokeRunnerClosure) {", self.text)
+        self.assertIn(
+            'throw "ATTRCUDA_SMOKE_RUNNER_STALE cache $SmokeRunnerClosureDirName is missing '
+            '$($closureEntry.name)"',
             self.text,
         )
         self.assertIn(
-            "if ($smokeRunnerActualSha -ne $SmokeRunnerSha256.ToUpperInvariant()) {", self.text
+            "if ($closureEntryActualSha -ne $closureEntry.sha256.ToUpperInvariant()) {", self.text
         )
 
-    def test_the_smoke_runner_sha_is_validated_before_it_is_trusted(self) -> None:
-        # Fable minor (round 2): validated the same way -PresentMonSha256 is, before either value
-        # is substituted into the emitted job.
+    def test_the_closure_digest_is_validated_before_it_is_trusted(self) -> None:
+        # Fable minor (round 2, carried forward): validated the same way -PresentMonSha256 is,
+        # before it is substituted into the emitted job.
         self.assertIn(
-            "if ($smokeRunnerSha256 -notmatch '^[0-9a-f]{64}$') {", self.text
+            "if ($smokeRunnerClosureDigest -notmatch '^[0-9a-f]{64}$') {", self.text
         )
         self.assertIn("ATTRCUDA_BLOB_SHA_MALFORMED", self.text)
 
     def test_the_pin_is_baked_from_the_committed_git_blob_not_the_working_tree(self) -> None:
         self.assertIn(
-            "Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $SourceCommit "
+            "Resolve-AttrCudaSmokeRunnerClosure -RepoRoot $RepoRoot -Commit $SourceCommit "
             "-RepoRelativePath $SmokeRunnerRelativePath",
             self.text,
         )
-        self.assertIn(
-            "Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $smokeRunnerBlobId "
-            "-Destination $smokeRunnerPinTemp",
-            self.text,
-        )
-        self.assertIn("Replace('__SMOKE_RUNNER_SHA256__', $smokeRunnerSha256)", self.text)
+        self.assertIn("Get-AttrCudaClosureDigestHex -Closure $smokeRunnerClosure", self.text)
+        self.assertIn("Replace('__SMOKE_RUNNER_CLOSURE_DIR_NAME__', $smokeRunnerClosureDirName)", self.text)
 
     def test_the_refusal_runs_before_presentmon_and_before_deployment(self) -> None:
         refusal = self.text.index("ATTRCUDA_SMOKE_RUNNER_STALE")
@@ -449,6 +460,44 @@ class SmokeRunnerPinTests(unittest.TestCase):
         self.assertLess(
             refusal, present_mon_start, "the pin must be checked before PresentMon starts"
         )
+
+
+class SmokeRunFailedBeforePresentMonTests(unittest.TestCase):
+    """ATTR3-SMOKE-RUNNER-DEPS-1 (D): the smoke run's own outcome is checked before PresentMon
+    is waited on, so a smoke-side failure is never reported as PRESENTMON_TIMEOUT."""
+
+    def setUp(self) -> None:
+        self.text = _read(ATTRIBUTION_JOB)
+
+    def test_smoke_outcome_is_checked_before_waiting_on_presentmon(self) -> None:
+        smoke_launch = self.text.index("$smokeRc = $LASTEXITCODE")
+        check = self.text.index(
+            "if ($smokeRc -ne 0 -or -not (Test-Path -LiteralPath $resultPath)) {"
+        )
+        wait = self.text.index("$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc")
+        self.assertLess(smoke_launch, check)
+        self.assertLess(check, wait, "the outcome check must run before PresentMon is waited on")
+
+    def test_presentmon_is_stopped_not_waited_out_on_a_smoke_failure(self) -> None:
+        check = self.text.index(
+            "if ($smokeRc -ne 0 -or -not (Test-Path -LiteralPath $resultPath)) {"
+        )
+        stop = self.text.index("Stop-PresentMonCapture", check)
+        wait = self.text.index("$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc")
+        self.assertLess(stop, wait)
+
+    def test_smoke_run_failed_is_a_distinct_result_with_a_stderr_tail(self) -> None:
+        self.assertIn("RESULT=SMOKE_RUN_FAILED", self.text)
+        self.assertIn("smokeStderrTail", self.text)
+        self.assertIn("exit 18", self.text)
+
+    def test_presentmon_timeout_still_exists_for_its_own_case(self) -> None:
+        # Unchanged: Wait-PresentMonCapture still throws PRESENTMON_TIMEOUT, now reached only
+        # once the smoke run is already known to have succeeded.
+        self.assertIn("PRESENTMON_TIMEOUT: did not exit within", self.text)
+        failed = self.text.index("RESULT=SMOKE_RUN_FAILED")
+        timeout_fn = self.text.index("function Wait-PresentMonCapture")
+        self.assertLess(timeout_fn, failed, "PRESENTMON_TIMEOUT's own function is defined earlier in the file")
 
 
 class AttributionJobFixtureRehearsalTests(unittest.TestCase):
