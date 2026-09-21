@@ -384,6 +384,73 @@ class AttributionJobTests(unittest.TestCase):
                 self.assertLess(refusal, self.text.index(later_verdict))
 
 
+class SmokeRunnerPinTests(unittest.TestCase):
+    """ATTR3-SMOKE-RUNNER-PIN-1: existence of the cached runner is no longer enough.
+
+    Bachelor ran a copy of run-release-gui-smoke.ps1 from before commit f401bf9a because the
+    job only ever checked that SOME file sat at that cache path. It is now hash-pinned exactly
+    like PresentMon, and the pin is baked from the committed git blob at -SourceCommit -- the
+    same bytes attr3-stage-smoke-runner-job.ps1 stages -- never from a working-tree file.
+    """
+
+    def setUp(self) -> None:
+        self.text = _read(ATTRIBUTION_JOB)
+
+    def test_existence_only_check_is_gone(self) -> None:
+        self.assertNotIn(
+            "foreach ($name in @($PresentMonName, 'run-release-gui-smoke.ps1')) {", self.text
+        )
+
+    def test_the_emitted_job_hash_checks_the_runner_before_it_is_used(self) -> None:
+        self.assertIn("$SmokeRunnerSha256 = '__SMOKE_RUNNER_SHA256__'", self.text)
+        # round 2: the cache name is content-addressed (derived from the pinned sha256), not the
+        # old fixed literal -- a stager must never be asked to overwrite whatever bytes already
+        # sit under the old fixed name.
+        self.assertIn(
+            '$SmokeRunnerCacheName = "run-release-gui-smoke-$($SmokeRunnerSha256.Substring(0, 16)).ps1"',
+            self.text,
+        )
+        self.assertIn(
+            'throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing $SmokeRunnerCacheName"',
+            self.text,
+        )
+        self.assertIn(
+            "if ($smokeRunnerActualSha -ne $SmokeRunnerSha256.ToUpperInvariant()) {", self.text
+        )
+
+    def test_the_smoke_runner_sha_is_validated_before_it_is_trusted(self) -> None:
+        # Fable minor (round 2): validated the same way -PresentMonSha256 is, before either value
+        # is substituted into the emitted job.
+        self.assertIn(
+            "if ($smokeRunnerSha256 -notmatch '^[0-9a-f]{64}$') {", self.text
+        )
+        self.assertIn("ATTRCUDA_BLOB_SHA_MALFORMED", self.text)
+
+    def test_the_pin_is_baked_from_the_committed_git_blob_not_the_working_tree(self) -> None:
+        self.assertIn(
+            "Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $SourceCommit "
+            "-RepoRelativePath $SmokeRunnerRelativePath",
+            self.text,
+        )
+        self.assertIn(
+            "Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $smokeRunnerBlobId "
+            "-Destination $smokeRunnerPinTemp",
+            self.text,
+        )
+        self.assertIn("Replace('__SMOKE_RUNNER_SHA256__', $smokeRunnerSha256)", self.text)
+
+    def test_the_refusal_runs_before_presentmon_and_before_deployment(self) -> None:
+        refusal = self.text.index("ATTRCUDA_SMOKE_RUNNER_STALE")
+        deploy = self.text.index(
+            "[void](Publish-AttrCudaFileCopy -Source (Join-Path $Cache $ExeName) -Destination $exePath)"
+        )
+        present_mon_start = self.text.index("Start-PresentMonCapture $presentMonPath")
+        self.assertLess(refusal, deploy, "the pin must be checked before the package is deployed")
+        self.assertLess(
+            refusal, present_mon_start, "the pin must be checked before PresentMon starts"
+        )
+
+
 class AttributionJobFixtureRehearsalTests(unittest.TestCase):
     """ATTR3-FIXTURE-REHEARSAL-1: -ClipId also admits the two tracked fixtures, unmistakably."""
 
