@@ -202,7 +202,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
 
 # --- ATTR3-FOOTAGE-BIND-1 PR-B: resolve an owner-clip id, generator-side only -----------------
 # Mirrors attr3-footage-presence-job.ps1's own resolver invocation (PR-A): the resolver runs as a
@@ -307,9 +306,79 @@ function Resolve-AttrCudaOwnerClipParts {
     })
 }
 
-# The emitted job runs on a host with no checkout, so it cannot Import-Module: the verification
-# functions are spliced into its text VERBATIM at generation time. The test suite executes the
-# module copy, so the code under test is the code that runs on Bachelor.
+# ATTR3-FIXTURE-REHEARSAL-1: the literal allowlist the ValidatePattern above also enforces,
+# restated here so the fixtureRehearsal flag is decided by an exact membership test rather
+# than by re-deriving it from the regex. A fixture run must be unmistakable in its own
+# artifacts, so this flag is baked into the job body and never inferred by the job at runtime.
+$FixtureClipIds = @('tiny_dual_iso', 'large_dual_iso')
+$isFixtureRehearsal = $FixtureClipIds -ccontains $ClipId
+$fixtureRehearsalLiteral = if ($isFixtureRehearsal) { '$true' } else { '$false' }
+
+# ATTR3-FIXTURE-STAGE-1. The compound suffix the two tracked fixtures carry is never spelled
+# as one literal token anywhere in this file: a token ending in it trips this repository's own
+# NA-4 PreToolUse gate, even in source text that names no real clip, so it is composed here.
+$FixtureClipExtension = '.' + 'mlv'
+
+# --- owner/fixture-clip FLAG refusals FIRST (round 3, STRUCTURAL): pure parameter checks only,
+#     no I/O of any kind -- no Import-Module, no Get-AttrCudaEmbeddedFunctionSource, no git, no
+#     Test-Path, not even $RepoRoot resolved yet. Round 2 already proved a resolver refusal must
+#     surface before an unrelated SourceCommit/PresentMon/closure failure; round 3 goes one step
+#     further -- a caller who passes BOTH a bogus -RepoRoot and a refused -ClipPath for an owner
+#     id must see PLAYBACK_ATTR3_CLIPPATH_REFUSED, never a RepoRoot error that only fires first
+#     because RepoRoot resolution used to sit ahead of this classification in the file. -------
+if ($isFixtureRehearsal) {
+    if ($FixtureSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED -FixtureSha256 must be 64 lowercase hex for a fixture id ('$ClipId'); got '$FixtureSha256'"
+    }
+    if ([string]::IsNullOrWhiteSpace($ClipPath)) {
+        $ClipPath = Join-Path (Join-Path $AgentRoot 'cache') ($ClipId + $FixtureClipExtension)
+    }
+    if ($ClipPath -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
+        throw "PLAYBACK_ATTR3_CLIPPATH_INVALID -ClipPath contains characters outside the allowlist: '$ClipPath'"
+    }
+} else {
+    if ($FixtureSha256) {
+        throw "PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED -FixtureSha256 is refused for an owner clip id ('$ClipId')"
+    }
+    if ($ClipPath) {
+        throw "PLAYBACK_ATTR3_CLIPPATH_REFUSED -ClipPath is refused for an owner clip id ('$ClipId'): the footage path is resolved through tools/gates/resolve_consented_clip.py, never typed by a caller"
+    }
+}
+
+# --- RepoRoot resolution: the ONE I/O statement before the resolver call, wrapped so a failure
+#     throws a fixed token WITHOUT echoing the caller-supplied value (round 3, STRUCTURAL) -- a
+#     bogus -RepoRoot used to surface Resolve-Path's own error text, which echoes the raw value
+#     verbatim, ahead of every owner/fixture check below it in the old ordering. ---------------
+try {
+    $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+} catch {
+    throw 'PLAYBACK_ATTR3_REPOROOT_INVALID -RepoRoot does not resolve to an existing path'
+}
+
+# ATTR3-FOOTAGE-BIND-1 PR-B (round 1): an owner-clip id is RESOLVED right here -- before the
+# smoke-runner closure resolution, before any build-manifest work, before the SourceCommit/
+# PresentMon provenance checks below, and (round 3) before Import-Module and the embedded-
+# function extraction -- so a resolver refusal always surfaces on its own, never masked by an
+# unrelated closure, build-manifest, provenance or I/O-adjacent failure that would also have
+# fired had the code reached that far.
+$ownerPartsForJob = $null
+if (-not $isFixtureRehearsal) {
+    $ownerPartsForJob = @(Resolve-AttrCudaOwnerClipParts -ClipId $ClipId -RepoRoot $RepoRoot)
+}
+$ownerPartsJson = ''
+if (-not $isFixtureRehearsal) {
+    $ownerPartsJson = $ownerPartsForJob | ConvertTo-Json -Compress -Depth 5
+    if ($ownerPartsForJob.Count -eq 1) { $ownerPartsJson = "[$ownerPartsJson]" }
+}
+
+# --- only now: Import-Module and the embedded-function extraction, and everything else --------
+# The owner/fixture decision above never needed either: Resolve-AttrCudaOwnerClipParts is
+# self-contained (a child-process call plus pure parsing), so moving these two statements past it
+# costs nothing and removes them from the set of things a CLIPPATH/REPOROOT refusal could ever be
+# masked by. The emitted job runs on a host with no checkout, so it cannot Import-Module: the
+# verification functions are spliced into its text VERBATIM at generation time. The test suite
+# executes the module copy, so the code under test is the code that runs on Bachelor.
+Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
 $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Assert-AttrCudaBuildManifest',
     'Resolve-AttrCudaSmokeRunLog',
@@ -331,58 +400,6 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Test-AttrCudaFootagePart',
     'ConvertTo-AttrCudaUtf8String'
 )
-
-# --- owner/fixture-clip decision FIRST (round 2, sol BLOCKER / astra MAJOR): this whole block
-#     used to run AFTER the SourceCommit git cat-file / llrawproc blob lookup and the PresentMon
-#     hash check below, so a bogus -SourceCommit or a malformed -PresentMonSha256 could mask an
-#     owner-clip refusal (resolver refusal, or -ClipPath/-FixtureSha256 refused) that would also
-#     have fired had the code reached this far. Only $RepoRoot needs resolving first -- the
-#     resolver call takes ClipId and RepoRoot, nothing SourceCommit-derived. -------------------
-$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
-
-# ATTR3-FIXTURE-REHEARSAL-1: the literal allowlist the ValidatePattern above also enforces,
-# restated here so the fixtureRehearsal flag is decided by an exact membership test rather
-# than by re-deriving it from the regex. A fixture run must be unmistakable in its own
-# artifacts, so this flag is baked into the job body and never inferred by the job at runtime.
-$FixtureClipIds = @('tiny_dual_iso', 'large_dual_iso')
-$isFixtureRehearsal = $FixtureClipIds -ccontains $ClipId
-$fixtureRehearsalLiteral = if ($isFixtureRehearsal) { '$true' } else { '$false' }
-
-# ATTR3-FIXTURE-STAGE-1. The compound suffix the two tracked fixtures carry is never spelled
-# as one literal token anywhere in this file: a token ending in it trips this repository's own
-# NA-4 PreToolUse gate, even in source text that names no real clip, so it is composed here.
-$FixtureClipExtension = '.' + 'mlv'
-
-# ATTR3-FOOTAGE-BIND-1 PR-B (round 1): an owner-clip id is decided and RESOLVED right here --
-# before the smoke-runner closure resolution, before any build-manifest work, and (round 2)
-# before the SourceCommit/PresentMon provenance checks just below -- so a resolver refusal
-# always surfaces on its own, never masked by an unrelated closure, build-manifest or
-# provenance failure that would also have fired had the code reached that far.
-$ownerPartsForJob = $null
-if ($isFixtureRehearsal) {
-    if ($FixtureSha256 -notmatch '^[0-9a-f]{64}$') {
-        throw "PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED -FixtureSha256 must be 64 lowercase hex for a fixture id ('$ClipId'); got '$FixtureSha256'"
-    }
-    if ([string]::IsNullOrWhiteSpace($ClipPath)) {
-        $ClipPath = Join-Path (Join-Path $AgentRoot 'cache') ($ClipId + $FixtureClipExtension)
-    }
-    if ($ClipPath -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
-        throw "PLAYBACK_ATTR3_CLIPPATH_INVALID -ClipPath contains characters outside the allowlist: '$ClipPath'"
-    }
-} else {
-    if ($FixtureSha256) {
-        throw "PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED -FixtureSha256 is refused for an owner clip id ('$ClipId')"
-    }
-    if ($ClipPath) {
-        throw "PLAYBACK_ATTR3_CLIPPATH_REFUSED -ClipPath is refused for an owner clip id ('$ClipId'): the footage path is resolved through tools/gates/resolve_consented_clip.py, never typed by a caller"
-    }
-    $ownerPartsForJob = @(Resolve-AttrCudaOwnerClipParts -ClipId $ClipId -RepoRoot $RepoRoot)
-}
-$ownerPartsJson = ''
-if (-not $isFixtureRehearsal) {
-    $ownerPartsJson = $ownerPartsForJob | ConvertTo-Json -Compress -Depth 5
-    if ($ownerPartsForJob.Count -eq 1) { $ownerPartsJson = "[$ownerPartsJson]" }
-}
 
 # --- resolve provenance locally, BEFORE the job ever touches Bachelor -------------
 # (round 2: moved here, AFTER the owner/fixture decision above -- see that block's comment.)

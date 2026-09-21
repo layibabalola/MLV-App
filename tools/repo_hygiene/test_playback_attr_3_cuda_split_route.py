@@ -804,6 +804,90 @@ class AttributionJobOwnerClipRefusalTests(unittest.TestCase):
             self.assertIn("$FixtureRehearsal = $true", out_file.read_text(encoding="utf-8"))
 
 
+class OwnerDecisionOrderingAstTests(unittest.TestCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL). An AST census over the generator's own
+    TOP-LEVEL statements only -- a FunctionDefinitionAst is one top-level statement whose BODY
+    never executes at definition time, so this never descends into one. Proves: no
+    Import-Module, Get-AttrCudaEmbeddedFunctionSource, git invocation or Test-Path precedes the
+    statement that throws PLAYBACK_ATTR3_CLIPPATH_REFUSED, and that the $RepoRoot resolution
+    statement is the only thing standing between that decision and the resolver call
+    (Resolve-AttrCudaOwnerClipParts)."""
+
+    def _census(self) -> dict:
+        import json
+        import tempfile
+
+        if PWSH is None:
+            self.skipTest("pwsh is not on PATH")
+        script = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$text = [IO.File]::ReadAllText('{ATTRIBUTION_JOB}')\n"
+            "$tokens = $null; $errors = $null\n"
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)\n"
+            "if ($errors.Count -gt 0) { throw ('PARSE_ERROR: ' + ($errors -join '; ')) }\n"
+            "$statements = @($ast.EndBlock.Statements)\n"
+            "$forbiddenNames = @('Import-Module', 'Get-AttrCudaEmbeddedFunctionSource', 'Test-Path', 'git')\n"
+            "$forbiddenIndex = -1\n"
+            "$throwIndex = -1\n"
+            "$repoRootIndex = -1\n"
+            "$resolverCallIndex = -1\n"
+            "for ($i = 0; $i -lt $statements.Count; $i++) {\n"
+            "    $stmt = $statements[$i]\n"
+            "    if ($stmt -is [System.Management.Automation.Language.FunctionDefinitionAst]) { continue }\n"
+            "    if ($forbiddenIndex -lt 0) {\n"
+            "        $commands = $stmt.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)\n"
+            "        foreach ($c in $commands) {\n"
+            "            $name = $c.GetCommandName()\n"
+            "            if ($null -ne $name -and ($forbiddenNames -icontains $name)) { $forbiddenIndex = $i; break }\n"
+            "        }\n"
+            "    }\n"
+            "    if ($throwIndex -lt 0) {\n"
+            "        $throwStatements = $stmt.FindAll({ param($n) $n -is [System.Management.Automation.Language.ThrowStatementAst] }, $true)\n"
+            "        foreach ($t in $throwStatements) {\n"
+            "            if ($t.Extent.Text -like '*PLAYBACK_ATTR3_CLIPPATH_REFUSED*') { $throwIndex = $i; break }\n"
+            "        }\n"
+            "    }\n"
+            "    if ($repoRootIndex -lt 0 -and $stmt.Extent.Text -like '*Resolve-Path -LiteralPath $RepoRoot*') { $repoRootIndex = $i }\n"
+            "    if ($resolverCallIndex -lt 0 -and $stmt.Extent.Text -like '*Resolve-AttrCudaOwnerClipParts -ClipId*') { $resolverCallIndex = $i }\n"
+            "}\n"
+            "[pscustomobject]@{ forbiddenIndex = $forbiddenIndex; throwIndex = $throwIndex; "
+            "repoRootIndex = $repoRootIndex; resolverCallIndex = $resolverCallIndex } | ConvertTo-Json -Compress\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="attr3-ast-order-") as tmp:
+            script_path = Path(tmp) / "census.ps1"
+            script_path.write_text(script, encoding="utf-8")
+            proc = subprocess.run(
+                [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script_path)],
+                capture_output=True, text=True,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_no_import_module_embedded_source_git_or_test_path_precedes_the_clippath_refusal(
+        self,
+    ) -> None:
+        census = self._census()
+        self.assertGreaterEqual(census["throwIndex"], 0, "CLIPPATH_REFUSED throw not found")
+        self.assertGreaterEqual(census["forbiddenIndex"], 0, "no forbidden command found at all")
+        self.assertLess(
+            census["throwIndex"],
+            census["forbiddenIndex"],
+            "an Import-Module / Get-AttrCudaEmbeddedFunctionSource / git / Test-Path statement "
+            "precedes the PLAYBACK_ATTR3_CLIPPATH_REFUSED throw",
+        )
+
+    def test_reporoot_resolution_is_the_only_io_before_the_resolver_call(self) -> None:
+        census = self._census()
+        self.assertGreaterEqual(census["repoRootIndex"], 0, "RepoRoot resolution statement not found")
+        self.assertGreaterEqual(census["resolverCallIndex"], 0, "resolver call statement not found")
+        self.assertLess(census["throwIndex"], census["repoRootIndex"])
+        self.assertLess(census["repoRootIndex"], census["resolverCallIndex"])
+        # None of Import-Module / Get-AttrCudaEmbeddedFunctionSource / git / Test-Path appears in
+        # ANY top-level statement before the resolver call -- so the only I/O between the
+        # CLIPPATH decision and the resolver call is RepoRoot's own Resolve-Path.
+        self.assertGreater(census["forbiddenIndex"], census["resolverCallIndex"])
+
+
 class RetiredCompileJobTests(unittest.TestCase):
     """The old route must refuse, and say where to go instead."""
 
@@ -894,7 +978,9 @@ class RunbookTests(unittest.TestCase):
 class NoFootageTokensTests(unittest.TestCase):
     """None of the new scripts may name, glob or resolve footage, or sweep the agent cache.
 
-    NA-4 admits a real clip only as the one owner-typed path the attribution job is handed. The
+    NA-4's id-addressed-consumer route admits a real clip only by RESOLVING an owner-clip id
+    through tools/gates/resolve_consented_clip.py against the frozen consent table
+    (ATTR3-FOOTAGE-BIND-1); the attribution job never takes a caller-typed path for one. The
     build-route scripts have no business knowing footage exists, and a cache sweep is how an
     id-to-file resolver gets reintroduced by accident.
     """

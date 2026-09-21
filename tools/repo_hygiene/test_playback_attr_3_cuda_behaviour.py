@@ -1483,6 +1483,54 @@ class OwnerClipResolverOrderingTests(_PwshCase):
 
 
 @requires_pwsh
+class RepoRootOrderingTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): the owner/fixture-clip FLAG refusals run
+    before $RepoRoot is ever resolved. A caller who supplies both a bogus -RepoRoot and a refused
+    -ClipPath for an owner id must see PLAYBACK_ATTR3_CLIPPATH_REFUSED, never a RepoRoot error
+    that only fires first because RepoRoot resolution used to sit ahead of this classification.
+    No git or real repository is needed here: -RepoRoot never resolves far enough to touch one."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+        self.bogus_repo_root = self.tmp / "does-not-exist" / "at-all"
+
+    def _generate(self, *, clip_path: str | None = None):
+        out_file = self.staging / "job.ps1"
+        clip_path_args = f"-ClipPath '{clip_path}' " if clip_path else ""
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{'a' * 40}' "
+            f"-BuildManifestSha256 '{'b' * 64}' -ClipId 'M16-1243' "
+            f"{clip_path_args}"
+            f"-OutFile '{out_file}' -RepoRoot '{self.bogus_repo_root}'\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script), out_file
+
+    def test_a_bogus_reporoot_with_an_owner_id_and_clippath_surfaces_clippath_refused(self) -> None:
+        proc, out_file = self._generate(clip_path="C:\\synthetic-cache\\M16-1243")
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REFUSED", message)
+        self.assertNotIn("PLAYBACK_ATTR3_REPOROOT_INVALID", message)
+        self.assertNotIn(str(self.bogus_repo_root), message)
+        self.assertFalse(out_file.exists())
+
+    def test_a_bogus_reporoot_alone_surfaces_reporoot_invalid_without_echoing_the_path(self) -> None:
+        proc, out_file = self._generate()
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_REPOROOT_INVALID", message)
+        self.assertNotIn(str(self.bogus_repo_root), message)
+        self.assertFalse(out_file.exists())
+
+
+@requires_pwsh
 @requires_git
 class FixtureCommittedBytesTests(_PwshCase):
     """Assert-AttrCudaFixtureCommittedBytes, exercised against a throwaway git repository."""

@@ -20,11 +20,16 @@ an unnecessary system change to the owner's laptop.
 > read its `result.json` (exit 5, `msvcDiscovery`). `safe_to_submit_to_bachelor` certified script
 > safety, not toolchain existence.
 
-**Footage (NA-4).** `docs/never-authorized.json` NA-4 lets a lane open exactly one real clip:
-the single full canonical path on the `CLIP_OR_NONE:` line of that lane's own prompt
-(`MLV_LANE_PROMPT`). Agent sessions cannot write that line, so the **owner types it by hand**.
-Only step 5 touches footage; steps 1-4 compile, hash and move build artifacts and never name a
-media file. Adjudication: `.claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md`.
+**Footage (NA-4, id-only route).** `docs/never-authorized.json` NA-4's `CLIP_OR_NONE:`
+owner-typed-path mechanism is how OTHER cards admit footage; this card uses NA-4's
+id-addressed-consumer route instead (ATTR3-FOOTAGE-BIND-1). Step 4 below takes an owner clip
+**id** (e.g. `M16-1243`), never a path: the generator resolves it through
+`tools/gates/resolve_consented_clip.py` against the frozen consent table
+(`OWNER_CONSENTED_FOOTAGE` in `tools/hooks/mlv-never-authorized.py`), and `-ClipPath` /
+`-FixtureSha256` are both refused outright for an owner id. Only step 4 touches footage; steps
+1-3 compile, hash and move build artifacts and never name a media file. Adjudication:
+`.claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md` (round 1);
+ATTR3-FOOTAGE-BIND-1 (round 2, the current route).
 
 **Submission (NA-7).** Direct hooked writes to `\\bachelor\...` are refused. The tracked
 submitter `tools/profiling/um-run.ps1` is the route, and the agents execute only `inbox\*.job.ps1`
