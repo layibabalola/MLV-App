@@ -24,7 +24,7 @@
 # Assert-AttrCudaClosureComplete is the generator-time REGRESSION TRIPWIRE that keeps the pinned
 # list honest -- an AST census over each manifest file's own committed text, throwing
 # ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE the moment a load site cannot be classified. It is a
-# tripwire over these four reviewed files, not a proof that covers every future edit; the runtime
+# tripwire over these five reviewed files, not a proof that covers every future edit; the runtime
 # path (playback-attr-3-cuda-job.ps1's SMOKE_RUN_FAILED branch) is the real safety property for
 # whatever it cannot see. Full contract at AttrCudaArtifacts.psm1, above the manifest.
 #
