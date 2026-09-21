@@ -888,6 +888,84 @@ class OwnerDecisionOrderingAstTests(unittest.TestCase):
         self.assertGreater(census["forbiddenIndex"], census["resolverCallIndex"])
 
 
+class FirstThrowCapableStatementAstTests(unittest.TestCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 5 (STRUCTURAL). Generalizes
+    OwnerDecisionOrderingAstTests beyond the four forbidden command names: walking the
+    generator's own $ast.EndBlock.Statements in textual order (skipping FunctionDefinitionAst,
+    whose body never executes at definition time), the FIRST statement that CAN throw -- either
+    it contains a ThrowStatementAst directly, or it calls a function (by name) whose own body
+    contains a ThrowStatementAst -- must be the owner/fixture flag-refusal if/else block itself.
+    Round 4 left -AgentRoot's shape check as a standalone `if` ahead of that block, so it was the
+    first throw-capable statement instead; round 5 folds it into both arms of the if/else so the
+    block remains the first thing that can throw."""
+
+    def _first_throw_capable(self) -> dict:
+        import json
+        import tempfile
+
+        if PWSH is None:
+            self.skipTest("pwsh is not on PATH")
+        script = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$text = [IO.File]::ReadAllText('{ATTRIBUTION_JOB}')\n"
+            "$tokens = $null; $errors = $null\n"
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)\n"
+            "if ($errors.Count -gt 0) { throw ('PARSE_ERROR: ' + ($errors -join '; ')) }\n"
+            "$statements = @($ast.EndBlock.Statements)\n"
+            "$throwingFunctionNames = [System.Collections.Generic.HashSet[string]]::new(\n"
+            "    [string[]]@(), [System.StringComparer]::OrdinalIgnoreCase)\n"
+            "foreach ($stmt in $statements) {\n"
+            "    if ($stmt -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { continue }\n"
+            "    $bodyThrows = @($stmt.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.ThrowStatementAst] }, $true))\n"
+            "    if ($bodyThrows.Count -gt 0) { [void]$throwingFunctionNames.Add($stmt.Name) }\n"
+            "}\n"
+            "$firstIndex = -1\n"
+            "$firstText = $null\n"
+            "for ($i = 0; $i -lt $statements.Count; $i++) {\n"
+            "    $stmt = $statements[$i]\n"
+            "    if ($stmt -is [System.Management.Automation.Language.FunctionDefinitionAst]) { continue }\n"
+            "    $canThrow = $false\n"
+            "    $throwStatements = @($stmt.FindAll({ param($n) $n -is [System.Management.Automation.Language.ThrowStatementAst] }, $true))\n"
+            "    if ($throwStatements.Count -gt 0) { $canThrow = $true }\n"
+            "    if (-not $canThrow) {\n"
+            "        $commands = @($stmt.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))\n"
+            "        foreach ($c in $commands) {\n"
+            "            $name = $c.GetCommandName()\n"
+            "            if ($null -ne $name -and $throwingFunctionNames.Contains($name)) { $canThrow = $true; break }\n"
+            "        }\n"
+            "    }\n"
+            "    if ($canThrow) { $firstIndex = $i; $firstText = $stmt.Extent.Text; break }\n"
+            "}\n"
+            "[pscustomobject]@{ firstIndex = $firstIndex; firstText = $firstText } | ConvertTo-Json -Compress\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="attr3-first-throw-ast-") as tmp:
+            script_path = Path(tmp) / "first_throw_census.ps1"
+            script_path.write_text(script, encoding="utf-8")
+            proc = subprocess.run(
+                [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script_path)],
+                capture_output=True, text=True,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_first_throw_capable_statement_is_the_owner_fixture_flag_refusal_block(self) -> None:
+        census = self._first_throw_capable()
+        self.assertGreaterEqual(census["firstIndex"], 0, "no throw-capable top-level statement found")
+        text = census["firstText"] or ""
+        self.assertIn(
+            "PLAYBACK_ATTR3_CLIPPATH_REFUSED",
+            text,
+            "the first throw-capable top-level statement is not the owner/fixture flag-refusal "
+            "block -- something else can throw before it",
+        )
+        self.assertIn(
+            "PLAYBACK_ATTR3_AGENTROOT_INVALID",
+            text,
+            "the AgentRoot shape check must be nested inside the same flag-refusal if/else, not "
+            "a standalone statement ahead of it",
+        )
+
+
 class ParamBlockBindingTimeAstTests(unittest.TestCase):
     """ATTR3-FOOTAGE-BIND-1 PR-B round 4 (BINDING-TIME ORDERING). An AST census over the
     generator's own $ast.ParamBlock: no parameter DEFAULT expression may invoke

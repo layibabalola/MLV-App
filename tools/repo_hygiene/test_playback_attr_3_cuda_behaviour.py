@@ -1656,6 +1656,88 @@ class OwnerFootagePrivateDirectoryLeakAndRefusalTests(_PwshCase):
         self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
         self.assertIn("THREW OWNER_FOOTAGE_LINK_FAILED", proc.stdout)
 
+    def test_a_handle_acquisition_failure_after_the_first_link_cleans_up_and_refuses(self) -> None:
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 5 (astra major). Part 0 links and its handle opens
+        # normally; part 1's handle acquisition is synthetically failed AFTER part 1's own link
+        # was already created. Proves the round-5 enclosing try/catch (not a per-part try around
+        # New-AttrCudaOwnerFootageLink alone) closes the part-0 handle, deletes BOTH neutral link
+        # entries, leaves the real sources untouched, and reports the typed refusal.
+        base_extension = "." + "MLV"
+        continuation_extension = "." + "M00"
+        src_dir = self.tmp / "owner-handle-failure-source"
+        src_dir.mkdir()
+        part0_path = src_dir / ("source" + base_extension)
+        part0_bytes = b"handle failure cleanup part zero " * 40
+        part0_path.write_bytes(part0_bytes)
+        part1_path = src_dir / ("source" + continuation_extension)
+        part1_bytes = b"handle failure cleanup part one"
+        part1_path.write_bytes(part1_bytes)
+        parts = [
+            {"index": 0, "path": str(part0_path).replace("\\", "/"), "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()},
+            {"index": 1, "path": str(part1_path).replace("\\", "/"), "length": len(part1_bytes), "sha256": hashlib.sha256(part1_bytes).hexdigest()},
+        ]
+        pub = self.tmp / "agent" / "outbox" / "owner-handle-failure.artifacts"
+        work = self.tmp / "work"
+        pub.mkdir(parents=True)
+        work.mkdir(parents=True, exist_ok=True)
+        block = self._extract_content_check()
+        owner_parts_json = self._owner_parts_json(parts).replace("'", "''")
+        script = self.tmp / "owner-handle-failure-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            "$FixtureRehearsal = $false\n"
+            f"$OwnerPartsJson = '{owner_parts_json}'\n"
+            "$ClipId = 'FIX-OWNER-HANDLEFAIL-0001'\n"
+            f"$SourceCommit = '{'d' * 40}'\n"
+            f"$Pub = '{pub}'\n"
+            f"$Work = '{work}'\n"
+            "$ownerLinkHandles = [System.Collections.Generic.List[object]]::new()\n"
+            "function Save-Json($Object, [string]$Path) {\n"
+            "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
+            "}\n"
+            # Real handle for part 0's link; synthetic IOException for part 1's -- the block calls
+            # this unqualified at SCRIPT scope (it is spliced in directly, not called from inside
+            # the module), so overriding it here is enough without the module-scope mock trick.
+            "$script:AttrCudaHandleOpenCount = 0\n"
+            "Set-Item -Path function:Open-AttrCudaReadOnlyHandle -Value {\n"
+            "    param([string]$Path)\n"
+            "    $script:AttrCudaHandleOpenCount++\n"
+            "    if ($script:AttrCudaHandleOpenCount -eq 1) {\n"
+            "        return [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)\n"
+            "    }\n"
+            "    throw [IO.IOException]::new('SYNTHETIC_HANDLE_ACQUISITION_FAILURE')\n"
+            "}\n"
+            + block + "\n"
+            "Write-Output 'UNREACHABLE_NO_THROW'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+
+        self.assertEqual(proc.returncode, 22, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=OWNER_FOOTAGE_LINK_FAILED", proc.stdout)
+        self.assertIn("PART=1", proc.stdout)
+        self.assertNotIn("UNREACHABLE_NO_THROW", proc.stdout)
+
+        private_dir_name = "owner-" + "clip"
+        private_dir = work / private_dir_name
+        self.assertTrue(private_dir.exists())
+        self.assertEqual(sorted(p.name for p in private_dir.iterdir()), [])
+
+        # The real sources are untouched -- never linked away, never truncated, never renamed.
+        self.assertTrue(part0_path.is_file())
+        self.assertEqual(part0_path.read_bytes(), part0_bytes)
+        self.assertTrue(part1_path.is_file())
+        self.assertEqual(part1_path.read_bytes(), part1_bytes)
+
+        summary = json.loads((pub / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["result"], "OWNER_FOOTAGE_LINK_FAILED")
+        self.assertEqual(summary["partIndex"], 1)
+        dumped = json.dumps(summary)
+        self.assertNotIn(str(part0_path).replace("\\", "/"), dumped)
+        self.assertNotIn(str(part1_path).replace("\\", "/"), dumped)
+
 
 @requires_pwsh
 class SharedFootagePartVerifierEmbeddingTests(_PwshCase):
@@ -1843,6 +1925,57 @@ class RepoRootOrderingTests(_PwshCase):
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PLAYBACK_ATTR3_REPOROOT_INVALID", message)
         self.assertNotIn(str(self.bogus_repo_root), message)
+        self.assertFalse(out_file.exists())
+
+
+@requires_pwsh
+class AgentRootOrderingTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 5 (STRUCTURAL): -AgentRoot's shape check now runs AFTER
+    the owner arm's own -FixtureSha256/-ClipPath refusals, not ahead of the whole flag-refusal
+    if/else the way round 4 left it. A caller who supplies both a malformed -AgentRoot and a
+    refused -ClipPath for an owner id must see PLAYBACK_ATTR3_CLIPPATH_REFUSED, never
+    PLAYBACK_ATTR3_AGENTROOT_INVALID masking it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+        self.bad_agent_root = "not-a-drive-rooted-path"
+
+    def _generate(self, *, clip_path: str | None = None, agent_root: str | None = None):
+        out_file = self.staging / "job.ps1"
+        clip_path_args = f"-ClipPath '{clip_path}' " if clip_path else ""
+        agent_root_args = f"-AgentRoot '{agent_root}' " if agent_root is not None else ""
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{'a' * 40}' "
+            f"-BuildManifestSha256 '{'b' * 64}' -ClipId 'M16-1243' "
+            f"{clip_path_args}{agent_root_args}"
+            f"-OutFile '{out_file}'\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script), out_file
+
+    def test_a_malformed_agentroot_with_an_owner_id_and_clippath_surfaces_clippath_refused(
+        self,
+    ) -> None:
+        proc, out_file = self._generate(
+            clip_path="C:\\synthetic-cache\\M16-1243", agent_root=self.bad_agent_root
+        )
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REFUSED", message)
+        self.assertNotIn("PLAYBACK_ATTR3_AGENTROOT_INVALID", message)
+        self.assertFalse(out_file.exists())
+
+    def test_a_malformed_agentroot_alone_surfaces_agentroot_invalid(self) -> None:
+        proc, out_file = self._generate(agent_root=self.bad_agent_root)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_AGENTROOT_INVALID", message)
         self.assertFalse(out_file.exists())
 
 

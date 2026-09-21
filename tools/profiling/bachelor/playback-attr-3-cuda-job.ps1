@@ -340,14 +340,18 @@ $FixtureClipExtension = '.' + 'mlv'
 #     further -- a caller who passes BOTH a bogus -RepoRoot and a refused -ClipPath for an owner
 #     id must see PLAYBACK_ATTR3_CLIPPATH_REFUSED, never a RepoRoot error that only fires first
 #     because RepoRoot resolution used to sit ahead of this classification in the file. -------
-# ATTR3-FOOTAGE-BIND-1 PR-B round 4: -AgentRoot's shape is checked here too -- a pure regex
-# match against the parameter itself, no I/O -- because the fixture arm just below builds
-# -ClipPath directly from -AgentRoot. Never echoes the value, for the same reason the ClipPath
-# refusal above it never does: the refusal names only the parameter, not what was passed.
-if ($AgentRoot -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
-    throw 'PLAYBACK_ATTR3_AGENTROOT_INVALID -AgentRoot contains characters outside the allowlist'
-}
+# ATTR3-FOOTAGE-BIND-1 PR-B round 5: -AgentRoot's shape check moved INSIDE each arm of this
+# if/else, after the owner-arm's own flag refusals -- round 4 put it ahead of the whole
+# if/else, so a malformed -AgentRoot threw PLAYBACK_ATTR3_AGENTROOT_INVALID before an owner id's
+# refused -FixtureSha256/-ClipPath ever got a chance to surface their own typed refusal first.
+# The fixture arm still validates -AgentRoot before using it to build -ClipPath (round 4's
+# reason: never echoes the value, for the same reason the ClipPath refusal never does -- the
+# refusal names only the parameter, not what was passed), it just now runs after entering the
+# fixture branch rather than ahead of the branch decision itself.
 if ($isFixtureRehearsal) {
+    if ($AgentRoot -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
+        throw 'PLAYBACK_ATTR3_AGENTROOT_INVALID -AgentRoot contains characters outside the allowlist'
+    }
     if ($FixtureSha256 -notmatch '^[0-9a-f]{64}$') {
         throw "PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED -FixtureSha256 must be 64 lowercase hex for a fixture id ('$ClipId'); got '$FixtureSha256'"
     }
@@ -363,6 +367,9 @@ if ($isFixtureRehearsal) {
     }
     if ($ClipPath) {
         throw "PLAYBACK_ATTR3_CLIPPATH_REFUSED -ClipPath is refused for an owner clip id ('$ClipId'): the footage path is resolved through tools/gates/resolve_consented_clip.py, never typed by a caller"
+    }
+    if ($AgentRoot -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
+        throw 'PLAYBACK_ATTR3_AGENTROOT_INVALID -AgentRoot contains characters outside the allowlist'
     }
 }
 
@@ -907,45 +914,66 @@ if ($FixtureRehearsal) {
     }
 
     $OwnerClipDir = New-AttrCudaDirectory -Path (Join-Path $Work 'owner-clip')
-    foreach ($part in $ownerAssertedParts) {
-        $linkPath = $null
-        try {
+    # ATTR3-FOOTAGE-BIND-1 PR-B round 5 (astra major): the cleanup `try` now wraps this ENTIRE
+    # loop -- creating every link, opening every held handle, and re-verifying every link's
+    # content -- not just the code from a link's successful creation onward. Round 4 only guarded
+    # New-AttrCudaOwnerFootageLink's own throw with a per-part try/catch; a failure from
+    # Open-AttrCudaReadOnlyHandle (e.g. a sharing violation on part N after parts 0..N-1 were
+    # already linked and held) had no catch of its own and propagated straight out of the script,
+    # skipping cleanup entirely and leaking every link already created. One catch below now
+    # handles all three failure shapes (cross-volume, link/identity/handle failure, post-link
+    # content mismatch): $part still holds the failing iteration's value here (a PowerShell
+    # `foreach` variable is not iteration-scoped, so it survives the loop being broken out of by
+    # an exception), which is enough to report the affected index without re-deriving it from the
+    # exception text.
+    try {
+        foreach ($part in $ownerAssertedParts) {
             $linkPath = New-AttrCudaOwnerFootageLink -Directory $OwnerClipDir -Index $part.index -SourcePath $part.path
-        } catch {
-            $linkToken = ($_.Exception.Message -split '\s+')[0]
-            $linkExitCode = if ($linkToken -eq 'OWNER_FOOTAGE_LINK_CROSS_VOLUME') { 21 } else { 22 }
-            Close-AttrCudaOwnerFootageWorkspace -Handles $ownerLinkHandles -Directory $OwnerClipDir
-            $linkRefusal = [ordered]@{
-                schema='playback-attr-3-cuda-venue.v1'; result=$linkToken
-                fixtureRehearsal=$FixtureRehearsal
-                partIndex=$part.index
-                sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+            # Held open from the moment the link's identity is confirmed until the smoke child
+            # that reads it has exited (see the `finally` around the smoke run below) --
+            # FileShare.Read blocks any writer from replacing or truncating the link's target
+            # underneath a live measurement, while still letting the smoke child and this job's
+            # own re-hash below both read it.
+            $handle = Open-AttrCudaReadOnlyHandle -Path $linkPath
+            [void]$ownerLinkHandles.Add($handle)
+            $relinkStatus = Test-AttrCudaFootagePart -Path $linkPath -ExpectedLength $part.length -ExpectedSha256 $part.sha256
+            if ($relinkStatus -ne 'PASS') {
+                throw "OWNER_FOOTAGE_NOT_VERIFIED status=$relinkStatus"
             }
-            Save-Json $linkRefusal (Join-Path $Pub 'summary.json')
-            Write-Output "RESULT=$linkToken PART=$($part.index) ARTIFACTS=$Pub"
-            exit $linkExitCode
+            if ($part.index -eq 0) { $clipPath = $linkPath }
         }
-        # Held open from the moment the link's identity is confirmed until the smoke child that
-        # reads it has exited (see the `finally` around the smoke run below) -- FileShare.Read
-        # blocks any writer from replacing or truncating the link's target underneath a live
-        # measurement, while still letting the smoke child and this job's own re-hash below both
-        # read it.
-        $handle = Open-AttrCudaReadOnlyHandle -Path $linkPath
-        [void]$ownerLinkHandles.Add($handle)
-        $relinkStatus = Test-AttrCudaFootagePart -Path $linkPath -ExpectedLength $part.length -ExpectedSha256 $part.sha256
-        if ($relinkStatus -ne 'PASS') {
-            Close-AttrCudaOwnerFootageWorkspace -Handles $ownerLinkHandles -Directory $OwnerClipDir
+    } catch {
+        # Closes whatever handles were acquired before the failure and deletes only the neutral
+        # link entries that exist with a live link count >= 2 -- never throws, so the refusal
+        # below is always reached.
+        Close-AttrCudaOwnerFootageWorkspace -Handles $ownerLinkHandles -Directory $OwnerClipDir
+        $message = $_.Exception.Message
+        if ($message -match '^OWNER_FOOTAGE_NOT_VERIFIED status=(\S+)$') {
             $relinkRefusal = [ordered]@{
                 schema='playback-attr-3-cuda-venue.v1'; result='OWNER_FOOTAGE_NOT_VERIFIED'
                 fixtureRehearsal=$FixtureRehearsal
-                parts=@(@{ index = $part.index; status = $relinkStatus })
+                parts=@(@{ index = $part.index; status = $Matches[1] })
                 sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
             }
             Save-Json $relinkRefusal (Join-Path $Pub 'summary.json')
-            Write-Output "RESULT=OWNER_FOOTAGE_NOT_VERIFIED PARTS=$($part.index)=$relinkStatus ARTIFACTS=$Pub"
+            Write-Output "RESULT=OWNER_FOOTAGE_NOT_VERIFIED PARTS=$($part.index)=$($Matches[1]) ARTIFACTS=$Pub"
             exit 19
         }
-        if ($part.index -eq 0) { $clipPath = $linkPath }
+        # Any other failure in this loop -- cross-volume, link/identity creation, or a handle that
+        # could not even be opened -- is reported the same way New-AttrCudaOwnerFootageLink's own
+        # throws always were: by index only, never a path or the raw exception text.
+        $linkToken = ($message -split '\s+')[0]
+        if ($linkToken -ne 'OWNER_FOOTAGE_LINK_CROSS_VOLUME') { $linkToken = 'OWNER_FOOTAGE_LINK_FAILED' }
+        $linkExitCode = if ($linkToken -eq 'OWNER_FOOTAGE_LINK_CROSS_VOLUME') { 21 } else { 22 }
+        $linkRefusal = [ordered]@{
+            schema='playback-attr-3-cuda-venue.v1'; result=$linkToken
+            fixtureRehearsal=$FixtureRehearsal
+            partIndex=$part.index
+            sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+        }
+        Save-Json $linkRefusal (Join-Path $Pub 'summary.json')
+        Write-Output "RESULT=$linkToken PART=$($part.index) ARTIFACTS=$Pub"
+        exit $linkExitCode
     }
 }
 
