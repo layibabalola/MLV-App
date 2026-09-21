@@ -178,7 +178,27 @@ foreach ($rawPart in $RawParts) {
 
     if (-not $status) {
         if ($actualLength -ne [int64]$rawPart.length) {
-            $status = 'LENGTH_MISMATCH'
+            # Round 5: a differing length alone does not prove the content was ever actually
+            # OBSERVED to differ -- a part whose metadata is readable (Get-Item above succeeded)
+            # but whose CONTENT read is denied must not be reported as LENGTH_MISMATCH, since that
+            # feeds FOOTAGE_MISMATCH below without ever having read a byte. Establish readability
+            # first: open for read and consume at least one byte when the file is non-empty. Only
+            # a successful open-and-read yields LENGTH_MISMATCH; any failure maps the same way the
+            # sha256 branch below does, and never leaks the exception's own text.
+            $readStream = $null
+            try {
+                $readStream = [IO.File]::OpenRead($partPath)
+                if ($actualLength -gt 0) {
+                    [void]$readStream.ReadByte()
+                }
+                $status = 'LENGTH_MISMATCH'
+            } catch [System.UnauthorizedAccessException] {
+                $status = 'ACCESS_DENIED'
+            } catch {
+                $status = if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' }
+            } finally {
+                if ($readStream) { $readStream.Dispose() }
+            }
         } else {
             try {
                 $actualSha256 = (Get-FileHash -LiteralPath $partPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()

@@ -321,6 +321,35 @@ class FootagePresenceJobTests(unittest.TestCase):
         self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
         self._assert_no_token(run.stdout, run.stderr)
 
+    def test_length_mismatch_with_denied_content_read_is_footage_indeterminate(self) -> None:
+        # Round 5: metadata is readable (the length genuinely differs, so Get-Item's stat
+        # succeeds), but the CONTENT read is denied by ACL -- that must NOT be reported as
+        # LENGTH_MISMATCH/FOOTAGE_MISMATCH, since no byte was ever actually observed to differ.
+        # It must land as ACCESS_DENIED / FOOTAGE_INDETERMINATE instead, per the round-4 contract
+        # that MISMATCH requires a part that is readable AND differs.
+        job = self.job_path(self.generate())
+        target = self.paths[0]
+        Path(target).write_bytes(self.contents[0] + b"!")
+        user = os.environ.get("USERNAME", "")
+        self.assertTrue(user, "USERNAME must be set to run the ACL-denial test")
+        deny = subprocess.run(
+            ["icacls", target, "/deny", f"{user}:(R)"], capture_output=True, text=True,
+        )
+        self.assertEqual(deny.returncode, 0, deny.stdout + deny.stderr)
+        try:
+            run = self.run_job(job)
+        finally:
+            subprocess.run(
+                ["icacls", target, "/remove:d", user], capture_output=True, text=True,
+            )
+        self.assertIn("PART=0 STATUS=ACCESS_DENIED", run.stdout, run.stdout + run.stderr)
+        self.assertNotIn("PART=0 STATUS=LENGTH_MISMATCH", run.stdout)
+        self.assertIn("PART=1 STATUS=PASS", run.stdout, run.stdout + run.stderr)
+        self.assertIn("RESULT=FOOTAGE_INDETERMINATE", run.stdout)
+        self.assertNotIn("RESULT=FOOTAGE_MISMATCH", run.stdout)
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        self._assert_no_token(run.stdout, run.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
