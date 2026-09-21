@@ -20,11 +20,16 @@ an unnecessary system change to the owner's laptop.
 > read its `result.json` (exit 5, `msvcDiscovery`). `safe_to_submit_to_bachelor` certified script
 > safety, not toolchain existence.
 
-**Footage (NA-4).** `docs/never-authorized.json` NA-4 lets a lane open exactly one real clip:
-the single full canonical path on the `CLIP_OR_NONE:` line of that lane's own prompt
-(`MLV_LANE_PROMPT`). Agent sessions cannot write that line, so the **owner types it by hand**.
-Only step 5 touches footage; steps 1-4 compile, hash and move build artifacts and never name a
-media file. Adjudication: `.claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md`.
+**Footage (NA-4, id-only route).** `docs/never-authorized.json` NA-4's `CLIP_OR_NONE:`
+owner-typed-path mechanism is how OTHER cards admit footage; this card uses NA-4's
+id-addressed-consumer route instead (ATTR3-FOOTAGE-BIND-1). Step 4 below takes an owner clip
+**id** (e.g. `M16-1243`), never a path: the generator resolves it through
+`tools/gates/resolve_consented_clip.py` against the frozen consent table
+(`OWNER_CONSENTED_FOOTAGE` in `tools/hooks/mlv-never-authorized.py`), and `-ClipPath` /
+`-FixtureSha256` are both refused outright for an owner id. Only step 4 touches footage; steps
+1-3 compile, hash and move build artifacts and never name a media file. Adjudication:
+`.claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md` (round 1);
+ATTR3-FOOTAGE-BIND-1 (round 2, the current route).
 
 **Submission (NA-7).** Direct hooked writes to `\\bachelor\...` are refused. The tracked
 submitter `tools/profiling/um-run.ps1` is the route, and the agents execute only `inbox\*.job.ps1`
@@ -148,15 +153,19 @@ interrupted run leaves `build.json` unpublished by construction (it is copied la
 artifact has been renamed into place), so the attribution job's requirement that it be present is
 what makes a partial stage safe: re-drop the side-files and re-run.
 
-## 4. Attribution job (inside the owner-granted lane)
+## 4. Attribution job (owner clip, id-only)
 
-Run this **only inside a lane whose prompt carries the owner-typed `CLIP_OR_NONE:` path**.
-`-ClipPath` must be exactly that path.
+Run this for the owner's clip id. **No `-ClipPath` and no `-FixtureSha256`: both are refused
+outright for an owner clip id (ATTR3-FOOTAGE-BIND-1).** The generator resolves the id through
+`tools/gates/resolve_consented_clip.py` against the frozen consent table, bakes each resolved
+part's path (base64 of its UTF-8 bytes), length and lower-case sha256 into the emitted job, and
+the job re-verifies every part's content on Bachelor before anything opens. A resolver refusal
+throws with the resolver's own typed status and emits nothing -- never a path.
 
 ```powershell
 pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
-    -SourceCommit <same-40-hex-sha> -BuildManifestSha256 <64-lowercase-hex> -ClipId <id> `
-    -ClipPath '<the lane prompt CLIP_OR_NONE path>' -OutFile <staging-dir>\<jobId>.job.ps1
+    -SourceCommit <same-40-hex-sha> -BuildManifestSha256 <64-lowercase-hex> `
+    -ClipId <owner id, e.g. M16-1243> -OutFile <staging-dir>\<jobId>.job.ps1
 ```
 
 **`-BuildManifestSha256` is mandatory, and the hub passes the sha the assembler printed**
@@ -170,9 +179,24 @@ parsed field is already a trusted field -- and then requires its `sourceCommit` 
 `pendingSymbolPresence` to be a real boolean. Both hashes land in `evidence-manifest.json` under
 `buildManifest`.
 
-On Bachelor the emitted job refuses to run unless the clip path sits directly in the agent cache,
-names that clip id, and exists. It verifies all three cache artifacts against the authenticated
-`build.json` and **reads `pendingSymbolPresence` from it**. PresentMon runs as a direct child,
+On Bachelor the emitted job re-verifies each resolved part against the live filesystem, AT ITS
+OWN RESOLVER PATH -- exists, readable, length, and sha256 (case-insensitive) -- through the
+shared `Test-AttrCudaFootagePart` verifier. Once every part passes, the job builds a PRIVATE,
+neutrally-named directory under its own work tree (one hard link per verified part, contiguous,
+never spelled from the caller's real names) and re-verifies each link's identity and content
+against its source before opening anything: playback opens only that private link's part 0
+(neutral base name `owner-clip`), never the owner's real path. Nothing this job publishes --
+stdout, `summary.json`, `evidence-manifest.json`, or any other artifact -- ever names a source
+path; every reader-facing output carries only the part's index and status. Any non-`PASS` part,
+or a failure creating/opening/re-verifying a private link, fails closed (`OWNER_FOOTAGE_NOT_VERIFIED`
+exit 19, `OWNER_FOOTAGE_LINK_CROSS_VOLUME` exit 21, or `OWNER_FOOTAGE_LINK_FAILED` exit 22),
+closing whatever handles were already held and removing whatever private links were already
+created, before PresentMon starts, before deploy, and before the smoke child. (The fixture route in
+section 4b instead requires the clip path to sit directly in the agent cache, name that clip id,
+and exist, then hashes it against `-FixtureSha256`, failing closed at
+`FIXTURE_CONTENT_MISMATCH`, exit 17, on a mismatch.) The job also verifies all three package
+cache artifacts (exe, DLL pair, PresentMon) against the authenticated `build.json` and **reads
+`pendingSymbolPresence` from it**. PresentMon runs as a direct child,
 inheriting the job-owned TEMP; if the agent account lacks ETW trace rights the job fails
 `PRESENTMON_FAILED rc=6` and never falls back to the elevated scheduled task.
 
@@ -196,7 +220,9 @@ refused the same way: absence of the diagnostic is not evidence of eligibility. 
 The owner's consent for the clip on this card is recorded at
 `.claude-state/coordination/dual-lane/receipts/owner-footage-consent-20260916.json`, with its
 `-correction.json`. That receipt is evidence of consent, never an authorization -- the
-authorization is the owner-typed path line. The job cites the receipt's file name in
+authorization is the resolver's own cross-check of the id against the frozen consent table in
+`tools/hooks/mlv-never-authorized.py` (`OWNER_CONSENTED_FOOTAGE`), re-verified against the live
+filesystem by the job itself before anything opens. The job cites the receipt's file name in
 `evidence-manifest.json`.
 
 ## 4b. Fixture rehearsal (no footage)
@@ -243,12 +269,14 @@ pwsh -NoProfile -File "tools\profiling\um-run.ps1" `
     -ScriptPath "<staging-dir>\<attrJobId>.job.ps1" -JobId <attrJobId> -AgentShare \\bachelor\mlv-agent
 ```
 
-- **-ClipPath is OPTIONAL for a fixture id (ATTR3-FIXTURE-STAGE-1).** Omitted, the generator
-  derives it as the agent cache path for `-ClipId`; supplied, it must still resolve into the agent
-  cache with `BaseName -ceq $ClipId`, unchanged from the owner-clip case. `-FixtureSha256` is
-  MANDATORY for a fixture id and REFUSED for an owner clip id: the emitted job hashes the cached
-  clip before it is ever opened and fails closed at `FIXTURE_CONTENT_MISMATCH` (exit 17) on a
-  mismatch -- a cache file name proves nothing about its bytes.
+- **-ClipPath is OPTIONAL for a fixture id (ATTR3-FIXTURE-STAGE-1).** An owner clip id refuses
+  `-ClipPath` outright (section 4): its footage path is resolved, never typed by a caller.
+  Omitted for a fixture id, the generator derives it as the
+  agent cache path for `-ClipId`; supplied, it must still resolve into the agent cache with
+  `BaseName -ceq $ClipId`. `-FixtureSha256` is MANDATORY for a fixture id and REFUSED for an
+  owner clip id: the emitted job hashes the cached clip before it is ever opened and fails closed
+  at `FIXTURE_CONTENT_MISMATCH` (exit 17) on a mismatch -- a cache file name proves nothing about
+  its bytes.
 - **Unchanged for a fixture run.** `-BuildManifestSha256` still authenticates the staged manifest;
   the eligibility gate still exits 15 unless `cuda_backend_available=1` and `r16_available=1`.
 - **What it establishes.** That staging, backend load, the eligibility gate, PresentMon capture and

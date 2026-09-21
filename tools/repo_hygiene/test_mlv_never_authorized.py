@@ -7031,8 +7031,6 @@ _CLAIM_CARRIERS_PINNED = (
     "tools/profiling/bachelor/playback-attr-3-cuda-job.ps1",
     "tools/repo_hygiene/test_attr3_footage_presence_job.py",
     "tools/repo_hygiene/test_mlv_never_authorized.py",
-    "tools/repo_hygiene/test_playback_attr_3_cuda_behaviour.py",
-    "tools/repo_hygiene/test_playback_attr_3_cuda_split_route.py",
     "tools/repo_hygiene/test_verify_consented_footage.py",
 )
 

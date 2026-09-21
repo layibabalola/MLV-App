@@ -8,9 +8,12 @@ blockers that a text-level suite was green against, because "the script mentions
 against real directories and asserts on exit codes and on what ended up on disk.
 
 WHAT IS AND IS NOT EXERCISED. The verification logic lives in
-tools/profiling/bachelor/AttrCudaArtifacts.psm1 and is spliced VERBATIM into each emitted job by
-Get-AttrCudaEmbeddedFunctionSource, so a test that imports the module runs the same characters
-the job runs on Bachelor or Ultra-Magnus. What cannot run here is the compiling and measuring --
+tools/profiling/bachelor/AttrCudaArtifacts.psm1 (build-route verification, shared by every
+PLAYBACK-ATTR-3-CUDA generator) and tools/profiling/bachelor/AttrCudaOwnerFootage.psm1 (the
+private owner-footage workspace, embedded only by the attribution job), spliced VERBATIM into
+each emitted job by Get-AttrCudaEmbeddedFunctionSource, so a test that imports the module runs
+the same characters the job runs on Bachelor or Ultra-Magnus. What cannot run here is the
+compiling and measuring --
 no CUDA toolkit, no Qt/MinGW, no 4090, no measurement laptop -- so the jobs are exercised through
 their `-VerifyOnly` prefix and through the staging job end to end, which touches only files.
 
@@ -35,6 +38,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
+# ATTR3-FOOTAGE-BIND-1 PR-B round 4b: the private owner-footage workspace functions (neutral
+# naming, part-contiguity, Win32 file identity, hard-link creation, held read handles, link-only
+# cleanup) moved out of MODULE into their own module, so playback-attr-3-cuda-job.ps1's own
+# NoFootageTokensTests-exempt embedding is the only caller and MODULE stays free of composed
+# footage-word fragments. See that module's own header for why.
+OWNER_FOOTAGE_MODULE = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaOwnerFootage.psm1"
 STAGE_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-stage-job.ps1"
 DLL_GENERATOR = ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1"
 ATTRIBUTION_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1"
@@ -126,7 +135,8 @@ class _PwshCase(unittest.TestCase):
         script = self.tmp / name
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
-            f"Import-Module '{MODULE}' -Force\n" + body,
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n" + body,
             encoding="utf-8",
         )
         return _run_pwsh_file(script)
@@ -881,20 +891,53 @@ class AttributionJobOptionalClipPathTests(_PwshCase):
         )
         self.assertFalse(out_file.exists())
 
-    # NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (B): every owner-clip id is refused outright until
-    # ATTR3-FOOTAGE-BIND-1, BEFORE the -ClipPath / -FixtureSha256 checks, so these two cases now
-    # assert that refusal instead of PLAYBACK_ATTR3_CLIPPATH_REQUIRED / _FIXTURE_SHA_REFUSED.
-    def test_an_owner_id_without_clippath_is_refused(self) -> None:
+    # ATTR3-FOOTAGE-BIND-1 PR-B: an owner-clip id is RESOLVED, not blanket-refused. -ClipPath and
+    # -FixtureSha256 stay REFUSED for one (cheap, no resolver call needed); an id with neither
+    # reaches the resolver, which this throwaway repo (no refs/remotes/fork/master) always
+    # refuses -- deterministic, and never touches real consent data.
+    def test_an_owner_id_without_clippath_is_resolved_and_refused_by_the_resolver(self) -> None:
         proc, out_file = self._generate(ClipId="M16-1243")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("ATTR3-FOOTAGE-BIND-1", normalize_pwsh_message_text(proc.stdout + proc.stderr))
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_OWNER_RESOLVE_REFUSED", message)
         self.assertFalse(out_file.exists())
 
     def test_an_owner_id_with_fixture_sha_is_refused(self) -> None:
-        owner_path = "C:\\mlvtmp\\mlv-agent\\cache\\M16-1243.raw"
-        proc, out_file = self._generate(ClipId="M16-1243", ClipPath=owner_path, FixtureSha256="c" * 64)
+        proc, out_file = self._generate(ClipId="M16-1243", FixtureSha256="c" * 64)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("ATTR3-FOOTAGE-BIND-1", normalize_pwsh_message_text(proc.stdout + proc.stderr))
+        self.assertIn(
+            "PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED", normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        )
+        self.assertFalse(out_file.exists())
+
+    def test_an_owner_id_with_clippath_is_refused(self) -> None:
+        owner_path = "C:\\mlvtmp\\mlv-agent\\cache\\M16-1243.raw"
+        proc, out_file = self._generate(ClipId="M16-1243", ClipPath=owner_path)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(
+            "PLAYBACK_ATTR3_CLIPPATH_REFUSED", normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        )
+        self.assertFalse(out_file.exists())
+
+    # ATTR3-FOOTAGE-BIND-1 PR-B round 6 (sol minor): -ClipPath/-FixtureSha256 are refused by flag
+    # PRESENCE ($PSBoundParameters.ContainsKey), not by truthiness -- so explicitly binding either
+    # flag to an empty string is refused too, matching the "refused outright" documented contract
+    # instead of being silently read as omission.
+    def test_an_owner_id_with_an_explicit_empty_clippath_is_still_refused(self) -> None:
+        proc, out_file = self._generate(ClipId="M16-1243", ClipPath="")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(
+            "PLAYBACK_ATTR3_CLIPPATH_REFUSED", normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        )
+        self.assertFalse(out_file.exists())
+
+    def test_an_owner_id_with_an_explicit_empty_fixture_sha_is_still_refused(self) -> None:
+        proc, out_file = self._generate(ClipId="M16-1243", FixtureSha256="")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(
+            "PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED",
+            normalize_pwsh_message_text(proc.stdout + proc.stderr),
+        )
         self.assertFalse(out_file.exists())
 
     def test_a_fixture_id_with_an_explicit_clippath_is_still_accepted(self) -> None:
@@ -904,6 +947,165 @@ class AttributionJobOptionalClipPathTests(_PwshCase):
         proc, out_file = self._generate(FixtureSha256="d" * 64, ClipPath=explicit_path)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn(f"$AuthorizedClipPath = '{explicit_path}'", out_file.read_text(encoding="utf-8"))
+
+    # ATTR3-FOOTAGE-BIND-1 PR-B round 2 (sol BLOCKER / astra MAJOR): -ClipPath used to carry a
+    # PARAMETER-LEVEL ValidatePattern that ran before owner/fixture classification, so a
+    # forward-slash value (the real owner-part path shape) failed PowerShell's own binding
+    # validation and got ECHOED in the diagnostic instead of reaching the path-free
+    # PLAYBACK_ATTR3_CLIPPATH_REFUSED throw. Validation now happens in the body, after
+    # classification, so an owner id's -ClipPath value never appears in any message.
+    def test_an_owner_id_with_a_forward_slash_clippath_is_refused_not_echoed(self) -> None:
+        owner_path = "C:/mlvtmp/mlv-agent/cache/M16-1243.raw"
+        proc, out_file = self._generate(ClipId="M16-1243", ClipPath=owner_path)
+        self.assertNotEqual(proc.returncode, 0)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REFUSED", message)
+        self.assertNotIn(owner_path, message)
+        self.assertFalse(out_file.exists())
+
+
+@requires_pwsh
+@requires_git
+class GeneratorBakeTokenInjectionTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 2 (astra BLOCKER): every __TOKEN__ this generator bakes
+    into the emitted job's single-quoted template literals must be either strictly validated to
+    a safe alphabet or escaped for its quoting context -- never neither. -ConsentReceiptFileName
+    was the astra-cited concrete repro (a value shaped like "'; $OwnerPartsJson = '<forged
+    parts>'; #" closed the literal early and re-assigned OwnerPartsJson before the job's own
+    content gate ever ran); -BasePackageZip, -BasePackageExeName and -PresentMonName carried the
+    identical defect (no ValidatePattern, no escaping at the Replace() call site) and are fixed
+    and tested the same way. Each is now restricted to a plain basename via ValidatePattern
+    (belt) and additionally escaped at bake time (suspenders), so a value containing a quote and
+    a newline is refused at parameter binding -- never silently baked."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+
+    def _generate_raw(self, extra_flag: str, malicious_value: str):
+        # Bypasses the simple `-Key 'Value'` formatter in AttributionJobOptionalClipPathTests
+        # (that formatter cannot carry a value containing a literal quote): the malicious value
+        # is doubled here exactly the way a caller's own shell/quoting layer would have to do it
+        # to deliver a literal `'` through to the generator's PowerShell parameter binder.
+        out_file = self.staging / "job.ps1"
+        escaped_for_outer_literal = malicious_value.replace("'", "''")
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'tiny_dual_iso' "
+            f"-FixtureSha256 '{'b' * 64}' "
+            f"{extra_flag} '{escaped_for_outer_literal}' "
+            f"-OutFile '{out_file}' -RepoRoot '{self.repo}'\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script), out_file
+
+    def test_consent_receipt_filename_with_quote_and_newline_is_refused(self) -> None:
+        malicious = "x'; $Global:Pwned = 'yes'; #\n.json"
+        proc, out_file = self._generate_raw("-ConsentReceiptFileName", malicious)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_base_package_zip_with_quote_and_newline_is_refused(self) -> None:
+        malicious = "x'; $Global:Pwned = 'yes'; #\n.zip"
+        proc, out_file = self._generate_raw("-BasePackageZip", malicious)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_base_package_exe_name_with_quote_and_newline_is_refused(self) -> None:
+        malicious = "x'; $Global:Pwned = 'yes'; #\n.exe"
+        proc, out_file = self._generate_raw("-BasePackageExeName", malicious)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_presentmon_name_with_quote_and_newline_is_refused(self) -> None:
+        malicious = "x'; $Global:Pwned = 'yes'; #\n.exe"
+        proc, out_file = self._generate_raw("-PresentMonName", malicious)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+    def test_consent_receipt_filename_shaped_like_a_template_token_is_not_re_expanded(self) -> None:
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL). -ConsentReceiptFileName's own
+        # ValidatePattern is alnum/underscore/dot/hyphen, so 'a__EMBEDDED_FUNCTIONS__b.json'
+        # passes it -- and was the astra-cited concrete repro of the collision class this round
+        # closes: the old chained .Replace() calls substituted this value BEFORE
+        # __EMBEDDED_FUNCTIONS__, so the later call rescanned the already-substituted text and
+        # spliced ~600 lines of verifier source into the middle of the $ConsentReceiptFileName
+        # string literal, breaking the emitted job's own parse. A single-pass
+        # Expand-AttrCudaTemplate substitution never rescans a substituted value, so the job must
+        # now emit, parse cleanly, and carry the value literally.
+        colliding = "a__EMBEDDED_FUNCTIONS__b.json"
+        proc, out_file = self._generate_raw("-ConsentReceiptFileName", colliding)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(out_file.exists())
+        job_text = out_file.read_text(encoding="utf-8")
+        self.assertIn(f"$ConsentReceiptFileName = '{colliding}'", job_text)
+        parse_script = self.tmp / "parse_check.ps1"
+        parse_script.write_text(
+            "$t=$null; $e=$null\n"
+            f"[void][System.Management.Automation.Language.Parser]::ParseFile('{out_file}', [ref]$t, [ref]$e)\n"
+            "Write-Output $e.Count\n",
+            encoding="utf-8",
+        )
+        parse = _run_pwsh_file(parse_script)
+        self.assertEqual(parse.stdout.strip(), "0", parse.stdout + parse.stderr)
+
+    def test_consent_receipt_filename_accepts_a_plain_name(self) -> None:
+        # Proves the ValidatePattern above is not so strict it rejects the real default shape.
+        proc, out_file = self._generate_raw(
+            "-ConsentReceiptFileName", "owner-footage-consent-20260916.json"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(out_file.exists())
+        job_text = out_file.read_text(encoding="utf-8")
+        self.assertIn(
+            "$ConsentReceiptFileName = 'owner-footage-consent-20260916.json'", job_text
+        )
+
+
+@requires_pwsh
+class ExpandAttrCudaTemplateTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): unit tests for the shared single-pass
+    templater every generator now calls instead of a chained .Replace() sequence."""
+
+    def test_a_value_containing_another_tokens_spelling_is_not_re_expanded(self) -> None:
+        proc = self.run_with_module(
+            "$tokens = [ordered]@{ FOO = 'hello'; BAR = 'a__FOO__b'; BAZ = 'z' }\n"
+            "$out = Expand-AttrCudaTemplate -Template 'X=__FOO__ Y=__BAR__ Z=__BAZ__' -Tokens $tokens\n"
+            "Write-Output $out\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("X=hello Y=a__FOO__b Z=z", proc.stdout)
+
+    def test_an_unknown_template_placeholder_throws(self) -> None:
+        proc = self.run_with_module(
+            _guard(
+                "Expand-AttrCudaTemplate -Template '__NOPE__' -Tokens ([ordered]@{ FOO = 'x' })"
+            )
+        )
+        self.assert_throws(proc, "ATTRCUDA_TEMPLATE_UNKNOWN_TOKEN")
+
+    def test_an_unconsumed_tokens_entry_throws(self) -> None:
+        proc = self.run_with_module(
+            _guard(
+                "Expand-AttrCudaTemplate -Template 'plain text, no placeholders' "
+                "-Tokens ([ordered]@{ FOO = 'x' })"
+            )
+        )
+        self.assert_throws(proc, "ATTRCUDA_TEMPLATE_UNUSED_TOKEN")
+
+    def test_every_token_consumed_and_no_unknown_placeholder_succeeds(self) -> None:
+        proc = self.run_with_module(
+            "$tokens = [ordered]@{ A = '1'; B = '2' }\n"
+            "$out = Expand-AttrCudaTemplate -Template '__A__-__B__' -Tokens $tokens\n"
+            "Write-Output $out\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("1-2", proc.stdout)
 
 
 @requires_pwsh
@@ -941,9 +1143,18 @@ class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
 
     def _extract_fixture_content_check(self) -> str:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        # ATTR3-FOOTAGE-BIND-1 PR-B: an EARLIER "if ($FixtureRehearsal) {" now also gates the
+        # clip-path residence checks (before $Pub exists) -- bound the search to start AFTER
+        # $Pub is created, so this always finds the CONTENT-hash-check block, never the
+        # residence-check block.
+        pub_created = text.index("[void](New-AttrCudaDirectory -Path $Pub)")
         start_marker = "if ($FixtureRehearsal) {"
-        end_marker = "\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)"
-        start = text.index(start_marker)
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 4: everything from the owner/fixture if/else through the
+        # end of the job now runs inside one `try` (see the generator's own comment above it), so
+        # the slice must stop BEFORE that `try {` line -- stopping at the old Expand-Archive marker
+        # alone would now include an unclosed `try {` in the extracted text.
+        end_marker = "\ntry {\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)"
+        start = text.index(start_marker, pub_created)
         end = text.index(end_marker, start)
         self.assertGreater(end, start, "fixture-content-check markers moved in the generator")
         return text[start:end]
@@ -1046,6 +1257,824 @@ class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
         combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
         self.assertIn("job-owned path 'Root' resolves outside", combined)
         self.assertIn("C:\\mlvtmp", combined)
+
+
+@requires_pwsh
+class AttributionJobOwnerContentAuthenticationTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B: the emitted job verifies EVERY owner part's content -- via the
+    same extraction technique AttributionJobFixtureContentAuthenticationTests uses for the
+    fixture arm of the SAME if/else block -- before the package is deployed, PresentMon starts,
+    or the smoke child runs. Every part here is SYNTHETIC, built directly (never through the real
+    resolver), exactly the way test_attr3_footage_presence_job.py exercises the identical
+    per-part verifier for the presence-probe job.
+    """
+
+    def _extract_content_check(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        pub_created = text.index("[void](New-AttrCudaDirectory -Path $Pub)")
+        start = text.index("if ($FixtureRehearsal) {", pub_created)
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 4: stop BEFORE the `try {` that now wraps everything
+        # from here to the end of the job (see the generator's own comment above it) -- the old
+        # Expand-Archive marker alone would now include that unclosed `try {` in the slice, and
+        # this range also needs to include the round-4 private-directory linking logic, which
+        # lives inside the SAME if/else block, before that `try {`.
+        end = text.index("\ntry {\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)", start)
+        self.assertGreater(end, start, "owner/fixture content-check markers moved in the generator")
+        return text[start:end]
+
+    def _owner_parts_json(self, parts) -> str:
+        baked = [
+            {
+                "index": part["index"],
+                "pathBase64": base64.b64encode(part["path"].encode("utf-8")).decode("ascii"),
+                "length": part["length"],
+                "sha256": part["sha256"],
+            }
+            for part in parts
+        ]
+        return json.dumps(baked)
+
+    def _run_owner_content_check(self, *, parts, pub: Path, work: Path | None = None) -> subprocess.CompletedProcess:
+        # The real job creates $Pub (New-AttrCudaDirectory) and $Work before this block ever
+        # runs; this probe stands in for those two steps so Save-Json and the round-4 private
+        # directory (built under $Work) both have somewhere to write.
+        pub.mkdir(parents=True)
+        if work is None:
+            work = self.tmp / "work"
+        work.mkdir(parents=True, exist_ok=True)
+        block = self._extract_content_check()
+        owner_parts_json = self._owner_parts_json(parts).replace("'", "''")
+        script = self.tmp / "owner-content-check-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            "$FixtureRehearsal = $false\n"
+            f"$OwnerPartsJson = '{owner_parts_json}'\n"
+            "$ClipId = 'FIX-OWNER-CONTENT-0001'\n"
+            f"$SourceCommit = '{'d' * 40}'\n"
+            f"$Pub = '{pub}'\n"
+            f"$Work = '{work}'\n"
+            "$ownerLinkHandles = [System.Collections.Generic.List[object]]::new()\n"
+            "function Save-Json($Object, [string]$Path) {\n"
+            "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
+            "}\n"
+            + block + "\n"
+            "Write-Output ('RESULT=NO_MISMATCH clipPath=' + $clipPath)\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script)
+
+    def test_both_parts_pass_and_a_private_directory_is_built_from_neutral_hard_links(self) -> None:
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 4: the path this job opens is no longer the owner's own
+        # part path -- it is a neutrally-named HARD LINK under a private directory built inside
+        # $Work, byte-identical to (and the SAME file object as) the verified source part.
+        base_extension = "." + "MLV"
+        continuation_extension = "." + "M00"
+        part0_dir = self.tmp / "owner-content-part0"
+        part0_dir.mkdir()
+        part0_path = part0_dir / ("source" + base_extension)
+        part0_bytes = b"synthetic owner content part zero " * 97
+        part0_path.write_bytes(part0_bytes)
+        part1_path = self.tmp / ("source" + continuation_extension)
+        part1_bytes = b"synthetic owner content part one"
+        part1_path.write_bytes(part1_bytes)
+        part0 = str(part0_path).replace("\\", "/")
+        part1 = str(part1_path).replace("\\", "/")
+        parts = [
+            {"index": 0, "path": part0, "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()},
+            {"index": 1, "path": part1, "length": len(part1_bytes), "sha256": hashlib.sha256(part1_bytes).hexdigest()},
+        ]
+        pub = self.tmp / "agent" / "outbox" / "owner-pass.artifacts"
+        work = self.tmp / "work"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub, work=work)
+
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=NO_MISMATCH", proc.stdout)
+        private_dir_name = "owner-" + "clip"
+        neutral0 = private_dir_name + base_extension
+        neutral1 = private_dir_name + continuation_extension
+        link0_path = work / private_dir_name / neutral0
+        link1_path = work / private_dir_name / neutral1
+        self.assertIn(f"clipPath={link0_path}", proc.stdout)
+        # Never the owner's real part path, anywhere in the job's own stdout.
+        self.assertNotIn(part0, proc.stdout)
+        self.assertNotIn(part1, proc.stdout)
+        self.assertTrue(link0_path.is_file())
+        self.assertTrue(link1_path.is_file())
+        self.assertEqual(link0_path.read_bytes(), part0_bytes)
+        self.assertEqual(link1_path.read_bytes(), part1_bytes)
+        # The SAME file object as its source, not a copy -- proven the same way the job proves it.
+        self.assertEqual(link0_path.stat().st_ino, part0_path.stat().st_ino)
+        self.assertEqual(link1_path.stat().st_ino, part1_path.stat().st_ino)
+
+    def test_a_mismatched_part_fails_closed_before_the_package_is_touched(self) -> None:
+        part0_path = self.tmp / "owner-content-mismatch-part0.raw"
+        part0_bytes = b"synthetic owner content that will not match"
+        part0_path.write_bytes(part0_bytes)
+        parts = [
+            {
+                "index": 0,
+                "path": str(part0_path).replace("\\", "/"),
+                "length": len(part0_bytes),
+                "sha256": hashlib.sha256(b"not the bytes the resolver saw").hexdigest(),
+            },
+        ]
+        pub = self.tmp / "agent" / "outbox" / "owner-mismatch.artifacts"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub)
+
+        self.assertEqual(proc.returncode, 19, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=OWNER_FOOTAGE_NOT_VERIFIED", proc.stdout)
+        self.assertIn("PARTS=0=SHA256_MISMATCH", proc.stdout)
+        summary = json.loads((pub / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["result"], "OWNER_FOOTAGE_NOT_VERIFIED")
+        self.assertEqual(summary["parts"], [{"index": 0, "status": "SHA256_MISMATCH"}])
+        # Never a path in a reader-facing output.
+        self.assertNotIn(str(part0_path).replace("\\", "/"), json.dumps(summary))
+
+    def test_a_missing_part_is_reported_by_index_and_status_only(self) -> None:
+        missing_path = self.tmp / "owner-content-missing-part0.raw"
+        parts = [
+            {"index": 0, "path": str(missing_path).replace("\\", "/"), "length": 10, "sha256": "a" * 64},
+        ]
+        pub = self.tmp / "agent" / "outbox" / "owner-missing.artifacts"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub)
+
+        self.assertEqual(proc.returncode, 19, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=OWNER_FOOTAGE_NOT_VERIFIED", proc.stdout)
+        self.assertIn("PARTS=0=NOT_FOUND", proc.stdout)
+
+
+@requires_pwsh
+class OwnerFootagePrivateDirectoryLeakAndRefusalTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 4: the leak proof, the sibling-isolation proof, and the
+    cross-volume / identity-mismatch refusal paths for the private per-job directory.
+
+    The cross-volume and identity-mismatch cases are exercised by MOCKING
+    Get-AttrCudaFileIdentity inside AttrCudaOwnerFootage.psm1's own scope (`& $module { Set-Item
+    -Path function:... }`) rather than by requiring a second real volume or a real hardware race --
+    New-AttrCudaOwnerFootageLink is called directly, so this is a statement about the CODE PATH
+    taken when the identity comparison itself reports a mismatch, not about the real OS. The mock
+    and the mocked-from call MUST share one module (round 4b, verified empirically): PowerShell
+    resolves an unqualified command called from within a module function through that module's OWN
+    session-state function table, looked up fresh per call, so Set-Item only takes effect for
+    callers in the SAME module as the function it replaces -- a caller in a module that merely
+    imported the mocked one holds a snapshot from import time and never observes the override.
+    """
+
+    def _extract_content_check(self) -> str:
+        # Duplicated from AttributionJobOwnerContentAuthenticationTests rather than shared, in
+        # keeping with this file's own convention of keeping each test class self-contained.
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        pub_created = text.index("[void](New-AttrCudaDirectory -Path $Pub)")
+        start = text.index("if ($FixtureRehearsal) {", pub_created)
+        end = text.index("\ntry {\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)", start)
+        self.assertGreater(end, start, "owner/fixture content-check markers moved in the generator")
+        return text[start:end]
+
+    def _extract_cmd_build(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start = text.index("$envList = \"'\" + ($envs -join")
+        end = text.index("\n$presentMonProc = Start-PresentMonCapture", start)
+        self.assertGreater(end, start, "cmd-build markers moved in the generator")
+        return text[start:end]
+
+    def _owner_parts_json(self, parts) -> str:
+        baked = [
+            {
+                "index": part["index"],
+                "pathBase64": base64.b64encode(part["path"].encode("utf-8")).decode("ascii"),
+                "length": part["length"],
+                "sha256": part["sha256"],
+            }
+            for part in parts
+        ]
+        return json.dumps(baked)
+
+    def _run_owner_content_check(self, *, parts, pub: Path, work: Path) -> subprocess.CompletedProcess:
+        pub.mkdir(parents=True)
+        work.mkdir(parents=True, exist_ok=True)
+        block = self._extract_content_check()
+        owner_parts_json = self._owner_parts_json(parts).replace("'", "''")
+        script = self.tmp / "owner-leak-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            "$FixtureRehearsal = $false\n"
+            f"$OwnerPartsJson = '{owner_parts_json}'\n"
+            "$ClipId = 'FIX-OWNER-LEAK-0001'\n"
+            f"$SourceCommit = '{'d' * 40}'\n"
+            f"$Pub = '{pub}'\n"
+            f"$Work = '{work}'\n"
+            "$ownerLinkHandles = [System.Collections.Generic.List[object]]::new()\n"
+            "function Save-Json($Object, [string]$Path) {\n"
+            "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
+            "}\n"
+            + block + "\n"
+            "Write-Output ('CLIPPATH=' + $clipPath)\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script)
+
+    def _build_cmd(self, *, clip_path: str) -> str:
+        block = self._extract_cmd_build()
+        script = self.tmp / "cmd-build-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            "$envs = @('FAKE_ENV=1')\n"
+            "$smoke = 'C:\\fake\\smoke.ps1'\n"
+            "$exePath = 'C:\\fake\\app.exe'\n"
+            "$resultPath = 'C:\\fake\\result.json'\n"
+            f"$clipPath = '{clip_path}'\n"
+            + block + "\n"
+            "Write-Output ('CMD=' + $cmd)\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        marker = "CMD="
+        line = next(line for line in proc.stdout.splitlines() if line.startswith(marker))
+        return line[len(marker) :]
+
+    def test_no_sentinel_leak_in_command_line_or_publish_directory(self) -> None:
+        # SENTINEL: a unique string embedded ONLY in the owner's real (never-published) directory.
+        sentinel = "SENTINELOWNERPATH0001"
+        base_extension = "." + "MLV"
+        src_dir = self.tmp / f"real-owner-dir-{sentinel}"
+        src_dir.mkdir()
+        part0_path = src_dir / ("source" + base_extension)
+        part0_bytes = b"leak proof sentinel bytes " * 40
+        part0_path.write_bytes(part0_bytes)
+        part0 = str(part0_path).replace("\\", "/")
+        parts = [{"index": 0, "path": part0, "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()}]
+        pub = self.tmp / "agent" / "outbox" / "owner-sentinel.artifacts"
+        work = self.tmp / "work"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub, work=work)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertNotIn(sentinel, proc.stdout)
+        marker = "CLIPPATH="
+        line = next(line for line in proc.stdout.splitlines() if line.startswith(marker))
+        clip_path = line[len(marker) :]
+        self.assertNotIn(sentinel, clip_path)
+
+        # Nothing this stage publishes (there is nothing to publish on the success path at this
+        # extraction boundary, but the directory is checked anyway) names the sentinel.
+        for candidate in pub.rglob("*"):
+            if candidate.is_file():
+                self.assertNotIn(sentinel, candidate.read_text(encoding="utf-8", errors="ignore"))
+
+        cmd = self._build_cmd(clip_path=clip_path)
+        self.assertNotIn(sentinel, cmd)
+        self.assertIn(clip_path, cmd)
+
+    def test_sibling_and_sidecar_files_are_never_linked_into_the_private_directory(self) -> None:
+        base_extension = "." + "MLV"
+        continuation_extension = "." + "M00"
+        sidecar_extension = "." + "MAPP"
+        src_dir = self.tmp / "owner-source-with-siblings"
+        src_dir.mkdir()
+        part0_path = src_dir / ("source" + base_extension)
+        part0_bytes = b"sibling isolation part zero " * 40
+        part0_path.write_bytes(part0_bytes)
+        # An UNVERIFIED sibling continuation part -- never named in the parts list -- and a stray
+        # sidecar file, both beside the verified source.
+        (src_dir / ("source" + continuation_extension)).write_bytes(b"unverified sibling continuation part")
+        (src_dir / ("source" + sidecar_extension)).write_bytes(b"stray sidecar bytes")
+        part0 = str(part0_path).replace("\\", "/")
+        parts = [{"index": 0, "path": part0, "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()}]
+        pub = self.tmp / "agent" / "outbox" / "owner-siblings.artifacts"
+        work = self.tmp / "work"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub, work=work)
+
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        private_dir_name = "owner-" + "clip"
+        private_dir = work / private_dir_name
+        entries = sorted(p.name for p in private_dir.iterdir())
+        self.assertEqual(entries, [private_dir_name + base_extension])
+
+    def test_more_than_100_parts_is_refused_as_not_contiguous(self) -> None:
+        base_extension = "." + "MLV"
+        src_dir = self.tmp / "owner-too-many-parts"
+        src_dir.mkdir()
+        parts = []
+        for index in range(101):
+            extension = base_extension if index == 0 else ("." + "M{0:02d}".format(index - 1))
+            part_path = src_dir / (f"source-{index}" + extension)
+            part_bytes = f"part {index}".encode("utf-8")
+            part_path.write_bytes(part_bytes)
+            parts.append({
+                "index": index,
+                "path": str(part_path).replace("\\", "/"),
+                "length": len(part_bytes),
+                "sha256": hashlib.sha256(part_bytes).hexdigest(),
+            })
+        pub = self.tmp / "agent" / "outbox" / "owner-too-many.artifacts"
+        work = self.tmp / "work"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub, work=work)
+
+        self.assertEqual(proc.returncode, 20, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=OWNER_PARTS_NOT_CONTIGUOUS", proc.stdout)
+        summary = json.loads((pub / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["result"], "OWNER_PARTS_NOT_CONTIGUOUS")
+
+    def test_a_gap_in_part_indices_is_refused_as_not_contiguous(self) -> None:
+        base_extension = "." + "MLV"
+        continuation_extension = "." + "M01"
+        src_dir = self.tmp / "owner-gap-parts"
+        src_dir.mkdir()
+        part0_path = src_dir / ("source" + base_extension)
+        part0_bytes = b"gap test part zero"
+        part0_path.write_bytes(part0_bytes)
+        # Index 1 is MISSING: index 0 then jumps straight to index 2.
+        part2_path = src_dir / ("source" + continuation_extension)
+        part2_bytes = b"gap test part two"
+        part2_path.write_bytes(part2_bytes)
+        parts = [
+            {"index": 0, "path": str(part0_path).replace("\\", "/"), "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()},
+            {"index": 2, "path": str(part2_path).replace("\\", "/"), "length": len(part2_bytes), "sha256": hashlib.sha256(part2_bytes).hexdigest()},
+        ]
+        pub = self.tmp / "agent" / "outbox" / "owner-gap.artifacts"
+        work = self.tmp / "work"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub, work=work)
+
+        self.assertEqual(proc.returncode, 20, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=OWNER_PARTS_NOT_CONTIGUOUS", proc.stdout)
+
+    def test_cross_volume_refusal_when_source_and_directory_report_different_volumes(self) -> None:
+        base_extension = "." + "MLV"
+        src_dir = self.tmp / "owner-cross-volume-source"
+        src_dir.mkdir()
+        source_path = src_dir / ("source" + base_extension)
+        source_path.write_bytes(b"cross volume refusal bytes")
+        directory = self.tmp / "owner-cross-volume-directory"
+        directory.mkdir()
+
+        script = self.tmp / "cross-volume-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            "$mod = Get-Module AttrCudaOwnerFootage\n"
+            f"$global:AttrCudaTestSourcePath = '{source_path}'\n"
+            "& $mod {\n"
+            "    Set-Item -Path function:Get-AttrCudaFileIdentity -Value {\n"
+            "        param([string]$Path)\n"
+            "        $serial = if ($Path -eq $global:AttrCudaTestSourcePath) { 111 } else { 222 }\n"
+            "        [pscustomobject]@{ VolumeSerialNumber = $serial; FileIndexHigh = 1; FileIndexLow = 1; NumberOfLinks = 1 }\n"
+            "    }\n"
+            "}\n"
+            f"try {{ [void](New-AttrCudaOwnerFootageLink -Directory '{directory}' -Index 0 -SourcePath $global:AttrCudaTestSourcePath); Write-Output 'NO_THROW' }}\n"
+            "catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("THREW OWNER_FOOTAGE_LINK_CROSS_VOLUME", proc.stdout)
+        # No hard link was left behind by the refused attempt.
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_identity_mismatch_after_link_creation_is_refused(self) -> None:
+        base_extension = "." + "MLV"
+        src_dir = self.tmp / "owner-identity-mismatch-source"
+        src_dir.mkdir()
+        source_path = src_dir / ("source" + base_extension)
+        source_path.write_bytes(b"identity mismatch refusal bytes")
+        directory = self.tmp / "owner-identity-mismatch-directory"
+        directory.mkdir()
+
+        script = self.tmp / "identity-mismatch-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            "$mod = Get-Module AttrCudaOwnerFootage\n"
+            f"$sourcePath = '{source_path}'\n"
+            f"$directory = '{directory}'\n"
+            "$global:AttrCudaTestExpectedLinkPath = Join-Path $directory (Get-AttrCudaOwnerFootageNeutralName -Index 0)\n"
+            "& $mod {\n"
+            "    Set-Item -Path function:Get-AttrCudaFileIdentity -Value {\n"
+            "        param([string]$Path)\n"
+            "        if ($Path -eq $global:AttrCudaTestExpectedLinkPath) {\n"
+            "            [pscustomobject]@{ VolumeSerialNumber = 1; FileIndexHigh = 999; FileIndexLow = 999; NumberOfLinks = 2 }\n"
+            "        } else {\n"
+            "            [pscustomobject]@{ VolumeSerialNumber = 1; FileIndexHigh = 1; FileIndexLow = 1; NumberOfLinks = 1 }\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "try { [void](New-AttrCudaOwnerFootageLink -Directory $directory -Index 0 -SourcePath $sourcePath); Write-Output 'NO_THROW' }\n"
+            "catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("THREW OWNER_FOOTAGE_LINK_FAILED", proc.stdout)
+
+    def test_a_handle_acquisition_failure_after_the_first_link_cleans_up_and_refuses(self) -> None:
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 5 (astra major). Part 0 links and its handle opens
+        # normally; part 1's handle acquisition is synthetically failed AFTER part 1's own link
+        # was already created. Proves the round-5 enclosing try/catch (not a per-part try around
+        # New-AttrCudaOwnerFootageLink alone) closes the part-0 handle, deletes BOTH neutral link
+        # entries, leaves the real sources untouched, and reports the typed refusal.
+        base_extension = "." + "MLV"
+        continuation_extension = "." + "M00"
+        src_dir = self.tmp / "owner-handle-failure-source"
+        src_dir.mkdir()
+        part0_path = src_dir / ("source" + base_extension)
+        part0_bytes = b"handle failure cleanup part zero " * 40
+        part0_path.write_bytes(part0_bytes)
+        part1_path = src_dir / ("source" + continuation_extension)
+        part1_bytes = b"handle failure cleanup part one"
+        part1_path.write_bytes(part1_bytes)
+        parts = [
+            {"index": 0, "path": str(part0_path).replace("\\", "/"), "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()},
+            {"index": 1, "path": str(part1_path).replace("\\", "/"), "length": len(part1_bytes), "sha256": hashlib.sha256(part1_bytes).hexdigest()},
+        ]
+        pub = self.tmp / "agent" / "outbox" / "owner-handle-failure.artifacts"
+        work = self.tmp / "work"
+        pub.mkdir(parents=True)
+        work.mkdir(parents=True, exist_ok=True)
+        block = self._extract_content_check()
+        owner_parts_json = self._owner_parts_json(parts).replace("'", "''")
+        script = self.tmp / "owner-handle-failure-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            "$FixtureRehearsal = $false\n"
+            f"$OwnerPartsJson = '{owner_parts_json}'\n"
+            "$ClipId = 'FIX-OWNER-HANDLEFAIL-0001'\n"
+            f"$SourceCommit = '{'d' * 40}'\n"
+            f"$Pub = '{pub}'\n"
+            f"$Work = '{work}'\n"
+            "$ownerLinkHandles = [System.Collections.Generic.List[object]]::new()\n"
+            "function Save-Json($Object, [string]$Path) {\n"
+            "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
+            "}\n"
+            # Real handle for part 0's link; synthetic IOException for part 1's -- the block calls
+            # this unqualified at SCRIPT scope (it is spliced in directly, not called from inside
+            # the module), so overriding it here is enough without the module-scope mock trick.
+            "$script:AttrCudaHandleOpenCount = 0\n"
+            "Set-Item -Path function:Open-AttrCudaReadOnlyHandle -Value {\n"
+            "    param([string]$Path)\n"
+            "    $script:AttrCudaHandleOpenCount++\n"
+            "    if ($script:AttrCudaHandleOpenCount -eq 1) {\n"
+            "        return [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)\n"
+            "    }\n"
+            "    throw [IO.IOException]::new('SYNTHETIC_HANDLE_ACQUISITION_FAILURE')\n"
+            "}\n"
+            + block + "\n"
+            "Write-Output 'UNREACHABLE_NO_THROW'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+
+        self.assertEqual(proc.returncode, 22, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=OWNER_FOOTAGE_LINK_FAILED", proc.stdout)
+        self.assertIn("PART=1", proc.stdout)
+        self.assertNotIn("UNREACHABLE_NO_THROW", proc.stdout)
+
+        private_dir_name = "owner-" + "clip"
+        private_dir = work / private_dir_name
+        self.assertTrue(private_dir.exists())
+        self.assertEqual(sorted(p.name for p in private_dir.iterdir()), [])
+
+        # The real sources are untouched -- never linked away, never truncated, never renamed.
+        self.assertTrue(part0_path.is_file())
+        self.assertEqual(part0_path.read_bytes(), part0_bytes)
+        self.assertTrue(part1_path.is_file())
+        self.assertEqual(part1_path.read_bytes(), part1_bytes)
+
+        summary = json.loads((pub / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["result"], "OWNER_FOOTAGE_LINK_FAILED")
+        self.assertEqual(summary["partIndex"], 1)
+        dumped = json.dumps(summary)
+        self.assertNotIn(str(part0_path).replace("\\", "/"), dumped)
+        self.assertNotIn(str(part1_path).replace("\\", "/"), dumped)
+
+
+@requires_pwsh
+class SharedFootagePartVerifierEmbeddingTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B: Test-AttrCudaFootagePart (and the base64 decode it rides on)
+    must be the SAME characters in both emitted jobs -- never two copies that can drift."""
+
+    def test_both_generators_embed_the_same_shared_function_names(self) -> None:
+        presence_module_text = (
+            ROOT / "tools" / "profiling" / "bachelor" / "Attr3FootagePresenceJob.psm1"
+        ).read_text(encoding="utf-8")
+        attribution_text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        for name in ("Read-AttrCudaBase64Payload", "Test-AttrCudaFootagePart"):
+            with self.subTest(name=name):
+                self.assertIn(name, presence_module_text)
+                self.assertIn(name, attribution_text)
+
+    def test_the_extracted_function_source_is_byte_identical_regardless_of_caller(self) -> None:
+        # Get-AttrCudaEmbeddedFunctionSource extracts VERBATIM text keyed only by function name
+        # from the ONE module file -- calling it twice with the same names, independent of which
+        # job is being generated, always returns the same string. This is the guarantee the two
+        # emitted jobs' embeddings rely on.
+        proc = self.run_with_module(
+            "$a = Get-AttrCudaEmbeddedFunctionSource -Name @('Read-AttrCudaBase64Payload', 'Test-AttrCudaFootagePart')\n"
+            "$b = Get-AttrCudaEmbeddedFunctionSource -Name @('Read-AttrCudaBase64Payload', 'Test-AttrCudaFootagePart')\n"
+            "Write-Output ('IDENTICAL=' + ($a -ceq $b))\n"
+            "Write-Output ('NONEMPTY=' + ($a.Length -gt 0))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("IDENTICAL=True", proc.stdout)
+        self.assertIn("NONEMPTY=True", proc.stdout)
+
+
+def _make_fixture_repo_missing_closure_sibling(path: Path) -> list[str]:
+    """Like _make_fixture_repo, but omits ONE smoke-runner closure sibling file
+    (gui-smoke-process-boundary.psm1), so Assert-AttrCudaClosureComplete would throw
+    ATTRCUDA_BLOB_UNRESOLVED if it ever ran against this commit -- used to prove a resolver
+    refusal surfaces even when the closure resolution would ALSO fail (ATTR3-FOOTAGE-BIND-1 PR-B,
+    round 1's ordering requirement)."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git_run(["init", "-q", "-b", "main"], path)
+    _git_run(["config", "commit.gpgsign", "false"], path)
+    _git_run(["config", "user.email", "lane@example.invalid"], path)
+    _git_run(["config", "user.name", "attr3 behaviour fixture"], path)
+    (path / "src" / "mlv" / "llrawproc").mkdir(parents=True)
+    (path / "tools" / "profiling").mkdir(parents=True)
+    (path / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(
+        "# fixture stand-in for run-release-gui-smoke.ps1\n"
+        ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+        "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+        ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n",
+        encoding="utf-8",
+    )
+    (path / "tools" / "profiling" / "gui-smoke-screenshot-provenance.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    (path / "tools" / "profiling" / "provenance-stamp.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    # Deliberately OMITTED: gui-smoke-process-boundary.psm1.
+    shas = []
+    for index, text in enumerate(("first", "second")):
+        (path / "src" / "mlv" / "llrawproc").mkdir(parents=True, exist_ok=True)
+        (path / "src" / "mlv" / "llrawproc" / "llrawproc.c").write_text(
+            f"/* fixture revision {text} */\n", encoding="utf-8"
+        )
+        _git_run(["add", "-A"], path)
+        _git_run(["commit", "-q", "-m", f"fixture {index}"], path)
+        shas.append(_git_run(["rev-parse", "HEAD"], path))
+    return shas
+
+
+@requires_pwsh
+@requires_git
+class OwnerClipResolverOrderingTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B, round 1: a resolver refusal for an owner id must surface even
+    when the smoke-runner closure resolution would ALSO fail -- the resolver decision runs
+    first, so its refusal is never masked by an unrelated closure/build-manifest failure that
+    would also have fired had the code reached that far."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo_missing_closure_sibling(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+
+    def test_resolver_refusal_surfaces_not_the_closure_failure(self) -> None:
+        out_file = self.staging / "job.ps1"
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'M16-1243' "
+            f"-OutFile '{out_file}' -RepoRoot '{self.repo}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_OWNER_RESOLVE_REFUSED", message)
+        self.assertNotIn("ATTRCUDA_BLOB_UNRESOLVED", message)
+        self.assertNotIn("ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE", message)
+        self.assertFalse(out_file.exists())
+
+    # round 2 (sol MAJOR / astra MAJOR): round 1 pinned only that a resolver refusal survives
+    # a closure failure. Source-commit/blob resolution and the PresentMon hash check sat ahead
+    # of the owner decision too, so a resolver refusal could ALSO be masked by an unrelated
+    # SourceCommit or PresentMon failure. Both are deliberately wrong here at once.
+    def test_resolver_refusal_surfaces_not_bogus_source_commit_or_presentmon_hash(self) -> None:
+        out_file = self.staging / "job.ps1"
+        script = self.tmp / "generate.ps1"
+        bogus_source_commit = "f" * 40  # well-formed 40-hex, not a commit in self.repo
+        bad_presentmon_sha = "not-a-valid-presentmon-sha256-value"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{bogus_source_commit}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'M16-1243' "
+            f"-PresentMonSha256 '{bad_presentmon_sha}' "
+            f"-OutFile '{out_file}' -RepoRoot '{self.repo}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_OWNER_RESOLVE_REFUSED", message)
+        self.assertNotIn("is not a commit known to the local repo", message)
+        self.assertNotIn("PresentMonSha256 is not a 64-hex sha256", message)
+        self.assertFalse(out_file.exists())
+
+    def test_the_closure_would_indeed_fail_on_its_own(self) -> None:
+        # Proves this fixture repo genuinely breaks closure resolution -- so the test above is
+        # not vacuously green because the closure would have passed anyway.
+        proc = self.run_with_module(
+            _guard(
+                f"Assert-AttrCudaClosureComplete -RepoRoot '{self.repo}' -Commit '{self.shas[1]}'"
+            )
+        )
+        self.assert_throws(proc, "ATTRCUDA_BLOB_UNRESOLVED")
+
+
+@requires_pwsh
+class RepoRootOrderingTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): the owner/fixture-clip FLAG refusals run
+    before $RepoRoot is ever resolved. A caller who supplies both a bogus -RepoRoot and a refused
+    -ClipPath for an owner id must see PLAYBACK_ATTR3_CLIPPATH_REFUSED, never a RepoRoot error
+    that only fires first because RepoRoot resolution used to sit ahead of this classification.
+    No git or real repository is needed here: -RepoRoot never resolves far enough to touch one."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+        self.bogus_repo_root = self.tmp / "does-not-exist" / "at-all"
+
+    def _generate(self, *, clip_path: str | None = None, clip_path_explicit_empty: bool = False):
+        out_file = self.staging / "job.ps1"
+        if clip_path_explicit_empty:
+            clip_path_args = "-ClipPath '' "
+        elif clip_path:
+            clip_path_args = f"-ClipPath '{clip_path}' "
+        else:
+            clip_path_args = ""
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{'a' * 40}' "
+            f"-BuildManifestSha256 '{'b' * 64}' -ClipId 'M16-1243' "
+            f"{clip_path_args}"
+            f"-OutFile '{out_file}' -RepoRoot '{self.bogus_repo_root}'\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script), out_file
+
+    def test_a_bogus_reporoot_with_an_owner_id_and_clippath_surfaces_clippath_refused(self) -> None:
+        proc, out_file = self._generate(clip_path="C:\\synthetic-cache\\M16-1243")
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REFUSED", message)
+        self.assertNotIn("PLAYBACK_ATTR3_REPOROOT_INVALID", message)
+        self.assertNotIn(str(self.bogus_repo_root), message)
+        self.assertFalse(out_file.exists())
+
+    # ATTR3-FOOTAGE-BIND-1 PR-B round 6 (sol minor): an EXPLICITLY bound empty -ClipPath must be
+    # refused the same way, not read as omission and left to fall through to RepoRoot handling.
+    def test_a_bogus_reporoot_with_an_owner_id_and_an_explicit_empty_clippath_surfaces_clippath_refused(
+        self,
+    ) -> None:
+        proc, out_file = self._generate(clip_path_explicit_empty=True)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REFUSED", message)
+        self.assertNotIn("PLAYBACK_ATTR3_REPOROOT_INVALID", message)
+        self.assertNotIn(str(self.bogus_repo_root), message)
+        self.assertFalse(out_file.exists())
+
+    def test_a_bogus_reporoot_alone_surfaces_reporoot_invalid_without_echoing_the_path(self) -> None:
+        proc, out_file = self._generate()
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_REPOROOT_INVALID", message)
+        self.assertNotIn(str(self.bogus_repo_root), message)
+        self.assertFalse(out_file.exists())
+
+
+@requires_pwsh
+class AgentRootOrderingTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 5 (STRUCTURAL), narrowed round 6: -AgentRoot's shape check
+    for the OWNER arm now runs after the complete owner-id decision (flag refusals, RepoRoot
+    resolution, the resolver call) -- see AgentRootAfterResolverOrderingTests below for that
+    behavioural proof, which needs a git fixture the resolver can be pointed at. This class keeps
+    the ordering proof that needs no git fixture: a caller who supplies both a malformed
+    -AgentRoot and a refused -ClipPath for an owner id must see PLAYBACK_ATTR3_CLIPPATH_REFUSED,
+    never PLAYBACK_ATTR3_AGENTROOT_INVALID masking it (the flag refusal never even reaches
+    RepoRoot/the resolver), and that a malformed -AgentRoot ALONE, for a FIXTURE id, still throws
+    PLAYBACK_ATTR3_AGENTROOT_INVALID -- the fixture arm's own copy of this check is unaffected by
+    round 6 and still runs first, needing no RepoRoot resolution or resolver call at all."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+        self.bad_agent_root = "not-a-drive-rooted-path"
+
+    def _generate(
+        self,
+        *,
+        clip_id: str = "M16-1243",
+        clip_path: str | None = None,
+        agent_root: str | None = None,
+        fixture_sha256: str | None = None,
+    ):
+        out_file = self.staging / "job.ps1"
+        clip_path_args = f"-ClipPath '{clip_path}' " if clip_path else ""
+        agent_root_args = f"-AgentRoot '{agent_root}' " if agent_root is not None else ""
+        fixture_sha_args = f"-FixtureSha256 '{fixture_sha256}' " if fixture_sha256 is not None else ""
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{'a' * 40}' "
+            f"-BuildManifestSha256 '{'b' * 64}' -ClipId '{clip_id}' "
+            f"{clip_path_args}{agent_root_args}{fixture_sha_args}"
+            f"-OutFile '{out_file}'\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script), out_file
+
+    def test_a_malformed_agentroot_with_an_owner_id_and_clippath_surfaces_clippath_refused(
+        self,
+    ) -> None:
+        proc, out_file = self._generate(
+            clip_path="C:\\synthetic-cache\\M16-1243", agent_root=self.bad_agent_root
+        )
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REFUSED", message)
+        self.assertNotIn("PLAYBACK_ATTR3_AGENTROOT_INVALID", message)
+        self.assertFalse(out_file.exists())
+
+    def test_a_malformed_agentroot_alone_for_a_fixture_id_surfaces_agentroot_invalid(self) -> None:
+        # A fixture id's own -AgentRoot check is unaffected by round 6 (it still runs before
+        # -FixtureSha256/-ClipPath, needing no RepoRoot resolution or resolver call), so this
+        # stays deterministic without a git fixture -- unlike the owner arm's copy, which now
+        # depends on the resolver call's own outcome (see AgentRootAfterResolverOrderingTests).
+        proc, out_file = self._generate(
+            clip_id="tiny_dual_iso", agent_root=self.bad_agent_root, fixture_sha256="c" * 64
+        )
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_AGENTROOT_INVALID", message)
+        self.assertFalse(out_file.exists())
+
+
+@requires_pwsh
+@requires_git
+class AgentRootAfterResolverOrderingTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 6 (astra major): the owner arm's -AgentRoot shape check now
+    runs AFTER the resolver call, not before it -- round 5 left it inside the same if/else as the
+    flag refusals, but still ahead of $RepoRoot resolution and the resolver call, so a malformed
+    -AgentRoot masked a resolver refusal that would otherwise have fired first. Uses the same
+    fixture-repo seam as OwnerClipResolverOrderingTests (a throwaway repo with no
+    refs/remotes/fork/master, which the resolver always refuses deterministically) so the resolver
+    outcome never depends on real consent data."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo_missing_closure_sibling(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+        self.bad_agent_root = "not-a-drive-rooted-path"
+
+    def test_a_malformed_agentroot_with_a_resolver_refusal_surfaces_resolve_refused(self) -> None:
+        out_file = self.staging / "job.ps1"
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'M16-1243' "
+            f"-AgentRoot '{self.bad_agent_root}' "
+            f"-OutFile '{out_file}' -RepoRoot '{self.repo}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_OWNER_RESOLVE_REFUSED", message)
+        self.assertNotIn("PLAYBACK_ATTR3_AGENTROOT_INVALID", message)
+        self.assertFalse(out_file.exists())
 
 
 @requires_pwsh
@@ -1755,7 +2784,7 @@ class SmokeRunnerStaleRefusalTests(_PwshCase):
     def _extract_pin_check(self) -> str:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
         start_marker = "$smokeRunnerClosureDir = Join-Path $Cache $SmokeRunnerClosureDirName"
-        end_marker = "\n# NA-4: open exactly the one authorized path baked in by the generator -- no lookup."
+        end_marker = "\n# Fixture runs open the cached clip named at generation time"
         start = text.index(start_marker)
         end = text.index(end_marker, start)
         self.assertGreater(end, start, "smoke-runner pin check markers moved in the generator")
@@ -1999,6 +3028,30 @@ class SmokeRunnerStageJobTests(_PwshCase):
                 expected_sha = _git_blob_sha256(self.repo, self.shas[1], f"tools/profiling/{name}")
                 self.assertEqual(hashlib.sha256(staged.read_bytes()).hexdigest(), expected_sha)
         self.assertFalse((self.agent / "inbox").exists(), "no inbox should ever be created")
+
+    def test_agent_root_shaped_like_a_template_token_is_not_re_expanded(self) -> None:
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL). -AgentRoot's own ValidatePattern
+        # admits underscores, so a value shaped like '...__EMBEDDED_FUNCTIONS__' used to collide
+        # with the LATER embedded-function substitution in the old chained .Replace() calls,
+        # splicing verifier source into the middle of the $AgentRoot string literal and breaking
+        # the emitted job's own parse. A single-pass Expand-AttrCudaTemplate substitution cannot
+        # do that regardless of which token a caller-controlled value happens to spell.
+        colliding_agent_root = str(self.agent) + "__EMBEDDED_FUNCTIONS__"
+        proc = self._generate(AgentRoot=colliding_agent_root)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+        job_text = Path(payload["jobFile"]).read_text(encoding="utf-8")
+        self.assertIn(f"$AgentRoot = '{colliding_agent_root}'", job_text)
+        parse = subprocess.run(
+            [
+                PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                "$t=$null; $e=$null; "
+                f"[void][System.Management.Automation.Language.Parser]::ParseFile('{payload['jobFile']}', [ref]$t, [ref]$e); "
+                "Write-Output $e.Count",
+            ],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(parse.stdout.strip(), "0", parse.stdout + parse.stderr)
 
     def test_generation_refuses_when_a_pinned_sibling_is_no_longer_referenced(self) -> None:
         """ATTR3-SMOKE-RUNNER-DEPS-1 round 3: the stage generator calls

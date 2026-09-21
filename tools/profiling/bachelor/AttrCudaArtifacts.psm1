@@ -57,6 +57,71 @@ function Get-AttrCudaEmbeddedFunctionSource {
     ($blocks -join "`r`n`r`n")
 }
 
+function Expand-AttrCudaTemplate {
+    <#
+    .SYNOPSIS
+    Single-pass job-template substitution: every __TOKEN__ placeholder in -Template is replaced
+    by -Tokens['TOKEN'] in ONE regex pass, so a substituted value is never rescanned for further
+    placeholders.
+    .DESCRIPTION
+    ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL). Every generator that emits a <jobId>.job.ps1
+    body used to substitute placeholders through a CHAINED .Replace(...).Replace(...) sequence:
+    each later .Replace call rescans the ENTIRE string, including text an earlier .Replace call
+    just spliced in. A caller-controlled value shaped like another placeholder's own token (e.g.
+    -ConsentReceiptFileName 'a__EMBEDDED_FUNCTIONS__b.json', which passes that parameter's own
+    ValidatePattern) therefore collided with the LATER __EMBEDDED_FUNCTIONS__ substitution and
+    spliced ~600 lines of verifier source into the middle of an unrelated string literal, breaking
+    the emitted job's own parse -- and the same window existed for every underscore-permitting
+    value and for every generated blob substituted early in the chain.
+    [regex]::Replace with a MatchEvaluator processes the ORIGINAL input in ONE pass: the
+    evaluator's return value for one match is never itself rescanned for further matches, so this
+    closes the whole class at once, for every token, in every generator, rather than patching one
+    collision at a time. Per-token quoting/escaping (e.g. doubling an embedded `'` for a
+    single-quoted literal context) stays the CALLER's job -- -Tokens values are expected to
+    already be escaped for the quoting context they land in, exactly as before this function
+    existed; this function only decides WHICH bytes replace WHICH placeholder, never how a value
+    is made safe for where it lands.
+    Throws AttrCudaTemplateUnknownToken for a template placeholder absent from -Tokens (a typo in
+    the template, or a caller who forgot a token), and AttrCudaTemplateUnusedToken for a -Tokens
+    entry the template never references (a caller who renamed a placeholder in one place and not
+    the other) -- both fail closed rather than silently emitting a literal placeholder or silently
+    dropping a caller-supplied value.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Template,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Specialized.OrderedDictionary]$Tokens
+    )
+
+    $consumed = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $unknown = [System.Collections.Generic.List[string]]::new()
+    $evaluator = {
+        param($match)
+        $name = $match.Value.Substring(2, $match.Value.Length - 4)
+        if (-not $Tokens.Contains($name)) {
+            [void]$unknown.Add($name)
+            return $match.Value
+        }
+        [void]$consumed.Add($name)
+        [string]$Tokens[$name]
+    }
+    $expanded = [regex]::Replace($Template, '__[A-Z0-9_]+__', $evaluator)
+
+    if ($unknown.Count -gt 0) {
+        $distinctUnknown = @($unknown | Select-Object -Unique)
+        throw "ATTRCUDA_TEMPLATE_UNKNOWN_TOKEN template placeholder(s) have no entry in -Tokens: $(($distinctUnknown | ForEach-Object { "__${_}__" }) -join ', ')"
+    }
+    $unusedKeys = @($Tokens.Keys | Where-Object { -not $consumed.Contains($_) })
+    if ($unusedKeys.Count -gt 0) {
+        throw "ATTRCUDA_TEMPLATE_UNUSED_TOKEN -Tokens entries never referenced by the template: $($unusedKeys -join ', ')"
+    }
+    $expanded
+}
+
 function Get-AttrCudaZipArchiveComment {
     <#
     .SYNOPSIS
@@ -1211,6 +1276,107 @@ function Read-AttrCudaBase64Payload {
     [pscustomobject]@{ bytes = $bytes; sha256 = $sha256 }
 }
 
+function Test-AttrCudaFootagePart {
+    <#
+    .SYNOPSIS
+    Verify one footage part's content on THIS host: existence, readability, length, then sha256.
+    .DESCRIPTION
+    ATTR3-FOOTAGE-BIND-1 PR-B: shared by attr3-footage-presence-job.ps1's emitted probe and
+    playback-attr-3-cuda-job.ps1's owner-id content gate -- ONE definition of "does this part's
+    bytes match", embedded verbatim in both via Get-AttrCudaEmbeddedFunctionSource so the two jobs
+    run the same characters instead of two copies that can quietly drift apart.
+    Every filesystem call is wrapped in its own try/catch: under $ErrorActionPreference = 'Stop' an
+    unwrapped Test-Path/Get-Item call can throw a TERMINATING error that would escape a caller's
+    loop and print the exception's own text -- which can contain the real path -- to output.
+    Nothing here ever returns exception text, only a fixed status TOKEN.
+    Returns one of PASS / NOT_FOUND / ACCESS_DENIED / UNREADABLE / LENGTH_MISMATCH /
+    SHA256_MISMATCH. Readability is established BEFORE a length mismatch is ever reported: a part
+    whose metadata is readable but whose CONTENT read is denied is UNREADABLE/ACCESS_DENIED, never
+    LENGTH_MISMATCH, since no byte was ever actually observed to differ.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [int64]$ExpectedLength,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSha256
+    )
+
+    $expectedSha256Lower = $ExpectedSha256.ToLowerInvariant()
+    $status = $null
+    $actualLength = $null
+    try {
+        $actualLength = (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Length
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        $status = 'NOT_FOUND'
+    } catch [System.UnauthorizedAccessException] {
+        $status = 'ACCESS_DENIED'
+    } catch {
+        $status = if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' }
+    }
+
+    if ($status) {
+        return $status
+    }
+
+    if ($actualLength -ne $ExpectedLength) {
+        # A differing length alone does not prove the content was ever actually OBSERVED to
+        # differ -- a part whose metadata is readable (Get-Item above succeeded) but whose CONTENT
+        # read is denied must not be reported as LENGTH_MISMATCH. Establish readability first: open
+        # for read and consume at least one byte when the file is non-empty. Only a successful
+        # open-and-read yields LENGTH_MISMATCH; any failure maps the same way the sha256 branch
+        # below does, and never leaks the exception's own text.
+        $readStream = $null
+        try {
+            $readStream = [IO.File]::OpenRead($Path)
+            if ($actualLength -gt 0) {
+                [void]$readStream.ReadByte()
+            }
+            return 'LENGTH_MISMATCH'
+        } catch [System.UnauthorizedAccessException] {
+            return 'ACCESS_DENIED'
+        } catch {
+            return $(if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' })
+        } finally {
+            if ($readStream) { $readStream.Dispose() }
+        }
+    }
+
+    try {
+        $actualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        return $(if ($actualSha256 -eq $expectedSha256Lower) { 'PASS' } else { 'SHA256_MISMATCH' })
+    } catch [System.UnauthorizedAccessException] {
+        return 'ACCESS_DENIED'
+    } catch {
+        return $(if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' })
+    }
+}
+
+function ConvertTo-AttrCudaUtf8String {
+    <#
+    .SYNOPSIS
+    Decode raw bytes as UTF-8 text.
+    .DESCRIPTION
+    Exists so a job TEMPLATE never needs [Text.Encoding]::UTF8.GetString() directly --
+    tools/repo_hygiene/attr3_publish_write_scan.ps1's R4 rule allowlists .NET static/instance
+    members in the template by name, and this repository's policy is that a job template stays
+    inside that allowlist; the decode lives here instead, spliced in and called by NAME like
+    every other embedded verifier (see Read-AttrCudaBase64Payload's own header for the same
+    reasoning about base64).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]]$Bytes
+    )
+    [Text.Encoding]::UTF8.GetString($Bytes)
+}
+
 function Publish-AttrCudaBytes {
     <#
     .SYNOPSIS
@@ -1697,6 +1863,7 @@ Export-ModuleMember -Function `
     Get-AttrCudaArtifactNames, `
     New-AttrCudaBuildInfoHeader, `
     Get-AttrCudaEmbeddedFunctionSource, `
+    Expand-AttrCudaTemplate, `
     Get-AttrCudaZipArchiveComment, `
     Assert-AttrCudaSourceArchive, `
     Assert-AttrCudaSafeArtifactName, `
@@ -1716,6 +1883,8 @@ Export-ModuleMember -Function `
     Get-AttrCudaClosureDirectoryMismatch, `
     Assert-AttrCudaNonOverwritingFileSlot, `
     Read-AttrCudaBase64Payload, `
+    Test-AttrCudaFootagePart, `
+    ConvertTo-AttrCudaUtf8String, `
     Publish-AttrCudaBytes, `
     Publish-AttrCudaText, `
     Publish-AttrCudaFileCopy, `

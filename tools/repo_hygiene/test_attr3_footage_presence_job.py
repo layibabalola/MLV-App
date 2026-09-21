@@ -198,6 +198,33 @@ class FootagePresenceJobTests(unittest.TestCase):
         self.assertIn("RESULT=FOOTAGE_PRESENT", run.stdout)
         self.assertIn("PART=0 STATUS=PASS", run.stdout)
 
+    def test_a_clip_id_shaped_like_a_template_token_is_not_re_expanded(self) -> None:
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL). -ClipId's own ValidatePattern
+        # (alnum/underscore/dot/hyphen) admits 'a__EMBEDDED_FUNCTIONS__b' -- a value shaped
+        # exactly like the LAST placeholder the old chained .Replace() calls substituted. Before
+        # Expand-AttrCudaTemplate, that value would have collided with the later
+        # __EMBEDDED_FUNCTIONS__ substitution and spliced verifier source into the middle of the
+        # $ClipId string literal, breaking the emitted job's own parse. The job must still emit,
+        # parse cleanly, and carry the value literally.
+        proc = self.generate(clip_id="a__EMBEDDED_FUNCTIONS__b")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        job = self.job_path(proc)
+        job_text = job.read_text(encoding="utf-8")
+        self.assertIn("$ClipId = 'a__EMBEDDED_FUNCTIONS__b'", job_text)
+        parse = subprocess.run(
+            [
+                PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                "$t=$null; $e=$null; "
+                f"[void][System.Management.Automation.Language.Parser]::ParseFile('{job}', [ref]$t, [ref]$e); "
+                "Write-Output $e.Count",
+            ],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(parse.stdout.strip(), "0", parse.stdout + parse.stderr)
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("RESULT=FOOTAGE_PRESENT", run.stdout)
+
     # ---- emitted job: honest per-part statuses (round 4) and the four overall results ------------
     # NOT_FOUND / ACCESS_DENIED / UNREADABLE / LENGTH_MISMATCH / SHA256_MISMATCH / PASS per part;
     # FOOTAGE_PRESENT / FOOTAGE_ABSENT / FOOTAGE_MISMATCH / FOOTAGE_INDETERMINATE overall -- see

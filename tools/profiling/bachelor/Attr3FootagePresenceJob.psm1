@@ -127,7 +127,10 @@ function New-Attr3FootagePresenceJob {
     $jobId = "attr3-footage-presence-$ClipId-$($sourceSha256.Substring(0, 12))"
     [void](Assert-AttrCudaSafeArtifactName -Name "$jobId.job.ps1")
 
-    $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @('Read-AttrCudaBase64Payload')
+    # ATTR3-FOOTAGE-BIND-1 PR-B: Test-AttrCudaFootagePart is the ONE shared per-part content
+    # verifier, also embedded (byte-identically) in playback-attr-3-cuda-job.ps1's owner-clip
+    # content gate -- see that function's own header in AttrCudaArtifacts.psm1.
+    $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @('Read-AttrCudaBase64Payload', 'Test-AttrCudaFootagePart')
 
     # --- job body template (placeholders are substituted below; the body itself never touches
     #     this function's variables directly, so there is no accidental capture of this process's
@@ -157,59 +160,11 @@ foreach ($rawPart in $RawParts) {
     $decoded = Read-AttrCudaBase64Payload -Base64 $rawPart.pathBase64
     $partPath = [Text.Encoding]::UTF8.GetString($decoded.bytes)
 
-    # Every filesystem operation on this part is wrapped in its own try/catch (round 4, defect
-    # 4). Under $ErrorActionPreference = 'Stop', an UNWRAPPED Test-Path/Get-Item call can throw a
-    # TERMINATING error on a provider or access failure -- which would escape this loop entirely
-    # (skipping every remaining part and the final RESULT/JSON lines) and print the exception's
-    # own text, which can contain $partPath, to this job's stderr via PowerShell's default
-    # uncaught-error reporting. Nothing below ever writes $_, $_.Exception or its .Message --
-    # only a fixed status TOKEN never derived from exception text.
-    $status = $null
-    $actualLength = $null
-    try {
-        $actualLength = (Get-Item -LiteralPath $partPath -Force -ErrorAction Stop).Length
-    } catch [System.Management.Automation.ItemNotFoundException] {
-        $status = 'NOT_FOUND'
-    } catch [System.UnauthorizedAccessException] {
-        $status = 'ACCESS_DENIED'
-    } catch {
-        $status = if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' }
-    }
-
-    if (-not $status) {
-        if ($actualLength -ne [int64]$rawPart.length) {
-            # Round 5: a differing length alone does not prove the content was ever actually
-            # OBSERVED to differ -- a part whose metadata is readable (Get-Item above succeeded)
-            # but whose CONTENT read is denied must not be reported as LENGTH_MISMATCH, since that
-            # feeds FOOTAGE_MISMATCH below without ever having read a byte. Establish readability
-            # first: open for read and consume at least one byte when the file is non-empty. Only
-            # a successful open-and-read yields LENGTH_MISMATCH; any failure maps the same way the
-            # sha256 branch below does, and never leaks the exception's own text.
-            $readStream = $null
-            try {
-                $readStream = [IO.File]::OpenRead($partPath)
-                if ($actualLength -gt 0) {
-                    [void]$readStream.ReadByte()
-                }
-                $status = 'LENGTH_MISMATCH'
-            } catch [System.UnauthorizedAccessException] {
-                $status = 'ACCESS_DENIED'
-            } catch {
-                $status = if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' }
-            } finally {
-                if ($readStream) { $readStream.Dispose() }
-            }
-        } else {
-            try {
-                $actualSha256 = (Get-FileHash -LiteralPath $partPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-                $status = if ($actualSha256 -eq $rawPart.sha256) { 'PASS' } else { 'SHA256_MISMATCH' }
-            } catch [System.UnauthorizedAccessException] {
-                $status = 'ACCESS_DENIED'
-            } catch {
-                $status = if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' }
-            }
-        }
-    }
+    # ATTR3-FOOTAGE-BIND-1 PR-B: the per-part content check is now the ONE shared function
+    # Test-AttrCudaFootagePart (AttrCudaArtifacts.psm1), embedded verbatim -- never a
+    # re-implementation. Nothing below ever writes $_, $_.Exception or its .Message; the function
+    # itself returns only a fixed status TOKEN, never exception text.
+    $status = Test-AttrCudaFootagePart -Path $partPath -ExpectedLength ([int64]$rawPart.length) -ExpectedSha256 ([string]$rawPart.sha256)
     Write-Output "PART=$($rawPart.index) STATUS=$status"
     $results.Add([ordered]@{
         index = $rawPart.index
@@ -258,15 +213,19 @@ Write-Output (([ordered]@{
 exit $exitCode
 '@
 
-    # __EMBEDDED_FUNCTIONS__ is spliced in LAST, after every other placeholder is substituted (the
-    # same ordering playback-attr-3-cuda-job.ps1 and attr3-stage-smoke-runner-job.ps1 use), so a
-    # placeholder-shaped token that happens to appear inside the verbatim module source can never
-    # be rewritten by an earlier .Replace() call.
-    $text = $template.
-        Replace('__JOB_ID__', $jobId).
-        Replace('__CLIP_ID__', $ClipId).
-        Replace('__PARTS_JSON__', $partsJson)
-    $text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
+    # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): a single-pass substitution over the WHOLE
+    # token map at once -- see Expand-AttrCudaTemplate's own header in AttrCudaArtifacts.psm1. A
+    # -ClipId shaped like 'a__PARTS_JSON__b' passes this function's own ValidatePattern (it is
+    # alnum/underscore/dot/hyphen only) and used to collide with a later .Replace() call in the
+    # old chained substitution; a single regex pass over the original template never rescans a
+    # substituted value, so that collision class cannot occur here regardless of which token a
+    # caller-controlled value happens to spell.
+    $text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
+        JOB_ID = $jobId
+        CLIP_ID = $ClipId
+        PARTS_JSON = $partsJson
+        EMBEDDED_FUNCTIONS = $embeddedFunctions
+    })
 
     if (-not (Test-Path -LiteralPath $OutDir)) { [void](New-Item -ItemType Directory -Path $OutDir -Force) }
     $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
