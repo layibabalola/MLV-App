@@ -1378,6 +1378,32 @@ class OwnerClipResolverOrderingTests(_PwshCase):
         self.assertNotIn("ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE", message)
         self.assertFalse(out_file.exists())
 
+    # round 2 (sol MAJOR / astra MAJOR): round 1 pinned only that a resolver refusal survives
+    # a closure failure. Source-commit/blob resolution and the PresentMon hash check sat ahead
+    # of the owner decision too, so a resolver refusal could ALSO be masked by an unrelated
+    # SourceCommit or PresentMon failure. Both are deliberately wrong here at once.
+    def test_resolver_refusal_surfaces_not_bogus_source_commit_or_presentmon_hash(self) -> None:
+        out_file = self.staging / "job.ps1"
+        script = self.tmp / "generate.ps1"
+        bogus_source_commit = "f" * 40  # well-formed 40-hex, not a commit in self.repo
+        bad_presentmon_sha = "not-a-valid-presentmon-sha256-value"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{bogus_source_commit}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'M16-1243' "
+            f"-PresentMonSha256 '{bad_presentmon_sha}' "
+            f"-OutFile '{out_file}' -RepoRoot '{self.repo}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_OWNER_RESOLVE_REFUSED", message)
+        self.assertNotIn("is not a commit known to the local repo", message)
+        self.assertNotIn("PresentMonSha256 is not a 64-hex sha256", message)
+        self.assertFalse(out_file.exists())
+
     def test_the_closure_would_indeed_fail_on_its_own(self) -> None:
         # Proves this fixture repo genuinely breaks closure resolution -- so the test above is
         # not vacuously green because the closure would have passed anyway.

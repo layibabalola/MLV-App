@@ -332,19 +332,13 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'ConvertTo-AttrCudaUtf8String'
 )
 
-# --- resolve provenance locally, BEFORE the job ever touches Bachelor -------------
+# --- owner/fixture-clip decision FIRST (round 2, sol BLOCKER / astra MAJOR): this whole block
+#     used to run AFTER the SourceCommit git cat-file / llrawproc blob lookup and the PresentMon
+#     hash check below, so a bogus -SourceCommit or a malformed -PresentMonSha256 could mask an
+#     owner-clip refusal (resolver refusal, or -ClipPath/-FixtureSha256 refused) that would also
+#     have fired had the code reached this far. Only $RepoRoot needs resolving first -- the
+#     resolver call takes ClipId and RepoRoot, nothing SourceCommit-derived. -------------------
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
-& git -C $RepoRoot cat-file -e "$SourceCommit^{commit}" 2>$null
-if ($LASTEXITCODE -ne 0) {
-    throw "SourceCommit is not a commit known to the local repo at $RepoRoot : $SourceCommit"
-}
-$llrawprocBlobId = (& git -C $RepoRoot rev-parse "${SourceCommit}:${LlrawprocRelativePath}").Trim()
-if ($LASTEXITCODE -ne 0 -or $llrawprocBlobId -notmatch '^[0-9a-f]{40}$') {
-    throw "Could not resolve a blob id for $LlrawprocRelativePath at $SourceCommit"
-}
-if ($PresentMonSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
-    throw "PresentMonSha256 is not a 64-hex sha256: $PresentMonSha256"
-}
 
 # ATTR3-FIXTURE-REHEARSAL-1: the literal allowlist the ValidatePattern above also enforces,
 # restated here so the fixtureRehearsal flag is decided by an exact membership test rather
@@ -360,9 +354,10 @@ $fixtureRehearsalLiteral = if ($isFixtureRehearsal) { '$true' } else { '$false' 
 $FixtureClipExtension = '.' + 'mlv'
 
 # ATTR3-FOOTAGE-BIND-1 PR-B (round 1): an owner-clip id is decided and RESOLVED right here --
-# before the smoke-runner closure resolution and before any build-manifest work below -- so a
-# resolver refusal always surfaces on its own, never masked by an unrelated closure or
-# build-manifest failure that would also have fired had the code reached that far.
+# before the smoke-runner closure resolution, before any build-manifest work, and (round 2)
+# before the SourceCommit/PresentMon provenance checks just below -- so a resolver refusal
+# always surfaces on its own, never masked by an unrelated closure, build-manifest or
+# provenance failure that would also have fired had the code reached that far.
 $ownerPartsForJob = $null
 if ($isFixtureRehearsal) {
     if ($FixtureSha256 -notmatch '^[0-9a-f]{64}$') {
@@ -387,6 +382,20 @@ $ownerPartsJson = ''
 if (-not $isFixtureRehearsal) {
     $ownerPartsJson = $ownerPartsForJob | ConvertTo-Json -Compress -Depth 5
     if ($ownerPartsForJob.Count -eq 1) { $ownerPartsJson = "[$ownerPartsJson]" }
+}
+
+# --- resolve provenance locally, BEFORE the job ever touches Bachelor -------------
+# (round 2: moved here, AFTER the owner/fixture decision above -- see that block's comment.)
+& git -C $RepoRoot cat-file -e "$SourceCommit^{commit}" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    throw "SourceCommit is not a commit known to the local repo at $RepoRoot : $SourceCommit"
+}
+$llrawprocBlobId = (& git -C $RepoRoot rev-parse "${SourceCommit}:${LlrawprocRelativePath}").Trim()
+if ($LASTEXITCODE -ne 0 -or $llrawprocBlobId -notmatch '^[0-9a-f]{40}$') {
+    throw "Could not resolve a blob id for $LlrawprocRelativePath at $SourceCommit"
+}
+if ($PresentMonSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+    throw "PresentMonSha256 is not a 64-hex sha256: $PresentMonSha256"
 }
 
 # ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN): the runner is not standalone -- it

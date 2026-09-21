@@ -834,7 +834,7 @@ class RunbookTests(unittest.TestCase):
             self.text.index("playback-attr-3-cuda-dll-job.ps1"),
             self.text.index("playback-attr-3-cuda-assemble.ps1"),
             self.text.index("playback-attr-3-cuda-stage-job.ps1"),
-            self.text.index("Attribution job (inside the owner-granted lane)"),
+            self.text.index("Attribution job (owner clip, id-only)"),
         ]
         self.assertEqual(positions, sorted(positions))
 
