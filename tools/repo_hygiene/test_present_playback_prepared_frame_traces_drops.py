@@ -61,6 +61,49 @@ start a comment, because both are driven off the same one pass rather than
 two passes racing over different inputs. `_lex` also understands raw string
 literals (`R"delim( ... )delim"`, including a custom delimiter), which
 neither predecessor did.
+
+Round 7 (hub ruling, closing the lexing question for good): this tripwire is a
+REGRESSION TRIPWIRE over one function, not a general C++ lexer -- it must
+model the standard constructs exactly and FAIL CLOSED (raise, naming the
+construct and line, rather than silently mis-lexing) on anything it does not
+model, so a future edit that introduces one of those constructs is forced to
+extend the tripwire instead of getting a silent pass. The runtime safety
+property this file exists to guard is the `m_presentNothingDropCount` /
+`present_nothing_drops` counter and the `draw_frame_ready.present_nothing`
+trace on every silent-drop exit of `presentPlaybackPreparedFrame` -- this
+module checks source shape only, never runtime behavior.
+
+Two precision items closed:
+
+- sol r6: a `//` line comment followed by a backslash-newline continues onto
+  the next physical line under C++ phase-2 line splicing (the comment does
+  not end at that newline). `_lex` now models this for BOTH views: the
+  backslash is blanked as comment content and the state stays
+  `_LINE_COMMENT` across the newline (the newline character itself is left
+  untouched so line numbers stay accurate).
+- fable r6 minor 1: `_find_returns_with_context` now matches `RETURN_PATTERN`
+  against the CODE-ONLY view (string/char contents blanked), not the
+  comment-masked view -- a `return;` sitting only inside a string literal is
+  no longer a phantom match.
+
+Fail-closed, strict-mode only (see below): a backslash-newline outside a
+comment or string literal; a digit separator (an apostrophe directly between
+two alphanumeric characters, e.g. `1'000`); an encoding-prefixed raw string
+(`LR"`, `uR"`, `UR"`, `u8R"`); a trigraph (`??=`, `??/`, `??'`, `??(`, `??)`,
+`??!`, `??<`, `??>`, `??-`); a preprocessor directive line (`#if`,
+`#define`, ...) at code depth. Each raises `UnsupportedConstructError` naming
+the construct and the 1-based line within the scanned text.
+
+Strictness is scoped to the EXTRACTED FUNCTION BODY only, never the whole
+source file: `_lex` takes a `strict` flag (default `False`); only
+`_find_returns_with_context`, which lexes the already-extracted body, passes
+`strict=True`. `_extract_function_body` lexes the FULL ~20k-line source file
+just to find the function's matching braces, and that file legitimately
+contains hundreds of preprocessor directives elsewhere -- failing closed
+there would break body extraction on constructs that have nothing to do with
+`presentPlaybackPreparedFrame`. Comment-continuation modeling itself is
+unconditional (both calls), since it is simply correct lexing, not a
+fail-closed policy.
 """
 from pathlib import Path
 import re
@@ -81,12 +124,29 @@ _CODE, _LINE_COMMENT, _BLOCK_COMMENT, _STRING, _CHAR, _RAW_STRING = range(6)
 _RAW_DELIM_STOP = "()\\\t\n "
 _RAW_DELIM_MAX_LEN = 16
 
+_ENCODED_RAW_STRING_PREFIX = re.compile(r"(u8|[LuU])R\"")
+_TRIGRAPH = re.compile(r"\?\?[=/'()!<>\-]")
+
+
+class UnsupportedConstructError(Exception):
+    """Raised by `_lex(text, strict=True)` on a construct it refuses to
+    model, naming the construct and the 1-based line it starts on."""
+
 
 def _is_ident_char(char: str) -> bool:
     return char.isalnum() or char == "_"
 
 
-def _lex(text: str):
+def _line_at(text: str, index: int) -> int:
+    return text.count("\n", 0, index) + 1
+
+
+def _is_first_nonspace_on_line(text: str, index: int) -> bool:
+    line_start = text.rfind("\n", 0, index) + 1
+    return text[line_start:index].strip(" \t") == ""
+
+
+def _lex(text: str, *, strict: bool = False):
     """Single pass over *text* producing two same-length views.
 
     Returns ``(comment_masked, code_only)``:
@@ -102,14 +162,35 @@ def _lex(text: str):
     Handles line comments, block comments, string literals, char literals
     and raw string literals (`R"delim( ... )delim"`, including a custom
     delimiter), with backslash escapes honoured inside normal string/char
-    literals (an escaped closing quote does not end the literal). Both
-    views are driven off ONE state machine over the ORIGINAL text -- never
-    a previously masked copy -- so a quote or apostrophe encountered while
-    already inside a comment can never flip literal state, and a `//` or
-    `/*` encountered while already inside a literal can never start a
-    comment. Newlines are preserved verbatim in both views so line numbers
-    stay accurate, and both views are exactly ``len(text)`` long.
+    literals (an escaped closing quote does not end the literal). A `//`
+    line comment followed by a backslash-newline continues onto the next
+    physical line (C++ phase-2 line splicing), rather than ending at that
+    newline. Both views are driven off ONE state machine over the ORIGINAL
+    text -- never a previously masked copy -- so a quote or apostrophe
+    encountered while already inside a comment can never flip literal
+    state, and a `//` or `/*` encountered while already inside a literal
+    can never start a comment. Newlines are preserved verbatim in both
+    views so line numbers stay accurate, and both views are exactly
+    ``len(text)`` long.
+
+    When *strict* is True, raises `UnsupportedConstructError` (naming the
+    construct and its 1-based line in *text*) on any construct this lexer
+    refuses to model: a backslash-newline outside a comment or string
+    literal; a digit separator (an apostrophe directly between two
+    alphanumeric characters); an encoding-prefixed raw string (`LR"`,
+    `uR"`, `UR"`, `u8R"`); a trigraph; or a preprocessor directive line at
+    code depth. *strict* must stay scoped to an already-extracted function
+    body -- the whole source file legitimately contains constructs (real
+    preprocessor directives, at minimum) that have nothing to do with any
+    one function.
     """
+    if strict:
+        trigraph_match = _TRIGRAPH.search(text)
+        if trigraph_match:
+            raise UnsupportedConstructError(
+                f"trigraph {trigraph_match.group(0)!r} at line "
+                f"{_line_at(text, trigraph_match.start())}"
+            )
     length = len(text)
     comment_out = list(text)
     code_out = list(text)
@@ -121,6 +202,33 @@ def _lex(text: str):
         char = text[index]
 
         if state == _CODE:
+            if strict and char == "#" and _is_first_nonspace_on_line(text, index):
+                raise UnsupportedConstructError(
+                    f"preprocessor directive line at line {_line_at(text, index)}"
+                )
+            if strict and char == "\\" and index + 1 < length and text[index + 1] == "\n":
+                raise UnsupportedConstructError(
+                    "backslash-newline line continuation outside a comment "
+                    f"or string literal at line {_line_at(text, index)}"
+                )
+            if (
+                strict
+                and char == "'"
+                and index > 0
+                and text[index - 1].isalnum()
+                and index + 1 < length
+                and text[index + 1].isalnum()
+            ):
+                raise UnsupportedConstructError(
+                    f"digit separator at line {_line_at(text, index)}"
+                )
+            if strict and _ENCODED_RAW_STRING_PREFIX.match(text, index) and (
+                index == 0 or not _is_ident_char(text[index - 1])
+            ):
+                raise UnsupportedConstructError(
+                    "encoding-prefixed raw string literal at line "
+                    f"{_line_at(text, index)}"
+                )
             if char == "/" and index + 1 < length and text[index + 1] == "/":
                 comment_out[index] = comment_out[index + 1] = " "
                 code_out[index] = code_out[index + 1] = " "
@@ -169,8 +277,17 @@ def _lex(text: str):
             continue
 
         if state == _LINE_COMMENT:
-            # A quote or apostrophe here NEVER changes state -- only a
-            # newline ends a line comment.
+            # A quote or apostrophe here NEVER changes state -- only an
+            # un-escaped newline ends a line comment. A backslash directly
+            # before the newline (C++ phase-2 line splicing) blanks the
+            # backslash as comment content and keeps the comment open past
+            # that newline -- the newline itself stays unblanked so line
+            # numbers stay accurate.
+            if char == "\\" and index + 1 < length and text[index + 1] == "\n":
+                comment_out[index] = " "
+                code_out[index] = " "
+                index += 2
+                continue
             if char == "\n":
                 state = _CODE
             else:
@@ -272,8 +389,17 @@ def _find_returns_with_context(body: str):
     contents left intact (so the present_nothing marker stays visible).
     `direct_code` additionally has string/char contents blanked -- the
     CODE-ONLY view, so a token sitting only inside a literal cannot match.
+
+    `return;` is matched against the CODE-ONLY view: `direct_text`/`masked`
+    leaves string contents intact (needed so the present_nothing marker
+    stays visible), which would let a `return;` sitting only inside a
+    string literal register as a phantom return (fable r6 minor 1).
+
+    Lexed with `strict=True`: *body* is already the extracted function
+    body, so any construct this lexer refuses to model raises
+    `UnsupportedConstructError` here rather than silently mis-lexing.
     """
-    masked, code_masked = _lex(body)
+    masked, code_masked = _lex(body, strict=True)
     frame_starts = [0]
     frame_segments = [[]]
     results = []
@@ -295,7 +421,7 @@ def _find_returns_with_context(body: str):
                 frame_starts[-1] = index + 1
             index += 1
             continue
-        match = RETURN_PATTERN.match(masked, index)
+        match = RETURN_PATTERN.match(code_masked, index)
         if match:
             segments = frame_segments[-1] + [(frame_starts[-1], match.start())]
             direct_text = "".join(masked[s:e] for s, e in segments)
@@ -479,6 +605,12 @@ class LexerDirectTests(unittest.TestCase):
                 " " * 28 + " after\n",
                 " " * 28 + " after\n",
             ),
+            (
+                "backslash-newline continues a // comment onto the next line (sol r6)",
+                "int a; // say hi \\\nstill comment\nint b;\n",
+                "int a; " + " " * 11 + "\n" + " " * 13 + "\nint b;\n",
+                "int a; " + " " * 11 + "\n" + " " * 13 + "\nint b;\n",
+            ),
         ]
         for name, text, expected_comment_masked, expected_code_only in cases:
             with self.subTest(name=name):
@@ -532,6 +664,22 @@ class PresentPlaybackPreparedFrameTracesDropsTests(unittest.TestCase):
             f"{FUNCTION_NAME} no longer contains a `return;` -- "
             "re-check whether this tripwire is still needed.",
         )
+
+    def test_real_function_body_has_no_unsupported_constructs(self):
+        # Round 7: the real function must stay inside what this tripwire
+        # models -- if it ever grows one of the refused constructs, this
+        # test is the signal to extend the tripwire, not silently trust a
+        # mis-lex. Uses the exact strict lexing _find_returns_with_context
+        # performs internally.
+        source = MAIN_WINDOW_CPP.read_text(encoding="utf-8")
+        body = _extract_function_body(source, FUNCTION_NAME)
+        try:
+            _lex(body, strict=True)
+        except UnsupportedConstructError as exc:
+            self.fail(
+                f"{FUNCTION_NAME} body contains a construct this tripwire "
+                f"refuses to model: {exc}"
+            )
 
 
 class TripwireMutationTests(unittest.TestCase):
@@ -632,6 +780,116 @@ class TripwireMutationTests(unittest.TestCase):
             "unmatched quote in an earlier comment -- must not satisfy the "
             "trace/counter requirement",
         )
+
+
+class ReturnScanCodeOnlyMatchTests(unittest.TestCase):
+    """Round 7 (fable r6 minor 1): `return;` inside a string literal must not
+    register as a phantom return -- `_find_returns_with_context` now matches
+    `RETURN_PATTERN` against the CODE-ONLY view instead of the
+    comment-masked view (which leaves string contents intact).
+    """
+
+    def test_return_inside_string_literal_is_not_a_phantom_return(self):
+        body = (
+            "    if( x )\n"
+            "    {\n"
+            '        QStringLiteral( "note: return; here" );\n'
+            "        logInteractionEvent(\n"
+            '            QStringLiteral("draw_frame_ready.present_nothing") );\n'
+            "        m_presentNothingDropCount.fetch_add( 1 );\n"
+            "        return;\n"
+            "    }\n"
+        )
+        entries = _find_returns_with_context(body)
+        self.assertEqual(
+            1,
+            len(entries),
+            "a `return;` token sitting only inside a string literal must not "
+            "be counted as a real return",
+        )
+        ok, traced, is_present_nothing, counted = _classify_return(entries[0])
+        self.assertTrue(ok)
+        self.assertTrue(traced)
+        self.assertTrue(counted)
+
+
+class LexerStrictModeTests(unittest.TestCase):
+    """Round 7 (hub ruling): `_lex(text, strict=True)` fails closed --
+    raises `UnsupportedConstructError` naming the construct and its line --
+    on any construct this tripwire refuses to model, so a future edit that
+    introduces one is forced to extend the tripwire instead of getting a
+    silent pass. Strictness is scoped to an already-extracted function body
+    only: non-strict lexing (the whole-source pass `_extract_function_body`
+    uses to find a function's braces) must never raise on these, since the
+    whole source legitimately contains them elsewhere (e.g. hundreds of
+    real preprocessor directives in MainWindow.cpp).
+    """
+
+    def test_backslash_newline_outside_comment_or_string_is_refused(self):
+        text = "int a = 1 + \\\n2;\n"
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _lex(text, strict=True)
+        self.assertIn("backslash-newline", str(ctx.exception))
+        self.assertIn("line 1", str(ctx.exception))
+
+    def test_backslash_newline_inside_a_string_is_not_refused(self):
+        # Already handled as a string escape (the literal stays open across
+        # the newline) -- must not be flagged.
+        text = 'x = "a\\\nb";\n'
+        _lex(text, strict=True)
+
+    def test_backslash_newline_inside_a_line_comment_is_not_refused(self):
+        # Round 7 requirement 1: this is modeled, not refused.
+        text = "// comment \\\nstill comment\nint a;\n"
+        _lex(text, strict=True)
+
+    def test_digit_separator_is_refused(self):
+        text = "int n = 1'000;\n"
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _lex(text, strict=True)
+        self.assertIn("digit separator", str(ctx.exception))
+
+    def test_encoded_raw_string_prefixes_are_refused(self):
+        for prefix in ("L", "u", "U", "u8"):
+            with self.subTest(prefix=prefix):
+                text = "x = " + prefix + 'R"(hi)";\n'
+                with self.assertRaises(UnsupportedConstructError) as ctx:
+                    _lex(text, strict=True)
+                self.assertIn("encoding-prefixed raw string", str(ctx.exception))
+
+    def test_unprefixed_raw_string_is_not_refused(self):
+        text = 'x = R"(hi)";\n'
+        _lex(text, strict=True)
+
+    def test_trigraph_is_refused(self):
+        text = "int a;\n??/\nint b;\n"
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _lex(text, strict=True)
+        self.assertIn("trigraph", str(ctx.exception))
+        self.assertIn("line 2", str(ctx.exception))
+
+    def test_preprocessor_directive_line_is_refused(self):
+        text = "    if( x )\n    {\n#if 1\n        return;\n    }\n"
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _lex(text, strict=True)
+        self.assertIn("preprocessor directive line", str(ctx.exception))
+        self.assertIn("line 3", str(ctx.exception))
+
+    def test_hash_not_first_on_line_is_not_refused(self):
+        text = "    int x = 1; // trailing # is not a directive\n"
+        _lex(text, strict=True)
+
+    def test_non_strict_mode_never_raises_on_any_refused_construct(self):
+        texts = [
+            "int a = 1 + \\\n2;\n",
+            "int n = 1'000;\n",
+            'x = LR"(hi)";\n',
+            "??/\n",
+            "#define X 1\n",
+        ]
+        for text in texts:
+            with self.subTest(text=text):
+                _lex(text)
 
 
 if __name__ == "__main__":
