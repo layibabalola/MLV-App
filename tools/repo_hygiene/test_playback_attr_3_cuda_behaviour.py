@@ -20,6 +20,7 @@ and on non-Windows platforms (the jobs validate drive-letter paths); CI Windows 
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import hashlib
 import json
@@ -1072,12 +1073,19 @@ class SmokeRunnerStaleRefusalTests(_PwshCase):
 
     def _extract_pin_check(self) -> str:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
-        start_marker = "$smokeRunnerCachePath = Join-Path $Cache 'run-release-gui-smoke.ps1'"
+        start_marker = (
+            '$SmokeRunnerCacheName = "run-release-gui-smoke-'
+            '$($SmokeRunnerSha256.Substring(0, 16)).ps1"'
+        )
         end_marker = "\n# NA-4: open exactly the one authorized path baked in by the generator -- no lookup."
         start = text.index(start_marker)
         end = text.index(end_marker, start)
         self.assertGreater(end, start, "smoke-runner pin check markers moved in the generator")
         return text[start:end]
+
+    @staticmethod
+    def _versioned_name(sha256_hex: str) -> str:
+        return f"run-release-gui-smoke-{sha256_hex[:16]}.ps1"
 
     def _run_pin_check(self, *, cache: Path, smoke_runner_sha256: str) -> subprocess.CompletedProcess:
         block = self._extract_pin_check()
@@ -1098,8 +1106,9 @@ class SmokeRunnerStaleRefusalTests(_PwshCase):
     def test_a_stale_or_swapped_runner_is_refused_before_any_smoke_launch(self) -> None:
         cache = self.tmp / "cache"
         cache.mkdir()
-        (cache / "run-release-gui-smoke.ps1").write_bytes(b"# a stale pre-f401bf9a copy\n")
         pinned_sha256 = hashlib.sha256(b"the real, current, tracked runner bytes").hexdigest()
+        # A stale copy sitting under the VERSIONED name it would need to occupy to pass.
+        (cache / self._versioned_name(pinned_sha256)).write_bytes(b"# a stale pre-f401bf9a copy\n")
 
         proc = self._run_pin_check(cache=cache, smoke_runner_sha256=pinned_sha256)
 
@@ -1120,20 +1129,36 @@ class SmokeRunnerStaleRefusalTests(_PwshCase):
         combined = proc.stdout + proc.stderr
         self.assertEqual(proc.returncode, 1, combined)
         self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
-        self.assertIn("cache is missing run-release-gui-smoke.ps1", combined, combined)
+        self.assertIn(f"cache is missing {self._versioned_name(pinned_sha256)}", combined, combined)
 
     def test_the_pinned_runner_passes_the_gate(self) -> None:
         cache = self.tmp / "cache"
         cache.mkdir()
         runner_bytes = b"the real, current, tracked runner bytes"
-        (cache / "run-release-gui-smoke.ps1").write_bytes(runner_bytes)
         pinned_sha256 = hashlib.sha256(runner_bytes).hexdigest()
+        (cache / self._versioned_name(pinned_sha256)).write_bytes(runner_bytes)
 
         proc = self._run_pin_check(cache=cache, smoke_runner_sha256=pinned_sha256)
 
         combined = proc.stdout + proc.stderr
         self.assertNotIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
         self.assertIn("RESULT=NO_REFUSAL", proc.stdout, combined)
+
+    def test_the_old_fixed_name_is_never_consulted(self) -> None:
+        # round 2 BLOCKER: correct bytes under the OLD fixed name must not satisfy the gate --
+        # only the content-addressed VERSIONED name is ever looked at.
+        cache = self.tmp / "cache"
+        cache.mkdir()
+        runner_bytes = b"the real, current, tracked runner bytes"
+        pinned_sha256 = hashlib.sha256(runner_bytes).hexdigest()
+        (cache / "run-release-gui-smoke.ps1").write_bytes(runner_bytes)
+
+        proc = self._run_pin_check(cache=cache, smoke_runner_sha256=pinned_sha256)
+
+        combined = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, combined)
+        self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
+        self.assertIn(f"cache is missing {self._versioned_name(pinned_sha256)}", combined, combined)
 
 
 @requires_pwsh
@@ -1144,6 +1169,11 @@ class SmokeRunnerStageJobTests(_PwshCase):
     The throwaway fixture repository's own tracked file (src/mlv/llrawproc/llrawproc.c) stands
     in for the runner via -RunnerRelativePath: what is under test is the STAGING MECHANISM
     (committed-blob extraction, hash-pinned publish), not the real runner's contents.
+
+    ATTR3-SMOKE-RUNNER-PIN-1 round 2: the emitted job carries the runner's bytes INLINE
+    (base64), never as a side file dropped into an inbox -- there is no inbox in this design at
+    all, so the agent root here only ever needs to exist (mirroring the persistent, already
+    provisioned root on the real Bachelor host).
     """
 
     RUNNER_PATH = "src/mlv/llrawproc/llrawproc.c"
@@ -1155,6 +1185,11 @@ class SmokeRunnerStageJobTests(_PwshCase):
         self.staging = self.tmp / "staging"
         self.staging.mkdir()
         self.agent = self.tmp / "agent"
+        self.agent.mkdir()
+
+    @staticmethod
+    def _versioned_name(sha256_hex: str) -> str:
+        return f"run-release-gui-smoke-{sha256_hex[:16]}.ps1"
 
     def _generate(self, **overrides) -> subprocess.CompletedProcess:
         args = {
@@ -1184,25 +1219,18 @@ class SmokeRunnerStageJobTests(_PwshCase):
 
         expected_sha = _git_blob_sha256(self.repo, self.shas[1], self.RUNNER_PATH)
         self.assertEqual(payload["runnerSha256"], expected_sha)
-        side_file = Path(payload["sideFile"])
-        self.assertTrue(side_file.is_file())
-        self.assertEqual(hashlib.sha256(side_file.read_bytes()).hexdigest(), expected_sha)
-        self.assertEqual(side_file.name, "run-release-gui-smoke.ps1")
+        self.assertEqual(payload["cacheFileName"], self._versioned_name(expected_sha))
 
-        # Submit: drop the side-file into the inbox beside the job, exactly as um-run.ps1 does,
-        # and run the emitted job end to end.
-        inbox = self.agent / "inbox"
-        inbox.mkdir(parents=True)
-        shutil.copy2(side_file, inbox / "run-release-gui-smoke.ps1")
-
+        # No side file, no inbox drop: run the emitted job directly against the (already
+        # provisioned) agent root.
         run_proc = _run_job(Path(payload["jobFile"]))
 
         self.assertEqual(run_proc.returncode, 0, run_proc.stdout + run_proc.stderr)
         self.assertIn("RESULT=SMOKE_RUNNER_STAGE_OK", run_proc.stdout)
-        cache_file = self.agent / "cache" / "run-release-gui-smoke.ps1"
+        cache_file = self.agent / "cache" / self._versioned_name(expected_sha)
         self.assertTrue(cache_file.is_file())
         self.assertEqual(hashlib.sha256(cache_file.read_bytes()).hexdigest(), expected_sha)
-        self.assertEqual(list(inbox.iterdir()), [], "side-file was left in the inbox")
+        self.assertFalse((self.agent / "inbox").exists(), "no inbox should ever be created")
 
     def test_a_different_commit_stages_that_commits_bytes_not_the_others(self) -> None:
         proc = self._generate(SourceCommit=self.shas[0])
@@ -1216,22 +1244,133 @@ class SmokeRunnerStageJobTests(_PwshCase):
         expected_second = _git_blob_sha256(self.repo, self.shas[1], self.RUNNER_PATH)
         self.assertNotEqual(expected_first, expected_second)
         self.assertEqual(payload["runnerSha256"], expected_first)
+        self.assertEqual(payload["cacheFileName"], self._versioned_name(expected_first))
 
-    def test_a_tampered_inbox_copy_is_refused_and_nothing_is_published(self) -> None:
+    def test_a_tampered_embedded_payload_is_refused_and_nothing_is_published(self) -> None:
         proc = self._generate()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        # The generator both Write-Output's a RESULT= line (so the hub need not re-derive the
-        # hash) and returns the pscustomobject; piped through ConvertTo-Json that is an array
-        # of the two -- the object is the last element.
         payload = json.loads(proc.stdout)[-1]
-        inbox = self.agent / "inbox"
-        inbox.mkdir(parents=True)
-        (inbox / "run-release-gui-smoke.ps1").write_bytes(b"swapped after the hash was baked")
+        job_path = Path(payload["jobFile"])
+        text = job_path.read_text(encoding="utf-8")
+        marker = "$RunnerBase64 = '"
+        start = text.index(marker) + len(marker)
+        end = text.index("'", start)
+        tampered_b64 = base64.b64encode(b"swapped after the hash was baked").decode("ascii")
+        job_path.write_text(text[:start] + tampered_b64 + text[end:], encoding="utf-8")
+
+        run_proc = _run_job(job_path)
+
+        self.assertEqual(run_proc.returncode, 4, run_proc.stdout + run_proc.stderr)
+        self.assertFalse(
+            (self.agent / "cache" / payload["cacheFileName"]).exists(),
+            "a hash-mismatched payload must publish nothing",
+        )
+
+    def test_the_emitted_job_carries_the_runner_inline_with_no_side_file_instruction(self) -> None:
+        """Required test (ATTR3-SMOKE-RUNNER-PIN-1 round 2): the emitted job embeds the exact
+        committed bytes; decoding the embedded payload and hashing it reproduces the pin; and
+        nothing in the job tells an operator to submit the runner as a side file."""
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+        text = Path(payload["jobFile"]).read_text(encoding="utf-8")
+
+        marker = "$RunnerBase64 = '"
+        start = text.index(marker) + len(marker)
+        end = text.index("'", start)
+        embedded_b64 = text[start:end]
+        decoded = base64.b64decode(embedded_b64)
+        self.assertEqual(hashlib.sha256(decoded).hexdigest(), payload["runnerSha256"])
+
+        self.assertNotIn("-SideFile", text)
+        self.assertNotIn("$Inbox", text)
+        self.assertNotIn("$side", text)
+
+    def test_staging_succeeds_when_the_old_fixed_name_holds_different_bytes(self) -> None:
+        """Required test: the bachelor state this card exists to fix -- a stale runner already
+        occupying the OLD fixed cache name -- must not block staging under the new versioned
+        name, and that file must be left exactly as it was."""
+        cache_dir = self.agent / "cache"
+        cache_dir.mkdir(parents=True)
+        old_name = cache_dir / "run-release-gui-smoke.ps1"
+        stale_bytes = b"the stale pre-f401bf9a bachelor runner\n"
+        old_name.write_bytes(stale_bytes)
+
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
 
         run_proc = _run_job(Path(payload["jobFile"]))
 
-        self.assertEqual(run_proc.returncode, 4, run_proc.stdout + run_proc.stderr)
-        self.assertFalse((self.agent / "cache" / "run-release-gui-smoke.ps1").exists())
+        self.assertEqual(run_proc.returncode, 0, run_proc.stdout + run_proc.stderr)
+        self.assertIn("RESULT=SMOKE_RUNNER_STAGE_OK", run_proc.stdout)
+        versioned = cache_dir / payload["cacheFileName"]
+        self.assertTrue(versioned.is_file())
+        self.assertEqual(hashlib.sha256(versioned.read_bytes()).hexdigest(), payload["runnerSha256"])
+        # untouched: neither deleted nor rewritten
+        self.assertEqual(old_name.read_bytes(), stale_bytes)
+
+    def test_staging_fails_closed_when_the_versioned_name_holds_different_bytes(self) -> None:
+        """Required test: a versioned name is content-addressed, so different bytes under it can
+        only mean corruption -- staging must refuse, not overwrite."""
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+        cache_dir = self.agent / "cache"
+        cache_dir.mkdir(parents=True)
+        versioned = cache_dir / payload["cacheFileName"]
+        corrupted_bytes = b"corrupted -- different bytes under the content-addressed name"
+        versioned.write_bytes(corrupted_bytes)
+
+        run_proc = _run_job(Path(payload["jobFile"]))
+
+        self.assertEqual(run_proc.returncode, 21, run_proc.stdout + run_proc.stderr)
+        self.assertIn("DIFFERENT bytes", run_proc.stdout + run_proc.stderr)
+        self.assertEqual(versioned.read_bytes(), corrupted_bytes)
+
+
+@requires_git
+class SmokeRunnerBlobHelperSpacedPathTests(unittest.TestCase):
+    """Required test (ATTR3-SMOKE-RUNNER-PIN-1 round 2 BLOCKER): Save-AttrCudaCommittedBlobBytes
+    against a real repository whose path CONTAINS A SPACE -- the real repository root
+    (`C:\\!Layi Wkspc\\MLV-App`) does, and the pre-fix -ArgumentList joined `-C $RepoRoot` into an
+    unquoted command line that git could not parse, so no generator could ever stage anything
+    from the real checkout.
+    """
+
+    def setUp(self) -> None:
+        if os.name != "nt":
+            self.skipTest("the ATTR-3 host jobs are Windows-only (drive-letter path parameters)")
+        if not PWSH:
+            self.skipTest("pwsh is not on PATH")
+        self._tmp = tempfile.TemporaryDirectory(prefix="attr3 space ")
+        self.tmp = _long_path(Path(self._tmp.name))
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_blob_bytes_written_from_a_spaced_repo_path_match_git_cat_file(self) -> None:
+        repo = self.tmp / "repo with space"
+        shas = _make_fixture_repo(repo)
+        self.assertIn(" ", str(repo), "the fixture repo path must itself contain a space")
+
+        rel_path = "src/mlv/llrawproc/llrawproc.c"
+        blob_id = _git_run(["rev-parse", f"{shas[1]}:{rel_path}"], repo)
+        destination = self.tmp / "extracted-blob.bin"
+
+        script = self.tmp / "extract.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Save-AttrCudaCommittedBlobBytes -RepoRoot '{repo}' -BlobId '{blob_id}' "
+            f"-Destination '{destination}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("ATTRCUDA_BLOB_READ_FAILED", proc.stdout + proc.stderr)
+        self.assertTrue(destination.is_file())
+        expected_sha256 = _git_blob_sha256(repo, shas[1], rel_path)
+        self.assertEqual(hashlib.sha256(destination.read_bytes()).hexdigest(), expected_sha256)
 
 
 # --------------------------------------------------------------------------------------------

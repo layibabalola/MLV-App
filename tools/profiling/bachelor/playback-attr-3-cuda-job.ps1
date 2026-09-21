@@ -222,6 +222,12 @@ try {
 } finally {
     if (Test-Path -LiteralPath $smokeRunnerPinTemp) { Remove-Item -LiteralPath $smokeRunnerPinTemp -Force -ErrorAction SilentlyContinue }
 }
+# Fable minor (round 2): validated as 64 lowercase hex before it is substituted into the emitted
+# job, the same way -PresentMonSha256 is validated above -- this value gates
+# ATTRCUDA_SMOKE_RUNNER_STALE and deserves the identical shape check.
+if ($smokeRunnerSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw "ATTRCUDA_BLOB_SHA_MALFORMED resolved smoke-runner sha256 is not 64 lowercase hex: '$smokeRunnerSha256'"
+}
 
 $shortSha = $SourceCommit.Substring(0, 12)
 $exeName = "MLVApp-playback-attr-3-cuda-$shortSha.exe"
@@ -500,13 +506,18 @@ if (-not (Test-Path -LiteralPath (Join-Path $Cache $PresentMonName))) { throw "c
 # a scarce quiet venue window had already been spent. The cache copy is now hash-pinned exactly
 # like PresentMon above (a template placeholder, validated as 64 hex), and refused HERE --
 # before PresentMon starts, before the app launches, before any run is spent.
-$smokeRunnerCachePath = Join-Path $Cache 'run-release-gui-smoke.ps1'
+# round 2 BLOCKER: the cache name is now content-addressed (derived from the very sha256 this
+# check pins against), not the old fixed name -- a stager can never be asked to overwrite
+# whatever bytes already sit under the old fixed name, and this check can never be satisfied by
+# them either, because it never looks at that name.
+$SmokeRunnerCacheName = "run-release-gui-smoke-$($SmokeRunnerSha256.Substring(0, 16)).ps1"
+$smokeRunnerCachePath = Join-Path $Cache $SmokeRunnerCacheName
 if (-not (Test-Path -LiteralPath $smokeRunnerCachePath -PathType Leaf)) {
-    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing run-release-gui-smoke.ps1"
+    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing $SmokeRunnerCacheName"
 }
 $smokeRunnerActualSha = Get-Sha $smokeRunnerCachePath
 if ($smokeRunnerActualSha -ne $SmokeRunnerSha256.ToUpperInvariant()) {
-    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache run-release-gui-smoke.ps1 sha256 mismatch: expected $SmokeRunnerSha256, actual $smokeRunnerActualSha"
+    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache $SmokeRunnerCacheName sha256 mismatch: expected $SmokeRunnerSha256, actual $smokeRunnerActualSha"
 }
 # NA-4: open exactly the one authorized path baked in by the generator -- no lookup.
 $clipPath = $AuthorizedClipPath

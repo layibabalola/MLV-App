@@ -403,13 +403,28 @@ class SmokeRunnerPinTests(unittest.TestCase):
 
     def test_the_emitted_job_hash_checks_the_runner_before_it_is_used(self) -> None:
         self.assertIn("$SmokeRunnerSha256 = '__SMOKE_RUNNER_SHA256__'", self.text)
+        # round 2: the cache name is content-addressed (derived from the pinned sha256), not the
+        # old fixed literal -- a stager must never be asked to overwrite whatever bytes already
+        # sit under the old fixed name.
         self.assertIn(
-            'throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing run-release-gui-smoke.ps1"',
+            '$SmokeRunnerCacheName = "run-release-gui-smoke-$($SmokeRunnerSha256.Substring(0, 16)).ps1"',
+            self.text,
+        )
+        self.assertIn(
+            'throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing $SmokeRunnerCacheName"',
             self.text,
         )
         self.assertIn(
             "if ($smokeRunnerActualSha -ne $SmokeRunnerSha256.ToUpperInvariant()) {", self.text
         )
+
+    def test_the_smoke_runner_sha_is_validated_before_it_is_trusted(self) -> None:
+        # Fable minor (round 2): validated the same way -PresentMonSha256 is, before either value
+        # is substituted into the emitted job.
+        self.assertIn(
+            "if ($smokeRunnerSha256 -notmatch '^[0-9a-f]{64}$') {", self.text
+        )
+        self.assertIn("ATTRCUDA_BLOB_SHA_MALFORMED", self.text)
 
     def test_the_pin_is_baked_from_the_committed_git_blob_not_the_working_tree(self) -> None:
         self.assertIn(
