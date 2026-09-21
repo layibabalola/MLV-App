@@ -6899,7 +6899,7 @@ _EXCLUSIVE_ROUTE_PHRASINGS = (
 def _assert_no_exclusive_route_claim(case, text, label):
     """Fail if ``text`` claims consented footage is reachable ONLY through the card's route.
 
-    WHAT THIS CATCHES -- and this is the WHOLE of it: the claim re-cased, re-wrapped across
+    WHAT THIS CATCHES: the claim re-cased, re-wrapped across
     comment lines, or reworded with one of the subject/verb/preposition combinations
     enumerated above ("reached only via", "a consented clip is opened only by tracked
     consumers"), plus the bounded subject/``only``/route-preposition regex.
@@ -6951,18 +6951,6 @@ def _assert_no_exclusive_route_claim(case, text, label):
 # counted into that total, and the `os.walk` defaults tagged (f) and (g) below skip carriers
 # and appeared in NO disclosure, here or in the PR body.  So the closure framing is GONE.
 #
-# ROUND 12.  Round 11 then wrote its OWN counts about this list -- "exactly THREE `continue`
-# statements", "two `os.walk` defaults", "knowing seven means there is no eighth" -- and, by
-# adding (f) and (g) here, left THREE references to this list's extent pointing at the shape
-# it had BEFORE that edit: `_derive_claim_carriers`'s docstring said "the four skips
-# documented above", the `_CLAIM_CARRIERS_PINNED` preamble said "skips (a)-(e)", and the
-# carrier-coverage row said "five documented bounds".  A count of this list is a thing an
-# edit to this list can falsify, and did.  So the counts and the RANGES are DELETED -- here
-# and at those three sites -- rather than recounted, and references now point at the list
-# itself.  A single label like (f) still names one entry; a range like (a)-(g) asserts where
-# the list ends, which is the thing that goes stale.  What follows is an HONESTLY PARTIAL
-# list, each entry tagged with the mechanism it actually is; the bounds named in it are no
-# claim about bounds not named in it:
 #   (a) [continue] its extension is not in `_CARRIER_SUFFIXES` -- a `.rst`, `.adoc` or
 #       extensionless carrier is invisible;
 #   (b) [dirnames filter, NOT a `continue`] it is under a pruned directory
@@ -6994,10 +6982,7 @@ _CARRIER_PRUNE_DIRS = frozenset({
     ".git", ".claude-state", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache",
     "worktrees",
 })
-# Text the claim could plausibly be written in; skip (a) above.  Checked for AGREEMENT, not
-# for completeness: `git grep -l` on the same subject pattern returned the same 8 files when
-# this was written, which says the walk and git agree ON THIS TREE TODAY -- not that either
-# is complete, and not that the pin below covers what the walk misses.
+# Text the claim could plausibly be written in; skip (a) above.
 _CARRIER_SUFFIXES = (
     ".py", ".ps1", ".psm1", ".json", ".md", ".txt", ".yml", ".yaml", ".sh", ".cpp", ".h",
     ".hpp", ".c", ".pro", ".qrc", ".ui", ".bat", ".cmd", ".mjs", ".js", ".toml",
@@ -7008,7 +6993,7 @@ _CARRIER_MAX_BYTES = 4 * 1024 * 1024
 def _derive_claim_carriers(root=REPO_ROOT):
     """-> sorted repo-relative paths of the carriers THIS WALK SEES, by the bounds above.
 
-    Not a hand list, and agreed with ``git grep -l`` 8-for-8 when it was written.  It is a
+    Not a hand list.  It is a
     SEARCH, not a census: bounded by the subject regex and by the bounds documented above,
     and a carrier outside those bounds is returned by neither this walk nor the pin it feeds.
     """
@@ -7278,7 +7263,7 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         # an anti-overclaim needle, and sol disproved it by execution: four ordinary
         # paraphrases walked straight through.  What this actually catches is the round-6 and
         # round-7 spellings re-cased, re-wrapped or re-worded WITHIN the enumerated phrase
-        # family, plus the bounded subject/``only``/preposition regex -- and nothing else.  An
+        # family, plus the bounded subject/``only``/preposition regex.  An
         # arbitrary paraphrase passes, by construction and for good: a finite list of
         # forbidden spellings can never be "any spelling", and enlarging the list each time a
         # reviewer finds a new one has no end.  The bound is pinned by execution at
@@ -7387,7 +7372,7 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         # So this row pins the LIMIT ITSELF.  Each paraphrase below asserts the SAME false
         # claim the needle exists to kill, and each MUST pass the needle.  If a later round
         # enlarges the phrase family to swallow one of THESE FOUR STRINGS, this row goes RED.
-        # ROUND 10: that is the whole of its reach.  It pins four specific escapes, not the
+        # It pins four specific escapes, not the
         # existence of escapes -- a round that widened the family around all four would leave
         # this row green, and the disclosure would then be wrong with nothing to say so.
         escapes = (
@@ -7477,9 +7462,7 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         # `na` id -- so "r1 open an unnamed clip" and "na4 same basename different clip",
         # both `"na": "NA-4"` with `"expect": "DENY"`, already assert that the real hook, in
         # a separate process, exits 2 with an "NA-4: " reason.  The clause is DELETED rather
-        # than narrowed.  What this row carries that those two do not is its INPUT -- a
-        # synthetic clip-cache path shape -- which is a different input, not a property no
-        # other row reaches.
+        # than narrowed.
         #
         # ROUND 10 (sol) -- DISCLOSED, NOT FIXED, and here is which and why.  Round 9 renamed
         # this row `..._whatever_its_consent_status` and added the fixture precondition below,
@@ -7564,7 +7547,7 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         )
 
     # Rows that reach a DECISION but promise nothing about consent status, so the ablation
-    # below has nothing to hold them to.  Every entry carries its reason here.
+    # below has nothing to hold them to.
     #
     # ROUND 10 (opus).  Round 9 commented this "an explicit, reasoned list because an empty one
     # would be a lie" while it WAS empty -- a sentence that contradicted the line under it, in
@@ -7627,8 +7610,8 @@ class OwnerConsentedFootageTests(unittest.TestCase):
                 source_of[name] = inspect.getsource(function)
             except (OSError, TypeError):  # pragma: no cover - source always available here
                 self.fail("cannot read the source of %s; the enumeration would be a lie" % name)
-        # HEURISTIC, by literal spelling -- escape (i) above.  These three strings are the
-        # whole of the discovery rule; a decision row worded any other way is invisible to it.
+        # HEURISTIC, by literal spelling -- escape (i) above.
+        # A decision row worded any other way is invisible to it.
         deciders = sorted(
             name for name, src in source_of.items()
             if ("self._decide(" in src or "self._decide_command(" in src
