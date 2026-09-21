@@ -5828,6 +5828,24 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("playback_prep_region_total_ms"),
             prepRegionTotalMs );
+        const bool preparedEmpty =
+            result.preparedOwnedImage.isNull()
+            && result.preparedImage.empty()
+            && !( result.preparedBorrowedImage && result.preparedBorrowedImageSize > 0 );
+        m_presentNothingDropCount.fetch_add( 1, std::memory_order_acq_rel );
+        logInteractionEvent(
+            QStringLiteral("draw_frame_ready.present_nothing"),
+            QStringLiteral("serial=%1 display_frame=%2 amaze_texture_candidate=%3 "
+                           "gpu16=%4 widget_viewport_installed=%5 window_active=%6 "
+                           "prepared_empty=%7 texture_fallback_reason=\"%8\"")
+                .arg( static_cast<qulonglong>( task.requestSerial ) )
+                .arg( static_cast<qulonglong>( display_frame ) )
+                .arg( bool01( gpuAmazeTexturePresentCandidate ) )
+                .arg( bool01( gpu16PreviewActive ) )
+                .arg( bool01( GpuDisplayViewport::isInstalledOn( ui->graphicsView ) ) )
+                .arg( bool01( GpuDisplayWindow::isActive() ) )
+                .arg( bool01( preparedEmpty ) )
+                .arg( sanitizeLogValue( readyFrame.gpuAmazeFallbackReason ) ) );
         if( m_pRenderThread )
             m_pRenderThread->releasePresentedFrameForRequestSerial( task.requestSerial );
         m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
@@ -6168,6 +6186,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
 
     MainWindowGpuPreviewPolicyState renderPolicy;
     renderPolicy.gpuViewportInstalled = gpuPreviewSurfaceActive();
+    renderPolicy.gpuWidgetViewportInstalled =
+        GpuDisplayViewport::isInstalledOn( ui->graphicsView );
     renderPolicy.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
     renderPolicy.gpuPreviewProcessingEnvironmentRequested =
         gpuPreviewProcessingRequestedByEnvironment();
@@ -17302,6 +17322,8 @@ bool MainWindow::shouldUseGpu16PreviewPath( void ) const
 {
     MainWindowGpuPreviewPolicyState policyState;
     policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
+    policyState.gpuWidgetViewportInstalled =
+        GpuDisplayViewport::isInstalledOn( ui->graphicsView );
     const bool scopeDisplayVisible = ui->dockWidgetEdit->isVisible();
     policyState.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
         scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
@@ -17318,6 +17340,8 @@ bool MainWindow::shouldUseGpuPreviewProcessingPath( void ) const
 {
     MainWindowGpuPreviewPolicyState policyState;
     policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
+    policyState.gpuWidgetViewportInstalled =
+        GpuDisplayViewport::isInstalledOn( ui->graphicsView );
     policyState.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
     policyState.gpuPreviewProcessingEnvironmentRequested =
         gpuPreviewProcessingRequestedByEnvironment();
@@ -17338,6 +17362,8 @@ bool MainWindow::shouldUseGpuBilinearDebayerPath( void ) const
 {
     MainWindowGpuPreviewPolicyState policyState;
     policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
+    policyState.gpuWidgetViewportInstalled =
+        GpuDisplayViewport::isInstalledOn( ui->graphicsView );
     policyState.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
     policyState.gpuPreviewProcessingEnvironmentRequested =
         gpuPreviewProcessingRequestedByEnvironment();
@@ -17363,6 +17389,8 @@ bool MainWindow::shouldUseGpuAmazeDebayerPath( void ) const
 {
     MainWindowGpuPreviewPolicyState policyState;
     policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
+    policyState.gpuWidgetViewportInstalled =
+        GpuDisplayViewport::isInstalledOn( ui->graphicsView );
     policyState.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
     policyState.gpuPreviewProcessingEnvironmentRequested =
         gpuPreviewProcessingRequestedByEnvironment();
@@ -20557,6 +20585,8 @@ MainWindowGpuPreviewPolicyState MainWindow::gpuPreviewPolicyForCurrentScopeState
 {
     MainWindowGpuPreviewPolicyState policyState;
     policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
+    policyState.gpuWidgetViewportInstalled =
+        GpuDisplayViewport::isInstalledOn( ui->graphicsView );
     policyState.gpuPreviewProcessingBackendRequest =
         m_gpuPreviewProcessingBackendRequest;
     policyState.gpuPreviewProcessingEnvironmentRequested =
@@ -22268,6 +22298,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
         m_playbackPrepStaleDropCount.load( std::memory_order_acquire );
     m_playbackSmokeStartPrepGenerationDrops =
         m_playbackPrepGenerationDropCount.load( std::memory_order_acquire );
+    m_playbackSmokeStartPresentNothingDrops =
+        m_presentNothingDropCount.load( std::memory_order_acquire );
     m_playbackSmokeStartPrepReplacedBefore =
         m_playbackPrepReplacedBeforeComputeCount.load( std::memory_order_acquire );
     m_playbackSmokeStartPrepReplacedAfter =
@@ -24839,6 +24871,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
         m_playbackPrepReplacedBeforeComputeCount.load( std::memory_order_acquire );
     const uint64_t currentReplacedAfter =
         m_playbackPrepReplacedAfterComputeCount.load( std::memory_order_acquire );
+    const uint64_t currentPresentNothingDrops =
+        m_presentNothingDropCount.load( std::memory_order_acquire );
     auto deltaCounter = []( uint64_t current, uint64_t start ) -> qulonglong
     {
         return static_cast<qulonglong>( current >= start ? current - start : 0 );
@@ -24898,7 +24932,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "auto_avg_fps_equivalent=%59 auto_budget_fps_equivalent=%60 "
                "auto_headroom_capability_last=%61 "
                "auto_validated_no_readback_capability_observed=%62 "
-               "auto_validated_no_readback_capability_demoted_last=%63" )
+               "auto_validated_no_readback_capability_demoted_last=%63 "
+               "present_nothing_drops=%64" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -24972,7 +25007,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( bool01(
                    m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() ) )
                .arg( bool01(
-                   m_playbackQualityAutoCapabilityTracker.lastObservationDemotedCapability() ) );
+                   m_playbackQualityAutoCapabilityTracker.lastObservationDemotedCapability() ) )
+               .arg( deltaCounter( currentPresentNothingDrops,
+                                    m_playbackSmokeStartPresentNothingDrops ) );
 
     qInfo().noquote()
         << QStringLiteral(

@@ -48,6 +48,7 @@ enum class GpuPlaybackPipelineStatus
 struct MainWindowGpuPreviewPolicyState
 {
     bool gpuViewportInstalled = false;
+    bool gpuWidgetViewportInstalled = false;
     GpuPreviewProcessingBackendRequest gpuPreviewProcessingBackendRequest =
         GpuPreviewProcessingBackendRequest::Auto;
     bool gpuPreviewProcessingEnvironmentRequested = false;
@@ -203,7 +204,8 @@ inline bool mainWindowAllowsGpuAmazeTexturePresentation(
     const MainWindowGpuPreviewPolicyState &state)
 {
     return mainWindowUsesGpuAmazeDebayer(state)
-        && state.gpuAmazeTexturePresentationEnvironmentRequested;
+        && state.gpuAmazeTexturePresentationEnvironmentRequested
+        && state.gpuWidgetViewportInstalled;
 }
 
 inline bool mainWindowUsesGpuAmazeTexturePresentation(

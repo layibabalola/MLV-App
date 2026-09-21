@@ -593,6 +593,7 @@ private slots:
     void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
     void mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAndNested();
+    void mainWindowGpuPreviewPolicyRequiresWidgetViewportForAmazeTexturePresent();
     void mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExplicitAndNested();
     void mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus();
     void mainWindowGpuPreviewPolicyLabelsVisibleScopeCpuFallback();
@@ -949,6 +950,7 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAnd
 {
     MainWindowGpuPreviewPolicyState state;
     state.gpuViewportInstalled = true;
+    state.gpuWidgetViewportInstalled = true;
     state.gpuPreviewProcessingBackendRequest = GpuPreviewProcessingBackendRequest::Gpu;
     state.gpuPreviewProcessingCompatible = true;
     state.renderThreadUsing16BitPreview = true;
@@ -981,6 +983,37 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAnd
     state.renderThreadUsingGpuAmazeDebayer = false;
     QVERIFY(!mainWindowAllowsGpuAmazeTexturePresentation(state));
     QVERIFY(!mainWindowUsesGpuAmazeTexturePresentation(state));
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyRequiresWidgetViewportForAmazeTexturePresent()
+{
+    // CUDA-SCALE4-ZERO-PRESENT-1: GL-window mode (Optimus hybrid, no QOpenGLWidget
+    // viewport installed on the QGraphicsView) sets gpuViewportInstalled via
+    // GpuDisplayWindow::isActive(), but GpuDisplayViewport::presentAmazePostWbTexture
+    // and presentRgb16 can only present through the QOpenGLWidget viewport -- they have
+    // no GpuDisplayWindow routing. Without this gate the render thread took the
+    // AMaZE-texture branch, deferred debayer to a viewport that never receives the
+    // texture, and presented zero frames.
+    MainWindowGpuPreviewPolicyState state;
+    state.gpuViewportInstalled = true;
+    state.gpuWidgetViewportInstalled = false;
+    state.gpuPreviewProcessingBackendRequest = GpuPreviewProcessingBackendRequest::Gpu;
+    state.gpuPreviewProcessingCompatible = true;
+    state.renderThreadUsing16BitPreview = true;
+    state.renderThreadUsingGpuProcessingPreview = true;
+    state.gpuAmazeDebayerBackendRequest = GpuAmazeDebayerBackendRequest::Gpu;
+    state.gpuAmazeDebayerCompatible = true;
+    state.renderThreadUsingGpuAmazeDebayer = true;
+    state.gpuAmazeTexturePresentationEnvironmentRequested = true;
+    state.renderThreadUsingGpuAmazeTexturePresentation = true;
+
+    QVERIFY(mainWindowUsesGpuAmazeDebayer(state));
+    QVERIFY(!mainWindowAllowsGpuAmazeTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuAmazeTexturePresentation(state));
+
+    state.gpuWidgetViewportInstalled = true;
+    QVERIFY(mainWindowAllowsGpuAmazeTexturePresentation(state));
+    QVERIFY(mainWindowUsesGpuAmazeTexturePresentation(state));
 }
 
 void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExplicitAndNested()
