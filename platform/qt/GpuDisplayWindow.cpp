@@ -150,7 +150,8 @@ bool GpuDisplayWindow::installInPreview(QGraphicsView *view)
 }
 
 bool GpuDisplayWindow::presentImageIfActive(const QImage &image,
-                                            const QSize &displaySize)
+                                            const QSize &displaySize,
+                                            quint64 presentationSerial)
 {
     QMutexLocker lock(&g_activeMutex);
     GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
@@ -160,7 +161,7 @@ bool GpuDisplayWindow::presentImageIfActive(const QImage &image,
     {
         // Same (GUI) thread: setPresentedImage deep-copies synchronously, and the
         // destructor runs on this same thread, so there is no race here.
-        win->setPresentedImage(image, displaySize);
+        win->setPresentedImage(image, displaySize, presentationSerial);
     }
     else
     {
@@ -170,8 +171,8 @@ bool GpuDisplayWindow::presentImageIfActive(const QImage &image,
         // the copy() inside setPresentedImage would run too late. The mutex keeps the
         // destructor from freeing `win` between this load and the queued post.
         const QImage owned = image.copy();
-        QMetaObject::invokeMethod(win, [win, owned, displaySize]() {
-                                      win->setPresentedImage(owned, displaySize);
+        QMetaObject::invokeMethod(win, [win, owned, displaySize, presentationSerial]() {
+                                      win->setPresentedImage(owned, displaySize, presentationSerial);
                                   },
                                   Qt::QueuedConnection);
     }
@@ -271,6 +272,10 @@ GpuDisplayWindow::GpuDisplayWindow(QWindow *parent)
     , m_textureFromGpuRecon(false)
     , m_texturePresentationActive(false)
     , m_textureDirty(false)
+    , m_pendingPresentationSerial(0)
+    , m_presentedSerial(0)
+    , m_presentedSerialValid(false)
+    , m_captureRenderInProgress(false)
     , m_loggedContext(false)
     , m_loggedPaint(false)
     , m_loggedPresented(false)
@@ -304,7 +309,8 @@ GpuDisplayWindow::~GpuDisplayWindow()
 }
 
 void GpuDisplayWindow::setPresentedImage(const QImage &image,
-                                         const QSize &displaySize)
+                                         const QSize &displaySize,
+                                         quint64 presentationSerial)
 {
     const QSize previousDisplaySize(m_pendingDisplayWidth,
                                     m_pendingDisplayHeight);
@@ -331,6 +337,7 @@ void GpuDisplayWindow::setPresentedImage(const QImage &image,
     m_pendingDisplayWidth = effectiveDisplaySize.width();
     m_pendingDisplayHeight = effectiveDisplaySize.height();
     m_textureDirty = true;
+    m_pendingPresentationSerial = presentationSerial;
     if ( !m_loggedSetImage )
     {
         qInfo().nospace() << "gpu_window setPresentedImage: first frame received ("
@@ -353,6 +360,9 @@ void GpuDisplayWindow::clearPresented()
     m_pendingTextureFromGpuRecon = false;
     m_texturePresentationActive = false;
     m_textureDirty = true;
+    m_pendingPresentationSerial = 0;
+    m_presentedSerial = 0;
+    m_presentedSerialValid = false;
     update();
 }
 
@@ -778,8 +788,14 @@ bool GpuDisplayWindow::readGpuReconSourceBayer16Texture(QByteArray *textureBytes
 #endif
 }
 
-bool GpuDisplayWindow::grabPresentedFramebufferIfActive(QImage *outImage, QString *reason)
+bool GpuDisplayWindow::grabPresentedFramebufferIfActive(QImage *outImage,
+                                                        QString *reason,
+                                                        quint64 *presentedSerial,
+                                                        bool *presentedSerialValid)
 {
+    if ( presentedSerial ) *presentedSerial = 0;
+    if ( presentedSerialValid ) *presentedSerialValid = false;
+
     GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
     if ( !win )
     {
@@ -816,15 +832,20 @@ bool GpuDisplayWindow::grabPresentedFramebufferIfActive(QImage *outImage, QStrin
     // paintGL() draws the still-current texture fresh into that framebuffer right before the
     // read, so what is captured is guaranteed to be what paintGL just drew, not swap leftovers.
     //
-    // KNOWN LIMITATION (ATTR3-VISUAL-QUALITY-EVIDENCE-1, part 1; carried forward as documented
-    // follow-up work, not fixed this round): paintGL() itself calls updateTextureIfNeeded(), so
-    // if a new frame has been submitted-but-not-yet-presented when a screenshot is requested
-    // (m_textureDirty already set, no paint event run yet), this call uploads and captures that
-    // pending frame one frame AHEAD of whatever frame/serial the smoke log most recently recorded
-    // as presented. This is never a silent wrong-pass: -RequireFreshScreenshotRender's frame/hash
-    // association (gui-smoke-screenshot-provenance.ps1) fails closed on the resulting mismatch,
-    // so a coherence gap here surfaces as a provenance failure, not a false-clean capture.
+    // This re-render is CAPTURE-ONLY (m_captureRenderInProgress): paintGL() skips
+    // updateTextureIfNeeded() for the duration of this call, so a frame that has been
+    // submitted-but-not-yet-really-painted (m_textureDirty already set, no real paint event
+    // run yet) is never promoted into m_texture just because a screenshot was requested --
+    // the pixels read back below are always exactly what the last REAL paintGL()+swap drew,
+    // never a frame one ahead of it. m_presentedSerial (returned via presentedSerial) is
+    // likewise only ever written by that real promotion (updateTextureIfNeeded), so it
+    // identifies exactly the frame these pixels came from.
+    win->m_captureRenderInProgress = true;
     win->paintGL();
+    win->m_captureRenderInProgress = false;
+
+    if ( presentedSerial ) *presentedSerial = win->m_presentedSerial;
+    if ( presentedSerialValid ) *presentedSerialValid = win->m_presentedSerialValid;
 
     if ( !win->m_texture )
     {
@@ -943,6 +964,7 @@ void GpuDisplayWindow::updateTextureIfNeeded()
     if ( m_pendingImage.isNull() )
     {
         destroyTexture();
+        m_presentedSerialValid = false;
         return;
     }
     ensureProgram();
@@ -985,6 +1007,12 @@ void GpuDisplayWindow::updateTextureIfNeeded()
     m_pendingTextureWidth = uploadImage.width();
     m_pendingTextureHeight = uploadImage.height();
     m_texturePresentationActive = false;
+
+    // This upload only happens from a REAL paint (paintGL() skips this call entirely
+    // during a capture-only re-render -- see m_captureRenderInProgress), so the serial
+    // recorded here is always the identity of the frame this window is about to swap.
+    m_presentedSerial = m_pendingPresentationSerial;
+    m_presentedSerialValid = true;
 }
 
 void GpuDisplayWindow::paintGL()
@@ -1000,7 +1028,11 @@ void GpuDisplayWindow::paintGL()
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    updateTextureIfNeeded();
+    // Skipped during a capture-only re-render (grabPresentedFramebufferIfActive) so a
+    // frame submitted-but-not-yet-really-painted (m_textureDirty already set, no real
+    // paint event run yet) is never promoted into m_texture just because a screenshot
+    // was requested -- see m_captureRenderInProgress.
+    if ( !m_captureRenderInProgress ) updateTextureIfNeeded();
     if ( !m_texture || !m_program || width() <= 0 || height() <= 0 )
     {
         m_texturePresentationActive = false;

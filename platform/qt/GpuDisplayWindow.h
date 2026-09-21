@@ -54,7 +54,8 @@ public:
     static QSize effectiveDisplaySizeForImage(const QSize &imageSize,
                                               const QSize &requestedDisplaySize);
     static bool presentImageIfActive(const QImage &image,
-                                     const QSize &displaySize = QSize());
+                                     const QSize &displaySize = QSize(),
+                                     quint64 presentationSerial = 0);
     static bool clearIfActive(void);
     static QString rendererDescription(void);
     static bool presentGpuPlaybackReconAmazePostWbTextureIfActive(
@@ -83,9 +84,19 @@ public:
      * it stands at call time, which for this NoPartialUpdate window is the back buffer left
      * over from a prior frame once a swap has already happened, with content the GL spec
      * leaves undefined post-swap (measured: a solid black readback despite a successful
-     * present). Never a screen-region capture. GUI-thread only; call after a completed
-     * present. Image size is the window's real device-pixel framebuffer size. */
-    static bool grabPresentedFramebufferIfActive(QImage *outImage, QString *reason = nullptr);
+     * present). The re-render is capture-only: it does NOT call updateTextureIfNeeded(), so
+     * a frame submitted-but-not-yet-painted through a real paint event is never promoted
+     * into the capture -- the pixels read back are always exactly what the last REAL
+     * paintGL()+swap drew. Never a screen-region capture. GUI-thread only; call after a
+     * completed present. Image size is the window's real device-pixel framebuffer size.
+     * presentedSerial, when non-null, receives the presentationSerial (see
+     * presentImageIfActive) of the frame actually captured, and presentedSerialValid
+     * reports whether any real paint has happened yet (false before the first one, or
+     * after clearIfActive()). */
+    static bool grabPresentedFramebufferIfActive(QImage *outImage,
+                                                 QString *reason = nullptr,
+                                                 quint64 *presentedSerial = nullptr,
+                                                 bool *presentedSerialValid = nullptr);
     /* Logical size of the active preview window (empty if none). Used by the display
      * scene-geometry calc so the playback preview resolution tracks the QOpenGLWindow
      * surface, not the hidden QGraphicsView. GUI-thread only. */
@@ -95,7 +106,8 @@ public:
     ~GpuDisplayWindow() override;
 
     void setPresentedImage(const QImage &image,
-                           const QSize &displaySize = QSize());
+                           const QSize &displaySize = QSize(),
+                           quint64 presentationSerial = 0);
     void clearPresented(void);
     bool setPresentedGpuPlaybackReconAmazePostWbTexture(
         const uint16_t *rawInputBayer14,
@@ -140,6 +152,10 @@ private:
     bool m_textureFromGpuRecon;
     bool m_texturePresentationActive;
     bool m_textureDirty;
+    quint64 m_pendingPresentationSerial;
+    quint64 m_presentedSerial;
+    bool m_presentedSerialValid;
+    bool m_captureRenderInProgress;
     bool m_loggedContext;
     bool m_loggedPaint;
     bool m_loggedPresented;

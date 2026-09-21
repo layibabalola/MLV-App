@@ -5909,10 +5909,14 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     bool imagePresentedByViewport = false;
     if( !framePresentedByViewport )
     {
+        // Threaded through so GpuDisplayWindow can record which requestSerial it actually
+        // swapped in -- see GpuDisplayWindow::grabPresentedFramebufferIfActive.
+        GpuDisplayViewport::PresentationOptions presentationOptions = task.gpuPresentationOptions;
+        presentationOptions.presentationSerial = task.requestSerial;
         imagePresentedByViewport = GpuDisplayViewport::presentImage( ui->graphicsView,
                                                                       m_pGraphicsItem,
                                                                       displayImage,
-                                                                      task.gpuPresentationOptions );
+                                                                      presentationOptions );
     }
 
     if( !framePresentedByViewport && !imagePresentedByViewport )
@@ -9183,6 +9187,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         QString windowScreenshotMethod = QStringLiteral("app_internal_window_grab");
         bool glWindowComposited = false;
         QString glWindowCompositeReason;
+        qulonglong glWindowCompositedPresentedSerial = 0;
+        bool glWindowCompositedPresentedSerialValid = false;
         if( GpuDisplayWindow::isActive() )
         {
             QWidget *glWindowContainer =
@@ -9195,11 +9201,17 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             else
             {
                 QImage glWindowFrame;
+                quint64 glWindowPresentedSerial = 0;
+                bool glWindowPresentedSerialValid = false;
                 if( GpuDisplayWindow::grabPresentedFramebufferIfActive(
-                        &glWindowFrame, &glWindowCompositeReason )
+                        &glWindowFrame, &glWindowCompositeReason,
+                        &glWindowPresentedSerial, &glWindowPresentedSerialValid )
                  && !glWindowFrame.isNull()
                  && !windowScreenshot.isNull() )
                 {
+                    glWindowCompositedPresentedSerial =
+                        static_cast<qulonglong>( glWindowPresentedSerial );
+                    glWindowCompositedPresentedSerialValid = glWindowPresentedSerialValid;
                     const QPoint containerTopLeft =
                         glWindowContainer->mapTo( this, QPoint( 0, 0 ) );
                     const QRect targetRect(
@@ -9234,7 +9246,9 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         logInteractionEvent(
             QStringLiteral("gui_smoke.window_screenshot"),
             QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4 gl_window_active=%5 "
-                            "gl_window_composited=%6 gl_window_composite_reason=\"%7\" fps_status=\"%8\"")
+                            "gl_window_composited=%6 gl_window_composite_reason=\"%7\" "
+                            "gl_window_presented_serial=%8 gl_window_presented_serial_valid=%9 "
+                            "fps_status=\"%10\"")
                 .arg( windowScreenshotInfo.absoluteFilePath() )
                 .arg( windowScreenshot.width() )
                 .arg( windowScreenshot.height() )
@@ -9242,6 +9256,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                 .arg( bool01( GpuDisplayWindow::isActive() ) )
                 .arg( bool01( glWindowComposited ) )
                 .arg( glWindowCompositeReason )
+                .arg( glWindowCompositedPresentedSerial )
+                .arg( bool01( glWindowCompositedPresentedSerialValid ) )
                 .arg( m_pFpsStatus ? m_pFpsStatus->text() : QStringLiteral("unavailable") ) );
     }
 
@@ -9272,15 +9288,27 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         QPixmap screenshot;
         QString screenshotMethod = QStringLiteral("app_internal_presented_pixmap");
         QString glWindowReadbackReason;
+        qulonglong glWindowPresentedSerial = 0;
+        bool glWindowPresentedSerialValid = false;
         if( GpuDisplayWindow::isActive() )
         {
             QImage glWindowFrame;
+            quint64 capturedSerial = 0;
+            bool capturedSerialValid = false;
             if( GpuDisplayWindow::grabPresentedFramebufferIfActive(
-                    &glWindowFrame, &glWindowReadbackReason )
+                    &glWindowFrame, &glWindowReadbackReason,
+                    &capturedSerial, &capturedSerialValid )
              && !glWindowFrame.isNull() )
             {
                 screenshot = QPixmap::fromImage( glWindowFrame );
                 screenshotMethod = QStringLiteral("gl_window_framebuffer_readback");
+                // The identity of the frame actually captured -- bound at the last real
+                // paintGL()+swap, never a frame promoted just for this capture. May
+                // legitimately differ from screenshotSerial (the most recently QUEUED
+                // frame) when a screenshot is requested before that frame's real paint
+                // event has run; provenance should bind to this value, not screenshotSerial.
+                glWindowPresentedSerial = static_cast<qulonglong>( capturedSerial );
+                glWindowPresentedSerialValid = capturedSerialValid;
             }
         }
         if( screenshot.isNull()
@@ -9334,7 +9362,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         logInteractionEvent(
             QStringLiteral("gui_smoke.screenshot"),
             QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4 bytes=%5 sha256=%6 frame=%7 serial=%8 "
-                            "generation=%9 gl_window_active=%10 gl_window_readback_reason=\"%11\"")
+                            "generation=%9 gl_window_active=%10 gl_window_readback_reason=\"%11\" "
+                            "gl_window_presented_serial=%12 gl_window_presented_serial_valid=%13")
                 .arg( screenshotInfo.absoluteFilePath() )
                 .arg( screenshot.width() )
                 .arg( screenshot.height() )
@@ -9345,7 +9374,9 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                 .arg( screenshotSerial )
                 .arg( screenshotGeneration )
                 .arg( bool01( GpuDisplayWindow::isActive() ) )
-                .arg( glWindowReadbackReason ) );
+                .arg( glWindowReadbackReason )
+                .arg( glWindowPresentedSerial )
+                .arg( bool01( glWindowPresentedSerialValid ) ) );
     }
 
     if( ui->actionPlay->isChecked() )

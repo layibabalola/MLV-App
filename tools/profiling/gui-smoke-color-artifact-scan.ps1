@@ -226,6 +226,19 @@ public static class MlvGuiSmokeColorArtifactScanner
             const double NearZeroVisibleFractionThreshold = 0.02;
             bool nearZeroVisible = sampleCount > 0 && visibleFraction < NearZeroVisibleFractionThreshold;
 
+            // KNOWN FAIL-CLOSED LIMITATION (ATTR3-VISUAL-QUALITY-EVIDENCE-1, round 3 fable
+            // minor, carried forward as documented rather than fixed): this black-pedestal
+            // heuristic cannot distinguish "GPU rendered a bad dark capture" from "the scene
+            // itself is dark AND strongly color-tinted" -- both produce a low per-channel
+            // peak with a large peak/trough ratio. A CORRECT dark red-lit frame (e.g. peak
+            // R~90, peak G/B~50) satisfies peak<PeakBrightnessThreshold AND
+            // skew>ChannelSkewRatioThreshold exactly like the bad-capture signature this
+            // guard targets, and would be scored capture-too-dark despite being a faithful
+            // capture. This is intentionally the safe direction for an evidence gate (a red
+            // run, never a false-clean pass), so it is NOT loosened here -- but a future
+            // fixture with genuinely dark, strongly-tinted content should expect this rule to
+            // fire, and that must be recognized as this documented limitation, not a capture
+            // regression.
             int peakChannelValue = Math.Max(maxR, Math.Max(maxG, maxB));
             int troughChannelValue = Math.Min(maxR, Math.Min(maxG, maxB));
             const int PeakBrightnessThreshold = 96;
@@ -289,6 +302,17 @@ public static class MlvGuiSmokeColorArtifactScanner
 "@
 }
 
+function Get-ColorArtifactFailingVerdicts {
+    # Single source of truth for which colorArtifactScan.verdict values mean the capture
+    # is unusable or shows an artifact. Every consumer -- this scanner's own reported
+    # thresholds below, run-release-gui-smoke.ps1's -FailOnColorArtifact gate, and the
+    # A/B comparator's color gate -- must call this instead of hand-keeping a copy of the
+    # list: PR147 round 3 shipped two independently-maintained copies that drifted (the
+    # A/B comparator's own list omitted capture-invalid and capture-too-dark, so an A/B
+    # leg with an unusable capture could still report PASS).
+    @("suspect-block-or-bar", "scan-error", "capture-invalid", "capture-too-dark")
+}
+
 function Get-ScreenshotColorArtifactScan {
     param([string]$Path)
 
@@ -332,7 +356,7 @@ function Get-ScreenshotColorArtifactScan {
                 globalArtifactRatio = 0.18
                 peakBrightnessThreshold = 96
                 channelSkewRatio = 1.3
-                verdictsThatFailWhenRequested = @("suspect-block-or-bar", "scan-error", "capture-invalid", "capture-too-dark")
+                verdictsThatFailWhenRequested = Get-ColorArtifactFailingVerdicts
             }
             note = "Sampled presented-frame screenshot scan for magenta/pink/green bars, tinted blocks, and severe global color-axis spikes; isolated high-saturation tiles are informational unless supported by band/global evidence."
             error = $null

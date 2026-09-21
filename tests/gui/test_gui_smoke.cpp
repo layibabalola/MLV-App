@@ -594,6 +594,7 @@ private slots:
     void gpuViewportPresentsRgb16PatternExactly();
     void gpuDisplayWindowFramebufferReadbackFailsWithoutActiveWindow();
     void gpuDisplayWindowGrabsPresentedFramebufferReadback();
+    void gpuDisplayWindowCaptureNeverPromotesUnpaintedPendingFrame();
     void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
@@ -1840,6 +1841,116 @@ void GuiSmokeTest::gpuDisplayWindowGrabsPresentedFramebufferReadback()
              qPrintable(QStringLiteral("Expected the GL window readback to show the presented frame; "
                                         "center pixel was rgb(%1,%2,%3)")
                         .arg(center.red()).arg(center.green()).arg(center.blue())));
+
+    host.reset();
+    QVERIFY(!GpuDisplayWindow::isActive());
+    qunsetenv(GpuDisplayWindow::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuDisplayWindowCaptureNeverPromotesUnpaintedPendingFrame()
+{
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        QSKIP("GL window framebuffer readback needs a platform plugin that can create an OpenGL context");
+    }
+
+    qputenv(GpuDisplayWindow::environmentVariableName(), QByteArrayLiteral("1"));
+
+    auto host = std::make_unique<QWidget>();
+    auto *layout = new QVBoxLayout(host.get());
+    auto *view = new QGraphicsView(host.get());
+    layout->addWidget(view);
+    host->resize(64, 64);
+
+    QVERIFY(GpuDisplayWindow::installInPreview(view));
+    host->show();
+    QApplication::processEvents();
+    static_cast<void>(QTest::qWaitForWindowExposed(host.get()));
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    // Present frame A and let its real paint event actually run.
+    QImage frameA(32, 32, QImage::Format_RGB888);
+    frameA.fill(qRgb(10, 200, 30));   // green
+    const quint64 serialA = 111;
+    QVERIFY(GpuDisplayWindow::presentImageIfActive(frameA, QSize(), serialA));
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage grabbedA;
+    QString reasonA;
+    quint64 capturedSerialA = 0;
+    bool capturedSerialValidA = false;
+    const bool okA = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedA, &reasonA, &capturedSerialA, &capturedSerialValidA);
+    if (!okA || grabbedA.isNull()) {
+        QSKIP("OpenGL framebuffer capture is unavailable in this environment");
+    }
+    QVERIFY(capturedSerialValidA);
+    QCOMPARE(capturedSerialA, serialA);
+    {
+        const QColor center(grabbedA.pixel(grabbedA.width() / 2, grabbedA.height() / 2));
+        QVERIFY2(center.green() > 150 && center.red() < 80 && center.blue() < 80,
+                 qPrintable(QStringLiteral("Expected the initial capture to show frame A; center pixel was rgb(%1,%2,%3)")
+                            .arg(center.red()).arg(center.green()).arg(center.blue())));
+    }
+
+    // Submit frame B but deliberately do NOT pump the event loop before capturing --
+    // its real paint event has not run, so the window has not actually presented it
+    // yet. The capture must still bind to A, by both pixels and serial, never to the
+    // pending-but-unpainted B (this is the coherence gap PR147 round-3 documented and
+    // round 4 closes: grabPresentedFramebufferIfActive() must not promote pending
+    // texture state during its capture-only re-render).
+    QImage frameB(32, 32, QImage::Format_RGB888);
+    frameB.fill(qRgb(200, 10, 30));   // red
+    const quint64 serialB = 222;
+    QVERIFY(GpuDisplayWindow::presentImageIfActive(frameB, QSize(), serialB));
+
+    QImage grabbedDuring;
+    QString reasonDuring;
+    quint64 capturedSerialDuring = 0;
+    bool capturedSerialValidDuring = false;
+    const bool okDuring = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedDuring, &reasonDuring, &capturedSerialDuring, &capturedSerialValidDuring);
+    QVERIFY(okDuring);
+    QVERIFY(!grabbedDuring.isNull());
+    QVERIFY(capturedSerialValidDuring);
+    QCOMPARE(capturedSerialDuring, serialA);
+    {
+        const QColor center(grabbedDuring.pixel(grabbedDuring.width() / 2, grabbedDuring.height() / 2));
+        QVERIFY2(center.green() > 150 && center.red() < 80 && center.blue() < 80,
+                 qPrintable(QStringLiteral("Expected the capture taken before frame B's real paint to still show "
+                                            "frame A, never the pending unpainted frame B; center pixel was "
+                                            "rgb(%1,%2,%3)")
+                            .arg(center.red()).arg(center.green()).arg(center.blue())));
+    }
+
+    // Now let frame B's real paint event run, and confirm a later capture picks it up.
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage grabbedB;
+    QString reasonB;
+    quint64 capturedSerialB = 0;
+    bool capturedSerialValidB = false;
+    const bool okB = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedB, &reasonB, &capturedSerialB, &capturedSerialValidB);
+    QVERIFY(okB);
+    QVERIFY(!grabbedB.isNull());
+    QVERIFY(capturedSerialValidB);
+    QCOMPARE(capturedSerialB, serialB);
+    {
+        const QColor center(grabbedB.pixel(grabbedB.width() / 2, grabbedB.height() / 2));
+        QVERIFY2(center.red() > 150 && center.green() < 80 && center.blue() < 80,
+                 qPrintable(QStringLiteral("Expected the capture after frame B's real paint to show frame B; "
+                                            "center pixel was rgb(%1,%2,%3)")
+                            .arg(center.red()).arg(center.green()).arg(center.blue())));
+    }
 
     host.reset();
     QVERIFY(!GpuDisplayWindow::isActive());

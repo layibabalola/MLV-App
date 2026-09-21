@@ -203,7 +203,7 @@ $wrapperPath = Join-Path $PSScriptRoot 'run-release-gui-smoke.ps1'
 $wrapperText = Get-Content -LiteralPath $wrapperPath -Raw
 foreach ($requiredSymbol in @(
     "'gui-smoke-color-artifact-scan.ps1'",
-    '"suspect-block-or-bar", "scan-error", "capture-invalid", "capture-too-dark"',
+    'Get-ColorArtifactFailingVerdicts',
     '"app_internal_gl_viewport_grab", "gl_window_framebuffer_readback"'
 )) {
     Assert-True $wrapperText.Contains($requiredSymbol) `
@@ -211,6 +211,35 @@ foreach ($requiredSymbol in @(
 }
 Assert-True (-not $wrapperText.Contains('function Add-ColorArtifactScannerType')) `
     'The color-artifact scanner type must be defined only in the extracted, dot-sourced file.'
+Assert-True (-not $wrapperText.Contains(
+    '@("suspect-block-or-bar", "scan-error", "capture-invalid", "capture-too-dark")')) `
+    'run-release-gui-smoke.ps1 must call the shared Get-ColorArtifactFailingVerdicts, not hand-keep its own copy of the failing-verdict list.'
+
+# PR147 round 3 shipped a SECOND, independently hand-kept color-artifact-failure list in
+# the A/B comparator that omitted capture-invalid and capture-too-dark, so an A/B leg with
+# an unusable or artifacted capture could still report PASS. Round 4 makes
+# Get-ColorArtifactFailingVerdicts the single source of truth for every consumer; this
+# guards against that comparator quietly regressing back to its own copy.
+$comparatorPath = Join-Path $PSScriptRoot 'compare-release-gui-smoke-ab.ps1'
+$comparatorText = Get-Content -LiteralPath $comparatorPath -Raw
+foreach ($requiredSymbol in @(
+    "'gui-smoke-color-artifact-scan.ps1'",
+    'Get-ColorArtifactFailingVerdicts'
+)) {
+    Assert-True $comparatorText.Contains($requiredSymbol) `
+        "compare-release-gui-smoke-ab.ps1 is missing integration symbol: $requiredSymbol"
+}
+Assert-True (-not $comparatorText.Contains('@("suspect-block-or-bar", "scan-error")')) `
+    'compare-release-gui-smoke-ab.ps1 must not hand-keep its own (stale, capture-invalid/capture-too-dark-blind) color-artifact-failure list.'
+
+$expectedFailingVerdicts = @("suspect-block-or-bar", "scan-error", "capture-invalid", "capture-too-dark")
+$actualFailingVerdicts = @(Get-ColorArtifactFailingVerdicts)
+Assert-True ($actualFailingVerdicts.Count -eq $expectedFailingVerdicts.Count) `
+    "Get-ColorArtifactFailingVerdicts returned $($actualFailingVerdicts.Count) verdicts, expected $($expectedFailingVerdicts.Count)."
+foreach ($verdict in $expectedFailingVerdicts) {
+    Assert-True ($actualFailingVerdicts -contains $verdict) `
+        "Get-ColorArtifactFailingVerdicts is missing required failing verdict: $verdict"
+}
 
 $scannerPath = Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1'
 $parseErrors = $null

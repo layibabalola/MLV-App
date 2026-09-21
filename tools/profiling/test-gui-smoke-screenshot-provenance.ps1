@@ -342,4 +342,35 @@ $metricIndex = $blockingAbText.IndexOf('$metricsJson =')
 Assert-True ($pairGateIndex -ge 0 -and $metricIndex -gt $pairGateIndex) `
     'The pair comparability assertion must run before image metrics consume either screenshot.'
 
+Assert-True $wrapperText.Contains('-FailOnColorArtifact requires -CaptureScreenshot.') `
+    'run-release-gui-smoke.ps1 must reject -FailOnColorArtifact without -CaptureScreenshot at parameter validation.'
+
+# -FailOnColorArtifact without -CaptureScreenshot must fail LOUD, not silently no-op
+# (colorArtifactScan is never populated without -CaptureScreenshot, so the failure gate
+# would otherwise be unreachable). Invoke the real wrapper -- a parameter-validation throw
+# happens before anything needs a real MLVApp build, so this runs without a Qt toolchain.
+$failOnColorArtifactOutput = & pwsh -NoProfile -Command (
+    "try { & '$wrapperPath' -FailOnColorArtifact -ErrorAction Stop } " +
+    "catch { Write-Output ('CAUGHT: ' + `$_.Exception.Message) }"
+) 2>&1
+Assert-True (($failOnColorArtifactOutput -join "`n").Contains(
+    'CAUGHT: -FailOnColorArtifact requires -CaptureScreenshot.')) `
+    "run-release-gui-smoke.ps1 -FailOnColorArtifact (without -CaptureScreenshot) did not fail loud at parameter validation; observed: $($failOnColorArtifactOutput -join ' | ')"
+
+# Paired with -CaptureScreenshot, validation must move PAST that gate (the run then fails
+# later for an unrelated, expected reason -- no MLVApp build in this environment -- which
+# proves the combination is accepted rather than also being rejected).
+$failOnColorArtifactWithScreenshotOutput = & pwsh -NoProfile -Command (
+    "try { & '$wrapperPath' -FailOnColorArtifact -CaptureScreenshot -ErrorAction Stop } " +
+    "catch { Write-Output ('CAUGHT: ' + `$_.Exception.Message) }"
+) 2>&1
+$failOnColorArtifactWithScreenshotJoined = $failOnColorArtifactWithScreenshotOutput -join "`n"
+Assert-True (-not $failOnColorArtifactWithScreenshotJoined.Contains(
+    '-FailOnColorArtifact requires -CaptureScreenshot.')) `
+    "run-release-gui-smoke.ps1 -FailOnColorArtifact -CaptureScreenshot must pass the parameter-validation gate; observed: $failOnColorArtifactWithScreenshotJoined"
+Assert-True $failOnColorArtifactWithScreenshotJoined.Contains('CAUGHT:') `
+    "Expected -FailOnColorArtifact -CaptureScreenshot to fail later for an unrelated reason (no MLVApp build here); observed: $failOnColorArtifactWithScreenshotJoined"
+
+Write-Host 'PASS: GUI smoke screenshot provenance tests'
+
 Write-Host 'PASS: GUI smoke screenshot fresh-render provenance tests'

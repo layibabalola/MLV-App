@@ -738,7 +738,8 @@ bool GpuDisplayViewport::presentImage(QGraphicsView *view,
     {
         const QSize displaySize =
             displaySizeForWindowPresent(view, fallbackItem, image);
-        if ( GpuDisplayWindow::presentImageIfActive(image, displaySize) ) return true;
+        if ( GpuDisplayWindow::presentImageIfActive(image, displaySize, options.presentationSerial) )
+            return true;
     }
     else if ( GpuDisplayWindow::clearIfActive() )
     {

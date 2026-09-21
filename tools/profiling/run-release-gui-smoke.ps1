@@ -96,6 +96,12 @@ Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force
 if ($RequireFreshScreenshotRender -and -not $CaptureScreenshot) {
     throw "-RequireFreshScreenshotRender requires -CaptureScreenshot."
 }
+if ($FailOnColorArtifact -and -not $CaptureScreenshot) {
+    # Without -CaptureScreenshot, $colorArtifactScan is never populated, so the
+    # color-artifact failure gate below is unreachable and -FailOnColorArtifact would
+    # silently do nothing -- fail loud at parameter validation instead of no-op.
+    throw "-FailOnColorArtifact requires -CaptureScreenshot."
+}
 if ($RequireFreshScreenshotRender) {
     # V2 provenance binds the screenshot to playback frame/session/index and
     # request serial telemetry. Make the dependency intrinsic to the policy.
@@ -1472,7 +1478,7 @@ if ($SettleCpuMaxMs -gt 0 -or $SettleCpuStableMs -gt 0) {
         $cpuSettled = ($cpuSettle.settled -eq 1)
     }
 }
-$colorArtifactFailureVerdicts = @("suspect-block-or-bar", "scan-error", "capture-invalid", "capture-too-dark")
+$colorArtifactFailureVerdicts = Get-ColorArtifactFailingVerdicts
 $colorArtifactVerdict =
     if ($null -ne $colorArtifactScan) { [string]$colorArtifactScan.verdict } else { "not-captured" }
 $colorArtifactScanPassed =
