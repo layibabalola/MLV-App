@@ -1211,6 +1211,107 @@ function Read-AttrCudaBase64Payload {
     [pscustomobject]@{ bytes = $bytes; sha256 = $sha256 }
 }
 
+function Test-AttrCudaFootagePart {
+    <#
+    .SYNOPSIS
+    Verify one footage part's content on THIS host: existence, readability, length, then sha256.
+    .DESCRIPTION
+    ATTR3-FOOTAGE-BIND-1 PR-B: shared by attr3-footage-presence-job.ps1's emitted probe and
+    playback-attr-3-cuda-job.ps1's owner-id content gate -- ONE definition of "does this part's
+    bytes match", embedded verbatim in both via Get-AttrCudaEmbeddedFunctionSource so the two jobs
+    run the same characters instead of two copies that can quietly drift apart.
+    Every filesystem call is wrapped in its own try/catch: under $ErrorActionPreference = 'Stop' an
+    unwrapped Test-Path/Get-Item call can throw a TERMINATING error that would escape a caller's
+    loop and print the exception's own text -- which can contain the real path -- to output.
+    Nothing here ever returns exception text, only a fixed status TOKEN.
+    Returns one of PASS / NOT_FOUND / ACCESS_DENIED / UNREADABLE / LENGTH_MISMATCH /
+    SHA256_MISMATCH. Readability is established BEFORE a length mismatch is ever reported: a part
+    whose metadata is readable but whose CONTENT read is denied is UNREADABLE/ACCESS_DENIED, never
+    LENGTH_MISMATCH, since no byte was ever actually observed to differ.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [int64]$ExpectedLength,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSha256
+    )
+
+    $expectedSha256Lower = $ExpectedSha256.ToLowerInvariant()
+    $status = $null
+    $actualLength = $null
+    try {
+        $actualLength = (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Length
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        $status = 'NOT_FOUND'
+    } catch [System.UnauthorizedAccessException] {
+        $status = 'ACCESS_DENIED'
+    } catch {
+        $status = if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' }
+    }
+
+    if ($status) {
+        return $status
+    }
+
+    if ($actualLength -ne $ExpectedLength) {
+        # A differing length alone does not prove the content was ever actually OBSERVED to
+        # differ -- a part whose metadata is readable (Get-Item above succeeded) but whose CONTENT
+        # read is denied must not be reported as LENGTH_MISMATCH. Establish readability first: open
+        # for read and consume at least one byte when the file is non-empty. Only a successful
+        # open-and-read yields LENGTH_MISMATCH; any failure maps the same way the sha256 branch
+        # below does, and never leaks the exception's own text.
+        $readStream = $null
+        try {
+            $readStream = [IO.File]::OpenRead($Path)
+            if ($actualLength -gt 0) {
+                [void]$readStream.ReadByte()
+            }
+            return 'LENGTH_MISMATCH'
+        } catch [System.UnauthorizedAccessException] {
+            return 'ACCESS_DENIED'
+        } catch {
+            return $(if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' })
+        } finally {
+            if ($readStream) { $readStream.Dispose() }
+        }
+    }
+
+    try {
+        $actualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        return $(if ($actualSha256 -eq $expectedSha256Lower) { 'PASS' } else { 'SHA256_MISMATCH' })
+    } catch [System.UnauthorizedAccessException] {
+        return 'ACCESS_DENIED'
+    } catch {
+        return $(if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' })
+    }
+}
+
+function ConvertTo-AttrCudaUtf8String {
+    <#
+    .SYNOPSIS
+    Decode raw bytes as UTF-8 text.
+    .DESCRIPTION
+    Exists so a job TEMPLATE never needs [Text.Encoding]::UTF8.GetString() directly --
+    tools/repo_hygiene/attr3_publish_write_scan.ps1's R4 rule allowlists .NET static/instance
+    members in the template by name, and this repository's policy is that a job template stays
+    inside that allowlist; the decode lives here instead, spliced in and called by NAME like
+    every other embedded verifier (see Read-AttrCudaBase64Payload's own header for the same
+    reasoning about base64).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]]$Bytes
+    )
+    [Text.Encoding]::UTF8.GetString($Bytes)
+}
+
 function Publish-AttrCudaBytes {
     <#
     .SYNOPSIS
@@ -1716,6 +1817,8 @@ Export-ModuleMember -Function `
     Get-AttrCudaClosureDirectoryMismatch, `
     Assert-AttrCudaNonOverwritingFileSlot, `
     Read-AttrCudaBase64Payload, `
+    Test-AttrCudaFootagePart, `
+    ConvertTo-AttrCudaUtf8String, `
     Publish-AttrCudaBytes, `
     Publish-AttrCudaText, `
     Publish-AttrCudaFileCopy, `

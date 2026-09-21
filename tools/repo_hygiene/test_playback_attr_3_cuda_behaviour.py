@@ -881,20 +881,32 @@ class AttributionJobOptionalClipPathTests(_PwshCase):
         )
         self.assertFalse(out_file.exists())
 
-    # NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (B): every owner-clip id is refused outright until
-    # ATTR3-FOOTAGE-BIND-1, BEFORE the -ClipPath / -FixtureSha256 checks, so these two cases now
-    # assert that refusal instead of PLAYBACK_ATTR3_CLIPPATH_REQUIRED / _FIXTURE_SHA_REFUSED.
-    def test_an_owner_id_without_clippath_is_refused(self) -> None:
+    # ATTR3-FOOTAGE-BIND-1 PR-B: an owner-clip id is RESOLVED, not blanket-refused. -ClipPath and
+    # -FixtureSha256 stay REFUSED for one (cheap, no resolver call needed); an id with neither
+    # reaches the resolver, which this throwaway repo (no refs/remotes/fork/master) always
+    # refuses -- deterministic, and never touches real consent data.
+    def test_an_owner_id_without_clippath_is_resolved_and_refused_by_the_resolver(self) -> None:
         proc, out_file = self._generate(ClipId="M16-1243")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("ATTR3-FOOTAGE-BIND-1", normalize_pwsh_message_text(proc.stdout + proc.stderr))
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_OWNER_RESOLVE_REFUSED", message)
         self.assertFalse(out_file.exists())
 
     def test_an_owner_id_with_fixture_sha_is_refused(self) -> None:
-        owner_path = "C:\\mlvtmp\\mlv-agent\\cache\\M16-1243.raw"
-        proc, out_file = self._generate(ClipId="M16-1243", ClipPath=owner_path, FixtureSha256="c" * 64)
+        proc, out_file = self._generate(ClipId="M16-1243", FixtureSha256="c" * 64)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("ATTR3-FOOTAGE-BIND-1", normalize_pwsh_message_text(proc.stdout + proc.stderr))
+        self.assertIn(
+            "PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED", normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        )
+        self.assertFalse(out_file.exists())
+
+    def test_an_owner_id_with_clippath_is_refused(self) -> None:
+        owner_path = "C:\\mlvtmp\\mlv-agent\\cache\\M16-1243.raw"
+        proc, out_file = self._generate(ClipId="M16-1243", ClipPath=owner_path)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(
+            "PLAYBACK_ATTR3_CLIPPATH_REFUSED", normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        )
         self.assertFalse(out_file.exists())
 
     def test_a_fixture_id_with_an_explicit_clippath_is_still_accepted(self) -> None:
@@ -941,9 +953,14 @@ class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
 
     def _extract_fixture_content_check(self) -> str:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        # ATTR3-FOOTAGE-BIND-1 PR-B: an EARLIER "if ($FixtureRehearsal) {" now also gates the
+        # clip-path residence checks (before $Pub exists) -- bound the search to start AFTER
+        # $Pub is created, so this always finds the CONTENT-hash-check block, never the
+        # residence-check block.
+        pub_created = text.index("[void](New-AttrCudaDirectory -Path $Pub)")
         start_marker = "if ($FixtureRehearsal) {"
         end_marker = "\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)"
-        start = text.index(start_marker)
+        start = text.index(start_marker, pub_created)
         end = text.index(end_marker, start)
         self.assertGreater(end, start, "fixture-content-check markers moved in the generator")
         return text[start:end]
@@ -1046,6 +1063,238 @@ class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
         combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
         self.assertIn("job-owned path 'Root' resolves outside", combined)
         self.assertIn("C:\\mlvtmp", combined)
+
+
+@requires_pwsh
+class AttributionJobOwnerContentAuthenticationTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B: the emitted job verifies EVERY owner part's content -- via the
+    same extraction technique AttributionJobFixtureContentAuthenticationTests uses for the
+    fixture arm of the SAME if/else block -- before the package is deployed, PresentMon starts,
+    or the smoke child runs. Every part here is SYNTHETIC, built directly (never through the real
+    resolver), exactly the way test_attr3_footage_presence_job.py exercises the identical
+    per-part verifier for the presence-probe job.
+    """
+
+    def _extract_content_check(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        pub_created = text.index("[void](New-AttrCudaDirectory -Path $Pub)")
+        start = text.index("if ($FixtureRehearsal) {", pub_created)
+        end = text.index("\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)", start)
+        self.assertGreater(end, start, "owner/fixture content-check markers moved in the generator")
+        return text[start:end]
+
+    def _owner_parts_json(self, parts) -> str:
+        baked = [
+            {
+                "index": part["index"],
+                "pathBase64": base64.b64encode(part["path"].encode("utf-8")).decode("ascii"),
+                "length": part["length"],
+                "sha256": part["sha256"],
+            }
+            for part in parts
+        ]
+        return json.dumps(baked)
+
+    def _run_owner_content_check(self, *, parts, pub: Path) -> subprocess.CompletedProcess:
+        # The real job creates $Pub (New-AttrCudaDirectory) before this block ever runs; this
+        # probe stands in for that one step so Save-Json has somewhere to write.
+        pub.mkdir(parents=True)
+        block = self._extract_content_check()
+        owner_parts_json = self._owner_parts_json(parts).replace("'", "''")
+        script = self.tmp / "owner-content-check-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            "$FixtureRehearsal = $false\n"
+            f"$OwnerPartsJson = '{owner_parts_json}'\n"
+            "$ClipId = 'FIX-OWNER-CONTENT-0001'\n"
+            f"$SourceCommit = '{'d' * 40}'\n"
+            f"$Pub = '{pub}'\n"
+            "function Save-Json($Object, [string]$Path) {\n"
+            "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
+            "}\n"
+            + block + "\n"
+            "Write-Output ('RESULT=NO_MISMATCH clipPath=' + $clipPath)\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script)
+
+    def test_both_parts_pass_and_clippath_is_byte_equal_to_the_first_part(self) -> None:
+        part0_dir = self.tmp / "owner-content-part0"
+        part0_dir.mkdir()
+        part0_path = part0_dir / "clip.raw"
+        part0_bytes = b"synthetic owner content part zero " * 97
+        part0_path.write_bytes(part0_bytes)
+        part1_path = self.tmp / "clip.raw.part1"
+        part1_bytes = b"synthetic owner content part one"
+        part1_path.write_bytes(part1_bytes)
+        part0 = str(part0_path).replace("\\", "/")
+        part1 = str(part1_path)
+        parts = [
+            {"index": 0, "path": part0, "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()},
+            {"index": 1, "path": part1, "length": len(part1_bytes), "sha256": hashlib.sha256(part1_bytes).hexdigest()},
+        ]
+        pub = self.tmp / "agent" / "outbox" / "owner-pass.artifacts"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub)
+
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=NO_MISMATCH", proc.stdout)
+        # The path this job opens is byte-equal to the DECODED first part -- never composed.
+        self.assertIn(f"clipPath={part0}", proc.stdout)
+
+    def test_a_mismatched_part_fails_closed_before_the_package_is_touched(self) -> None:
+        part0_path = self.tmp / "owner-content-mismatch-part0.raw"
+        part0_bytes = b"synthetic owner content that will not match"
+        part0_path.write_bytes(part0_bytes)
+        parts = [
+            {
+                "index": 0,
+                "path": str(part0_path).replace("\\", "/"),
+                "length": len(part0_bytes),
+                "sha256": hashlib.sha256(b"not the bytes the resolver saw").hexdigest(),
+            },
+        ]
+        pub = self.tmp / "agent" / "outbox" / "owner-mismatch.artifacts"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub)
+
+        self.assertEqual(proc.returncode, 19, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=OWNER_FOOTAGE_NOT_VERIFIED", proc.stdout)
+        self.assertIn("PARTS=0=SHA256_MISMATCH", proc.stdout)
+        summary = json.loads((pub / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["result"], "OWNER_FOOTAGE_NOT_VERIFIED")
+        self.assertEqual(summary["parts"], [{"index": 0, "status": "SHA256_MISMATCH"}])
+        # Never a path in a reader-facing output.
+        self.assertNotIn(str(part0_path).replace("\\", "/"), json.dumps(summary))
+
+    def test_a_missing_part_is_reported_by_index_and_status_only(self) -> None:
+        missing_path = self.tmp / "owner-content-missing-part0.raw"
+        parts = [
+            {"index": 0, "path": str(missing_path).replace("\\", "/"), "length": 10, "sha256": "a" * 64},
+        ]
+        pub = self.tmp / "agent" / "outbox" / "owner-missing.artifacts"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub)
+
+        self.assertEqual(proc.returncode, 19, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=OWNER_FOOTAGE_NOT_VERIFIED", proc.stdout)
+        self.assertIn("PARTS=0=NOT_FOUND", proc.stdout)
+
+
+@requires_pwsh
+class SharedFootagePartVerifierEmbeddingTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B: Test-AttrCudaFootagePart (and the base64 decode it rides on)
+    must be the SAME characters in both emitted jobs -- never two copies that can drift."""
+
+    def test_both_generators_embed_the_same_shared_function_names(self) -> None:
+        presence_module_text = (
+            ROOT / "tools" / "profiling" / "bachelor" / "Attr3FootagePresenceJob.psm1"
+        ).read_text(encoding="utf-8")
+        attribution_text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        for name in ("Read-AttrCudaBase64Payload", "Test-AttrCudaFootagePart"):
+            with self.subTest(name=name):
+                self.assertIn(name, presence_module_text)
+                self.assertIn(name, attribution_text)
+
+    def test_the_extracted_function_source_is_byte_identical_regardless_of_caller(self) -> None:
+        # Get-AttrCudaEmbeddedFunctionSource extracts VERBATIM text keyed only by function name
+        # from the ONE module file -- calling it twice with the same names, independent of which
+        # job is being generated, always returns the same string. This is the guarantee the two
+        # emitted jobs' embeddings rely on.
+        proc = self.run_with_module(
+            "$a = Get-AttrCudaEmbeddedFunctionSource -Name @('Read-AttrCudaBase64Payload', 'Test-AttrCudaFootagePart')\n"
+            "$b = Get-AttrCudaEmbeddedFunctionSource -Name @('Read-AttrCudaBase64Payload', 'Test-AttrCudaFootagePart')\n"
+            "Write-Output ('IDENTICAL=' + ($a -ceq $b))\n"
+            "Write-Output ('NONEMPTY=' + ($a.Length -gt 0))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("IDENTICAL=True", proc.stdout)
+        self.assertIn("NONEMPTY=True", proc.stdout)
+
+
+def _make_fixture_repo_missing_closure_sibling(path: Path) -> list[str]:
+    """Like _make_fixture_repo, but omits ONE smoke-runner closure sibling file
+    (gui-smoke-process-boundary.psm1), so Assert-AttrCudaClosureComplete would throw
+    ATTRCUDA_BLOB_UNRESOLVED if it ever ran against this commit -- used to prove a resolver
+    refusal surfaces even when the closure resolution would ALSO fail (ATTR3-FOOTAGE-BIND-1 PR-B,
+    round 1's ordering requirement)."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git_run(["init", "-q", "-b", "main"], path)
+    _git_run(["config", "commit.gpgsign", "false"], path)
+    _git_run(["config", "user.email", "lane@example.invalid"], path)
+    _git_run(["config", "user.name", "attr3 behaviour fixture"], path)
+    (path / "src" / "mlv" / "llrawproc").mkdir(parents=True)
+    (path / "tools" / "profiling").mkdir(parents=True)
+    (path / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(
+        "# fixture stand-in for run-release-gui-smoke.ps1\n"
+        ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+        "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+        ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n",
+        encoding="utf-8",
+    )
+    (path / "tools" / "profiling" / "gui-smoke-screenshot-provenance.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    (path / "tools" / "profiling" / "provenance-stamp.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    # Deliberately OMITTED: gui-smoke-process-boundary.psm1.
+    shas = []
+    for index, text in enumerate(("first", "second")):
+        (path / "src" / "mlv" / "llrawproc").mkdir(parents=True, exist_ok=True)
+        (path / "src" / "mlv" / "llrawproc" / "llrawproc.c").write_text(
+            f"/* fixture revision {text} */\n", encoding="utf-8"
+        )
+        _git_run(["add", "-A"], path)
+        _git_run(["commit", "-q", "-m", f"fixture {index}"], path)
+        shas.append(_git_run(["rev-parse", "HEAD"], path))
+    return shas
+
+
+@requires_pwsh
+@requires_git
+class OwnerClipResolverOrderingTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B, round 1: a resolver refusal for an owner id must surface even
+    when the smoke-runner closure resolution would ALSO fail -- the resolver decision runs
+    first, so its refusal is never masked by an unrelated closure/build-manifest failure that
+    would also have fired had the code reached that far."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo_missing_closure_sibling(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+
+    def test_resolver_refusal_surfaces_not_the_closure_failure(self) -> None:
+        out_file = self.staging / "job.ps1"
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'M16-1243' "
+            f"-OutFile '{out_file}' -RepoRoot '{self.repo}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_OWNER_RESOLVE_REFUSED", message)
+        self.assertNotIn("ATTRCUDA_BLOB_UNRESOLVED", message)
+        self.assertNotIn("ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE", message)
+        self.assertFalse(out_file.exists())
+
+    def test_the_closure_would_indeed_fail_on_its_own(self) -> None:
+        # Proves this fixture repo genuinely breaks closure resolution -- so the test above is
+        # not vacuously green because the closure would have passed anyway.
+        proc = self.run_with_module(
+            _guard(
+                f"Assert-AttrCudaClosureComplete -RepoRoot '{self.repo}' -Commit '{self.shas[1]}'"
+            )
+        )
+        self.assert_throws(proc, "ATTRCUDA_BLOB_UNRESOLVED")
 
 
 @requires_pwsh
@@ -1755,7 +2004,7 @@ class SmokeRunnerStaleRefusalTests(_PwshCase):
     def _extract_pin_check(self) -> str:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
         start_marker = "$smokeRunnerClosureDir = Join-Path $Cache $SmokeRunnerClosureDirName"
-        end_marker = "\n# NA-4: open exactly the one authorized path baked in by the generator -- no lookup."
+        end_marker = "\n# Fixture runs open the cached clip named at generation time"
         start = text.index(start_marker)
         end = text.index(end_marker, start)
         self.assertGreater(end, start, "smoke-runner pin check markers moved in the generator")

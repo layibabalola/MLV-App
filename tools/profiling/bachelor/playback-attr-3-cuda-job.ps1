@@ -11,34 +11,33 @@
 #   - the provenance sidecar contract in tools/repo_hygiene/gpu_job_result_provenance.py
 #     (rangeHeadSha, llrawprocBlobId, dllSha256 lowercase, pendingSymbolPresence)
 #
-# FOOTAGE (NA-4, docs/never-authorized.json): the job opens exactly ONE clip, the exact
-# canonical path passed as -ClipPath. There is NO id-to-file resolution anywhere; an
-# earlier resolver was ruled an NA-4 evasion (sol, PR #131 r2) and removed. NA-4 admits
-# a real clip named in command text only as the single path on the CLIP_OR_NONE line of the
-# running lane's own MLV_LANE_PROMPT, which the owner types by hand (agents cannot write it).
-# The hook's frozen owner-consented table (NA4-OWNER-CONSENTED-FOOTAGE-1) admits NO path from
-# command text (round 6, NARROW); the route that card provides for consented footage is a
-# tracked, id-addressed consumer that verifies content against that table. That route is NOT
-# the only way a consented clip can be opened today: NA-4 exception (2) above still admits
-# the one CLIP_OR_NONE path, and nothing excludes a consented clip's own path from it, so a
-# consented clip named there is opened with no content check against the table and by no
-# id-addressed consumer. This generator is not yet
-# one, so it REFUSES every owner-clip id until card ATTR3-FOOTAGE-BIND-1 makes it id-only
-# (resolving via tools/gates/output-budget.json with a table-hash check) and wires
-# tools/gates/verify_consented_footage.py in (see the refusal below the fixture test). An
-# interpreter one-liner can still open any path; that residual is unchanged. A two-part
-# clip's continuation part is opened
-# by the application itself, never named by this code. The owner's consent record
-# (receipts/owner-footage-consent-20260916.json and its -correction.json) is evidence of
-# consent, never an authorization. Adjudication:
-# .claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md.
+# FOOTAGE (ATTR3-FOOTAGE-BIND-1, PR-B): an owner-clip id is RESOLVED, never handed a path. The
+# generator calls tools/gates/resolve_consented_clip.py (PR-A) as a child process with
+# --emit-json: the resolver alone proves that the frozen spec's parts for this id (length,
+# sha256, and the hook's own norm() of the path) agree with the hook's frozen consent table
+# (OWNER_CONSENTED_FOOTAGE in tools/hooks/mlv-never-authorized.py). A non-zero resolver exit is a
+# refusal -- this generator throws with the resolver's typed status and emits nothing, never a
+# path. On success, each part's path/length/sha256 is baked into the emitted job as base64 of its
+# UTF-8 bytes (never an interpolated literal -- see Attr3FootagePresenceJob.psm1's header for
+# why), so the job that runs on Bachelor re-checks every part's CONTENT against the live
+# filesystem -- via the shared Test-AttrCudaFootagePart verifier -- before it opens anything,
+# never trusting that "the resolver approved it" means the bytes are still there.
+# -ClipPath and -FixtureSha256 are both REFUSED for an owner id: there is no owner-typed path on
+# this route, and a content hash is meaningless without the resolver's own cross-check against
+# the frozen table. An interpreter one-liner can still open any path; that residual is
+# unchanged. A two-part clip's continuation part is opened by the application itself, never
+# named by this code. The owner's consent record (receipts/owner-footage-consent-20260916.json
+# and its -correction.json) is evidence of consent, never an authorization. Adjudication:
+# .claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md (round 1);
+# ATTR3-FOOTAGE-BIND-1 (round 2, this file).
 #
 # FIXTURE REHEARSAL (ATTR3-FIXTURE-REHEARSAL-1, extended by ATTR3-FIXTURE-STAGE-1): -ClipId
 # may instead be exactly 'tiny_dual_iso' or 'large_dual_iso' -- the two tracked fixtures under
 # tests/fixtures/clips/, admitted by NA-4 without a CLIP_OR_NONE authorization because they
 # never resolve through an id-to-file lookup either. -ClipPath is OPTIONAL for a fixture id:
 # omitted, it is derived as the agent cache path for -ClipId; supplied, it must still resolve
-# to the agent cache with BaseName -ceq $ClipId, unchanged from the owner-clip case. A fixture
+# to the agent cache with BaseName -ceq $ClipId. -ClipPath is REFUSED outright for an owner id
+# (see FOOTAGE above); only the fixture arm ever takes one. A fixture
 # id also requires -FixtureSha256 (64 lowercase hex, baked by attr3-stage-fixture-job.ps1 and
 # printed on its own result line): the emitted job hashes the cached clip before it is ever
 # opened and fails closed at FIXTURE_CONTENT_MISMATCH (exit 17) on a mismatch -- a cache file
@@ -83,11 +82,11 @@
 # the call. A log that is absent, unbound or outside this job's work tree exits 16
 # (SMOKE_LOG_UNAVAILABLE) -- a missing gate is never a passed gate.
 #
-# Usage (owner clip):
+# Usage (owner clip, id-only -- no -ClipPath, no -FixtureSha256):
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
 #       -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> `
-#       -ClipId M16-1243 -ClipPath <the lane's CLIP_OR_NONE path> -OutFile <path>\<jobId>.job.ps1
-# (an owner-clip -ClipId is refused until ATTR3-FOOTAGE-BIND-1; see FOOTAGE above)
+#       -ClipId M16-1243 -OutFile <path>\<jobId>.job.ps1
+# (the id is resolved through tools/gates/resolve_consented_clip.py; see FOOTAGE above)
 # Usage (fixture rehearsal, no -ClipPath):
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
 #       -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> -ClipId tiny_dual_iso `
@@ -103,9 +102,10 @@ param(
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$SourceCommit,
 
-    # Either the owner-clip id pattern, or exactly one of the two tracked-fixture ids (a
-    # literal allowlist, not a loosened pattern -- ATTR3-FIXTURE-REHEARSAL-1). A fixture id
-    # never touches NA-4: it names no path, so the generator's own consent gate never sees it.
+    # Either the owner-clip id pattern (resolved via tools/gates/resolve_consented_clip.py,
+    # ATTR3-FOOTAGE-BIND-1), or exactly one of the two tracked-fixture ids (a literal allowlist,
+    # not a loosened pattern -- ATTR3-FIXTURE-REHEARSAL-1). A fixture id never touches the
+    # resolver: it names no clip in the frozen spec, so no id-to-file lookup ever runs for it.
     [Parameter(Mandatory = $true)]
     # The fixture arm is CASE-SENSITIVE via (?-i:...): PowerShell's ValidatePattern is
     # case-insensitive by default, so without it 'TINY_DUAL_ISO' would pass validation while the
@@ -116,22 +116,22 @@ param(
     [ValidatePattern('^(?:[A-Za-z]\d{2}-\d{3,4}|(?-i:tiny_dual_iso|large_dual_iso))\z')]
     [string]$ClipId,
 
-    # The ONE authorized clip (NA-4): must equal the CLIP_OR_NONE line of the lane running
-    # this generator. An absolute path directly inside the Bachelor agent cache whose
-    # BaseName is -ClipId; the emitted job re-checks both on Bachelor and fails closed.
-    # MANDATORY for an owner clip id (unchanged). OPTIONAL for a fixture id
+    # A fixture id's cache path, in the agent cache, BaseName -ceq -ClipId; the emitted job
+    # re-checks both on Bachelor and fails closed. OPTIONAL for a fixture id
     # (ATTR3-FIXTURE-STAGE-1): omitted, it is derived below as the agent cache path for
     # -ClipId, from the same agent root the template's own $Root already names.
+    # REFUSED outright for an owner clip id (ATTR3-FOOTAGE-BIND-1): the owner's footage path is
+    # resolved through tools/gates/resolve_consented_clip.py, never typed by a caller.
     [Parameter(Mandatory = $false)]
     [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$')]
     [string]$ClipPath = '',
 
     # A fixture id's cached bytes, authenticated before this generator will bake -ClipPath
-    # into the emitted job: MANDATORY for a fixture id, REFUSED for an owner clip id (an
-    # owner clip is authorized by NA-4's path match, never by a content hash). The value
-    # attr3-stage-fixture-job.ps1 bakes and prints on its own FIXTURE_SHA256= result line.
-    # Validated below rather than by ValidatePattern, so a malformed value and an outright
-    # missing one are told apart in the refusal.
+    # into the emitted job: MANDATORY for a fixture id, REFUSED for an owner clip id (an owner
+    # id is bound to its content by the resolver's own cross-check, not by a caller-supplied
+    # hash). The value attr3-stage-fixture-job.ps1 bakes and prints on its own FIXTURE_SHA256=
+    # result line. Validated below rather than by ValidatePattern, so a malformed value and an
+    # outright missing one are told apart in the refusal.
     [string]$FixtureSha256 = '',
 
     [Parameter(Mandatory = $true)]
@@ -183,6 +183,109 @@ param(
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
 
+# --- ATTR3-FOOTAGE-BIND-1 PR-B: resolve an owner-clip id, generator-side only -----------------
+# Mirrors attr3-footage-presence-job.ps1's own resolver invocation (PR-A): the resolver runs as a
+# CHILD PROCESS that writes paths only into a private --emit-json temp file; this generator reads
+# it IN-PROCESS (never Write-Output-ing its content) and deletes it in a `finally` before
+# returning. A real footage path may flow only through process memory or through a file a child
+# process writes -- never into a tool call or onto this generator's own stdout. This is the
+# generator's ONLY path to obtaining parts for an owner id: there is no parameter that skips it.
+$OwnerPartPathPattern = '^[A-Za-z]:(?:/[A-Za-z0-9_.-]+)+$'
+
+function Resolve-AttrCudaOwnerPython {
+    <#
+    .SYNOPSIS
+    Prefer `python.exe` only after proving it is Python 3; else fall back to the `py` launcher
+    pinned to -3. Mirrors attr3-footage-presence-job.ps1's own interpreter probe.
+    #>
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($null -ne $python) {
+        $major = @(& $python.Source -c 'import sys; print(sys.version_info[0])' 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $major.Count -eq 1 -and $major[0] -eq '3') {
+            return [pscustomobject]@{ Exe = $python.Source; PrefixArgs = @() }
+        }
+    }
+    $pyLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($null -ne $pyLauncher) {
+        return [pscustomobject]@{ Exe = $pyLauncher.Source; PrefixArgs = @('-3') }
+    }
+    throw 'PLAYBACK_ATTR3_OWNER_NO_PYTHON no Python 3 interpreter is available to resolve an owner-clip id'
+}
+
+function Resolve-AttrCudaOwnerClipParts {
+    <#
+    .SYNOPSIS
+    Resolve an owner-clip id to its baked-for-embedding parts (index/pathBase64/length/sha256
+    ordered by index), or throw with the resolver's own typed refusal. The resolver script is
+    located relative to THIS generator's own checkout ($PSScriptRoot), independent of -RepoRoot
+    (which may point at a throwaway repo in a test): the tool itself always ships with the real
+    checkout, while -RepoRoot only selects which repo's frozen spec ref is resolved against.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ClipId,
+        [Parameter(Mandatory = $true)][string]$RepoRoot
+    )
+
+    $resolverPath = Join-Path $PSScriptRoot '..\..\gates\resolve_consented_clip.py'
+    if (-not (Test-Path -LiteralPath $resolverPath -PathType Leaf)) {
+        throw "PLAYBACK_ATTR3_OWNER_RESOLVER_MISSING resolver not found at $resolverPath"
+    }
+    $resolverPath = (Resolve-Path -LiteralPath $resolverPath).Path
+    $py = Resolve-AttrCudaOwnerPython
+
+    $emitPath = Join-Path ([IO.Path]::GetTempPath()) ("playback-attr-3-cuda-owner-resolve-$([guid]::NewGuid().ToString('N')).json")
+    try {
+        $resolverArgs = @($py.PrefixArgs) + @($resolverPath, '--clip-id', $ClipId, '--repo-root', $RepoRoot, '--emit-json', $emitPath)
+        $summaryLines = @(& $py.Exe @resolverArgs 2>&1)
+        $resolverExit = $LASTEXITCODE
+        if ($resolverExit -ne 0) {
+            # $summaryLines is the resolver's own path-free JSON summary line (its CLI contract
+            # never prints a part path), so folding it into this message is safe.
+            throw "PLAYBACK_ATTR3_OWNER_RESOLVE_REFUSED clip '$ClipId' was refused by the resolver (exit $resolverExit): $($summaryLines -join ' ')"
+        }
+        if (-not (Test-Path -LiteralPath $emitPath -PathType Leaf)) {
+            throw 'PLAYBACK_ATTR3_OWNER_EMIT_MISSING resolver exited 0 but wrote no --emit-json file'
+        }
+        $emitBytes = [IO.File]::ReadAllBytes($emitPath)
+    } finally {
+        if (Test-Path -LiteralPath $emitPath) { Remove-Item -LiteralPath $emitPath -Force }
+    }
+
+    $resolved = [Text.Encoding]::UTF8.GetString($emitBytes) | ConvertFrom-Json
+    if ($resolved.clipId -cne $ClipId) {
+        throw "PLAYBACK_ATTR3_OWNER_CLIP_ID_MISMATCH resolver emitted clipId '$($resolved.clipId)' for requested '$ClipId'"
+    }
+    $rawParts = @($resolved.parts)
+    if ($rawParts.Count -eq 0) {
+        throw "PLAYBACK_ATTR3_OWNER_NO_PARTS resolver returned zero parts for '$ClipId'"
+    }
+
+    # Structural check on each part's path, in addition to the resolver's own content
+    # cross-check: a drive letter, colon, then forward-slash-separated segments of letters,
+    # digits, underscore, dot and hyphen -- the exact shape of the real consented-part paths in
+    # tools/gates/output-budget.json. Defense in depth, not the injection-safety mechanism (the
+    # base64 embedding below is): this refuses a shape the base64 route would have accepted.
+    @($rawParts | Sort-Object { [int]$_.index } | ForEach-Object {
+        $path = [string]$_.path
+        if ($path -notmatch $OwnerPartPathPattern) {
+            throw "PLAYBACK_ATTR3_OWNER_PART_PATH_INVALID part $($_.index) does not match the owner footage path allowlist (drive letter, colon, forward-slash segments)"
+        }
+        $sha = ([string]$_.sha256).ToLowerInvariant()
+        if ($sha -notmatch '^[0-9a-f]{64}$') {
+            throw "PLAYBACK_ATTR3_OWNER_PART_SHA_INVALID part $($_.index) sha256 is not 64 hex characters"
+        }
+        # Each part's path travels ONLY as base64 of its UTF-8 bytes from here on -- never as an
+        # interpolated literal (see Attr3FootagePresenceJob.psm1's header for why).
+        [ordered]@{
+            index = [int]$_.index
+            pathBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($path))
+            length = [int64]$_.length
+            sha256 = $sha
+        }
+    })
+}
+
 # The emitted job runs on a host with no checkout, so it cannot Import-Module: the verification
 # functions are spliced into its text VERBATIM at generation time. The test suite executes the
 # module copy, so the code under test is the code that runs on Bachelor.
@@ -199,7 +302,13 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Publish-AttrCudaFileMove',
     'New-AttrCudaDirectory',
     'Assert-AttrCudaNoLinkBelowRoot',
-    'Remove-AttrCudaTree'
+    'Remove-AttrCudaTree',
+    # ATTR3-FOOTAGE-BIND-1 PR-B: the owner-clip content gate. Test-AttrCudaFootagePart is the
+    # SAME function Attr3FootagePresenceJob.psm1 embeds for its own probe -- one definition,
+    # spliced verbatim into both, never two copies that can drift apart.
+    'Read-AttrCudaBase64Payload',
+    'Test-AttrCudaFootagePart',
+    'ConvertTo-AttrCudaUtf8String'
 )
 
 # --- resolve provenance locally, BEFORE the job ever touches Bachelor -------------
@@ -214,6 +323,49 @@ if ($LASTEXITCODE -ne 0 -or $llrawprocBlobId -notmatch '^[0-9a-f]{40}$') {
 }
 if ($PresentMonSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
     throw "PresentMonSha256 is not a 64-hex sha256: $PresentMonSha256"
+}
+
+# ATTR3-FIXTURE-REHEARSAL-1: the literal allowlist the ValidatePattern above also enforces,
+# restated here so the fixtureRehearsal flag is decided by an exact membership test rather
+# than by re-deriving it from the regex. A fixture run must be unmistakable in its own
+# artifacts, so this flag is baked into the job body and never inferred by the job at runtime.
+$FixtureClipIds = @('tiny_dual_iso', 'large_dual_iso')
+$isFixtureRehearsal = $FixtureClipIds -ccontains $ClipId
+$fixtureRehearsalLiteral = if ($isFixtureRehearsal) { '$true' } else { '$false' }
+
+# ATTR3-FIXTURE-STAGE-1. The compound suffix the two tracked fixtures carry is never spelled
+# as one literal token anywhere in this file: a token ending in it trips this repository's own
+# NA-4 PreToolUse gate, even in source text that names no real clip, so it is composed here.
+$FixtureClipExtension = '.' + 'mlv'
+
+# ATTR3-FOOTAGE-BIND-1 PR-B (round 1): an owner-clip id is decided and RESOLVED right here --
+# before the smoke-runner closure resolution and before any build-manifest work below -- so a
+# resolver refusal always surfaces on its own, never masked by an unrelated closure or
+# build-manifest failure that would also have fired had the code reached that far.
+$ownerPartsForJob = $null
+if ($isFixtureRehearsal) {
+    if ($FixtureSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED -FixtureSha256 must be 64 lowercase hex for a fixture id ('$ClipId'); got '$FixtureSha256'"
+    }
+    if ([string]::IsNullOrWhiteSpace($ClipPath)) {
+        $ClipPath = Join-Path (Join-Path $AgentRoot 'cache') ($ClipId + $FixtureClipExtension)
+    }
+    if ($ClipPath -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
+        throw "PLAYBACK_ATTR3_CLIPPATH_INVALID -ClipPath contains characters outside the allowlist: '$ClipPath'"
+    }
+} else {
+    if ($FixtureSha256) {
+        throw "PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED -FixtureSha256 is refused for an owner clip id ('$ClipId')"
+    }
+    if ($ClipPath) {
+        throw "PLAYBACK_ATTR3_CLIPPATH_REFUSED -ClipPath is refused for an owner clip id ('$ClipId'): the footage path is resolved through tools/gates/resolve_consented_clip.py, never typed by a caller"
+    }
+    $ownerPartsForJob = @(Resolve-AttrCudaOwnerClipParts -ClipId $ClipId -RepoRoot $RepoRoot)
+}
+$ownerPartsJson = ''
+if (-not $isFixtureRehearsal) {
+    $ownerPartsJson = $ownerPartsForJob | ConvertTo-Json -Compress -Depth 5
+    if ($ownerPartsForJob.Count -eq 1) { $ownerPartsJson = "[$ownerPartsJson]" }
 }
 
 # ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN): the runner is not standalone -- it
@@ -262,47 +414,6 @@ $shortSha = $SourceCommit.Substring(0, 12)
 $exeName = "MLVApp-playback-attr-3-cuda-$shortSha.exe"
 $reconName = "igpu_recon_cuda-playback-attr-3-cuda-$shortSha.dll"
 
-# ATTR3-FIXTURE-REHEARSAL-1: the literal allowlist the ValidatePattern above also enforces,
-# restated here so the fixtureRehearsal flag is decided by an exact membership test rather
-# than by re-deriving it from the regex. A fixture run must be unmistakable in its own
-# artifacts, so this flag is baked into the job body and never inferred by the job at runtime.
-$FixtureClipIds = @('tiny_dual_iso', 'large_dual_iso')
-$isFixtureRehearsal = $FixtureClipIds -ccontains $ClipId
-$fixtureRehearsalLiteral = if ($isFixtureRehearsal) { '$true' } else { '$false' }
-
-# NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (B), kept at round 6: FAIL CLOSED until this route is
-# id-only and content-bound. NA-4 admits no consented path from command text, and nothing on
-# this route yet checks the bytes against the frozen table with
-# tools/gates/verify_consented_footage.py, so an owner-clip id is refused
-# outright (no override switch) until card ATTR3-FOOTAGE-BIND-1 wires that verifier in.
-if (-not $isFixtureRehearsal) {
-    throw "REFUSED: owner-clip id '$ClipId' emits no job until card ATTR3-FOOTAGE-BIND-1 wires tools/gates/verify_consented_footage.py into this route; only the fixture ids 'tiny_dual_iso' and 'large_dual_iso' are emitted today."
-}
-
-# ATTR3-FIXTURE-STAGE-1. The compound suffix the two tracked fixtures carry is never spelled
-# as one literal token anywhere in this file: a token ending in it trips this repository's own
-# NA-4 PreToolUse gate, even in source text that names no real clip, so it is composed here.
-$FixtureClipExtension = '.' + 'mlv'
-
-if ($isFixtureRehearsal) {
-    if ($FixtureSha256 -notmatch '^[0-9a-f]{64}$') {
-        throw "PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED -FixtureSha256 must be 64 lowercase hex for a fixture id ('$ClipId'); got '$FixtureSha256'"
-    }
-    if ([string]::IsNullOrWhiteSpace($ClipPath)) {
-        $ClipPath = Join-Path (Join-Path $AgentRoot 'cache') ($ClipId + $FixtureClipExtension)
-    }
-} else {
-    if ($FixtureSha256) {
-        throw "PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED -FixtureSha256 is refused for an owner clip id ('$ClipId')"
-    }
-    if ([string]::IsNullOrWhiteSpace($ClipPath)) {
-        throw "PLAYBACK_ATTR3_CLIPPATH_REQUIRED -ClipPath is mandatory for an owner clip id ('$ClipId')"
-    }
-}
-if ($ClipPath -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
-    throw "PLAYBACK_ATTR3_CLIPPATH_INVALID -ClipPath contains characters outside the allowlist: '$ClipPath'"
-}
-
 # --- job body template (placeholders are substituted below; the body itself never
 #     touches this generator's variables directly, so there is no accidental capture
 #     of this machine's environment into the emitted script) ----------------------
@@ -312,6 +423,7 @@ $SourceCommit = '__SOURCE_COMMIT__'
 $ClipId = '__CLIP_ID__'
 $BuildManifestSha256 = '__BUILD_MANIFEST_SHA256__'
 $AuthorizedClipPath = '__CLIP_PATH__'
+$OwnerPartsJson = '__OWNER_PARTS_JSON__'
 $RangeHeadSha = '__RANGE_HEAD_SHA__'
 $LlrawprocBlobId = '__LLRAWPROC_BLOB_ID__'
 $ExeName = '__EXE_NAME__'
@@ -604,13 +716,18 @@ $smokeRunnerClosureMismatch = Get-AttrCudaClosureDirectoryMismatch -Dir $smokeRu
 if ($null -ne $smokeRunnerClosureMismatch) {
     throw "ATTRCUDA_SMOKE_RUNNER_STALE $smokeRunnerClosureMismatch"
 }
-# NA-4: open exactly the one authorized path baked in by the generator -- no lookup.
-$clipPath = $AuthorizedClipPath
-# Injection guard (sol PR #131 r4): the path is later embedded in a nested pwsh -Command string.
-if ($clipPath -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') { throw "authorized clip path contains characters outside the allowlist" }
-if ((Split-Path -Parent $clipPath) -ine $Cache) { throw "authorized clip path is not directly inside the agent cache" }
-if ([IO.Path]::GetFileNameWithoutExtension($clipPath) -cne $ClipId) { throw "authorized clip path does not name clip id $ClipId" }
-if (-not (Test-Path -LiteralPath $clipPath -PathType Leaf)) { throw "authorized clip path is missing on this host" }
+# Fixture runs open the cached clip named at generation time, checked for residence in the
+# agent cache -- unchanged from before ATTR3-FOOTAGE-BIND-1. An owner run has no single
+# authorized path to check here at all: its parts are verified below, after $Pub exists, and
+# $clipPath is set only once every part has PASSed (never composed from $Cache/$ClipId).
+if ($FixtureRehearsal) {
+    $clipPath = $AuthorizedClipPath
+    # Injection guard (sol PR #131 r4): the path is later embedded in a nested pwsh -Command string.
+    if ($clipPath -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') { throw "authorized clip path contains characters outside the allowlist" }
+    if ((Split-Path -Parent $clipPath) -ine $Cache) { throw "authorized clip path is not directly inside the agent cache" }
+    if ([IO.Path]::GetFileNameWithoutExtension($clipPath) -cne $ClipId) { throw "authorized clip path does not name clip id $ClipId" }
+    if (-not (Test-Path -LiteralPath $clipPath -PathType Leaf)) { throw "authorized clip path is missing on this host" }
+}
 
 # $Work and $Pub already exist (created at job start, alongside the TEMP/TMP scratch
 # dir under $Work) -- do not remove/recreate $Work here, which would delete the live
@@ -622,9 +739,8 @@ New-Item -ItemType Directory -Path (Join-Path $Work 'out') -Force | Out-Null
 [void](New-AttrCudaDirectory -Path $Pub)
 
 # ATTR3-FIXTURE-STAGE-1: a fixture run authenticates the cached clip's CONTENT before it is
-# ever opened -- a cache file name proves nothing about its bytes. Owner-clip runs carry no
-# $FixtureSha256 (the generator refuses one) and skip this: NA-4's path match is their
-# authorization instead. Hashed and checked before any package is deployed or playback launched.
+# ever opened -- a cache file name proves nothing about its bytes. Hashed and checked before any
+# package is deployed or playback launched.
 if ($FixtureRehearsal) {
     $actualClipSha256 = (Get-FileHash -LiteralPath $clipPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualClipSha256 -ne $FixtureSha256) {
@@ -638,6 +754,43 @@ if ($FixtureRehearsal) {
         Write-Output "RESULT=FIXTURE_CONTENT_MISMATCH EXPECTED=$FixtureSha256 ACTUAL=$actualClipSha256 ARTIFACTS=$Pub"
         exit 17
     }
+} else {
+    # ATTR3-FOOTAGE-BIND-1 PR-B: an owner run authenticates EVERY part's CONTENT -- exists,
+    # readable, length, sha256, via the SAME Test-AttrCudaFootagePart the presence-probe job
+    # uses -- before anything is deployed, before PresentMon starts, and before the smoke
+    # child runs. The resolver's cross-check baked these parts in; this is the live-filesystem
+    # re-check that never just takes the resolver's word for it.
+    $ownerRawParts = @($OwnerPartsJson | ConvertFrom-Json)
+    $ownerPartResults = [System.Collections.Generic.List[object]]::new()
+    $ownerDecodedPaths = [System.Collections.Generic.List[object]]::new()
+    foreach ($rawPart in ($ownerRawParts | Sort-Object { [int]$_.index })) {
+        # The path never travels as a literal: decoded from base64 IN THIS PROCESS, on this
+        # host, and used only through -LiteralPath calls -- never re-embedded into a string
+        # PowerShell parses as code.
+        $decoded = Read-AttrCudaBase64Payload -Base64 $rawPart.pathBase64
+        $partPath = ConvertTo-AttrCudaUtf8String -Bytes $decoded.bytes
+        $status = Test-AttrCudaFootagePart -Path $partPath -ExpectedLength ([int64]$rawPart.length) -ExpectedSha256 ([string]$rawPart.sha256)
+        [void]$ownerPartResults.Add([ordered]@{ index = [int]$rawPart.index; status = $status })
+        [void]$ownerDecodedPaths.Add($partPath)
+    }
+    $ownerFailingParts = @($ownerPartResults | Where-Object { $_.status -ne 'PASS' })
+    if ($ownerFailingParts.Count -gt 0) {
+        # Per-part index and status only -- never a path -- in every reader-facing output below.
+        $notVerified = [ordered]@{
+            schema='playback-attr-3-cuda-venue.v1'; result='OWNER_FOOTAGE_NOT_VERIFIED'
+            fixtureRehearsal=$FixtureRehearsal
+            parts=@($ownerPartResults)
+            sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+        }
+        Save-Json $notVerified (Join-Path $Pub 'summary.json')
+        $partsSummary = (($ownerPartResults | ForEach-Object { "$($_.index)=$($_.status)" }) -join ',')
+        Write-Output "RESULT=OWNER_FOOTAGE_NOT_VERIFIED PARTS=$partsSummary ARTIFACTS=$Pub"
+        exit 19
+    }
+    # The path this job opens is byte-equal to the decoded first part -- never composed from
+    # $Cache/$ClipId, never re-derived: the resolver named it, every part above just verified
+    # against the live filesystem is the only source this job trusts.
+    $clipPath = $ownerDecodedPaths[0]
 }
 
 Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip) -DestinationPath (Join-Path $Work 'pkg') -Force
@@ -1008,6 +1161,7 @@ $text = $template.
     Replace('__CLIP_ID__', $ClipId).
     Replace('__BUILD_MANIFEST_SHA256__', $BuildManifestSha256.ToLowerInvariant()).
     Replace('__CLIP_PATH__', $ClipPath.Replace("'", "''")).
+    Replace('__OWNER_PARTS_JSON__', $ownerPartsJson.Replace("'", "''")).
     Replace('__RANGE_HEAD_SHA__', $SourceCommit).
     Replace('__LLRAWPROC_BLOB_ID__', $llrawprocBlobId).
     Replace('__EXE_NAME__', $exeName).
