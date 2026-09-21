@@ -435,18 +435,32 @@ function Start-PresentMonCapture([string]$CsvPath) {
     return $proc
 }
 
-function Wait-PresentMonCapture($Proc, [int]$TimeoutSeconds = 35) {
+function Wait-PresentMonCapture($Proc, [int]$TimeoutSeconds = 35, [int]$KillWaitTimeoutSeconds = 10) {
     if (-not $Proc.WaitForExit($TimeoutSeconds * 1000)) {
         # ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3, carried to round 3): the empty catch
         # here used to swallow a Kill() failure outright -- a PresentMon that survived both the
         # timeout and the kill attempt left no trace anywhere. Reported the same way
-        # Stop-PresentMonCapture already reports it: killError captured, confirmedExited read from
-        # $Proc itself AFTER the attempt, never assumed from "Kill() didn't throw".
+        # Stop-PresentMonCapture already reports it: killError and waitError captured,
+        # confirmedExited read from $Proc itself AFTER the attempt, never assumed from "Kill()
+        # didn't throw".
+        # Round 4 (fable round-3 minor, PR #144): Kill() is asynchronous -- sampling HasExited in
+        # the very next statement could still read false for a process that exits milliseconds
+        # later, sending an operator hunting a lingering process that is not there. Wait bounded
+        # after Kill(), exactly as Stop-PresentMonCapture already does, before sampling HasExited.
         $killError = $null
+        $waitError = $null
         try { $Proc.Kill() } catch { $killError = $_.Exception.Message }
+        try {
+            if (-not $Proc.WaitForExit($KillWaitTimeoutSeconds * 1000)) {
+                $waitError = "did not exit within $KillWaitTimeoutSeconds s after Kill()"
+            }
+        } catch {
+            $waitError = $_.Exception.Message
+        }
         $confirmedExited = [bool]$Proc.HasExited
         $killErrorText = if ($null -eq $killError) { '<none>' } else { $killError }
-        throw "PRESENTMON_TIMEOUT: did not exit within $TimeoutSeconds s after playback (confirmedExited=$confirmedExited killError=$killErrorText)"
+        $waitErrorText = if ($null -eq $waitError) { '<none>' } else { $waitError }
+        throw "PRESENTMON_TIMEOUT: did not exit within $TimeoutSeconds s after playback (confirmedExited=$confirmedExited killError=$killErrorText waitError=$waitErrorText)"
     }
     [pscustomobject]@{ status = 'done'; exitCode = $Proc.ExitCode }
 }

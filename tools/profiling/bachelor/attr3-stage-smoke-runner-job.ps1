@@ -14,12 +14,19 @@
 # the real cause. The fix stages the runner's WHOLE closure together, under their original file
 # names, in one directory, so $PSScriptRoot resolves every one of them.
 #
-# THE CLOSURE IS DERIVED MECHANICALLY, NEVER A HAND LIST. Resolve-AttrCudaSmokeRunnerClosure
-# (AttrCudaArtifacts.psm1) scans the runner's own committed text for $PSScriptRoot-relative
-# dot-source and Import-Module loads, and recurses into each dependency's own committed text the
-# same way -- so a dependency that itself loads a further sibling is followed, not missed. A
-# test (tools/repo_hygiene/test_playback_attr_3_cuda_behaviour.py) asserts the scanned set equals
-# the staged set, including a synthetic recursive chain.
+# THE CLOSURE IS AN EXPLICIT, PINNED MANIFEST -- NEVER DISCOVERED (ATTR3-SMOKE-RUNNER-DEPS-1
+# round 3, NARROW BY REDESIGN; contract restated honestly round 4, PR #144). Round 1 and round 2
+# derived this closure by SCANNING committed text; a design swarm ruled that undiscoverable-by-
+# patching (a literal-based scanner cannot see every real load shape, and a basename-only
+# classifier can be fooled by an unrelated file sharing a staged one's name). The closure is now
+# the fixed list in Get-AttrCudaSmokeRunnerClosureManifest (AttrCudaArtifacts.psm1);
+# Resolve-AttrCudaSmokeRunnerClosure does nothing but resolve each pinned path's committed bytes.
+# Assert-AttrCudaClosureComplete is the generator-time REGRESSION TRIPWIRE that keeps the pinned
+# list honest -- an AST census over each manifest file's own committed text, throwing
+# ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE the moment a load site cannot be classified. It is a
+# tripwire over these four reviewed files, not a proof that covers every future edit; the runtime
+# path (playback-attr-3-cuda-job.ps1's SMOKE_RUN_FAILED branch) is the real safety property for
+# whatever it cannot see. Full contract at AttrCudaArtifacts.psm1, above the manifest.
 #
 # CONTENT-ADDRESSED DIRECTORY, NOT A FIXED NAME (mirrors ATTR3-SMOKE-RUNNER-PIN-1 round 2's
 # reasoning for the single-file cache name). The published directory is named
@@ -211,7 +218,16 @@ try {
     [void](Assert-AttrCudaSafeArtifactName -Name $CacheDirName)
     foreach ($entry in $ClosureEntries) { [void](Assert-AttrCudaSafeArtifactName -Name $entry.name) }
     $cacheDirPath = Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache $CacheDirName) -Label "cache/$CacheDirName"
-    $partialDirPath = Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache "$CacheDirName.partial") -Label "cache/$CacheDirName.partial"
+    # sol PR #144 round 4 minor: every same-name concurrent stager used to share this ONE
+    # deterministic partial name, so one job could remove-and-recreate another job's not-yet-
+    # complete scratch directory between its per-file verification and its rename, letting a
+    # partial directory publish as a false success (attribution's exact-set check still refuses
+    # the resulting incomplete directory, so wrong bytes were never USED -- only the staging
+    # result could be wrong). A GUID suffix generated at job-body runtime, not at generator time,
+    # makes this run's partial directory unique among any concurrently running instance of the
+    # SAME emitted job, so no invocation ever touches another invocation's scratch directory.
+    $partialDirSuffix = [Guid]::NewGuid().ToString('N')
+    $partialDirPath = Assert-AttrCudaDirectChild -Root $Cache -Path (Join-Path $Cache "$CacheDirName.partial-$partialDirSuffix") -Label "cache/$CacheDirName.partial-$partialDirSuffix"
 } catch {
     Complete-Failed 6 'artifactNameSafety' $_.Exception.Message
 }
@@ -264,7 +280,10 @@ if (Test-Path -LiteralPath $cacheDirPath) {
     Complete-Failed 21 'publishRename' "cache already holds $CacheDirName with DIFFERENT content"
 }
 
-# Build under a temp name; a leftover partial from a previous interrupted run is removed first.
+# Build under a temp name unique to THIS invocation (see $partialDirSuffix above) -- the
+# pre-removal below is defensive only (the GUID-suffixed name should never already exist) and,
+# unlike the old shared deterministic name, can never remove a concurrent invocation's own
+# in-progress partial directory.
 Remove-AttrCudaTree -TrustedRoot $AgentRoot -Path $partialDirPath
 [void](New-AttrCudaDirectory -Path $partialDirPath)
 try {

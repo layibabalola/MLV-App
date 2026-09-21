@@ -1474,6 +1474,111 @@ class ClosureCompletenessTests(_PwshCase):
         proc = self._assert_complete(repo, sha)
         self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
 
+    def test_a_module_qualified_import_module_load_classifies_the_same_as_unqualified(self) -> None:
+        # ATTR3-SMOKE-RUNNER-DEPS-1 round 4 (sol PR #144 major 1): GetCommandName() returns the
+        # QUALIFIED string for a module-qualified invocation, which never matched the census's
+        # exact-name loader list. A qualified Import-Module of a pinned sibling must classify
+        # exactly like the unqualified form.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Microsoft.PowerShell.Core\\Import-Module "
+            "(Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
+
+    def test_a_module_qualified_import_module_of_an_unpinned_file_is_refused(self) -> None:
+        # The positive case above must not become a blanket pass for anything qualified: an extra,
+        # unpinned load through the same qualified spelling is still refused.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "Microsoft.PowerShell.Core\\Import-Module (Join-Path $PSScriptRoot 'x.psm1')\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_an_alias_defining_statement_is_always_unclassified(self) -> None:
+        # ATTR3-SMOKE-RUNNER-DEPS-1 round 4 (sol PR #144 major 2): an alias's target is
+        # undecidable statically, so Set-Alias/sal/New-Alias/nal (qualified or not) is ALWAYS a
+        # site the census refuses to classify -- never resolved at census time -- regardless of
+        # what the alias is named or what it is aliased to.
+        cases = {
+            "Set-Alias": "Set-Alias load Import-Module\n",
+            "sal": "sal load Import-Module\n",
+            "New-Alias": "New-Alias load Import-Module\n",
+            "nal": "nal load Import-Module\n",
+            "module_qualified": "Microsoft.PowerShell.Utility\\Set-Alias load Import-Module\n",
+        }
+        for label, alias_line in cases.items():
+            with self.subTest(alias=label):
+                repo = self.tmp / f"repo-{label}"
+                runner = (
+                    ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+                    ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+                    "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+                    + alias_line
+                )
+                sha = self._repo_with_runner_text(repo, runner)
+                proc = self._assert_complete(repo, sha)
+                self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_add_type_with_an_abbreviated_path_parameter_is_refused(self) -> None:
+        # ATTR3-SMOKE-RUNNER-DEPS-1 round 4 (sol PR #144 major 3): PowerShell binds any
+        # unambiguous parameter-name PREFIX, so `-Pat`/`-Lit` reach -Path/-LiteralPath at runtime
+        # even though the old exact `-ieq` comparison read them as pathless.
+        for abbreviation in ("-Pat", "-Lit", "-PSPath", "-LP"):
+            with self.subTest(abbreviation=abbreviation):
+                repo = self.tmp / f"repo-{abbreviation.strip('-')}"
+                runner = (
+                    ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+                    ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+                    "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+                    f"Add-Type {abbreviation} 'C:\\some\\extra.cs'\n"
+                )
+                sha = self._repo_with_runner_text(repo, runner)
+                proc = self._assert_complete(repo, sha)
+                self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_a_pinned_process_start_call_classifies_cleanly(self) -> None:
+        # fable's round-3 minor, fixed round 4: the exact real site (a static
+        # [System.Diagnostics.Process]::Start($startInfo) launching the deployed exe) is the one
+        # pinned class-(d) exclusion; it must classify without needing $startInfo to be provable.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "$startInfo = [System.Diagnostics.ProcessStartInfo]::new()\n"
+            "$process = [System.Diagnostics.Process]::Start($startInfo)\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
+
+    def test_an_unpinned_process_start_call_is_refused(self) -> None:
+        # The exclusion is keyed on EXACT site text: a different argument expression is a
+        # different, unreviewed site and must not silently match the pinned one.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "$otherStartInfo = [System.Diagnostics.ProcessStartInfo]::new()\n"
+            "$process = [System.Diagnostics.Process]::Start($otherStartInfo)\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
 
 @requires_pwsh
 @requires_git
@@ -1963,6 +2068,49 @@ class SmokeRunnerStageJobTests(_PwshCase):
         self.assertEqual(launch.returncode, 0, combined)
         self.assertNotIn("is not recognized", combined, combined)
 
+    def test_concurrent_invocations_of_the_same_job_use_distinct_partial_directories(self) -> None:
+        # ATTR3-SMOKE-RUNNER-DEPS-1 round 4 (sol PR #144 minor): every same-name stager used to
+        # share ONE deterministic partial directory name, so two overlapping invocations of the
+        # SAME emitted job could remove-and-recreate each other's not-yet-complete scratch
+        # directory. Proved two ways: the emitted job text computes the partial suffix from a
+        # GUID generated at RUNTIME (never baked in once by the generator, which is what would
+        # let two invocations of the identical job file still collide), and two actual runs of
+        # the identical job file report two different partial directory names.
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+        job_path = Path(payload["jobFile"])
+        text = job_path.read_text(encoding="utf-8")
+
+        self.assertIn("[Guid]::NewGuid()", text, "the partial suffix must be generated at job runtime")
+
+        marker = (
+            '$partialDirPath = Assert-AttrCudaDirectChild -Root $Cache -Path '
+            '(Join-Path $Cache "$CacheDirName.partial-$partialDirSuffix") '
+            '-Label "cache/$CacheDirName.partial-$partialDirSuffix"'
+        )
+        self.assertIn(marker, text)
+        instrumented = text.replace(marker, marker + '\nWrite-Output "PARTIAL_DIR=$partialDirPath"')
+        self.assertNotEqual(instrumented, text)
+
+        instrumented_path = self.tmp / "instrumented.job.ps1"
+        partial_dirs = []
+        for _ in range(2):
+            instrumented_path.write_text(instrumented, encoding="utf-8")
+            run_proc = _run_job(instrumented_path)
+            self.assertEqual(run_proc.returncode, 0, run_proc.stdout + run_proc.stderr)
+            lines = [line for line in run_proc.stdout.splitlines() if line.startswith("PARTIAL_DIR=")]
+            self.assertEqual(len(lines), 1, run_proc.stdout)
+            partial_dirs.append(lines[0].split("=", 1)[1])
+            # Remove the published cache dir between runs so the second run rebuilds fresh
+            # (rather than short-circuiting through Complete-AlreadyStaged, which never computes
+            # a new partial directory at all) and its own partial-suffix computation is exercised
+            # again, not skipped.
+            shutil.rmtree(self.agent / "cache" / payload["cacheDirName"])
+
+        self.assertEqual(len(partial_dirs), 2)
+        self.assertNotEqual(partial_dirs[0], partial_dirs[1])
+
     def test_a_different_commit_stages_that_commits_bytes_and_a_different_directory_name(self) -> None:
         proc = self._generate(SourceCommit=self.shas[0])
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -2197,6 +2345,42 @@ class SmokeRunFailedPresentMonCleanupTests(_PwshCase):
         self.assertIsNotNone(summary.get("smokeLaunchExceptionType"))
         self.assertIn("CommandNotFoundException", summary["smokeLaunchExceptionType"])
         self.assertIs(summary.get("presentMonConfirmedExited"), True, summary)
+
+
+@requires_pwsh
+class WaitPresentMonCaptureTimeoutWaitsAfterKillTests(_PwshCase):
+    """ATTR3-SMOKE-RUNNER-DEPS-1 round 4, item 5 (fable round-3 minor). Kill() is asynchronous --
+    Stop-PresentMonCapture already waited bounded after it before sampling HasExited;
+    Wait-PresentMonCapture's timeout path used to sample HasExited in the very next statement,
+    which could still read false for a process that exits milliseconds later. It now mirrors
+    Stop-PresentMonCapture and reports killError, waitError and confirmedExited alike, against a
+    REAL background process."""
+
+    def _presentmon_functions(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start = text.index("function Start-PresentMonCapture(")
+        end = text.index("\nfunction Get-FrameRows(", start)
+        return text[start:end]
+
+    def test_the_timeout_path_waits_after_kill_and_reports_all_three_fields(self) -> None:
+        script = self.tmp / "probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            + self._presentmon_functions() + "\n"
+            "$proc = Start-Process -FilePath 'powershell.exe' "
+            "-ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120') "
+            "-PassThru -WindowStyle Hidden\n"
+            "try { [void](Wait-PresentMonCapture $proc -TimeoutSeconds 1); Write-Output 'NO_THROW' } "
+            "catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        message = normalize_pwsh_message_text(proc.stdout)
+        self.assertIn("THREW PRESENTMON_TIMEOUT", message)
+        self.assertIn("confirmedExited=True", message)
+        self.assertIn("killError=<none>", message)
+        self.assertIn("waitError=<none>", message)
 
 
 @requires_git

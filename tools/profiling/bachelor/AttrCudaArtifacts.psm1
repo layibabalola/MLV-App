@@ -451,19 +451,39 @@ function Save-AttrCudaCommittedBlobBytes {
     (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-# ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN). Round 1 and round 2 both discovered
-# this closure by SCANNING committed text -- first a regex over one literal shape
-# (Join-Path $PSScriptRoot '<name>'), then a fail-closed AST literal scan layered on top of it.
-# A design swarm ruled both undiscoverable-by-patching: a scanner built on string literals cannot
-# see an extension-less load (`& "$PSScriptRoot\helper"`) or a bareword
-# `Import-Module $PSScriptRoot/modx` -- both load code; both scanners returned nothing for
-# either -- and the literal-scan classifier matched a resolved dependency by BASENAME alone, so an
-# absolute path like 'C:\evil\provenance-stamp.ps1' classified cleanly just by sharing a name with
-# a staged file. Removing the heuristic from the trust path removes both gaps permanently: the
-# closure is now this EXPLICIT, pinned list -- never discovered, never inferred -- and
-# Assert-AttrCudaClosureComplete (below) is the one-time, generator-time proof that the pinned
-# list still matches what the real files actually load, using an AST census that cannot be fooled
-# by an unfamiliar syntax shape the way a literal scanner could.
+# ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN), round 4 (contract stated honestly,
+# PR #144). Round 1 and round 2 both discovered this closure by SCANNING committed text -- first
+# a regex over one literal shape (Join-Path $PSScriptRoot '<name>'), then a fail-closed AST
+# literal scan layered on top of it. A design swarm ruled both undiscoverable-by-patching: a
+# scanner built on string literals cannot see an extension-less load
+# (`& "$PSScriptRoot\helper"`) or a bareword `Import-Module $PSScriptRoot/modx` -- both load
+# code; both scanners returned nothing for either -- and the literal-scan classifier matched a
+# resolved dependency by BASENAME alone, so an absolute path like 'C:\evil\provenance-stamp.ps1'
+# classified cleanly just by sharing a name with a staged file. Removing the heuristic from the
+# trust path removes both gaps permanently: the closure is now this EXPLICIT, pinned list --
+# never discovered, never inferred.
+#
+# WHAT Assert-AttrCudaClosureComplete (below) ACTUALLY PROVES, STATED HONESTLY. It is a
+# REGRESSION TRIPWIRE over these four reviewed, byte-pinned files at generator time -- never an
+# exhaustive proof that no future edit to them can smuggle in an unstaged load. PowerShell
+# resolves some commands dynamically (a computed string, a resolved alias), and no static census
+# can enumerate every spelling of "load a file" a determined future edit could use. What it DOES
+# guarantee: every load site Get-AttrCudaScriptLoadSites' AST census can see in the manifest's
+# own committed text -- including a module-qualified or aliased loader name and any abbreviated
+# Add-Type -Path/-LiteralPath parameter (sol round-4 majors 1 and 3) -- classifies as a manifest
+# sibling, a scriptblock-only invocation, a pathless Add-Type, or a reviewed exact-pair exclusion,
+# or generation refuses outright with ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE. An alias
+# definition (Set-Alias/sal/New-Alias/nal) is never resolved at census time -- it is ALWAYS
+# unclassified, because what it names is undecidable statically (round-4 sol major 2).
+#
+# THE SAFETY PROPERTY FOR WHATEVER THIS CENSUS CANNOT SEE IS THE RUNTIME PATH, NOT THIS
+# FUNCTION: a staged file that fails to load in the smoke child is reported as SMOKE_RUN_FAILED
+# (playback-attr-3-cuda-job.ps1's failure branch, ~:734-780), never silently masked as a
+# PresentMon timeout or a clean result. Today's four real files contain none of the forms this
+# census cannot see (hub-verified against the real repo by
+# test_the_real_current_repo_at_head_classifies_cleanly); this census exists to catch a
+# regression the moment one of these four files is edited to add one, not to prove no such form
+# could ever exist anywhere PowerShell can run.
 $script:AttrCudaSmokeRunnerClosureManifest = @(
     'tools/profiling/run-release-gui-smoke.ps1',
     'tools/profiling/gui-smoke-screenshot-provenance.ps1',
@@ -493,12 +513,18 @@ function Get-AttrCudaScriptLoadSites {
         variable, or a dynamic expression -- classification is the caller's job);
       - CommandAst named (case-insensitively) Import-Module/ipmo, Start-Process/saps/start,
         pwsh/powershell(.exe), Invoke-Expression/iex, Invoke-Command/icm, Start-Job,
-        Start-ThreadJob or Add-Type;
+        Start-ThreadJob, Add-Type, Set-Alias/sal or New-Alias/nal -- matched on the segment AFTER
+        the last `\`, so a module-qualified invocation
+        (`Microsoft.PowerShell.Core\Import-Module ...`) is recognized exactly like the
+        unqualified form, never invisible to this census (round 4, sol PR #144 major 1);
       - UsingStatementAst (a `using module|namespace|assembly` statement -- never a C# `using`
         keyword sitting inert inside a string literal handed to Add-Type, which this AST walk
         does not descend into because it is a StringConstantExpressionAst, not PowerShell code);
       - InvokeMemberExpressionAst whose member name is (case-insensitively) Create, AddScript,
-        AddCommand, InvokeScript or NewScriptBlock.
+        AddCommand, InvokeScript or NewScriptBlock;
+      - a STATIC InvokeMemberExpressionAst named (case-insensitively) Start on the type
+        expression [System.Diagnostics.Process] / [Diagnostics.Process] -- process launch, per
+        fable's round-3 minor (round 4, PR #144).
     This finds every SITE that can execute or generate code regardless of how its target is
     spelled -- an extension-less `& "$PSScriptRoot\helper"` or a bareword
     `Import-Module $PSScriptRoot/modx` are both real AST nodes the parser sees even though
@@ -531,14 +557,23 @@ function Get-AttrCudaScriptLoadSites {
         'Invoke-Expression', 'iex',
         'Invoke-Command', 'icm',
         'Start-Job', 'Start-ThreadJob',
-        'Add-Type'
+        'Add-Type',
+        'Set-Alias', 'sal', 'New-Alias', 'nal'
     )
     $memberNames = @('Create', 'AddScript', 'AddCommand', 'InvokeScript', 'NewScriptBlock')
     $sites = [System.Collections.Generic.List[object]]::new()
 
     $commandAsts = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true)
     foreach ($command in $commandAsts) {
-        $commandName = $command.GetCommandName()
+        $rawCommandName = $command.GetCommandName()
+        # sol PR #144 round 4 major 1: GetCommandName() returns the QUALIFIED string for a
+        # module-qualified invocation (`Microsoft.PowerShell.Core\Import-Module ...`), which
+        # never matched $loaderCommandNames by exact string. Matching on the segment after the
+        # last `\` recognizes the qualified and unqualified spellings identically.
+        $commandName = if ($null -ne $rawCommandName) {
+            $lastSeparator = $rawCommandName.LastIndexOf('\')
+            if ($lastSeparator -ge 0) { $rawCommandName.Substring($lastSeparator + 1) } else { $rawCommandName }
+        } else { $null }
         $isOperatorInvocation = ($command.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot) -or
             ($command.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Ampersand)
         $isNamedLoader = ($null -ne $commandName) -and (@($loaderCommandNames) -icontains $commandName)
@@ -574,9 +609,22 @@ function Get-AttrCudaScriptLoadSites {
         if ($member.Member -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
             $memberNameValue = $member.Member.Value
         }
-        if ($null -ne $memberNameValue -and (@($memberNames) -icontains $memberNameValue)) {
+        $isTrackedMemberCall = ($null -ne $memberNameValue) -and (@($memberNames) -icontains $memberNameValue)
+        # fable minor (round 3), fixed round 4: narrowly scoped to the one static member this
+        # closure's real files use to launch anything -- [System.Diagnostics.Process]::Start --
+        # rather than every member named Start, which would flag unrelated instance calls
+        # (e.g. a Stopwatch or a Job) that never load code.
+        $isProcessStartCall = $false
+        if ($member.Static -and $null -ne $memberNameValue -and $memberNameValue -ieq 'Start' -and
+            $member.Expression -is [System.Management.Automation.Language.TypeExpressionAst]) {
+            $typeFullName = $member.Expression.TypeName.FullName
+            if ($typeFullName -ieq 'System.Diagnostics.Process' -or $typeFullName -ieq 'Diagnostics.Process') {
+                $isProcessStartCall = $true
+            }
+        }
+        if ($isTrackedMemberCall -or $isProcessStartCall) {
             [void]$sites.Add([pscustomobject]@{
-                kind = 'MemberCall'
+                kind = if ($isProcessStartCall) { 'ProcessStart' } else { 'MemberCall' }
                 operator = $null
                 commandName = $null
                 memberName = $memberNameValue
@@ -700,14 +748,30 @@ function Test-AttrCudaCommandHasPathParameter {
     <#
     .SYNOPSIS
     Private classifier for class (c): true if $CommandAst names a -Path or -LiteralPath
-    parameter. Used to refuse auto-classifying an Add-Type that loads FROM a file.
+    parameter, spelled in full, abbreviated, or by its PSPath/LP alias. Used to refuse
+    auto-classifying an Add-Type that loads FROM a file.
+    .DESCRIPTION
+    sol PR #144 round 4 major 3: the exact `-ieq 'Path'`/`-ieq 'LiteralPath'` comparison this
+    replaced read `Add-Type -Pat x.cs` or `-Lit x.cs` as pathless, because PowerShell accepts any
+    unambiguous parameter-name PREFIX -- it bound those abbreviations to -Path/-LiteralPath at
+    runtime even though the AST's parameter name is the shorter text actually written. A
+    parameter counts as a path parameter here if 'Path' or 'LiteralPath' STARTS WITH the written
+    name (case-insensitive, so any valid prefix abbreviation is caught, including the empty-string
+    edge of neither name), or if the written name is the PSPath or LP alias. A parameter that is
+    merely AMBIGUOUS between a path name and some other Add-Type parameter (e.g. `-Pa` could bind
+    to -Path or -PassThru) still counts as a path parameter here: this classifier's job is to
+    refuse auto-classifying, never to resolve the ambiguity itself, so it fails closed.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$CommandAst)
 
     foreach ($element in $CommandAst.CommandElements) {
         if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
-            if ($element.ParameterName -ieq 'Path' -or $element.ParameterName -ieq 'LiteralPath') {
+            $name = $element.ParameterName
+            if ([string]::IsNullOrEmpty($name)) { continue }
+            if ('Path'.StartsWith($name, [StringComparison]::OrdinalIgnoreCase) -or
+                'LiteralPath'.StartsWith($name, [StringComparison]::OrdinalIgnoreCase) -or
+                $name -ieq 'PSPath' -or $name -ieq 'LP') {
                 return $true
             }
         }
@@ -730,6 +794,15 @@ $script:AttrCudaClosureScanExclusions = @(
             'test_the_emitted_smoke_command_never_passes_detectplaybackartifacts asserts this -- ' +
             'and the runner itself Test-Path-guards the call, falling back to verdict="no-data" ' +
             'if the file is ever missing. Dormant for this route by construction, not by luck.'
+    },
+    [pscustomobject]@{
+        repoRelativePath = 'tools/profiling/run-release-gui-smoke.ps1'
+        literal = '[System.Diagnostics.Process]::Start($startInfo)'
+        reason = 'Launches the hash-pinned, already-deployed application executable -- ' +
+            '$startInfo.FileName is set to $exe, the built app path resolved before this line, ' +
+            'never a $PSScriptRoot sibling script. Process.Start executes an OS binary directly; ' +
+            'it does not load or run PowerShell/.NET code from a file this census needs to see ' +
+            '(round 4, fable round-3 minor, PR #144).'
     }
 )
 
@@ -762,17 +835,23 @@ function Assert-AttrCudaClosureComplete {
     file's own committed text classifies cleanly, and the resolved class-(a) targets are EXACTLY
     the manifest's non-root siblings, in both directions.
     .DESCRIPTION
-    ATTR3-SMOKE-RUNNER-DEPS-1 round 3. Generator-time (and CI-time) only -- never embedded in an
-    emitted job, same reason as Resolve-AttrCudaCommittedBlobId. This is the one-time proof that
-    replaces the old always-on discovery scan: it runs Get-AttrCudaScriptLoadSites over each
-    manifest file's committed text at -Commit and requires every site to be exactly one of:
+    ATTR3-SMOKE-RUNNER-DEPS-1 round 3, round 4 (PR #144). Generator-time (and CI-time) only --
+    never embedded in an emitted job, same reason as Resolve-AttrCudaCommittedBlobId. This is a
+    REGRESSION TRIPWIRE over these four reviewed files, not an exhaustive proof -- see the module
+    header above the manifest for the honest statement of what it does and does not guarantee. It
+    runs Get-AttrCudaScriptLoadSites over each manifest file's committed text at -Commit and
+    requires every site to be exactly one of:
       (a) `Join-Path $PSScriptRoot '<bare file name>'`, whose resolved repo-relative path is a
           manifest entry, by FULL PATH equality -- never by basename alone;
       (b) `&`/`.` on a scriptblock-only variable or a [scriptblock]-typed parameter
           (Test-AttrCudaScriptblockOnlyInvocationTarget);
-      (c) `Add-Type` with no -Path/-LiteralPath (Test-AttrCudaCommandHasPathParameter);
+      (c) `Add-Type` with no -Path/-LiteralPath, matched by prefix and alias so an abbreviated
+          parameter cannot pass as pathless (Test-AttrCudaCommandHasPathParameter);
       (d) a pinned exclusion (Test-AttrCudaClosureScanExclusionMatch).
-    Anything else throws ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE. Finally, the set of resolved
+    A Set-Alias/sal/New-Alias/nal site is never a candidate for (a)-(c) and matches (d) only if
+    explicitly pinned there -- its target is never resolved statically, so it is always
+    unclassified unless excluded by name (round 4, sol major 2). Anything else throws
+    ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE. Finally, the set of resolved
     class-(a) targets must equal the manifest minus its root (first) entry, in both directions --
     a manifest entry never reached by a real load, or a real load that resolves outside the
     manifest, is a completeness failure, not silently accepted either way.
