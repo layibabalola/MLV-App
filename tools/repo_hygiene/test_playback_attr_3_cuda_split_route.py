@@ -36,6 +36,25 @@ def _pwsh_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+_ANSI_ESCAPE_RX = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_PWSH_ERROR_VIEW_CONTINUATION_RX = re.compile(r"(?m)^[ \t]*\|[ \t]?")
+
+
+def normalize_pwsh_message_text(text: str) -> str:
+    """Undo pwsh's console-width error-view wrapping before substring matching.
+
+    An uncaught terminating error is rendered by pwsh's own default host formatter, which wraps
+    the exception message at the console width and prefixes each continuation line with ANSI
+    colour codes and a '|' gutter -- so a phrase can land split across two lines on a narrower
+    console than this one, and assertIn looking for the unbroken phrase then fails even though
+    the thrown message is correct. Strip the ANSI codes and the '|' continuation prefixes, then
+    collapse whitespace runs (including the newline the wrap introduced) to one space.
+    """
+    text = _ANSI_ESCAPE_RX.sub("", text)
+    text = _PWSH_ERROR_VIEW_CONTINUATION_RX.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 ROOT = Path(__file__).resolve().parents[2]
 
 DLL_PAIR_JOB = ROOT / "tools" / "profiling" / "ultramagnus" / "playback-attr-3-cuda-dll-job.ps1"
@@ -385,12 +404,17 @@ class AttributionJobTests(unittest.TestCase):
 
 
 class SmokeRunnerPinTests(unittest.TestCase):
-    """ATTR3-SMOKE-RUNNER-PIN-1: existence of the cached runner is no longer enough.
+    """ATTR3-SMOKE-RUNNER-DEPS-1: the runner's FULL dependency closure is pinned, not the
+    runner alone.
 
-    Bachelor ran a copy of run-release-gui-smoke.ps1 from before commit f401bf9a because the
-    job only ever checked that SOME file sat at that cache path. It is now hash-pinned exactly
-    like PresentMon, and the pin is baked from the committed git blob at -SourceCommit -- the
-    same bytes attr3-stage-smoke-runner-job.ps1 stages -- never from a working-tree file.
+    Round 1 (ATTR3-SMOKE-RUNNER-PIN-1) hash-pinned only run-release-gui-smoke.ps1; Bachelor
+    still could not launch it, because the runner dot-sources two siblings and imports a
+    module, all resolved via $PSScriptRoot, and none of those three was ever staged. Round 1/2
+    then derived the closure by SCANNING; round 3 (NARROW BY REDESIGN) replaced discovery with
+    an EXPLICIT pinned manifest (Get-AttrCudaSmokeRunnerClosureManifest) proved complete by an
+    AST census (Assert-AttrCudaClosureComplete) at generation time -- every file in it is still
+    hash-pinned from the committed git blob at -SourceCommit -- the same bytes
+    attr3-stage-smoke-runner-job.ps1 stages -- never from a working-tree file.
     """
 
     def setUp(self) -> None:
@@ -401,43 +425,62 @@ class SmokeRunnerPinTests(unittest.TestCase):
             "foreach ($name in @($PresentMonName, 'run-release-gui-smoke.ps1')) {", self.text
         )
 
-    def test_the_emitted_job_hash_checks_the_runner_before_it_is_used(self) -> None:
-        self.assertIn("$SmokeRunnerSha256 = '__SMOKE_RUNNER_SHA256__'", self.text)
-        # round 2: the cache name is content-addressed (derived from the pinned sha256), not the
-        # old fixed literal -- a stager must never be asked to overwrite whatever bytes already
-        # sit under the old fixed name.
-        self.assertIn(
+    def test_single_file_pin_check_is_gone(self) -> None:
+        # ATTR3-SMOKE-RUNNER-PIN-1's single-file pin (round 2) is superseded by the closure.
+        self.assertNotIn("$SmokeRunnerSha256 = '__SMOKE_RUNNER_SHA256__'", self.text)
+        self.assertNotIn(
             '$SmokeRunnerCacheName = "run-release-gui-smoke-$($SmokeRunnerSha256.Substring(0, 16)).ps1"',
             self.text,
         )
+
+    def test_the_scan_based_member_loop_is_gone(self) -> None:
+        # round 3 (NARROW BY REDESIGN): the inline per-member loop is replaced by one call into
+        # the shared, embedded Get-AttrCudaClosureDirectoryMismatch.
+        self.assertNotIn("foreach ($closureEntry in $SmokeRunnerClosure) {", self.text)
+        self.assertNotIn(
+            "if ($closureEntryActualSha -ne $closureEntry.sha256.ToUpperInvariant()) {", self.text
+        )
+
+    def test_the_emitted_job_pins_the_closure_and_checks_it_with_the_shared_function(self) -> None:
+        self.assertIn("$SmokeRunnerClosure = __SMOKE_RUNNER_CLOSURE__", self.text)
+        self.assertIn("$SmokeRunnerClosureDirName = '__SMOKE_RUNNER_CLOSURE_DIR_NAME__'", self.text)
         self.assertIn(
-            'throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing $SmokeRunnerCacheName"',
+            "$smokeRunnerClosureDir = Join-Path $Cache $SmokeRunnerClosureDirName", self.text
+        )
+        self.assertIn(
+            "$smokeRunnerClosureMismatch = Get-AttrCudaClosureDirectoryMismatch -Dir "
+            "$smokeRunnerClosureDir -Entries $SmokeRunnerClosure",
             self.text,
         )
         self.assertIn(
-            "if ($smokeRunnerActualSha -ne $SmokeRunnerSha256.ToUpperInvariant()) {", self.text
+            'throw "ATTRCUDA_SMOKE_RUNNER_STALE $smokeRunnerClosureMismatch"', self.text
         )
 
-    def test_the_smoke_runner_sha_is_validated_before_it_is_trusted(self) -> None:
-        # Fable minor (round 2): validated the same way -PresentMonSha256 is, before either value
-        # is substituted into the emitted job.
+    def test_the_shared_directory_mismatch_function_is_embedded(self) -> None:
+        self.assertIn("'Get-AttrCudaClosureDirectoryMismatch',", self.text)
+
+    def test_the_closure_digest_is_validated_before_it_is_trusted(self) -> None:
+        # Fable minor (round 2, carried forward): validated the same way -PresentMonSha256 is,
+        # before it is substituted into the emitted job.
         self.assertIn(
-            "if ($smokeRunnerSha256 -notmatch '^[0-9a-f]{64}$') {", self.text
+            "if ($smokeRunnerClosureDigest -notmatch '^[0-9a-f]{64}$') {", self.text
         )
         self.assertIn("ATTRCUDA_BLOB_SHA_MALFORMED", self.text)
 
     def test_the_pin_is_baked_from_the_committed_git_blob_not_the_working_tree(self) -> None:
+        # round 3: the pinned manifest, never a -RepoRelativePath parameter -- and proved
+        # complete against the real files before it is trusted (Assert-AttrCudaClosureComplete).
         self.assertIn(
-            "Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $SourceCommit "
-            "-RepoRelativePath $SmokeRunnerRelativePath",
-            self.text,
+            "Assert-AttrCudaClosureComplete -RepoRoot $RepoRoot -Commit $SourceCommit", self.text
         )
         self.assertIn(
-            "Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $smokeRunnerBlobId "
-            "-Destination $smokeRunnerPinTemp",
+            "Resolve-AttrCudaSmokeRunnerClosure -RepoRoot $RepoRoot -Commit $SourceCommit",
             self.text,
         )
-        self.assertIn("Replace('__SMOKE_RUNNER_SHA256__', $smokeRunnerSha256)", self.text)
+        self.assertNotIn("-RepoRelativePath $SmokeRunnerRelativePath", self.text)
+        self.assertNotIn("SmokeRunnerRelativePath", self.text)
+        self.assertIn("Get-AttrCudaClosureDigestHex -Closure $smokeRunnerClosure", self.text)
+        self.assertIn("Replace('__SMOKE_RUNNER_CLOSURE_DIR_NAME__', $smokeRunnerClosureDirName)", self.text)
 
     def test_the_refusal_runs_before_presentmon_and_before_deployment(self) -> None:
         refusal = self.text.index("ATTRCUDA_SMOKE_RUNNER_STALE")
@@ -449,6 +492,120 @@ class SmokeRunnerPinTests(unittest.TestCase):
         self.assertLess(
             refusal, present_mon_start, "the pin must be checked before PresentMon starts"
         )
+
+
+class SmokeRunFailedBeforePresentMonTests(unittest.TestCase):
+    """ATTR3-SMOKE-RUNNER-DEPS-1 (D): the smoke run's own outcome is checked before PresentMon
+    is waited on, so a smoke-side failure is never reported as PRESENTMON_TIMEOUT."""
+
+    def setUp(self) -> None:
+        self.text = _read(ATTRIBUTION_JOB)
+
+    def test_smoke_outcome_is_checked_before_waiting_on_presentmon(self) -> None:
+        smoke_launch = self.text.index("$smokeLaunchException = $null")
+        check = self.text.index(
+            "if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not "
+            "(Test-Path -LiteralPath $resultPath)) {"
+        )
+        wait = self.text.index("$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc")
+        self.assertLess(smoke_launch, check)
+        self.assertLess(check, wait, "the outcome check must run before PresentMon is waited on")
+
+    def test_presentmon_is_stopped_not_waited_out_on_a_smoke_failure(self) -> None:
+        check = self.text.index(
+            "if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not "
+            "(Test-Path -LiteralPath $resultPath)) {"
+        )
+        stop = self.text.index("Stop-PresentMonCapture", check)
+        wait = self.text.index("$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc")
+        self.assertLess(stop, wait)
+
+    def test_smoke_run_failed_is_a_distinct_result_with_a_stderr_tail(self) -> None:
+        self.assertIn("RESULT=SMOKE_RUN_FAILED", self.text)
+        self.assertIn("smokeStderrTail", self.text)
+        self.assertIn("exit 18", self.text)
+
+    def test_presentmon_timeout_still_exists_for_its_own_case(self) -> None:
+        # Unchanged: Wait-PresentMonCapture still throws PRESENTMON_TIMEOUT, now reached only
+        # once the smoke run is already known to have succeeded.
+        self.assertIn("PRESENTMON_TIMEOUT: did not exit within", self.text)
+        failed = self.text.index("RESULT=SMOKE_RUN_FAILED")
+        timeout_fn = self.text.index("function Wait-PresentMonCapture")
+        self.assertLess(timeout_fn, failed, "PRESENTMON_TIMEOUT's own function is defined earlier in the file")
+
+    def test_a_launch_exception_is_caught_and_mapped_to_smoke_run_failed(self) -> None:
+        # sol, PR #144 major 3: a terminating exception starting the nested pwsh used to skip
+        # $smokeRc and the whole SMOKE_RUN_FAILED branch, bypassing PresentMon cleanup entirely.
+        launch = self.text.index("& \"$env:ProgramFiles\\PowerShell\\7\\pwsh.exe\"")
+        try_start = self.text.rindex("try {", 0, launch)
+        catch_start = self.text.index("} catch {", launch)
+        exception_capture = self.text.index("$smokeLaunchException = $_", catch_start)
+        check = self.text.index(
+            "if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not "
+            "(Test-Path -LiteralPath $resultPath)) {"
+        )
+        self.assertLess(try_start, launch)
+        self.assertLess(launch, catch_start)
+        self.assertLess(catch_start, exception_capture)
+        self.assertLess(exception_capture, check)
+
+    def test_smoke_run_failed_records_the_capped_exception_type_and_presentmon_stop_outcome(self) -> None:
+        self.assertIn("smokeLaunchExceptionType", self.text)
+        self.assertIn("smokeLaunchExceptionMessage", self.text)
+        self.assertIn("presentMonConfirmedExited", self.text)
+        self.assertIn("presentMonKillError", self.text)
+        self.assertIn("presentMonWaitError", self.text)
+        self.assertIn("$MaxSmokeLaunchExceptionChars = 500", self.text)
+
+
+class StopPresentMonCaptureReportsFailuresTests(unittest.TestCase):
+    """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3): Kill()/WaitForExit() failures must be
+    reported, not swallowed by an empty catch block, and confirmedExited must be read from the
+    process afterward rather than assumed from "no exception"."""
+
+    def setUp(self) -> None:
+        self.text = _read(ATTRIBUTION_JOB)
+
+    def test_no_empty_catch_blocks_remain_in_the_stop_function(self) -> None:
+        start = self.text.index("function Stop-PresentMonCapture(")
+        end = self.text.index("\nfunction Get-FrameRows(", start)
+        body = self.text[start:end]
+        self.assertNotIn("catch { }", body)
+        self.assertIn("$killError = $_.Exception.Message", body)
+        self.assertIn("$waitError = ", body)
+
+    def test_returns_a_status_object_not_void(self) -> None:
+        start = self.text.index("function Stop-PresentMonCapture(")
+        end = self.text.index("\nfunction Get-FrameRows(", start)
+        body = self.text[start:end]
+        self.assertIn("confirmedExited = [bool]$Proc.HasExited", body)
+        self.assertIn("killError = $killError", body)
+        self.assertIn("waitError = $waitError", body)
+
+
+class Attr3JobNeverActivatesExcludedDependencyTests(unittest.TestCase):
+    """ATTR3-SMOKE-RUNNER-DEPS-1 round 3: the AST-census pinned exclusion for the dormant
+    detect-playback-artifacts.ps1 launch site (kept next to
+    Test-AttrCudaClosureScanExclusionMatch in AttrCudaArtifacts.psm1) is sound only as long as
+    the ATTR-3 attribution job never passes -DetectPlaybackArtifacts -- the one switch that
+    would make run-release-gui-smoke.ps1 actually execute that reference. Required test (per the
+    review): if this job ever starts passing that switch, this test must fail before the
+    exclusion becomes unsound in production.
+    """
+
+    def setUp(self) -> None:
+        self.text = _read(ATTRIBUTION_JOB)
+
+    def test_the_emitted_smoke_command_never_passes_detectplaybackartifacts(self) -> None:
+        cmd_start = self.text.index('$cmd = "& $(ConvertTo-PsSingleQuoted $smoke)')
+        cmd_end = self.text.index('\n', cmd_start)
+        cmd_line = self.text[cmd_start:cmd_end]
+        self.assertNotIn("-DetectPlaybackArtifacts", cmd_line)
+
+    def test_no_other_reference_to_the_switch_exists_in_the_generator(self) -> None:
+        # Belt and suspenders: the flag must not appear anywhere else in the generator either
+        # (e.g. a second, less obvious invocation site added later).
+        self.assertNotIn("-DetectPlaybackArtifacts", self.text)
 
 
 class AttributionJobFixtureRehearsalTests(unittest.TestCase):
@@ -616,7 +773,9 @@ class AttributionJobOwnerClipRefusalTests(unittest.TestCase):
             out_file = Path(tmp) / "owner.job.ps1"
             proc = self._generate("M16-1243", out_file)
             self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            self.assertIn("ATTR3-FOOTAGE-BIND-1", proc.stdout + proc.stderr)
+            self.assertIn(
+                "ATTR3-FOOTAGE-BIND-1", normalize_pwsh_message_text(proc.stdout + proc.stderr)
+            )
             self.assertFalse(out_file.exists())
 
     def test_a_fixture_id_is_still_emitted(self) -> None:

@@ -25,6 +25,7 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -80,6 +81,27 @@ def _run_job(job: Path, *args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
     )
+
+
+_ANSI_ESCAPE_RX = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_PWSH_ERROR_VIEW_CONTINUATION_RX = re.compile(r"(?m)^[ \t]*\|[ \t]?")
+
+
+def normalize_pwsh_message_text(text: str) -> str:
+    """Undo pwsh's console-width error-view wrapping before substring matching.
+
+    An uncaught terminating error (no try/catch around the probe) is rendered by pwsh's own
+    default host formatter, which wraps the exception message at the console width and prefixes
+    each continuation line with ANSI colour codes and a '|' gutter -- so a phrase like "is
+    missing gui-smoke-screenshot-provenance.ps1" can land split across two lines on a narrower
+    console than this one, and assertIn looking for the unbroken phrase then fails even though
+    the thrown message is correct. Strip the ANSI codes and the '|' continuation prefixes, then
+    collapse whitespace runs (including the newline the wrap introduced) to one space so a
+    once-wrapped phrase matches again regardless of the host's console width.
+    """
+    text = _ANSI_ESCAPE_RX.sub("", text)
+    text = _PWSH_ERROR_VIEW_CONTINUATION_RX.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 class _PwshCase(unittest.TestCase):
@@ -151,8 +173,25 @@ def _make_fixture_repo(path: Path) -> list[str]:
     # ATTR3-SMOKE-RUNNER-PIN-1: the attribution generator resolves this path's committed blob
     # unconditionally (before the fixture/owner-clip branch), so every test that generates a
     # job through it needs the path to exist in the throwaway repo too.
+    # ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN): the closure is now a PINNED,
+    # explicit manifest, never discovered -- so the stand-in runner's own loads only need to
+    # classify cleanly under Assert-AttrCudaClosureComplete, and there is no more recursion to
+    # exercise (a manifest entry is never reached by following another entry's own loads).
     (path / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(
-        "# fixture stand-in for run-release-gui-smoke.ps1\n", encoding="utf-8"
+        "# fixture stand-in for run-release-gui-smoke.ps1\n"
+        ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+        "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+        ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n",
+        encoding="utf-8",
+    )
+    (path / "tools" / "profiling" / "gui-smoke-screenshot-provenance.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    (path / "tools" / "profiling" / "provenance-stamp.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    (path / "tools" / "profiling" / "gui-smoke-process-boundary.psm1").write_text(
+        "# fixture stand-in sibling (imported directly by the runner).\n", encoding="utf-8"
     )
     shas = []
     for index, text in enumerate(("first", "second")):
@@ -382,7 +421,7 @@ class StagingNameSafetyTests(_PwshCase):
         proc = _run_job(tampered, "-VerifyOnly")
 
         self.assertEqual(proc.returncode, 6, f"{proc.stdout}\n{proc.stderr}")
-        self.assertIn("canonical names", proc.stdout)
+        self.assertIn("canonical names", normalize_pwsh_message_text(proc.stdout))
         self.assertEqual(list((self.agent / "cache").iterdir()), [])
 
     def test_the_generator_refuses_a_manifest_that_names_a_traversal(self) -> None:
@@ -397,7 +436,7 @@ class StagingNameSafetyTests(_PwshCase):
         proc = _run_pwsh_file(script)
 
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("the canonical name for", proc.stderr + proc.stdout)
+        self.assertIn("the canonical name for", normalize_pwsh_message_text(proc.stderr + proc.stdout))
         self.assertEqual(list(self.staging.iterdir()), [], "a job was emitted for a bad manifest")
 
     def test_the_shared_guard_rejects_every_shape_of_unsafe_name(self) -> None:
@@ -836,7 +875,10 @@ class AttributionJobOptionalClipPathTests(_PwshCase):
     def test_a_fixture_id_without_fixture_sha_is_refused(self) -> None:
         proc, out_file = self._generate()
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED", proc.stdout + proc.stderr)
+        self.assertIn(
+            "PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED",
+            normalize_pwsh_message_text(proc.stdout + proc.stderr),
+        )
         self.assertFalse(out_file.exists())
 
     # NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (B): every owner-clip id is refused outright until
@@ -845,14 +887,14 @@ class AttributionJobOptionalClipPathTests(_PwshCase):
     def test_an_owner_id_without_clippath_is_refused(self) -> None:
         proc, out_file = self._generate(ClipId="M16-1243")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("ATTR3-FOOTAGE-BIND-1", proc.stdout + proc.stderr)
+        self.assertIn("ATTR3-FOOTAGE-BIND-1", normalize_pwsh_message_text(proc.stdout + proc.stderr))
         self.assertFalse(out_file.exists())
 
     def test_an_owner_id_with_fixture_sha_is_refused(self) -> None:
         owner_path = "C:\\mlvtmp\\mlv-agent\\cache\\M16-1243.raw"
         proc, out_file = self._generate(ClipId="M16-1243", ClipPath=owner_path, FixtureSha256="c" * 64)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("ATTR3-FOOTAGE-BIND-1", proc.stdout + proc.stderr)
+        self.assertIn("ATTR3-FOOTAGE-BIND-1", normalize_pwsh_message_text(proc.stdout + proc.stderr))
         self.assertFalse(out_file.exists())
 
     def test_a_fixture_id_with_an_explicit_clippath_is_still_accepted(self) -> None:
@@ -1001,7 +1043,7 @@ class AttributionJobFixtureContentAuthenticationTests(_PwshCase):
         proc = _run_job(out_file)
 
         self.assertEqual(proc.returncode, 1, f"{proc.stdout}\n{proc.stderr}")
-        combined = proc.stdout + proc.stderr
+        combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
         self.assertIn("job-owned path 'Root' resolves outside", combined)
         self.assertIn("C:\\mlvtmp", combined)
 
@@ -1057,14 +1099,645 @@ class StageFixtureJobCommittedBytesWiringTests(_PwshCase):
 
 
 # --------------------------------------------------------------------------------------------
-# ATTR3-SMOKE-RUNNER-PIN-1: the smoke runner is now hash-pinned, refused pre-flight when stale,
-# and staged into the cache by a sibling generator that reports the committed blob's sha256.
+# ATTR3-SMOKE-RUNNER-DEPS-1: the runner is not standalone -- it dot-sources two siblings and
+# imports a module, all resolved through $PSScriptRoot at runtime. Round 1 staged the runner
+# alone (ATTR3-SMOKE-RUNNER-PIN-1) and Bachelor could not even launch it: PresentMon never saw
+# a target and PRESENTMON_TIMEOUT masked the real cause. The full dependency CLOSURE is now
+# derived mechanically (Resolve-AttrCudaSmokeRunnerClosure), staged into one content-addressed
+# subdirectory (smoke-runner-<digest16>), and every file in it is hash-pinned before launch.
 # --------------------------------------------------------------------------------------------
+
+# Expected discovery order for the shared fixture repo's runner (see _make_fixture_repo): the
+# root first, then each $PSScriptRoot-relative load in the order the regex finds it on the
+# runner's own line, then the one dependency reached by recursion (through the .psm1).
+SMOKE_RUNNER_CLOSURE_NAMES = (
+    "run-release-gui-smoke.ps1",
+    "gui-smoke-screenshot-provenance.ps1",
+    "provenance-stamp.ps1",
+    "gui-smoke-process-boundary.psm1",
+)
+
+
+@requires_pwsh
+class SmokeRunnerClosureManifestTests(_PwshCase):
+    """Get-AttrCudaSmokeRunnerClosureManifest: the EXPLICIT, pinned list that replaced discovery
+    (ATTR3-SMOKE-RUNNER-DEPS-1 round 3, NARROW BY REDESIGN)."""
+
+    def test_the_manifest_is_the_four_pinned_repo_relative_paths_in_order(self) -> None:
+        proc = self.run_with_module(
+            "Get-AttrCudaSmokeRunnerClosureManifest | ForEach-Object { Write-Output \"PATH=$_\" }\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        paths = [line.split("=", 1)[1] for line in proc.stdout.splitlines() if line.startswith("PATH=")]
+        self.assertEqual(
+            paths,
+            [
+                "tools/profiling/run-release-gui-smoke.ps1",
+                "tools/profiling/gui-smoke-screenshot-provenance.ps1",
+                "tools/profiling/provenance-stamp.ps1",
+                "tools/profiling/gui-smoke-process-boundary.psm1",
+            ],
+        )
+
+
+@requires_pwsh
+class ScriptLoadSiteCensusTests(_PwshCase):
+    """Get-AttrCudaScriptLoadSites: the AST census that replaced the literal/regex scanners
+    (ATTR3-SMOKE-RUNNER-DEPS-1 round 3). Finds every SITE that can load or generate code,
+    regardless of how its target is spelled -- classification is a separate concern
+    (ClosureCompletenessTests, below)."""
+
+    def _kinds(self, text: str) -> list[tuple[str, str]]:
+        proc = self.run_with_module(
+            "$text = @'\n" + text + "\n'@\n"
+            "Get-AttrCudaScriptLoadSites -ScriptText $text | "
+            "ForEach-Object { Write-Output \"SITE=$($_.kind)|$($_.text)\" }\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = []
+        for line in proc.stdout.splitlines():
+            if not line.startswith("SITE="):
+                continue
+            kind, _, text_ = line[len("SITE="):].partition("|")
+            out.append((kind, text_))
+        return out
+
+    def test_finds_dot_source_and_call_operator_invocations(self) -> None:
+        self.assertEqual(
+            self._kinds(". (Join-Path $PSScriptRoot 'a.ps1')\n"),
+            [("InvocationOperator", ". (Join-Path $PSScriptRoot 'a.ps1')")],
+        )
+        self.assertEqual(
+            self._kinds('& "$PSScriptRoot\\x"\n'),
+            [("InvocationOperator", '& "$PSScriptRoot\\x"')],
+        )
+
+    def test_finds_a_bareword_import_module_with_no_string_literal(self) -> None:
+        # ATTR3-SMOKE-RUNNER-DEPS-1 round 3: exactly the shape a literal-based scanner cannot
+        # see -- there is no quoted string here at all for a text scan to match on.
+        sites = self._kinds("Import-Module $PSScriptRoot/x\n")
+        self.assertEqual(len(sites), 1)
+        self.assertEqual(sites[0][0], "CommandName")
+
+    def test_finds_named_loader_commands(self) -> None:
+        for command in (
+            "Start-Process notepad.exe",
+            "pwsh -File x.ps1",
+            "powershell.exe -File x.ps1",
+            "Invoke-Expression $code",
+            "Invoke-Command -ScriptBlock $sb",
+            "Start-Job -ScriptBlock $sb",
+            "Add-Type -AssemblyName System.Drawing",
+        ):
+            with self.subTest(command=command):
+                sites = self._kinds(command + "\n")
+                self.assertEqual(len(sites), 1, sites)
+                self.assertEqual(sites[0][0], "CommandName")
+
+    def test_ignores_an_ordinary_command_that_is_not_a_loader(self) -> None:
+        self.assertEqual(self._kinds("Get-ChildItem -Path C:\\x\n"), [])
+
+    def test_finds_a_using_statement(self) -> None:
+        self.assertEqual(
+            self._kinds("using namespace System.Text\n"),
+            [("UsingStatement", "using namespace System.Text")],
+        )
+
+    def test_a_csharp_using_keyword_inside_an_add_type_string_is_not_a_powershell_using_statement(self) -> None:
+        # The parser never descends into a StringConstantExpressionAst as PowerShell code, so a
+        # C# `using System;` sitting inert inside a -TypeDefinition string is not itself a site --
+        # only the Add-Type CommandAst that carries the string is.
+        text = 'Add-Type -TypeDefinition "using System;\nclass X {}"\n'
+        sites = self._kinds(text)
+        self.assertEqual([kind for kind, _ in sites], ["CommandName"])
+
+    def test_finds_named_member_calls(self) -> None:
+        for member in ("Create", "AddScript", "AddCommand", "InvokeScript", "NewScriptBlock"):
+            with self.subTest(member=member):
+                sites = self._kinds(f"$x.{member}('foo')\n")
+                self.assertEqual(len(sites), 1, sites)
+                self.assertEqual(sites[0][0], "MemberCall")
+
+    def test_ignores_an_unrelated_member_call(self) -> None:
+        self.assertEqual(self._kinds("$x.ToString()\n"), [])
+
+    def test_throws_a_distinguishable_error_on_a_parse_error(self) -> None:
+        proc = self.run_with_module(_guard("Get-AttrCudaScriptLoadSites -ScriptText 'function ('"))
+        self.assert_throws(proc, "ATTRCUDA_SCRIPT_PARSE_ERROR")
+
+
+@requires_pwsh
+@requires_git
+class ClosureCompletenessTests(_PwshCase):
+    """Assert-AttrCudaClosureComplete: the generator-time proof that the pinned manifest still
+    matches what the real files load, via the AST census -- never a scan, never trusted at
+    runtime. Every negative fixture here is the concrete gap a text/literal scanner left open
+    (sol's PR #144 review, carried into the round 3 design swarm)."""
+
+    def _repo_with_runner_text(self, path: Path, runner_text: str) -> str:
+        path.mkdir(parents=True, exist_ok=True)
+        _git_run(["init", "-q", "-b", "main"], path)
+        _git_run(["config", "commit.gpgsign", "false"], path)
+        _git_run(["config", "user.email", "lane@example.invalid"], path)
+        _git_run(["config", "user.name", "attr3 census fixture"], path)
+        (path / "tools" / "profiling").mkdir(parents=True)
+        (path / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(runner_text, encoding="utf-8")
+        for sibling in ("gui-smoke-screenshot-provenance.ps1", "provenance-stamp.ps1"):
+            (path / "tools" / "profiling" / sibling).write_text(f"# {sibling} stand-in\n", encoding="utf-8")
+        (path / "tools" / "profiling" / "gui-smoke-process-boundary.psm1").write_text(
+            "# gui-smoke-process-boundary.psm1 stand-in\n", encoding="utf-8"
+        )
+        _git_run(["add", "-A"], path)
+        _git_run(["commit", "-q", "-m", "fixture"], path)
+        return _git_run(["rev-parse", "HEAD"], path)
+
+    def _assert_complete(self, repo: Path, sha: str) -> subprocess.CompletedProcess:
+        return self.run_with_module(
+            _guard(f"Assert-AttrCudaClosureComplete -RepoRoot '{repo}' -Commit '{sha}'")
+        )
+
+    def test_the_real_current_repo_at_head_classifies_cleanly(self) -> None:
+        """The production manifest and exclusion list, proved against the real, current
+        run-release-gui-smoke.ps1 -- the fail-closed census must not itself break the route it
+        protects."""
+        head = _git_run(["rev-parse", "HEAD"], ROOT)
+        proc = self.run_with_module(
+            _guard(f"Assert-AttrCudaClosureComplete -RepoRoot '{ROOT}' -Commit '{head}'")
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
+
+    def test_all_four_pinned_dependency_loads_classify_cleanly(self) -> None:
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
+
+    def test_an_absolute_path_sharing_a_basename_is_refused_never_classified_by_basename(self) -> None:
+        # Round 2's basename-only classifier would have accepted this; full-path matching refuses it.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". 'C:\\evil\\provenance-stamp.ps1'\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_a_root_relative_not_psscriptroot_relative_load_is_refused(self) -> None:
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $root 'provenance-stamp.ps1')\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_a_traversal_name_is_refused_never_a_bare_file_name(self) -> None:
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot '..\\evil\\provenance-stamp.ps1')\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_an_extensionless_ampersand_load_is_refused(self) -> None:
+        # The exact concrete gap this redesign exists to close: no string literal here at all,
+        # so Get-AttrCudaScriptFileLiteralReferences (round 2's scanner) found nothing.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            '& "$PSScriptRoot\\helper"\n'
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_a_bareword_import_module_load_is_refused(self) -> None:
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "Import-Module $PSScriptRoot/modx\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_a_dynamic_invocation_target_is_refused(self) -> None:
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "$name = 'Get-Process'\n"
+            "& $name\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_a_parse_error_is_refused(self) -> None:
+        repo = self.tmp / "repo"
+        sha = self._repo_with_runner_text(repo, "function (\n")
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_SCRIPT_PARSE_ERROR")
+
+    def test_a_manifest_entry_never_loaded_is_a_completeness_mismatch(self) -> None:
+        # The manifest names gui-smoke-process-boundary.psm1, but the runner never loads it: the
+        # census finds nothing wrong with what IS there, but the manifest is over-complete.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+        self.assertIn("completeness mismatch", proc.stdout)
+        self.assertIn("gui-smoke-process-boundary.psm1", proc.stdout)
+
+    def test_a_scriptblock_typed_parameter_invocation_classifies_cleanly(self) -> None:
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "function f([scriptblock]$p) { & $p 1 }\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
+
+    def test_a_scriptblock_only_variable_invocation_classifies_cleanly(self) -> None:
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "$predicate = { param($x) $x -eq 1 }\n"
+            "& $predicate 1\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
+
+    def test_a_variable_with_a_non_scriptblock_assignment_is_refused(self) -> None:
+        # Proves class (b) is not a rubber stamp for every `&`/`.` on a variable: a variable that
+        # is EVER assigned something other than a scriptblock literal falls through to unclassified.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "$cmd = 'Get-Process'\n"
+            "& $cmd\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_add_type_with_no_path_classifies_cleanly(self) -> None:
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "Add-Type -AssemblyName System.Drawing\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
+
+    def test_add_type_with_a_path_is_refused(self) -> None:
+        # Class (c) is deliberately narrow: an Add-Type that loads FROM a file is a real load
+        # site and must be classified some other way (or excluded), never auto-passed.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "Add-Type -Path 'C:\\some\\extra.cs'\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_the_pinned_exclusion_matches_the_real_dormant_detector_launch(self) -> None:
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "$detectorPwsh = 'pwsh.exe'\n"
+            "$detectorArgs = @()\n"
+            "$detectorOut = & $detectorPwsh @detectorArgs 2>&1\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
+
+    def test_an_exclusion_does_not_widen_to_a_slightly_different_site_text(self) -> None:
+        # Keyed on EXACT site text: a near-identical but not-identical invocation must not match.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "$detectorPwsh = 'pwsh.exe'\n"
+            "$detectorArgs = @()\n"
+            "$detectorOut = & $detectorPwsh @detectorArgs\n"  # no trailing 2>&1
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_a_module_qualified_import_module_load_classifies_the_same_as_unqualified(self) -> None:
+        # ATTR3-SMOKE-RUNNER-DEPS-1 round 4 (sol PR #144 major 1): GetCommandName() returns the
+        # QUALIFIED string for a module-qualified invocation, which never matched the census's
+        # exact-name loader list. A qualified Import-Module of a pinned sibling must classify
+        # exactly like the unqualified form.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Microsoft.PowerShell.Core\\Import-Module "
+            "(Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
+
+    def test_a_module_qualified_import_module_of_an_unpinned_file_is_refused(self) -> None:
+        # The positive case above must not become a blanket pass for anything qualified: an extra,
+        # unpinned load through the same qualified spelling is still refused.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "Microsoft.PowerShell.Core\\Import-Module (Join-Path $PSScriptRoot 'x.psm1')\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_an_alias_defining_statement_is_always_unclassified(self) -> None:
+        # ATTR3-SMOKE-RUNNER-DEPS-1 round 4 (sol PR #144 major 2): an alias's target is
+        # undecidable statically, so Set-Alias/sal/New-Alias/nal (qualified or not) is ALWAYS a
+        # site the census refuses to classify -- never resolved at census time -- regardless of
+        # what the alias is named or what it is aliased to.
+        cases = {
+            "Set-Alias": "Set-Alias load Import-Module\n",
+            "sal": "sal load Import-Module\n",
+            "New-Alias": "New-Alias load Import-Module\n",
+            "nal": "nal load Import-Module\n",
+            "module_qualified": "Microsoft.PowerShell.Utility\\Set-Alias load Import-Module\n",
+        }
+        for label, alias_line in cases.items():
+            with self.subTest(alias=label):
+                repo = self.tmp / f"repo-{label}"
+                runner = (
+                    ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+                    ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+                    "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+                    + alias_line
+                )
+                sha = self._repo_with_runner_text(repo, runner)
+                proc = self._assert_complete(repo, sha)
+                self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_add_type_with_an_abbreviated_path_parameter_is_refused(self) -> None:
+        # ATTR3-SMOKE-RUNNER-DEPS-1 round 4 (sol PR #144 major 3): PowerShell binds any
+        # unambiguous parameter-name PREFIX, so `-Pat`/`-Lit` reach -Path/-LiteralPath at runtime
+        # even though the old exact `-ieq` comparison read them as pathless.
+        for abbreviation in ("-Pat", "-Lit", "-PSPath", "-LP"):
+            with self.subTest(abbreviation=abbreviation):
+                repo = self.tmp / f"repo-{abbreviation.strip('-')}"
+                runner = (
+                    ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+                    ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+                    "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+                    f"Add-Type {abbreviation} 'C:\\some\\extra.cs'\n"
+                )
+                sha = self._repo_with_runner_text(repo, runner)
+                proc = self._assert_complete(repo, sha)
+                self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+    def test_a_pinned_process_start_call_classifies_cleanly(self) -> None:
+        # fable's round-3 minor, fixed round 4: the exact real site (a static
+        # [System.Diagnostics.Process]::Start($startInfo) launching the deployed exe) is the one
+        # pinned class-(d) exclusion; it must classify without needing $startInfo to be provable.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "$startInfo = [System.Diagnostics.ProcessStartInfo]::new()\n"
+            "$process = [System.Diagnostics.Process]::Start($startInfo)\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
+
+    def test_an_unpinned_process_start_call_is_refused(self) -> None:
+        # The exclusion is keyed on EXACT site text: a different argument expression is a
+        # different, unreviewed site and must not silently match the pinned one.
+        repo = self.tmp / "repo"
+        runner = (
+            ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            "$otherStartInfo = [System.Diagnostics.ProcessStartInfo]::new()\n"
+            "$process = [System.Diagnostics.Process]::Start($otherStartInfo)\n"
+        )
+        sha = self._repo_with_runner_text(repo, runner)
+        proc = self._assert_complete(repo, sha)
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+
+@requires_pwsh
+@requires_git
+class SmokeRunnerClosureResolutionTests(_PwshCase):
+    """Resolve-AttrCudaSmokeRunnerClosure: resolution only, against the pinned manifest. No scan,
+    no recursion (ATTR3-SMOKE-RUNNER-DEPS-1 round 3) -- proved independent of what the runner's
+    own text says by pointing it at a fixture repo whose runner dot-sources nothing at all."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+
+    def test_resolves_exactly_the_pinned_manifest_in_order(self) -> None:
+        proc = self.run_with_module(
+            f"$closure = @(Resolve-AttrCudaSmokeRunnerClosure -RepoRoot '{self.repo}' "
+            f"-Commit '{self.shas[1]}')\n"
+            "$closure | ForEach-Object { Write-Output \"NAME=$($_.name)\" }\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        names = [line.split("=", 1)[1] for line in proc.stdout.splitlines() if line.startswith("NAME=")]
+        self.assertEqual(names, list(SMOKE_RUNNER_CLOSURE_NAMES))
+
+    def test_resolution_does_not_depend_on_the_runners_own_text(self) -> None:
+        # The exact behavioural break from round 1/2: resolution is unaffected even when the
+        # runner file dot-sources nothing recognizable at all -- there is nothing left to scan.
+        (self.repo / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(
+            "Write-Output 'no loads at all, on purpose'\n", encoding="utf-8"
+        )
+        _git_run(["add", "-A"], self.repo)
+        _git_run(["commit", "-q", "-m", "rewrite runner with no loads"], self.repo)
+        sha = _git_run(["rev-parse", "HEAD"], self.repo)
+
+        proc = self.run_with_module(
+            f"$closure = @(Resolve-AttrCudaSmokeRunnerClosure -RepoRoot '{self.repo}' -Commit '{sha}')\n"
+            "$closure | ForEach-Object { Write-Output \"NAME=$($_.name)\" }\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        names = [line.split("=", 1)[1] for line in proc.stdout.splitlines() if line.startswith("NAME=")]
+        self.assertEqual(names, list(SMOKE_RUNNER_CLOSURE_NAMES))
+
+    def test_each_entry_carries_its_own_committed_blob_sha256(self) -> None:
+        proc = self.run_with_module(
+            f"$closure = @(Resolve-AttrCudaSmokeRunnerClosure -RepoRoot '{self.repo}' "
+            f"-Commit '{self.shas[1]}')\n"
+            "$closure | ForEach-Object { Write-Output \"$($_.name)=$($_.sha256)\" }\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        for name in SMOKE_RUNNER_CLOSURE_NAMES:
+            expected = _git_blob_sha256(self.repo, self.shas[1], f"tools/profiling/{name}")
+            with self.subTest(name=name):
+                self.assertIn(f"{name}={expected}", proc.stdout)
+
+
+@requires_pwsh
+class ClosureDirectoryMismatchTests(_PwshCase):
+    """Get-AttrCudaClosureDirectoryMismatch: the ONE shared exact-set definition both emitted
+    jobs now embed (ATTR3-SMOKE-RUNNER-DEPS-1 round 3) -- replacing two inline copies that could
+    silently drift apart."""
+
+    def _entries_literal(self, entries: dict[str, str]) -> str:
+        return "@(" + ",".join(
+            f"[pscustomobject]@{{ name = '{name}'; sha256 = '{sha256}' }}" for name, sha256 in entries.items()
+        ) + ")"
+
+    def _write(self, directory: Path, contents: dict[str, bytes]) -> dict[str, str]:
+        directory.mkdir(parents=True, exist_ok=True)
+        shas = {}
+        for name, data in contents.items():
+            (directory / name).write_bytes(data)
+            shas[name] = hashlib.sha256(data).hexdigest()
+        return shas
+
+    def test_an_exact_match_returns_null(self) -> None:
+        directory = self.tmp / "dir"
+        shas = self._write(directory, {"a.ps1": b"a bytes", "b.ps1": b"b bytes"})
+        proc = self.run_with_module(
+            f"$result = Get-AttrCudaClosureDirectoryMismatch -Dir '{directory}' "
+            f"-Entries {self._entries_literal(shas)}\n"
+            "Write-Output \"RESULT=[$result]\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("RESULT=[]", proc.stdout)
+
+    def test_a_missing_directory_is_a_mismatch(self) -> None:
+        directory = self.tmp / "does-not-exist"
+        proc = self.run_with_module(
+            f"$result = Get-AttrCudaClosureDirectoryMismatch -Dir '{directory}' "
+            f"-Entries {self._entries_literal({'a.ps1': 'a' * 64})}\n"
+            "Write-Output \"RESULT=[$result]\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("missing closure directory", proc.stdout)
+
+    def test_an_extra_file_is_a_mismatch(self) -> None:
+        directory = self.tmp / "dir"
+        shas = self._write(directory, {"a.ps1": b"a bytes"})
+        (directory / "extra.ps1").write_bytes(b"unexpected")
+        proc = self.run_with_module(
+            f"$result = Get-AttrCudaClosureDirectoryMismatch -Dir '{directory}' "
+            f"-Entries {self._entries_literal(shas)}\n"
+            "Write-Output \"RESULT=[$result]\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("entries, expected", proc.stdout)
+
+    def test_an_extra_subdirectory_is_a_mismatch(self) -> None:
+        # Required test (D): "extra subdirectory", distinct from "extra file".
+        directory = self.tmp / "dir"
+        shas = self._write(directory, {"a.ps1": b"a bytes"})
+        (directory / "nested").mkdir()
+        proc = self.run_with_module(
+            f"$result = Get-AttrCudaClosureDirectoryMismatch -Dir '{directory}' "
+            f"-Entries {self._entries_literal(shas)}\n"
+            "Write-Output \"RESULT=[$result]\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("entries, expected", proc.stdout)
+
+    def test_a_missing_entry_is_named(self) -> None:
+        # Named specifically (not just "wrong count"): every expected entry is checked by name
+        # BEFORE the broader extra-entries sweep, so a refusal always says WHICH file is absent.
+        directory = self.tmp / "dir"
+        self._write(directory, {"a.ps1": b"a bytes"})
+        proc = self.run_with_module(
+            f"$result = Get-AttrCudaClosureDirectoryMismatch -Dir '{directory}' "
+            f"-Entries {self._entries_literal({'a.ps1': hashlib.sha256(b'a bytes').hexdigest(), 'missing.ps1': 'b' * 64})}\n"
+            "Write-Output \"RESULT=[$result]\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("is missing missing.ps1", proc.stdout)
+
+    def test_a_hash_mismatch_is_named(self) -> None:
+        directory = self.tmp / "dir"
+        self._write(directory, {"a.ps1": b"tampered bytes"})
+        wrong_sha = hashlib.sha256(b"the real bytes").hexdigest()
+        proc = self.run_with_module(
+            f"$result = Get-AttrCudaClosureDirectoryMismatch -Dir '{directory}' "
+            f"-Entries {self._entries_literal({'a.ps1': wrong_sha})}\n"
+            "Write-Output \"RESULT=[$result]\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("sha256 mismatch", proc.stdout)
+
+    def test_never_throws_on_a_mismatch(self) -> None:
+        directory = self.tmp / "does-not-exist"
+        proc = self.run_with_module(
+            _guard(
+                f"Get-AttrCudaClosureDirectoryMismatch -Dir '{directory}' "
+                f"-Entries {self._entries_literal({'a.ps1': 'a' * 64})}"
+            )
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NO_THROW", proc.stdout)
 
 
 @requires_pwsh
 class SmokeRunnerStaleRefusalTests(_PwshCase):
-    """The attribution job's pre-flight pin check, run standalone.
+    """The attribution job's pre-flight closure-pin check, run standalone.
 
     Mirrors AttributionJobFixtureContentAuthenticationTests's approach: the check is inline
     top-level code in the generator's $template text, not a named module function, so it is
@@ -1072,114 +1745,202 @@ class SmokeRunnerStaleRefusalTests(_PwshCase):
     reads. This never touches $Root/$Work/-AgentRoot/C:\\mlvtmp, so it needs no fabricated
     build manifest, package or PresentMon binary to reach -- exactly the code that decides
     ATTRCUDA_SMOKE_RUNNER_STALE, and nothing else.
+
+    ATTR3-SMOKE-RUNNER-DEPS-1 round 3: the check is now ONE call into the shared, embedded
+    Get-AttrCudaClosureDirectoryMismatch -- so this class also proves NEW behaviour the old
+    per-member loop never had: an EXTRA file or subdirectory in the closure cache now fails
+    closed here too, not just in the stager's "already staged" check.
     """
 
     def _extract_pin_check(self) -> str:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
-        start_marker = (
-            '$SmokeRunnerCacheName = "run-release-gui-smoke-'
-            '$($SmokeRunnerSha256.Substring(0, 16)).ps1"'
-        )
+        start_marker = "$smokeRunnerClosureDir = Join-Path $Cache $SmokeRunnerClosureDirName"
         end_marker = "\n# NA-4: open exactly the one authorized path baked in by the generator -- no lookup."
         start = text.index(start_marker)
         end = text.index(end_marker, start)
         self.assertGreater(end, start, "smoke-runner pin check markers moved in the generator")
         return text[start:end]
 
-    @staticmethod
-    def _versioned_name(sha256_hex: str) -> str:
-        return f"run-release-gui-smoke-{sha256_hex[:16]}.ps1"
+    def _closure_literal(self, closure) -> str:
+        return "@(" + ",".join(
+            f"[pscustomobject]@{{ name = '{name}'; sha256 = '{sha256}' }}" for name, sha256 in closure
+        ) + ")"
 
-    def _run_pin_check(self, *, cache: Path, smoke_runner_sha256: str) -> subprocess.CompletedProcess:
+    def _run_pin_check(
+        self, *, cache: Path, closure_dir_name: str, closure
+    ) -> subprocess.CompletedProcess:
         block = self._extract_pin_check()
         script = self.tmp / "pin-check-probe.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
+            # ATTR3-SMOKE-RUNNER-DEPS-1 round 3: the pin check block now calls the shared
+            # Get-AttrCudaClosureDirectoryMismatch (which itself calls
+            # Test-AttrCudaPathIsReparsePoint); imported here so the sliced-out block resolves
+            # both the same way the emitted job does.
+            f"Import-Module '{MODULE}' -Force\n"
             f"$Cache = '{cache}'\n"
-            f"$SmokeRunnerSha256 = '{smoke_runner_sha256}'\n"
-            "function Get-Sha([string]$Path) {\n"
-            "    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()\n"
-            "}\n"
+            f"$SmokeRunnerClosureDirName = '{closure_dir_name}'\n"
+            f"$SmokeRunnerClosure = {self._closure_literal(closure)}\n"
             + block + "\n"
             "Write-Output 'RESULT=NO_REFUSAL'\n",
             encoding="utf-8",
         )
         return _run_pwsh_file(script)
 
-    def test_a_stale_or_swapped_runner_is_refused_before_any_smoke_launch(self) -> None:
+    def test_a_missing_closure_directory_is_refused(self) -> None:
         cache = self.tmp / "cache"
         cache.mkdir()
-        pinned_sha256 = hashlib.sha256(b"the real, current, tracked runner bytes").hexdigest()
-        # A stale copy sitting under the VERSIONED name it would need to occupy to pass.
-        (cache / self._versioned_name(pinned_sha256)).write_bytes(b"# a stale pre-f401bf9a copy\n")
+        closure = [("run-release-gui-smoke.ps1", hashlib.sha256(b"x").hexdigest())]
 
-        proc = self._run_pin_check(cache=cache, smoke_runner_sha256=pinned_sha256)
+        proc = self._run_pin_check(cache=cache, closure_dir_name="smoke-runner-deadbeefdeadbeef", closure=closure)
 
-        combined = proc.stdout + proc.stderr
+        combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        self.assertEqual(proc.returncode, 1, combined)
+        self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
+        self.assertIn("missing closure directory", combined, combined)
+
+    def test_a_stale_or_swapped_file_in_the_closure_is_refused_and_named(self) -> None:
+        cache = self.tmp / "cache"
+        dir_name = "smoke-runner-deadbeefdeadbeef"
+        closure_dir = cache / dir_name
+        closure_dir.mkdir(parents=True)
+        pinned_sha = hashlib.sha256(b"the real, current, tracked runner bytes").hexdigest()
+        (closure_dir / "run-release-gui-smoke.ps1").write_bytes(b"# a stale pre-f401bf9a copy\n")
+        closure = [("run-release-gui-smoke.ps1", pinned_sha)]
+
+        proc = self._run_pin_check(cache=cache, closure_dir_name=dir_name, closure=closure)
+
+        combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
         self.assertEqual(proc.returncode, 1, combined)
         self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
         self.assertIn("sha256 mismatch", combined, combined)
+        self.assertIn("run-release-gui-smoke.ps1", combined, combined)
         self.assertNotIn("RESULT=NO_REFUSAL", proc.stdout)
 
-    def test_a_missing_runner_is_refused_with_the_same_token(self) -> None:
-        # existence-only used to pass this case; it must now be refused too.
+    def test_a_missing_single_dependency_is_refused_and_named_even_when_the_runner_is_present(self) -> None:
+        # The directory exists and the FIRST file is correct; only a later dependency is absent.
+        # A whole-directory existence check would have missed this; the loop must check each file.
         cache = self.tmp / "cache"
-        cache.mkdir()
-        pinned_sha256 = hashlib.sha256(b"anything").hexdigest()
+        dir_name = "smoke-runner-deadbeefdeadbeef"
+        closure_dir = cache / dir_name
+        closure_dir.mkdir(parents=True)
+        runner_bytes = b"runner bytes"
+        runner_sha = hashlib.sha256(runner_bytes).hexdigest()
+        (closure_dir / "run-release-gui-smoke.ps1").write_bytes(runner_bytes)
+        missing_sha = hashlib.sha256(b"a dependency that never got staged").hexdigest()
+        closure = [
+            ("run-release-gui-smoke.ps1", runner_sha),
+            ("gui-smoke-screenshot-provenance.ps1", missing_sha),
+        ]
 
-        proc = self._run_pin_check(cache=cache, smoke_runner_sha256=pinned_sha256)
+        proc = self._run_pin_check(cache=cache, closure_dir_name=dir_name, closure=closure)
 
-        combined = proc.stdout + proc.stderr
+        combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
         self.assertEqual(proc.returncode, 1, combined)
         self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
-        self.assertIn(f"cache is missing {self._versioned_name(pinned_sha256)}", combined, combined)
+        self.assertIn("is missing gui-smoke-screenshot-provenance.ps1", combined, combined)
 
-    def test_the_pinned_runner_passes_the_gate(self) -> None:
+    def test_the_fully_pinned_closure_passes_the_gate(self) -> None:
         cache = self.tmp / "cache"
-        cache.mkdir()
-        runner_bytes = b"the real, current, tracked runner bytes"
-        pinned_sha256 = hashlib.sha256(runner_bytes).hexdigest()
-        (cache / self._versioned_name(pinned_sha256)).write_bytes(runner_bytes)
+        dir_name = "smoke-runner-deadbeefdeadbeef"
+        closure_dir = cache / dir_name
+        closure_dir.mkdir(parents=True)
+        closure = []
+        for name in SMOKE_RUNNER_CLOSURE_NAMES:
+            content = f"# {name} bytes\n".encode("utf-8")
+            (closure_dir / name).write_bytes(content)
+            closure.append((name, hashlib.sha256(content).hexdigest()))
 
-        proc = self._run_pin_check(cache=cache, smoke_runner_sha256=pinned_sha256)
+        proc = self._run_pin_check(cache=cache, closure_dir_name=dir_name, closure=closure)
 
-        combined = proc.stdout + proc.stderr
+        combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
         self.assertNotIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
         self.assertIn("RESULT=NO_REFUSAL", proc.stdout, combined)
 
-    def test_the_old_fixed_name_is_never_consulted(self) -> None:
-        # round 2 BLOCKER: correct bytes under the OLD fixed name must not satisfy the gate --
-        # only the content-addressed VERSIONED name is ever looked at.
+    def test_a_reparse_point_closure_directory_is_refused_even_when_its_target_has_matching_bytes(self) -> None:
+        """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): Test-Path/Get-FileHash resolve
+        THROUGH a reparse point, so without an explicit check a junction whose TARGET happens to
+        carry the pinned bytes would pass every existing check. Refused before the hash is ever
+        read."""
         cache = self.tmp / "cache"
         cache.mkdir()
-        runner_bytes = b"the real, current, tracked runner bytes"
-        pinned_sha256 = hashlib.sha256(runner_bytes).hexdigest()
-        (cache / "run-release-gui-smoke.ps1").write_bytes(runner_bytes)
+        dir_name = "smoke-runner-deadbeefdeadbeef"
+        real_dir = self.tmp / "real-target"
+        real_dir.mkdir(parents=True)
+        content = b"the real, current, tracked runner bytes"
+        (real_dir / "run-release-gui-smoke.ps1").write_bytes(content)
+        junction_path = cache / dir_name
+        junction = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType Junction -Path '{junction_path}' -Target '{real_dir}'"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(junction.returncode, 0, junction.stdout + junction.stderr)
+        closure = [("run-release-gui-smoke.ps1", hashlib.sha256(content).hexdigest())]
 
-        proc = self._run_pin_check(cache=cache, smoke_runner_sha256=pinned_sha256)
+        proc = self._run_pin_check(cache=cache, closure_dir_name=dir_name, closure=closure)
 
-        combined = proc.stdout + proc.stderr
+        combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
         self.assertEqual(proc.returncode, 1, combined)
         self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
-        self.assertIn(f"cache is missing {self._versioned_name(pinned_sha256)}", combined, combined)
+        self.assertIn("is a reparse point", combined, combined)
+        self.assertNotIn("RESULT=NO_REFUSAL", proc.stdout)
+
+    def test_an_extra_file_in_the_closure_directory_is_now_refused(self) -> None:
+        # ATTR3-SMOKE-RUNNER-DEPS-1 round 3: NEW behaviour -- the old per-member loop only ever
+        # checked that each expected file was present and correct; it never noticed an EXTRA
+        # file sitting alongside them. The shared exact-set function closes that gap here too.
+        cache = self.tmp / "cache"
+        dir_name = "smoke-runner-deadbeefdeadbeef"
+        closure_dir = cache / dir_name
+        closure_dir.mkdir(parents=True)
+        content = b"runner bytes"
+        (closure_dir / "run-release-gui-smoke.ps1").write_bytes(content)
+        (closure_dir / "unexpected-extra-file.txt").write_bytes(b"not part of the closure")
+        closure = [("run-release-gui-smoke.ps1", hashlib.sha256(content).hexdigest())]
+
+        proc = self._run_pin_check(cache=cache, closure_dir_name=dir_name, closure=closure)
+
+        combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        self.assertEqual(proc.returncode, 1, combined)
+        self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
+        self.assertIn("entries, expected", combined, combined)
+        self.assertNotIn("RESULT=NO_REFUSAL", proc.stdout)
+
+    def test_an_extra_subdirectory_in_the_closure_directory_is_refused(self) -> None:
+        # Required test (D): "extra subdirectory", distinct from "extra file" above.
+        cache = self.tmp / "cache"
+        dir_name = "smoke-runner-deadbeefdeadbeef"
+        closure_dir = cache / dir_name
+        closure_dir.mkdir(parents=True)
+        content = b"runner bytes"
+        (closure_dir / "run-release-gui-smoke.ps1").write_bytes(content)
+        (closure_dir / "nested").mkdir()
+        closure = [("run-release-gui-smoke.ps1", hashlib.sha256(content).hexdigest())]
+
+        proc = self._run_pin_check(cache=cache, closure_dir_name=dir_name, closure=closure)
+
+        combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        self.assertEqual(proc.returncode, 1, combined)
+        self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
+        self.assertIn("entries, expected", combined, combined)
+        self.assertNotIn("RESULT=NO_REFUSAL", proc.stdout)
 
 
 @requires_pwsh
 @requires_git
 class SmokeRunnerStageJobTests(_PwshCase):
-    """attr3-stage-smoke-runner-job.ps1: one tracked file in, cache out, sha256 == the blob.
+    """attr3-stage-smoke-runner-job.ps1: the FULL dependency closure in, one content-addressed
+    cache DIRECTORY out, every file's sha256 == its committed blob.
 
-    The throwaway fixture repository's own tracked file (src/mlv/llrawproc/llrawproc.c) stands
-    in for the runner via -RunnerRelativePath: what is under test is the STAGING MECHANISM
-    (committed-blob extraction, hash-pinned publish), not the real runner's contents.
+    ATTR3-SMOKE-RUNNER-DEPS-1: staging the runner alone left Bachelor unable to launch it at all
+    (round 1 PRESENTMON_TIMEOUT). The closure is derived mechanically from the shared fixture
+    repo's real $PSScriptRoot loads (see _make_fixture_repo), never hand-listed here.
 
-    ATTR3-SMOKE-RUNNER-PIN-1 round 2: the emitted job carries the runner's bytes INLINE
-    (base64), never as a side file dropped into an inbox -- there is no inbox in this design at
-    all, so the agent root here only ever needs to exist (mirroring the persistent, already
-    provisioned root on the real Bachelor host).
+    No side file, no inbox: the emitted job carries every closure file's bytes INLINE (base64),
+    exactly as the single-file stager did (ATTR3-SMOKE-RUNNER-PIN-1 round 2) -- there is no inbox
+    in this design at all, so the agent root here only ever needs to exist.
     """
-
-    RUNNER_PATH = "src/mlv/llrawproc/llrawproc.c"
 
     def setUp(self) -> None:
         super().setUp()
@@ -1190,17 +1951,12 @@ class SmokeRunnerStageJobTests(_PwshCase):
         self.agent = self.tmp / "agent"
         self.agent.mkdir()
 
-    @staticmethod
-    def _versioned_name(sha256_hex: str) -> str:
-        return f"run-release-gui-smoke-{sha256_hex[:16]}.ps1"
-
     def _generate(self, **overrides) -> subprocess.CompletedProcess:
         args = {
             "SourceCommit": self.shas[1],
             "OutDir": str(self.staging),
             "AgentRoot": str(self.agent),
             "RepoRoot": str(self.repo),
-            "RunnerRelativePath": self.RUNNER_PATH,
         }
         args.update(overrides)
         parts = [f"-{key} '{value}'" for key, value in args.items()]
@@ -1212,42 +1968,161 @@ class SmokeRunnerStageJobTests(_PwshCase):
         )
         return _run_pwsh_file(script)
 
-    def test_generator_stages_the_committed_blob_and_reports_its_sha256(self) -> None:
+    def _expected_closure_digest16(self, commit: str) -> str:
+        entries = []
+        for name in SMOKE_RUNNER_CLOSURE_NAMES:
+            entries.append((name, _git_blob_sha256(self.repo, commit, f"tools/profiling/{name}")))
+        lines = sorted(f"{sha}  {name}" for name, sha in entries)
+        digest = hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8")).hexdigest()
+        return digest[:16]
+
+    def test_generator_stages_the_full_closure_under_a_content_addressed_directory(self) -> None:
         proc = self._generate()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        # The generator both Write-Output's a RESULT= line (so the hub need not re-derive the
-        # hash) and returns the pscustomobject; piped through ConvertTo-Json that is an array
-        # of the two -- the object is the last element.
+        # The generator both Write-Output's a RESULT= line and returns the pscustomobject; piped
+        # through ConvertTo-Json that is an array of the two -- the object is the last element.
         payload = json.loads(proc.stdout)[-1]
 
-        expected_sha = _git_blob_sha256(self.repo, self.shas[1], self.RUNNER_PATH)
-        self.assertEqual(payload["runnerSha256"], expected_sha)
-        self.assertEqual(payload["cacheFileName"], self._versioned_name(expected_sha))
+        expected_digest16 = self._expected_closure_digest16(self.shas[1])
+        self.assertEqual(payload["cacheDirName"], f"smoke-runner-{expected_digest16}")
 
-        # No side file, no inbox drop: run the emitted job directly against the (already
-        # provisioned) agent root.
         run_proc = _run_job(Path(payload["jobFile"]))
-
         self.assertEqual(run_proc.returncode, 0, run_proc.stdout + run_proc.stderr)
         self.assertIn("RESULT=SMOKE_RUNNER_STAGE_OK", run_proc.stdout)
-        cache_file = self.agent / "cache" / self._versioned_name(expected_sha)
-        self.assertTrue(cache_file.is_file())
-        self.assertEqual(hashlib.sha256(cache_file.read_bytes()).hexdigest(), expected_sha)
+
+        cache_dir = self.agent / "cache" / f"smoke-runner-{expected_digest16}"
+        self.assertTrue(cache_dir.is_dir())
+        for name in SMOKE_RUNNER_CLOSURE_NAMES:
+            staged = cache_dir / name
+            with self.subTest(name=name):
+                self.assertTrue(staged.is_file(), f"{name} was not staged")
+                expected_sha = _git_blob_sha256(self.repo, self.shas[1], f"tools/profiling/{name}")
+                self.assertEqual(hashlib.sha256(staged.read_bytes()).hexdigest(), expected_sha)
         self.assertFalse((self.agent / "inbox").exists(), "no inbox should ever be created")
 
-    def test_a_different_commit_stages_that_commits_bytes_not_the_others(self) -> None:
-        proc = self._generate(SourceCommit=self.shas[0])
+    def test_generation_refuses_when_a_pinned_sibling_is_no_longer_referenced(self) -> None:
+        """ATTR3-SMOKE-RUNNER-DEPS-1 round 3: the stage generator calls
+        Assert-AttrCudaClosureComplete before it ever resolves or stages anything, so rewriting
+        the runner to stop referencing a pinned sibling is refused at GENERATION time -- never
+        silently staged as an incomplete closure. (Pure resolution's independence from the
+        runner's own text is proved separately, at the module level, in
+        SmokeRunnerClosureResolutionTests.test_resolution_does_not_depend_on_the_runners_own_text.)
+        """
+        (self.repo / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(
+            "Write-Output 'no loads at all, on purpose'\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "commit", "-q", "-m", "rewrite runner with no loads"],
+            check=True, capture_output=True,
+        )
+        sha = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        proc = self._generate(SourceCommit=sha)
+
+        self.assertNotEqual(proc.returncode, 0)
+        combined = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        self.assertIn("ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE", combined)
+        self.assertIn("completeness mismatch", combined)
+        self.assertFalse((self.agent / "cache").exists(), "nothing should be staged on a refused generation")
+
+    def test_an_extra_subdirectory_in_the_cache_dir_is_not_already_staged(self) -> None:
+        # Required test (D): "extra subdirectory", distinct from the existing extra-FILE case
+        # (test_an_extra_file_in_the_directory_is_not_already_staged, below).
+        proc = self._generate()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        # The generator both Write-Output's a RESULT= line (so the hub need not re-derive the
-        # hash) and returns the pscustomobject; piped through ConvertTo-Json that is an array
-        # of the two -- the object is the last element.
         payload = json.loads(proc.stdout)[-1]
 
-        expected_first = _git_blob_sha256(self.repo, self.shas[0], self.RUNNER_PATH)
-        expected_second = _git_blob_sha256(self.repo, self.shas[1], self.RUNNER_PATH)
-        self.assertNotEqual(expected_first, expected_second)
-        self.assertEqual(payload["runnerSha256"], expected_first)
-        self.assertEqual(payload["cacheFileName"], self._versioned_name(expected_first))
+        first_run = _run_job(Path(payload["jobFile"]))
+        self.assertEqual(first_run.returncode, 0, first_run.stdout + first_run.stderr)
+
+        cache_dir = self.agent / "cache" / payload["cacheDirName"]
+        (cache_dir / "unexpected-nested-dir").mkdir()
+
+        second_run = _run_job(Path(payload["jobFile"]))
+
+        self.assertEqual(second_run.returncode, 21, second_run.stdout + second_run.stderr)
+        self.assertIn("DIFFERENT content", normalize_pwsh_message_text(second_run.stdout + second_run.stderr))
+
+    def test_a_staged_runner_dot_sources_its_sibling_from_the_staged_directory(self) -> None:
+        """Required test: run a synthetic runner that dot-sources a sibling from $PSScriptRoot
+        out of the staged directory -- directly disproving the round-1 failure mode (the runner
+        died at its own dot-source line because its siblings were never staged alongside it)."""
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+        run_proc = _run_job(Path(payload["jobFile"]))
+        self.assertEqual(run_proc.returncode, 0, run_proc.stdout + run_proc.stderr)
+
+        staged_runner = self.agent / "cache" / payload["cacheDirName"] / "run-release-gui-smoke.ps1"
+        self.assertTrue(staged_runner.is_file())
+        launch = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(staged_runner)],
+            capture_output=True, text=True,
+        )
+        combined = normalize_pwsh_message_text(launch.stdout + launch.stderr)
+        self.assertEqual(launch.returncode, 0, combined)
+        self.assertNotIn("is not recognized", combined, combined)
+
+    def test_concurrent_invocations_of_the_same_job_use_distinct_partial_directories(self) -> None:
+        # ATTR3-SMOKE-RUNNER-DEPS-1 round 4 (sol PR #144 minor): every same-name stager used to
+        # share ONE deterministic partial directory name, so two overlapping invocations of the
+        # SAME emitted job could remove-and-recreate each other's not-yet-complete scratch
+        # directory. Proved two ways: the emitted job text computes the partial suffix from a
+        # GUID generated at RUNTIME (never baked in once by the generator, which is what would
+        # let two invocations of the identical job file still collide), and two actual runs of
+        # the identical job file report two different partial directory names.
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+        job_path = Path(payload["jobFile"])
+        text = job_path.read_text(encoding="utf-8")
+
+        self.assertIn("[Guid]::NewGuid()", text, "the partial suffix must be generated at job runtime")
+
+        marker = (
+            '$partialDirPath = Assert-AttrCudaDirectChild -Root $Cache -Path '
+            '(Join-Path $Cache "$CacheDirName.partial-$partialDirSuffix") '
+            '-Label "cache/$CacheDirName.partial-$partialDirSuffix"'
+        )
+        self.assertIn(marker, text)
+        instrumented = text.replace(marker, marker + '\nWrite-Output "PARTIAL_DIR=$partialDirPath"')
+        self.assertNotEqual(instrumented, text)
+
+        instrumented_path = self.tmp / "instrumented.job.ps1"
+        partial_dirs = []
+        for _ in range(2):
+            instrumented_path.write_text(instrumented, encoding="utf-8")
+            run_proc = _run_job(instrumented_path)
+            self.assertEqual(run_proc.returncode, 0, run_proc.stdout + run_proc.stderr)
+            lines = [line for line in run_proc.stdout.splitlines() if line.startswith("PARTIAL_DIR=")]
+            self.assertEqual(len(lines), 1, run_proc.stdout)
+            partial_dirs.append(lines[0].split("=", 1)[1])
+            # Remove the published cache dir between runs so the second run rebuilds fresh
+            # (rather than short-circuiting through Complete-AlreadyStaged, which never computes
+            # a new partial directory at all) and its own partial-suffix computation is exercised
+            # again, not skipped.
+            shutil.rmtree(self.agent / "cache" / payload["cacheDirName"])
+
+        self.assertEqual(len(partial_dirs), 2)
+        self.assertNotEqual(partial_dirs[0], partial_dirs[1])
+
+    def test_a_different_commit_stages_that_commits_bytes_and_a_different_directory_name(self) -> None:
+        proc = self._generate(SourceCommit=self.shas[0])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+
+        first_digest16 = self._expected_closure_digest16(self.shas[0])
+        second_digest16 = self._expected_closure_digest16(self.shas[1])
+        # The runner/dependency bytes are identical across both fixture commits (only
+        # llrawproc.c differs between them), so the two directory names being EQUAL here is
+        # the correct, expected behaviour -- content-addressing, not commit-addressing.
+        self.assertEqual(first_digest16, second_digest16)
+        self.assertEqual(payload["cacheDirName"], f"smoke-runner-{first_digest16}")
 
     def test_a_tampered_embedded_payload_is_refused_and_nothing_is_published(self) -> None:
         proc = self._generate()
@@ -1255,7 +2130,7 @@ class SmokeRunnerStageJobTests(_PwshCase):
         payload = json.loads(proc.stdout)[-1]
         job_path = Path(payload["jobFile"])
         text = job_path.read_text(encoding="utf-8")
-        marker = "$RunnerBase64 = '"
+        marker = "base64 = '"
         start = text.index(marker) + len(marker)
         end = text.index("'", start)
         tampered_b64 = base64.b64encode(b"swapped after the hash was baked").decode("ascii")
@@ -1265,71 +2140,247 @@ class SmokeRunnerStageJobTests(_PwshCase):
 
         self.assertEqual(run_proc.returncode, 4, run_proc.stdout + run_proc.stderr)
         self.assertFalse(
-            (self.agent / "cache" / payload["cacheFileName"]).exists(),
-            "a hash-mismatched payload must publish nothing",
+            (self.agent / "cache" / payload["cacheDirName"]).exists(),
+            "a hash-mismatched payload must publish nothing at all",
         )
 
-    def test_the_emitted_job_carries_the_runner_inline_with_no_side_file_instruction(self) -> None:
-        """Required test (ATTR3-SMOKE-RUNNER-PIN-1 round 2): the emitted job embeds the exact
-        committed bytes; decoding the embedded payload and hashing it reproduces the pin; and
-        nothing in the job tells an operator to submit the runner as a side file."""
+    def test_the_emitted_job_carries_every_closure_file_inline_with_no_side_file_instruction(self) -> None:
         proc = self._generate()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         payload = json.loads(proc.stdout)[-1]
         text = Path(payload["jobFile"]).read_text(encoding="utf-8")
 
-        marker = "$RunnerBase64 = '"
-        start = text.index(marker) + len(marker)
-        end = text.index("'", start)
-        embedded_b64 = text[start:end]
-        decoded = base64.b64decode(embedded_b64)
-        self.assertEqual(hashlib.sha256(decoded).hexdigest(), payload["runnerSha256"])
+        for match in re.finditer(r"sha256 = '([0-9a-f]{64})'; base64 = '([^']*)'", text):
+            expected_sha, embedded_b64 = match.group(1), match.group(2)
+            decoded = base64.b64decode(embedded_b64)
+            self.assertEqual(hashlib.sha256(decoded).hexdigest(), expected_sha)
 
         self.assertNotIn("-SideFile", text)
         self.assertNotIn("$Inbox", text)
         self.assertNotIn("$side", text)
 
-    def test_staging_succeeds_when_the_old_fixed_name_holds_different_bytes(self) -> None:
-        """Required test: the bachelor state this card exists to fix -- a stale runner already
-        occupying the OLD fixed cache name -- must not block staging under the new versioned
-        name, and that file must be left exactly as it was."""
-        cache_dir = self.agent / "cache"
-        cache_dir.mkdir(parents=True)
-        old_name = cache_dir / "run-release-gui-smoke.ps1"
-        stale_bytes = b"the stale pre-f401bf9a bachelor runner\n"
-        old_name.write_bytes(stale_bytes)
-
-        proc = self._generate()
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        payload = json.loads(proc.stdout)[-1]
-
-        run_proc = _run_job(Path(payload["jobFile"]))
-
-        self.assertEqual(run_proc.returncode, 0, run_proc.stdout + run_proc.stderr)
-        self.assertIn("RESULT=SMOKE_RUNNER_STAGE_OK", run_proc.stdout)
-        versioned = cache_dir / payload["cacheFileName"]
-        self.assertTrue(versioned.is_file())
-        self.assertEqual(hashlib.sha256(versioned.read_bytes()).hexdigest(), payload["runnerSha256"])
-        # untouched: neither deleted nor rewritten
-        self.assertEqual(old_name.read_bytes(), stale_bytes)
-
-    def test_staging_fails_closed_when_the_versioned_name_holds_different_bytes(self) -> None:
-        """Required test: a versioned name is content-addressed, so different bytes under it can
-        only mean corruption -- staging must refuse, not overwrite."""
+    def test_staging_fails_closed_when_the_directory_holds_different_content(self) -> None:
+        """A different existing directory under the same content-addressed name fails closed."""
         proc = self._generate()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         payload = json.loads(proc.stdout)[-1]
         cache_dir = self.agent / "cache"
-        cache_dir.mkdir(parents=True)
-        versioned = cache_dir / payload["cacheFileName"]
+        closure_dir = cache_dir / payload["cacheDirName"]
+        closure_dir.mkdir(parents=True)
         corrupted_bytes = b"corrupted -- different bytes under the content-addressed name"
-        versioned.write_bytes(corrupted_bytes)
+        (closure_dir / "run-release-gui-smoke.ps1").write_bytes(corrupted_bytes)
 
         run_proc = _run_job(Path(payload["jobFile"]))
 
         self.assertEqual(run_proc.returncode, 21, run_proc.stdout + run_proc.stderr)
-        self.assertIn("DIFFERENT bytes", run_proc.stdout + run_proc.stderr)
-        self.assertEqual(versioned.read_bytes(), corrupted_bytes)
+        self.assertIn("DIFFERENT content", normalize_pwsh_message_text(run_proc.stdout + run_proc.stderr))
+        self.assertEqual((closure_dir / "run-release-gui-smoke.ps1").read_bytes(), corrupted_bytes)
+
+    def test_identical_existing_content_counts_as_already_staged(self) -> None:
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+
+        first_run = _run_job(Path(payload["jobFile"]))
+        self.assertEqual(first_run.returncode, 0, first_run.stdout + first_run.stderr)
+        self.assertNotIn("ALREADY=1", first_run.stdout)
+
+        second_run = _run_job(Path(payload["jobFile"]))
+        self.assertEqual(second_run.returncode, 0, second_run.stdout + second_run.stderr)
+        self.assertIn("RESULT=SMOKE_RUNNER_STAGE_OK ALREADY=1", second_run.stdout)
+
+    def test_an_extra_file_in_the_directory_is_not_already_staged(self) -> None:
+        """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): every pinned file present and
+        correct, PLUS one extra file, must NOT count as already-staged -- "already staged" means
+        the directory is EXACTLY the expected closure, no extra entries."""
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+
+        first_run = _run_job(Path(payload["jobFile"]))
+        self.assertEqual(first_run.returncode, 0, first_run.stdout + first_run.stderr)
+
+        cache_dir = self.agent / "cache" / payload["cacheDirName"]
+        (cache_dir / "unexpected-extra-file.txt").write_bytes(b"not part of the closure")
+
+        second_run = _run_job(Path(payload["jobFile"]))
+
+        self.assertEqual(second_run.returncode, 21, second_run.stdout + second_run.stderr)
+        self.assertIn("DIFFERENT content", normalize_pwsh_message_text(second_run.stdout + second_run.stderr))
+
+    def test_a_reparse_point_at_the_closure_directory_is_not_already_staged(self) -> None:
+        """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): a junction whose target is a
+        byte-identical mirror of the closure must still fail closed -- "already staged" refuses
+        a link at the directory itself, not just wrong bytes."""
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+
+        first_run = _run_job(Path(payload["jobFile"]))
+        self.assertEqual(first_run.returncode, 0, first_run.stdout + first_run.stderr)
+
+        cache_dir = self.agent / "cache" / payload["cacheDirName"]
+        mirror_dir = self.tmp / "mirror-of-cache-dir"
+        shutil.copytree(cache_dir, mirror_dir)
+        shutil.rmtree(cache_dir)
+        junction = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType Junction -Path '{cache_dir}' -Target '{mirror_dir}'"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(junction.returncode, 0, junction.stdout + junction.stderr)
+
+        second_run = _run_job(Path(payload["jobFile"]))
+
+        self.assertEqual(second_run.returncode, 21, second_run.stdout + second_run.stderr)
+        self.assertIn("DIFFERENT content", normalize_pwsh_message_text(second_run.stdout + second_run.stderr))
+
+    def test_verify_only_stops_before_anything_is_written(self) -> None:
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+
+        run_proc = _run_job(Path(payload["jobFile"]), "-VerifyOnly")
+
+        self.assertEqual(run_proc.returncode, 0, run_proc.stdout + run_proc.stderr)
+        self.assertIn("RESULT=VERIFY_ONLY_OK", run_proc.stdout)
+        self.assertFalse((self.agent / "cache").exists(), "-VerifyOnly must not create the cache")
+
+
+@requires_pwsh
+class SmokeRunFailedPresentMonCleanupTests(_PwshCase):
+    """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3), EXECUTED rather than merely asserted as
+    text ordering: PresentMon must actually be stopped -- confirmed exited by re-reading the
+    process afterward, never assumed from "no exception" -- both when the smoke child returns an
+    ordinary nonzero exit and when STARTING it raises a terminating exception (the previous
+    ordering fix only covered a normal child return). The PresentMon stand-in is a REAL
+    background process, not a fake object, so Stop-PresentMonCapture's Kill()/WaitForExit() do
+    real work; only Start-PresentMonCapture is swapped out, so the launcher and the boundary
+    condition (JobId, artifacts) never need a real cache, build manifest or GPU.
+    """
+
+    def _presentmon_functions(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start = text.index("function Start-PresentMonCapture(")
+        end = text.index("\nfunction Get-FrameRows(", start)
+        return text[start:end]
+
+    def _failure_block(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start_marker = "$presentMonProc = Start-PresentMonCapture $presentMonPath"
+        end_marker = "\n$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc"
+        start = text.index(start_marker)
+        end = text.index(end_marker, start)
+        return text[start:end]
+
+    def _run(self, *, cmd: str, program_files_has_pwsh: bool) -> tuple[subprocess.CompletedProcess, dict]:
+        pub = self.tmp / "pub"
+        pub.mkdir()
+        leg_out = self.tmp / "legOut"
+        leg_out.mkdir()
+        result_path = leg_out / "result.json"  # never created: every scenario here is a failure
+        real_pwsh_dir = str(Path(PWSH).resolve().parent)
+        stub_root = self.tmp / "pf-stub"
+        cmd_literal = "'" + cmd.replace("'", "''") + "'"
+        junction_line = (
+            f"New-Item -ItemType Junction -Path (Join-Path $stubRoot 'PowerShell\\7') "
+            f"-Target '{real_pwsh_dir}' | Out-Null\n"
+            if program_files_has_pwsh else ""
+        )
+        script = self.tmp / "probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"$stubRoot = '{stub_root}'\n"
+            "New-Item -ItemType Directory -Path (Join-Path $stubRoot 'PowerShell') -Force | Out-Null\n"
+            + junction_line
+            + "$env:ProgramFiles = $stubRoot\n"
+            f"$cmd = {cmd_literal}\n"
+            f"$legOut = '{leg_out}'\n"
+            f"$resultPath = '{result_path}'\n"
+            f"$presentMonPath = '{self.tmp / 'presentmon.csv'}'\n"
+            "$FixtureRehearsal = $true\n"
+            "$SourceCommit = ('1' * 40)\n"
+            "$ClipId = 'tiny_dual_iso'\n"
+            f"$Pub = '{pub}'\n"
+            "function Save-Json($Object, [string]$Path) {\n"
+            "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
+            "}\n"
+            + self._presentmon_functions() + "\n"
+            # Swaps out only the launcher: a real PresentMon binary and ETW rights are not
+            # available in this test environment, but Stop-PresentMonCapture (under test) must
+            # act on a REAL child process, not a fake object, to prove it truly terminates one.
+            "function Start-PresentMonCapture([string]$CsvPath) {\n"
+            "    Start-Process -FilePath 'powershell.exe' "
+            "-ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120') "
+            "-PassThru -WindowStyle Hidden\n"
+            "}\n"
+            + self._failure_block() + "\n"
+            "Write-Output 'RESULT=NO_FAILURE_BRANCH_TAKEN'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        summary_path = pub / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+        return proc, summary
+
+    def test_an_ordinary_nonzero_smoke_exit_stops_a_real_presentmon_process(self) -> None:
+        proc, summary = self._run(cmd="exit 7", program_files_has_pwsh=True)
+        self.assertEqual(proc.returncode, 18, proc.stdout + proc.stderr)
+        self.assertIn("RESULT=SMOKE_RUN_FAILED", proc.stdout)
+        self.assertEqual(summary.get("smokeExitCode"), 7)
+        self.assertIsNone(summary.get("smokeLaunchExceptionType"))
+        self.assertIs(summary.get("presentMonConfirmedExited"), True, summary)
+        self.assertIsNone(summary.get("presentMonKillError"))
+        self.assertIsNone(summary.get("presentMonWaitError"))
+
+    def test_a_launch_exception_also_stops_a_real_presentmon_process_and_is_captured(self) -> None:
+        # ProgramFiles points at a directory with no PowerShell\7\pwsh.exe at all, so the
+        # production launch line itself throws CommandNotFoundException before $smokeRc is ever
+        # set -- the exact bypass sol's major 3 describes.
+        proc, summary = self._run(cmd="exit 0", program_files_has_pwsh=False)
+        self.assertEqual(proc.returncode, 18, proc.stdout + proc.stderr)
+        self.assertIn("RESULT=SMOKE_RUN_FAILED", proc.stdout)
+        self.assertIsNone(summary.get("smokeExitCode"))
+        self.assertIsNotNone(summary.get("smokeLaunchExceptionType"))
+        self.assertIn("CommandNotFoundException", summary["smokeLaunchExceptionType"])
+        self.assertIs(summary.get("presentMonConfirmedExited"), True, summary)
+
+
+@requires_pwsh
+class WaitPresentMonCaptureTimeoutWaitsAfterKillTests(_PwshCase):
+    """ATTR3-SMOKE-RUNNER-DEPS-1 round 4, item 5 (fable round-3 minor). Kill() is asynchronous --
+    Stop-PresentMonCapture already waited bounded after it before sampling HasExited;
+    Wait-PresentMonCapture's timeout path used to sample HasExited in the very next statement,
+    which could still read false for a process that exits milliseconds later. It now mirrors
+    Stop-PresentMonCapture and reports killError, waitError and confirmedExited alike, against a
+    REAL background process."""
+
+    def _presentmon_functions(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start = text.index("function Start-PresentMonCapture(")
+        end = text.index("\nfunction Get-FrameRows(", start)
+        return text[start:end]
+
+    def test_the_timeout_path_waits_after_kill_and_reports_all_three_fields(self) -> None:
+        script = self.tmp / "probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            + self._presentmon_functions() + "\n"
+            "$proc = Start-Process -FilePath 'powershell.exe' "
+            "-ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120') "
+            "-PassThru -WindowStyle Hidden\n"
+            "try { [void](Wait-PresentMonCapture $proc -TimeoutSeconds 1); Write-Output 'NO_THROW' } "
+            "catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        message = normalize_pwsh_message_text(proc.stdout)
+        self.assertIn("THREW PRESENTMON_TIMEOUT", message)
+        self.assertIn("confirmedExited=True", message)
+        self.assertIn("killError=<none>", message)
+        self.assertIn("waitError=<none>", message)
 
 
 @requires_git
@@ -1370,7 +2421,9 @@ class SmokeRunnerBlobHelperSpacedPathTests(unittest.TestCase):
         proc = _run_pwsh_file(script)
 
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertNotIn("ATTRCUDA_BLOB_READ_FAILED", proc.stdout + proc.stderr)
+        self.assertNotIn(
+            "ATTRCUDA_BLOB_READ_FAILED", normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        )
         self.assertTrue(destination.is_file())
         expected_sha256 = _git_blob_sha256(repo, shas[1], rel_path)
         self.assertEqual(hashlib.sha256(destination.read_bytes()).hexdigest(), expected_sha256)
@@ -1843,12 +2896,27 @@ class EmbeddedFunctionContractTests(_PwshCase):
             "Remove-AttrCudaPartialFile",
             "Remove-AttrCudaTree",
         ),
+        ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-smoke-runner-job.ps1": (
+            "Assert-AttrCudaSafeArtifactName",
+            "Assert-AttrCudaDirectChild",
+            "Assert-AttrCudaNoLinkBelowRoot",
+            "Assert-AttrCudaWritableFileSlot",
+            "Assert-AttrCudaNonOverwritingFileSlot",
+            "Test-AttrCudaPathIsReparsePoint",
+            "Read-AttrCudaBase64Payload",
+            "Publish-AttrCudaBytes",
+            "Publish-AttrCudaText",
+            "Publish-AttrCudaDirectoryMoveNonOverwriting",
+            "New-AttrCudaDirectory",
+            "Remove-AttrCudaTree",
+        ),
         ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1": (
             "Assert-AttrCudaBuildManifest",
             "Resolve-AttrCudaSmokeRunLog",
             "Get-AttrCudaLastEligibilityLine",
             "Get-AttrCudaEligibilityVerdict",
             "Assert-AttrCudaWritableFileSlot",
+            "Test-AttrCudaPathIsReparsePoint",
             "Publish-AttrCudaText",
             "Publish-AttrCudaFileCopy",
             "Publish-AttrCudaFileMove",

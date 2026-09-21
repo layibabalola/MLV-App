@@ -177,12 +177,7 @@ param(
     # here) in the evidence manifest for audit trail.
     [string]$ConsentReceiptFileName = 'owner-footage-consent-20260916.json',
 
-    [string]$LlrawprocRelativePath = 'src/mlv/llrawproc/llrawproc.c',
-
-    # ATTR3-SMOKE-RUNNER-PIN-1: the smoke runner is a TRACKED repository script, not a build
-    # artifact, so its pin is derived from -SourceCommit locally rather than passed in -- see
-    # the __SMOKE_RUNNER_SHA256__ substitution below.
-    [string]$SmokeRunnerRelativePath = 'tools/profiling/run-release-gui-smoke.ps1'
+    [string]$LlrawprocRelativePath = 'src/mlv/llrawproc/llrawproc.c'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -197,6 +192,8 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Get-AttrCudaLastEligibilityLine',
     'Get-AttrCudaEligibilityVerdict',
     'Assert-AttrCudaWritableFileSlot',
+    'Test-AttrCudaPathIsReparsePoint',
+    'Get-AttrCudaClosureDirectoryMismatch',
     'Publish-AttrCudaText',
     'Publish-AttrCudaFileCopy',
     'Publish-AttrCudaFileMove',
@@ -219,26 +216,47 @@ if ($PresentMonSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
     throw "PresentMonSha256 is not a 64-hex sha256: $PresentMonSha256"
 }
 
-# ATTR3-SMOKE-RUNNER-PIN-1: pinned the SAME way PresentMon's sha is (a template placeholder
-# baked in here, validated as 64 hex, checked before the runner launches) -- but DERIVED from
-# -SourceCommit rather than hardcoded, because the runner is a tracked repository script and
-# both this generator and attr3-stage-smoke-runner-job.ps1 can resolve the identical git blob
-# independently, with no value needing to be threaded between the two. Bytes are read as
-# COMMITTED at $SourceCommit (git cat-file blob, never the working tree), so a CRLF checkout
-# can never disagree with what the stage job publishes into the cache.
-$smokeRunnerBlobId = Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $SourceCommit -RepoRelativePath $SmokeRunnerRelativePath
-$smokeRunnerPinTemp = Join-Path ([IO.Path]::GetTempPath()) "attrcuda-smoke-runner-pin-$([Guid]::NewGuid().ToString('N')).tmp"
-try {
-    $smokeRunnerSha256 = Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $smokeRunnerBlobId -Destination $smokeRunnerPinTemp
-} finally {
-    if (Test-Path -LiteralPath $smokeRunnerPinTemp) { Remove-Item -LiteralPath $smokeRunnerPinTemp -Force -ErrorAction SilentlyContinue }
+# ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN): the runner is not standalone -- it
+# dot-sources gui-smoke-screenshot-provenance.ps1 and provenance-stamp.ps1, and imports
+# gui-smoke-process-boundary.psm1, all resolved through $PSScriptRoot at runtime. Staging the
+# runner alone (ATTR3-SMOKE-RUNNER-PIN-1) left Bachelor unable to launch it at all: the runner
+# died at its own dot-source line, the app never launched, PresentMon never saw a target and
+# never exited, and PRESENTMON_TIMEOUT masked the real cause. Round 1/2 discovered this closure
+# by SCANNING; a design swarm ruled that undiscoverable-by-patching (a literal-based scanner
+# cannot see an extension-less load or a bareword Import-Module, and a basename-only classifier
+# can be satisfied by an unrelated absolute path). The closure is now the EXPLICIT, pinned
+# manifest (Get-AttrCudaSmokeRunnerClosureManifest); Assert-AttrCudaClosureComplete is the
+# generator-time proof that the pinned list still matches what the real files load, using an AST
+# census instead of a scan. Resolve-AttrCudaSmokeRunnerClosure then does nothing but resolve each
+# pinned path's committed bytes -- exactly as attr3-stage-smoke-runner-job.ps1 resolves the same
+# closure independently, with no value needing to be threaded between the two.
+[void](Assert-AttrCudaClosureComplete -RepoRoot $RepoRoot -Commit $SourceCommit)
+$smokeRunnerClosure = @(Resolve-AttrCudaSmokeRunnerClosure -RepoRoot $RepoRoot -Commit $SourceCommit)
+foreach ($entry in $smokeRunnerClosure) {
+    [void](Assert-AttrCudaSafeArtifactName -Name $entry.name)
+    # Fable minor (round 2, carried forward): validated as 64 lowercase hex before it is
+    # substituted into the emitted job, the same way -PresentMonSha256 is validated above -- a
+    # value from this helper is trusted enough to gate a publish decision and deserves the same
+    # shape check.
+    if ($entry.sha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "ATTRCUDA_BLOB_SHA_MALFORMED resolved closure file sha256 is not 64 lowercase hex for $($entry.name): '$($entry.sha256)'"
+    }
 }
-# Fable minor (round 2): validated as 64 lowercase hex before it is substituted into the emitted
-# job, the same way -PresentMonSha256 is validated above -- this value gates
-# ATTRCUDA_SMOKE_RUNNER_STALE and deserves the identical shape check.
-if ($smokeRunnerSha256 -notmatch '^[0-9a-f]{64}$') {
-    throw "ATTRCUDA_BLOB_SHA_MALFORMED resolved smoke-runner sha256 is not 64 lowercase hex: '$smokeRunnerSha256'"
+$smokeRunnerClosureDigest = Get-AttrCudaClosureDigestHex -Closure $smokeRunnerClosure
+if ($smokeRunnerClosureDigest -notmatch '^[0-9a-f]{64}$') {
+    throw "ATTRCUDA_BLOB_SHA_MALFORMED smoke-runner closure digest is not 64 lowercase hex: '$smokeRunnerClosureDigest'"
 }
+# Content-addressed, mirroring ATTR3-SMOKE-RUNNER-PIN-1 round 2's single-file cache name: a
+# distinct closure publishes under a distinct directory name, so this job never has to contend
+# with -- or touch -- whatever bytes already sit under another closure's directory.
+$smokeRunnerClosureDirName = "smoke-runner-$($smokeRunnerClosureDigest.Substring(0, 16))"
+[void](Assert-AttrCudaSafeArtifactName -Name $smokeRunnerClosureDirName)
+$smokeRunnerName = $smokeRunnerClosure[0].name
+
+function ConvertTo-AttrCudaGeneratorPsLiteral([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
+$smokeRunnerClosureLiteral = "@(`r`n" + (($smokeRunnerClosure | ForEach-Object {
+    "    [pscustomobject]@{ name = $(ConvertTo-AttrCudaGeneratorPsLiteral $_.name); sha256 = '$($_.sha256)' }"
+}) -join ",`r`n") + "`r`n)"
 
 $shortSha = $SourceCommit.Substring(0, 12)
 $exeName = "MLVApp-playback-attr-3-cuda-$shortSha.exe"
@@ -302,7 +320,9 @@ $BasePackageZip = '__BASE_PACKAGE_ZIP__'
 $BasePackageExeName = '__BASE_PACKAGE_EXE_NAME__'
 $PresentMonName = '__PRESENTMON_NAME__'
 $PresentMonSha = '__PRESENTMON_SHA256__'
-$SmokeRunnerSha256 = '__SMOKE_RUNNER_SHA256__'
+$SmokeRunnerClosure = __SMOKE_RUNNER_CLOSURE__
+$SmokeRunnerClosureDirName = '__SMOKE_RUNNER_CLOSURE_DIR_NAME__'
+$SmokeRunnerName = '__SMOKE_RUNNER_NAME__'
 $ConsentReceiptFileName = '__CONSENT_RECEIPT__'
 $FixtureRehearsal = __FIXTURE_REHEARSAL__
 $FixtureSha256 = '__FIXTURE_SHA256__'
@@ -415,12 +435,62 @@ function Start-PresentMonCapture([string]$CsvPath) {
     return $proc
 }
 
-function Wait-PresentMonCapture($Proc, [int]$TimeoutSeconds = 35) {
+function Wait-PresentMonCapture($Proc, [int]$TimeoutSeconds = 35, [int]$KillWaitTimeoutSeconds = 10) {
     if (-not $Proc.WaitForExit($TimeoutSeconds * 1000)) {
-        try { $Proc.Kill() } catch { }
-        throw "PRESENTMON_TIMEOUT: did not exit within $TimeoutSeconds s after playback"
+        # ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3, carried to round 3): the empty catch
+        # here used to swallow a Kill() failure outright -- a PresentMon that survived both the
+        # timeout and the kill attempt left no trace anywhere. Reported the same way
+        # Stop-PresentMonCapture already reports it: killError and waitError captured,
+        # confirmedExited read from $Proc itself AFTER the attempt, never assumed from "Kill()
+        # didn't throw".
+        # Round 4 (fable round-3 minor, PR #144): Kill() is asynchronous -- sampling HasExited in
+        # the very next statement could still read false for a process that exits milliseconds
+        # later, sending an operator hunting a lingering process that is not there. Wait bounded
+        # after Kill(), exactly as Stop-PresentMonCapture already does, before sampling HasExited.
+        $killError = $null
+        $waitError = $null
+        try { $Proc.Kill() } catch { $killError = $_.Exception.Message }
+        try {
+            if (-not $Proc.WaitForExit($KillWaitTimeoutSeconds * 1000)) {
+                $waitError = "did not exit within $KillWaitTimeoutSeconds s after Kill()"
+            }
+        } catch {
+            $waitError = $_.Exception.Message
+        }
+        $confirmedExited = [bool]$Proc.HasExited
+        $killErrorText = if ($null -eq $killError) { '<none>' } else { $killError }
+        $waitErrorText = if ($null -eq $waitError) { '<none>' } else { $waitError }
+        throw "PRESENTMON_TIMEOUT: did not exit within $TimeoutSeconds s after playback (confirmedExited=$confirmedExited killError=$killErrorText waitError=$waitErrorText)"
     }
     [pscustomobject]@{ status = 'done'; exitCode = $Proc.ExitCode }
+}
+
+function Stop-PresentMonCapture($Proc, [int]$TimeoutSeconds = 10) {
+    # ATTR3-SMOKE-RUNNER-DEPS-1 (D): used only when the smoke run itself is already known to have
+    # failed -- PresentMon is stopped, never waited out, so a smoke-side failure is reported as
+    # SMOKE_RUN_FAILED and not mis-diagnosed as PRESENTMON_TIMEOUT.
+    # ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3): the empty catch blocks used to swallow a
+    # Kill() or WaitForExit() failure outright, so a PresentMon that survived the kill left no
+    # trace anywhere. Both are now captured and returned -- confirmedExited is read from $Proc
+    # itself AFTER the attempt, never assumed from "Kill() didn't throw" -- so the caller can
+    # report a stop that did not actually confirm exit instead of silently trusting it.
+    $killError = $null
+    $waitError = $null
+    if (-not $Proc.HasExited) {
+        try { $Proc.Kill() } catch { $killError = $_.Exception.Message }
+        try {
+            if (-not $Proc.WaitForExit($TimeoutSeconds * 1000)) {
+                $waitError = "did not exit within $TimeoutSeconds s after Kill()"
+            }
+        } catch {
+            $waitError = $_.Exception.Message
+        }
+    }
+    [pscustomobject]@{
+        confirmedExited = [bool]$Proc.HasExited
+        killError = $killError
+        waitError = $waitError
+    }
 }
 
 function Get-FrameRows([string]$RawLog) {
@@ -519,25 +589,20 @@ foreach ($check in $manifestChecks) {
     if ((Get-Sha $check.path) -ne $check.expectedSha.ToUpperInvariant()) { throw "hash mismatch (vs build manifest $buildManifestName) for $($check.path)" }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $Cache $PresentMonName))) { throw "cache missing $PresentMonName" }
-# ATTR3-SMOKE-RUNNER-PIN-1 (BLOCKER): existence alone proved nothing about which bytes were
-# staged. Bachelor ran a copy of run-release-gui-smoke.ps1 from before commit f401bf9a --
-# passing this same existence check -- that used the pre-f401bf9a log layout and wrote no
-# evidence.runLogSnapshot, so Resolve-AttrCudaSmokeRunLog correctly refused it at exit 16 after
-# a scarce quiet venue window had already been spent. The cache copy is now hash-pinned exactly
-# like PresentMon above (a template placeholder, validated as 64 hex), and refused HERE --
-# before PresentMon starts, before the app launches, before any run is spent.
-# round 2 BLOCKER: the cache name is now content-addressed (derived from the very sha256 this
-# check pins against), not the old fixed name -- a stager can never be asked to overwrite
-# whatever bytes already sit under the old fixed name, and this check can never be satisfied by
-# them either, because it never looks at that name.
-$SmokeRunnerCacheName = "run-release-gui-smoke-$($SmokeRunnerSha256.Substring(0, 16)).ps1"
-$smokeRunnerCachePath = Join-Path $Cache $SmokeRunnerCacheName
-if (-not (Test-Path -LiteralPath $smokeRunnerCachePath -PathType Leaf)) {
-    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing $SmokeRunnerCacheName"
-}
-$smokeRunnerActualSha = Get-Sha $smokeRunnerCachePath
-if ($smokeRunnerActualSha -ne $SmokeRunnerSha256.ToUpperInvariant()) {
-    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache $SmokeRunnerCacheName sha256 mismatch: expected $SmokeRunnerSha256, actual $smokeRunnerActualSha"
+# ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN): the runner alone is not launchable --
+# it dot-sources two siblings and imports a module, all resolved via $PSScriptRoot, and staging
+# only the runner (ATTR3-SMOKE-RUNNER-PIN-1) left Bachelor unable to reach line 1 of playback,
+# which PRESENTMON_TIMEOUT then mis-reported as a PresentMon problem. Round 1/2 checked the
+# closure directory with an inline exact-set loop DUPLICATED between this job and the stager's
+# own "already staged" check -- exactly the shape that lets the two silently drift apart. Both
+# jobs now embed the SAME Get-AttrCudaClosureDirectoryMismatch function text
+# (Get-AttrCudaEmbeddedFunctionSource), so there is only ever one definition of "matches exactly"
+# to drift from. Checked HERE -- before PresentMon starts, before the app launches, before any
+# run is spent -- naming the failing file so a refusal says WHICH dependency is stale or missing.
+$smokeRunnerClosureDir = Join-Path $Cache $SmokeRunnerClosureDirName
+$smokeRunnerClosureMismatch = Get-AttrCudaClosureDirectoryMismatch -Dir $smokeRunnerClosureDir -Entries $SmokeRunnerClosure
+if ($null -ne $smokeRunnerClosureMismatch) {
+    throw "ATTRCUDA_SMOKE_RUNNER_STALE $smokeRunnerClosureMismatch"
 }
 # NA-4: open exactly the one authorized path baked in by the generator -- no lookup.
 $clipPath = $AuthorizedClipPath
@@ -626,7 +691,7 @@ $legOut = Join-Path $Work 'out\diagnostic'
 New-Item -ItemType Directory -Path $legOut -Force | Out-Null
 $resultPath = Join-Path $legOut 'result.json'
 $presentMonPath = Join-Path $legOut 'presentmon.csv'
-$smoke = $smokeRunnerCachePath
+$smoke = Join-Path $smokeRunnerClosureDir $SmokeRunnerName
 $envs = @(
     'MLVAPP_PLAYBACK_QUALITY_MODE=phase3_hq',
     'MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW=0',
@@ -662,10 +727,79 @@ $envList = "'" + ($envs -join "','") + "'"
 function ConvertTo-PsSingleQuoted([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
 $cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted $exePath) -Input $(ConvertTo-PsSingleQuoted $clipPath) -Output $(ConvertTo-PsSingleQuoted $resultPath) -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor 4 -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
 $presentMonProc = Start-PresentMonCapture $presentMonPath
-& "$env:ProgramFiles\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $cmd 1> (Join-Path $legOut 'smoke-stdout.txt') 2> (Join-Path $legOut 'smoke-stderr.txt')
-$smokeRc = $LASTEXITCODE
+# ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3): the smoke-failure ordering fix only covered a
+# NORMAL child return -- a terminating exception while starting or running the nested pwsh (the
+# executable missing, launch redirection throwing under ErrorActionPreference Stop) used to skip
+# $smokeRc and the whole SMOKE_RUN_FAILED branch below, bypassing PresentMon cleanup entirely.
+# Caught here instead, so every path -- normal failure, normal success, or a launch exception --
+# reaches the same Stop-PresentMonCapture call before this job decides anything else.
+$smokeRc = $null
+$smokeLaunchException = $null
+try {
+    & "$env:ProgramFiles\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $cmd 1> (Join-Path $legOut 'smoke-stdout.txt') 2> (Join-Path $legOut 'smoke-stderr.txt')
+    $smokeRc = $LASTEXITCODE
+} catch {
+    $smokeLaunchException = $_
+}
+
+# ATTR3-SMOKE-RUNNER-DEPS-1 (D, round 1 BLOCKER): the smoke run's own outcome is checked BEFORE
+# PresentMon is waited on. The previous order waited up to 35s for PresentMon to exit even when
+# the smoke run itself never launched the app (the round-1 failure: the runner died at its own
+# dot-source line before MLVApp.exe ever started) -- PresentMon then timed out waiting for a
+# process that was never going to appear, and PRESENTMON_TIMEOUT was true but not the cause.
+# PresentMon is stopped (never waited out) the moment the smoke run is known to have failed;
+# PRESENTMON_TIMEOUT is reserved for the one case it actually means: the smoke run succeeded and
+# PresentMon still would not exit.
+if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not (Test-Path -LiteralPath $resultPath)) {
+    $presentMonStop = Stop-PresentMonCapture -Proc $presentMonProc
+    $smokeStderrPath = Join-Path $legOut 'smoke-stderr.txt'
+    $smokeStderrTail = ''
+    if (Test-Path -LiteralPath $smokeStderrPath) {
+        $smokeStderrLines = @(Get-Content -LiteralPath $smokeStderrPath -Tail 40)
+        $smokeStderrTail = ($smokeStderrLines -join "`r`n")
+    }
+    $MaxSmokeStderrTailChars = 4000
+    if ($smokeStderrTail.Length -gt $MaxSmokeStderrTailChars) {
+        $smokeStderrTail = $smokeStderrTail.Substring($smokeStderrTail.Length - $MaxSmokeStderrTailChars)
+    }
+    # Capped the same way as the stderr tail above: an exception TYPE name is normally short, but
+    # this is untrusted-shaped data (a .NET type name from whatever failed to launch) and gets the
+    # same defensive cap before it is written into an artifact.
+    # CategoryInfo.Reason (never .Exception.GetType()): PowerShell's own ErrorRecord machinery
+    # already stamps the short exception type name there when an ErrorRecord is built from a
+    # thrown exception, so the type name is read as a plain property instead of an instance
+    # method call -- the attr3_publish_write_scan.ps1 R4 lint does not allowlist .GetType().
+    $MaxSmokeLaunchExceptionChars = 500
+    $smokeLaunchExceptionType = $null
+    $smokeLaunchExceptionMessage = $null
+    if ($null -ne $smokeLaunchException) {
+        $smokeLaunchExceptionType = [string]$smokeLaunchException.CategoryInfo.Reason
+        if ($smokeLaunchExceptionType.Length -gt $MaxSmokeLaunchExceptionChars) {
+            $smokeLaunchExceptionType = $smokeLaunchExceptionType.Substring(0, $MaxSmokeLaunchExceptionChars)
+        }
+        $smokeLaunchExceptionMessage = [string]$smokeLaunchException.Exception.Message
+        if ($smokeLaunchExceptionMessage.Length -gt $MaxSmokeLaunchExceptionChars) {
+            $smokeLaunchExceptionMessage = $smokeLaunchExceptionMessage.Substring(0, $MaxSmokeLaunchExceptionChars)
+        }
+    }
+    $smokeFailure = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='SMOKE_RUN_FAILED'
+        fixtureRehearsal=$FixtureRehearsal
+        smokeExitCode=$smokeRc; smokeResultPresent=(Test-Path -LiteralPath $resultPath)
+        smokeStderrTail=$smokeStderrTail
+        smokeLaunchExceptionType=$smokeLaunchExceptionType
+        smokeLaunchExceptionMessage=$smokeLaunchExceptionMessage
+        presentMonConfirmedExited=$presentMonStop.confirmedExited
+        presentMonKillError=$presentMonStop.killError
+        presentMonWaitError=$presentMonStop.waitError
+        sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $smokeFailure (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=SMOKE_RUN_FAILED EXIT=$smokeRc EXCEPTION=$smokeLaunchExceptionType PRESENTMON_EXITED=$($presentMonStop.confirmedExited) ARTIFACTS=$Pub"
+    exit 18
+}
+
 $presentMonDoneResult = Wait-PresentMonCapture $presentMonProc
-if (-not (Test-Path -LiteralPath $resultPath)) { throw "smoke result missing rc=$smokeRc" }
 if ($presentMonDoneResult.status -ne 'done' -or [int]$presentMonDoneResult.exitCode -ne 0) {
     throw "PresentMon capture invalid status=$($presentMonDoneResult.status) rc=$($presentMonDoneResult.exitCode)"
 }
@@ -882,7 +1016,9 @@ $text = $template.
     Replace('__BASE_PACKAGE_EXE_NAME__', $BasePackageExeName).
     Replace('__PRESENTMON_NAME__', $PresentMonName).
     Replace('__PRESENTMON_SHA256__', $PresentMonSha256).
-    Replace('__SMOKE_RUNNER_SHA256__', $smokeRunnerSha256).
+    Replace('__SMOKE_RUNNER_CLOSURE__', $smokeRunnerClosureLiteral).
+    Replace('__SMOKE_RUNNER_CLOSURE_DIR_NAME__', $smokeRunnerClosureDirName).
+    Replace('__SMOKE_RUNNER_NAME__', $smokeRunnerName).
     Replace('__CONSENT_RECEIPT__', $ConsentReceiptFileName).
     Replace('__FIXTURE_REHEARSAL__', $fixtureRehearsalLiteral).
     Replace('__AGENT_ROOT__', $AgentRoot).
@@ -904,5 +1040,6 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Dir
     reconName = $reconName
     rangeHeadSha = $SourceCommit
     llrawprocBlobId = $llrawprocBlobId
-    smokeRunnerSha256 = $smokeRunnerSha256
+    smokeRunnerClosureDigest = $smokeRunnerClosureDigest
+    smokeRunnerClosureDirName = $smokeRunnerClosureDirName
 }

@@ -451,6 +451,677 @@ function Save-AttrCudaCommittedBlobBytes {
     (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+# ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN), round 4 (contract stated honestly,
+# PR #144). Round 1 and round 2 both discovered this closure by SCANNING committed text -- first
+# a regex over one literal shape (Join-Path $PSScriptRoot '<name>'), then a fail-closed AST
+# literal scan layered on top of it. A design swarm ruled both undiscoverable-by-patching: a
+# scanner built on string literals cannot see an extension-less load
+# (`& "$PSScriptRoot\helper"`) or a bareword `Import-Module $PSScriptRoot/modx` -- both load
+# code; both scanners returned nothing for either -- and the literal-scan classifier matched a
+# resolved dependency by BASENAME alone, so an absolute path like 'C:\evil\provenance-stamp.ps1'
+# classified cleanly just by sharing a name with a staged file. Removing the heuristic from the
+# trust path removes both gaps permanently: the closure is now this EXPLICIT, pinned list --
+# never discovered, never inferred.
+#
+# WHAT Assert-AttrCudaClosureComplete (below) ACTUALLY PROVES, STATED HONESTLY. It is a
+# REGRESSION TRIPWIRE over these four reviewed, byte-pinned files at generator time -- never an
+# exhaustive proof that no future edit to them can smuggle in an unstaged load. PowerShell
+# resolves some commands dynamically (a computed string, a resolved alias), and no static census
+# can enumerate every spelling of "load a file" a determined future edit could use. What it DOES
+# guarantee: every load site Get-AttrCudaScriptLoadSites' AST census can see in the manifest's
+# own committed text -- including a module-qualified or aliased loader name and any abbreviated
+# Add-Type -Path/-LiteralPath parameter (sol round-4 majors 1 and 3) -- classifies as a manifest
+# sibling, a scriptblock-only invocation, a pathless Add-Type, or a reviewed exact-pair exclusion,
+# or generation refuses outright with ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE. An alias
+# definition (Set-Alias/sal/New-Alias/nal) is never resolved at census time -- it is ALWAYS
+# unclassified, because what it names is undecidable statically (round-4 sol major 2).
+#
+# THE SAFETY PROPERTY FOR WHATEVER THIS CENSUS CANNOT SEE IS THE RUNTIME PATH, NOT THIS
+# FUNCTION: a staged file that fails to load in the smoke child is reported as SMOKE_RUN_FAILED
+# (playback-attr-3-cuda-job.ps1's failure branch, ~:734-780), never silently masked as a
+# PresentMon timeout or a clean result. Today's four real files contain none of the forms this
+# census cannot see (hub-verified against the real repo by
+# test_the_real_current_repo_at_head_classifies_cleanly); this census exists to catch a
+# regression the moment one of these four files is edited to add one, not to prove no such form
+# could ever exist anywhere PowerShell can run.
+$script:AttrCudaSmokeRunnerClosureManifest = @(
+    'tools/profiling/run-release-gui-smoke.ps1',
+    'tools/profiling/gui-smoke-screenshot-provenance.ps1',
+    'tools/profiling/provenance-stamp.ps1',
+    'tools/profiling/gui-smoke-process-boundary.psm1'
+)
+
+function Get-AttrCudaSmokeRunnerClosureManifest {
+    <#
+    .SYNOPSIS
+    The pinned, explicit smoke-runner closure, as repo-relative paths, root script first.
+    #>
+    [CmdletBinding()]
+    param()
+    return @($script:AttrCudaSmokeRunnerClosureManifest)
+}
+
+function Get-AttrCudaScriptLoadSites {
+    <#
+    .SYNOPSIS
+    AST census of every code-loading SITE in PowerShell source text. FAILS CLOSED on a parse
+    error. Never a text/regex scan.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1 round 3. Parses with
+    [System.Management.Automation.Language.Parser] and returns every:
+      - CommandAst invoked with the dot (.) or call (&) operator (its target may be a literal, a
+        variable, or a dynamic expression -- classification is the caller's job);
+      - CommandAst named (case-insensitively) Import-Module/ipmo, Start-Process/saps/start,
+        pwsh/powershell(.exe), Invoke-Expression/iex, Invoke-Command/icm, Start-Job,
+        Start-ThreadJob, Add-Type, Set-Alias/sal or New-Alias/nal -- matched on the segment AFTER
+        the last `\`, so a module-qualified invocation
+        (`Microsoft.PowerShell.Core\Import-Module ...`) is recognized exactly like the
+        unqualified form, never invisible to this census (round 4, sol PR #144 major 1);
+      - UsingStatementAst (a `using module|namespace|assembly` statement -- never a C# `using`
+        keyword sitting inert inside a string literal handed to Add-Type, which this AST walk
+        does not descend into because it is a StringConstantExpressionAst, not PowerShell code);
+      - InvokeMemberExpressionAst whose member name is (case-insensitively) Create, AddScript,
+        AddCommand, InvokeScript or NewScriptBlock;
+      - a STATIC InvokeMemberExpressionAst named (case-insensitively) Start on the type
+        expression [System.Diagnostics.Process] / [Diagnostics.Process] -- process launch, per
+        fable's round-3 minor (round 4, PR #144).
+    This finds every SITE that can execute or generate code regardless of how its target is
+    spelled -- an extension-less `& "$PSScriptRoot\helper"` or a bareword
+    `Import-Module $PSScriptRoot/modx` are both real AST nodes the parser sees even though
+    neither contains a string literal a text scanner could match on. Classifying what each site
+    loads is Assert-AttrCudaClosureComplete's job, never this function's.
+    Throws ATTRCUDA_SCRIPT_PARSE_ERROR on any parse error: a file this scan cannot understand is
+    never silently treated as clean.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$ScriptText,
+
+        [string]$SourceLabel = '<script>'
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($ScriptText, [ref]$tokens, [ref]$parseErrors)
+    if ($null -ne $parseErrors -and $parseErrors.Count -gt 0) {
+        $messages = ($parseErrors | ForEach-Object { $_.Message }) -join '; '
+        throw "ATTRCUDA_SCRIPT_PARSE_ERROR ${SourceLabel}: $messages"
+    }
+
+    $loaderCommandNames = @(
+        'Import-Module', 'ipmo',
+        'Start-Process', 'saps', 'start',
+        'pwsh', 'pwsh.exe', 'powershell', 'powershell.exe',
+        'Invoke-Expression', 'iex',
+        'Invoke-Command', 'icm',
+        'Start-Job', 'Start-ThreadJob',
+        'Add-Type',
+        'Set-Alias', 'sal', 'New-Alias', 'nal'
+    )
+    $memberNames = @('Create', 'AddScript', 'AddCommand', 'InvokeScript', 'NewScriptBlock')
+    $sites = [System.Collections.Generic.List[object]]::new()
+
+    $commandAsts = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true)
+    foreach ($command in $commandAsts) {
+        $rawCommandName = $command.GetCommandName()
+        # sol PR #144 round 4 major 1: GetCommandName() returns the QUALIFIED string for a
+        # module-qualified invocation (`Microsoft.PowerShell.Core\Import-Module ...`), which
+        # never matched $loaderCommandNames by exact string. Matching on the segment after the
+        # last `\` recognizes the qualified and unqualified spellings identically.
+        $commandName = if ($null -ne $rawCommandName) {
+            $lastSeparator = $rawCommandName.LastIndexOf('\')
+            if ($lastSeparator -ge 0) { $rawCommandName.Substring($lastSeparator + 1) } else { $rawCommandName }
+        } else { $null }
+        $isOperatorInvocation = ($command.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot) -or
+            ($command.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Ampersand)
+        $isNamedLoader = ($null -ne $commandName) -and (@($loaderCommandNames) -icontains $commandName)
+        if ($isOperatorInvocation -or $isNamedLoader) {
+            [void]$sites.Add([pscustomobject]@{
+                kind = if ($isOperatorInvocation) { 'InvocationOperator' } else { 'CommandName' }
+                operator = [string]$command.InvocationOperator
+                commandName = $commandName
+                memberName = $null
+                text = $command.Extent.Text
+                line = $command.Extent.StartLineNumber
+                ast = $command
+            })
+        }
+    }
+
+    $usingAsts = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.UsingStatementAst] }, $true)
+    foreach ($using in $usingAsts) {
+        [void]$sites.Add([pscustomobject]@{
+            kind = 'UsingStatement'
+            operator = $null
+            commandName = $null
+            memberName = $null
+            text = $using.Extent.Text
+            line = $using.Extent.StartLineNumber
+            ast = $using
+        })
+    }
+
+    $memberAsts = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)
+    foreach ($member in $memberAsts) {
+        $memberNameValue = $null
+        if ($member.Member -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            $memberNameValue = $member.Member.Value
+        }
+        $isTrackedMemberCall = ($null -ne $memberNameValue) -and (@($memberNames) -icontains $memberNameValue)
+        # fable minor (round 3), fixed round 4: narrowly scoped to the one static member this
+        # closure's real files use to launch anything -- [System.Diagnostics.Process]::Start --
+        # rather than every member named Start, which would flag unrelated instance calls
+        # (e.g. a Stopwatch or a Job) that never load code.
+        $isProcessStartCall = $false
+        if ($member.Static -and $null -ne $memberNameValue -and $memberNameValue -ieq 'Start' -and
+            $member.Expression -is [System.Management.Automation.Language.TypeExpressionAst]) {
+            $typeFullName = $member.Expression.TypeName.FullName
+            if ($typeFullName -ieq 'System.Diagnostics.Process' -or $typeFullName -ieq 'Diagnostics.Process') {
+                $isProcessStartCall = $true
+            }
+        }
+        if ($isTrackedMemberCall -or $isProcessStartCall) {
+            [void]$sites.Add([pscustomobject]@{
+                kind = if ($isProcessStartCall) { 'ProcessStart' } else { 'MemberCall' }
+                operator = $null
+                commandName = $null
+                memberName = $memberNameValue
+                text = $member.Extent.Text
+                line = $member.Extent.StartLineNumber
+                ast = $member
+            })
+        }
+    }
+
+    return @($sites)
+}
+
+function Get-AttrCudaPSScriptRootJoinPathLiteral {
+    <#
+    .SYNOPSIS
+    Private classifier for class (a): if $CommandElement is (a parenthesized)
+    `Join-Path $PSScriptRoot '<bare file name>'`, return the bare file name; otherwise $null.
+    .DESCRIPTION
+    Deliberately narrow and syntactic, never evaluated: the root argument must be the literal
+    variable $PSScriptRoot (not $root or any other name -- that is the exact gap sol's basename-
+    collision case exploits) and the name argument must be a plain string constant with no path
+    separator in it (a bare file name, never a relative or absolute path) -- ValidatePattern-style
+    refusal-by-shape rather than a resolve-and-hope.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$CommandElement)
+
+    $expr = $CommandElement
+    if ($expr -is [System.Management.Automation.Language.ParenExpressionAst]) {
+        $elements = @($expr.Pipeline.PipelineElements)
+        if ($elements.Count -ne 1 -or -not ($elements[0] -is [System.Management.Automation.Language.CommandAst])) { return $null }
+        $expr = $elements[0]
+    }
+    if (-not ($expr -is [System.Management.Automation.Language.CommandAst])) { return $null }
+    if ($expr.GetCommandName() -ine 'Join-Path') { return $null }
+    $args = @($expr.CommandElements | Select-Object -Skip 1)
+    if ($args.Count -lt 2) { return $null }
+    $rootArg = $args[0]
+    $nameArg = $args[1]
+    $rootIsPSScriptRoot = ($rootArg -is [System.Management.Automation.Language.VariableExpressionAst]) -and
+        ($rootArg.VariablePath.UserPath -ieq 'PSScriptRoot')
+    if (-not $rootIsPSScriptRoot) { return $null }
+    if (-not ($nameArg -is [System.Management.Automation.Language.StringConstantExpressionAst])) { return $null }
+    $name = $nameArg.Value
+    if ([string]::IsNullOrWhiteSpace($name) -or $name -match '[\\/]') { return $null }
+    return $name
+}
+
+function Get-AttrCudaAssignmentExpression {
+    <#
+    .SYNOPSIS
+    Private helper: unwrap an AssignmentStatementAst's Right side to the expression it assigns,
+    or $null if it is not a single simple expression.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Assignment)
+
+    $right = $Assignment.Right
+    # PowerShell's parser hands back Right as a bare CommandExpressionAst for a simple `$x = ...`
+    # assignment, but wraps it in a one-element PipelineAst in other shapes (e.g. inside a nested
+    # statement); both are unwrapped the same way here.
+    if ($right -is [System.Management.Automation.Language.PipelineAst] -and $right.PipelineElements.Count -eq 1) {
+        $right = $right.PipelineElements[0]
+    }
+    if ($right -is [System.Management.Automation.Language.CommandExpressionAst]) {
+        return $right.Expression
+    }
+    return $null
+}
+
+function Test-AttrCudaScriptblockOnlyInvocationTarget {
+    <#
+    .SYNOPSIS
+    Private classifier for class (b): true when $CommandAst's `.`/`&` target is a variable whose
+    ONLY assignment anywhere in $Ast is a scriptblock literal, or a [scriptblock]-typed parameter.
+    .DESCRIPTION
+    A variable assigned a scriptblock literal, or nothing else, can only ever invoke code that
+    was already visible to this same census as a literal `{ ... }` -- there is no separate file
+    load to miss. A variable with even one non-scriptblock-literal assignment (e.g. a resolved
+    executable path) is refused here and falls through to be classified some other way or thrown
+    as unclassified: this check proves nothing was smuggled through under a scriptblock's cover.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$CommandAst,
+        [Parameter(Mandatory = $true)]$Ast
+    )
+
+    if ($CommandAst.CommandElements.Count -lt 1) { return $false }
+    $target = $CommandAst.CommandElements[0]
+    if (-not ($target -is [System.Management.Automation.Language.VariableExpressionAst])) { return $false }
+    $varName = $target.VariablePath.UserPath
+
+    $paramAsts = $Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.ParameterAst] }, $true)
+    foreach ($parameter in $paramAsts) {
+        if ($parameter.Name.VariablePath.UserPath -ine $varName) { continue }
+        foreach ($attribute in $parameter.Attributes) {
+            if ($attribute -is [System.Management.Automation.Language.TypeConstraintAst] -and
+                $attribute.TypeName.Name -ieq 'scriptblock') {
+                return $true
+            }
+        }
+    }
+
+    $assignments = $Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -ieq $varName
+    }, $true)
+    if ($assignments.Count -eq 0) { return $false }
+    foreach ($assignment in $assignments) {
+        $value = Get-AttrCudaAssignmentExpression -Assignment $assignment
+        if (-not ($value -is [System.Management.Automation.Language.ScriptBlockExpressionAst])) { return $false }
+    }
+    return $true
+}
+
+function Test-AttrCudaCommandHasPathParameter {
+    <#
+    .SYNOPSIS
+    Private classifier for class (c): true if $CommandAst names a -Path or -LiteralPath
+    parameter, spelled in full, abbreviated, or by its PSPath/LP alias. Used to refuse
+    auto-classifying an Add-Type that loads FROM a file.
+    .DESCRIPTION
+    sol PR #144 round 4 major 3: the exact `-ieq 'Path'`/`-ieq 'LiteralPath'` comparison this
+    replaced read `Add-Type -Pat x.cs` or `-Lit x.cs` as pathless, because PowerShell accepts any
+    unambiguous parameter-name PREFIX -- it bound those abbreviations to -Path/-LiteralPath at
+    runtime even though the AST's parameter name is the shorter text actually written. A
+    parameter counts as a path parameter here if 'Path' or 'LiteralPath' STARTS WITH the written
+    name (case-insensitive, so any valid prefix abbreviation is caught, including the empty-string
+    edge of neither name), or if the written name is the PSPath or LP alias. A parameter that is
+    merely AMBIGUOUS between a path name and some other Add-Type parameter (e.g. `-Pa` could bind
+    to -Path or -PassThru) still counts as a path parameter here: this classifier's job is to
+    refuse auto-classifying, never to resolve the ambiguity itself, so it fails closed.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$CommandAst)
+
+    foreach ($element in $CommandAst.CommandElements) {
+        if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
+            $name = $element.ParameterName
+            if ([string]::IsNullOrEmpty($name)) { continue }
+            if ('Path'.StartsWith($name, [StringComparison]::OrdinalIgnoreCase) -or
+                'LiteralPath'.StartsWith($name, [StringComparison]::OrdinalIgnoreCase) -or
+                $name -ieq 'PSPath' -or $name -ieq 'LP') {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+# ATTR3-SMOKE-RUNNER-DEPS-1 round 3. The explicit, reasoned exclusion list kept NEXT TO the
+# classifier it qualifies: every load site Get-AttrCudaScriptLoadSites finds in a manifest file
+# must be classified (a)/(b)/(c) above or listed here with a reason, keyed on the EXACT
+# (repoRelativePath, site text) pair -- never on a basename or a substring -- so an exclusion can
+# never silently widen to cover a different, unreviewed site.
+$script:AttrCudaClosureScanExclusions = @(
+    [pscustomobject]@{
+        repoRelativePath = 'tools/profiling/run-release-gui-smoke.ps1'
+        literal = '& $detectorPwsh @detectorArgs 2>&1'
+        reason = 'The dormant detect-playback-artifacts.ps1 launch, reached only under ' +
+            '-DetectPlaybackArtifacts. The ATTR-3 attribution job (playback-attr-3-cuda-job.ps1) ' +
+            'never passes that switch in its emitted smoke invocation -- ' +
+            'test_the_emitted_smoke_command_never_passes_detectplaybackartifacts asserts this -- ' +
+            'and the runner itself Test-Path-guards the call, falling back to verdict="no-data" ' +
+            'if the file is ever missing. Dormant for this route by construction, not by luck.'
+    },
+    [pscustomobject]@{
+        repoRelativePath = 'tools/profiling/run-release-gui-smoke.ps1'
+        literal = '[System.Diagnostics.Process]::Start($startInfo)'
+        reason = 'Launches the hash-pinned, already-deployed application executable -- ' +
+            '$startInfo.FileName is set to $exe, the built app path resolved before this line, ' +
+            'never a $PSScriptRoot sibling script. Process.Start executes an OS binary directly; ' +
+            'it does not load or run PowerShell/.NET code from a file this census needs to see ' +
+            '(round 4, fable round-3 minor, PR #144).'
+    }
+)
+
+function Test-AttrCudaClosureScanExclusionMatch {
+    <#
+    .SYNOPSIS
+    True if a (repoRelativePath, exact site text) pair is on the explicit exclusion list above.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRelativePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Literal
+    )
+
+    foreach ($exclusion in $script:AttrCudaClosureScanExclusions) {
+        if ($exclusion.repoRelativePath -eq $RepoRelativePath -and $exclusion.literal -eq $Literal) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Assert-AttrCudaClosureComplete {
+    <#
+    .SYNOPSIS
+    Prove the pinned smoke-runner closure manifest is COMPLETE: every load site in every manifest
+    file's own committed text classifies cleanly, and the resolved class-(a) targets are EXACTLY
+    the manifest's non-root siblings, in both directions.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1 round 3, round 4 (PR #144). Generator-time (and CI-time) only --
+    never embedded in an emitted job, same reason as Resolve-AttrCudaCommittedBlobId. This is a
+    REGRESSION TRIPWIRE over these four reviewed files, not an exhaustive proof -- see the module
+    header above the manifest for the honest statement of what it does and does not guarantee. It
+    runs Get-AttrCudaScriptLoadSites over each manifest file's committed text at -Commit and
+    requires every site to be exactly one of:
+      (a) `Join-Path $PSScriptRoot '<bare file name>'`, whose resolved repo-relative path is a
+          manifest entry, by FULL PATH equality -- never by basename alone;
+      (b) `&`/`.` on a scriptblock-only variable or a [scriptblock]-typed parameter
+          (Test-AttrCudaScriptblockOnlyInvocationTarget);
+      (c) `Add-Type` with no -Path/-LiteralPath, matched by prefix and alias so an abbreviated
+          parameter cannot pass as pathless (Test-AttrCudaCommandHasPathParameter);
+      (d) a pinned exclusion (Test-AttrCudaClosureScanExclusionMatch).
+    A Set-Alias/sal/New-Alias/nal site is never a candidate for (a)-(c) and matches (d) only if
+    explicitly pinned there -- its target is never resolved statically, so it is always
+    unclassified unless excluded by name (round 4, sol major 2). Anything else throws
+    ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE. Finally, the set of resolved
+    class-(a) targets must equal the manifest minus its root (first) entry, in both directions --
+    a manifest entry never reached by a real load, or a real load that resolves outside the
+    manifest, is a completeness failure, not silently accepted either way.
+    Throws ATTRCUDA_BLOB_UNRESOLVED if a manifest path is not a committed blob at -Commit,
+    ATTRCUDA_SCRIPT_PARSE_ERROR (from Get-AttrCudaScriptLoadSites), or
+    ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE (above).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$Commit,
+
+        [string[]]$RepoRelativePaths = $script:AttrCudaSmokeRunnerClosureManifest
+    )
+
+    $normalizedPaths = @($RepoRelativePaths | ForEach-Object { $_ -replace '\\', '/' })
+    $manifestBasenames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($path in $normalizedPaths) {
+        [void]$manifestBasenames.Add($path.Substring($path.LastIndexOf('/') + 1))
+    }
+    $rootPath = $normalizedPaths[0]
+    $rootName = $rootPath.Substring($rootPath.LastIndexOf('/') + 1)
+    $siblingBasenames = [System.Collections.Generic.HashSet[string]]::new([string[]]$manifestBasenames, [StringComparer]::Ordinal)
+    [void]$siblingBasenames.Remove($rootName)
+
+    $resolvedTargets = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+
+    foreach ($relativePath in $normalizedPaths) {
+        $directory = $relativePath.Substring(0, $relativePath.LastIndexOf('/'))
+        $blobId = Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $Commit -RepoRelativePath $relativePath
+        $tempFile = Join-Path ([IO.Path]::GetTempPath()) "attrcuda-census-$([Guid]::NewGuid().ToString('N')).tmp"
+        try {
+            [void](Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $blobId -Destination $tempFile)
+            $text = [IO.File]::ReadAllText($tempFile)
+        } finally {
+            if (Test-Path -LiteralPath $tempFile) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
+        }
+
+        # Parsed once here (beyond Get-AttrCudaScriptLoadSites' own internal parse) so the
+        # scriptblock-only classifier below can search the WHOLE file for $varName's assignments
+        # and parameter declarations -- not just the neighborhood of the one site being classified.
+        $fileTokens = $null
+        $fileParseErrors = $null
+        $fileAst = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$fileTokens, [ref]$fileParseErrors)
+
+        foreach ($site in (Get-AttrCudaScriptLoadSites -ScriptText $text -SourceLabel $relativePath)) {
+            $classified = $false
+
+            if ($site.kind -eq 'InvocationOperator' -or $site.kind -eq 'CommandName') {
+                $argIndex = if ($site.kind -eq 'InvocationOperator') { 0 } else { 1 }
+                if ($site.ast.CommandElements.Count -gt $argIndex) {
+                    $target = Get-AttrCudaPSScriptRootJoinPathLiteral -CommandElement $site.ast.CommandElements[$argIndex]
+                    if ($null -ne $target) {
+                        $resolvedPath = "$directory/$target"
+                        if ($manifestBasenames.Contains($target) -and ($normalizedPaths -contains $resolvedPath)) {
+                            [void]$resolvedTargets.Add($target)
+                            $classified = $true
+                        }
+                    }
+                }
+            }
+
+            if (-not $classified -and $site.kind -eq 'InvocationOperator') {
+                if (Test-AttrCudaScriptblockOnlyInvocationTarget -CommandAst $site.ast -Ast $fileAst) {
+                    $classified = $true
+                }
+            }
+
+            if (-not $classified -and $site.kind -eq 'CommandName' -and $site.commandName -ieq 'Add-Type') {
+                if (-not (Test-AttrCudaCommandHasPathParameter -CommandAst $site.ast)) {
+                    $classified = $true
+                }
+            }
+
+            if (-not $classified -and (Test-AttrCudaClosureScanExclusionMatch -RepoRelativePath $relativePath -Literal $site.text)) {
+                $classified = $true
+            }
+
+            if (-not $classified) {
+                throw ("ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE ${relativePath}: site '$($site.text)' " +
+                    "(kind=$($site.kind)) is neither a resolved `$PSScriptRoot manifest load (full-path " +
+                    "match, never basename), a scriptblock-only invocation, an Add-Type with no -Path, " +
+                    "nor on the pinned exclusion list next to Test-AttrCudaClosureScanExclusionMatch in " +
+                    "AttrCudaArtifacts.psm1 -- classify it before this closure can be trusted")
+            }
+        }
+    }
+
+    $missing = @($siblingBasenames | Where-Object { -not $resolvedTargets.Contains($_) })
+    $extra = @($resolvedTargets | Where-Object { -not $siblingBasenames.Contains($_) })
+    if ($missing.Count -gt 0 -or $extra.Count -gt 0) {
+        throw ("ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE closure completeness mismatch: " +
+            "missing=[$($missing -join ',')] extra=[$($extra -join ',')] -- the pinned manifest and " +
+            "the resolved `$PSScriptRoot load sites across its own files must name exactly the same " +
+            "siblings, in both directions")
+    }
+}
+
+function Resolve-AttrCudaSmokeRunnerClosure {
+    <#
+    .SYNOPSIS
+    Resolve the PINNED smoke-runner closure's committed bytes, AS COMMITTED at a given commit.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN). No scan, no recursion, no traversal:
+    the set of paths is Get-AttrCudaSmokeRunnerClosureManifest, proved complete against the real
+    script text by Assert-AttrCudaClosureComplete (call that first; this function does not
+    re-verify completeness, only resolution). Returns an ordered list of [pscustomobject]@{ name;
+    repoRelativePath; blobId; sha256 }, in manifest order (root script first).
+    Throws ATTRCUDA_BLOB_UNRESOLVED (from Resolve-AttrCudaCommittedBlobId) if a pinned path is not
+    a committed blob at -Commit.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$Commit,
+
+        [string[]]$RepoRelativePaths = $script:AttrCudaSmokeRunnerClosureManifest
+    )
+
+    $closure = [System.Collections.Generic.List[object]]::new()
+    foreach ($relativePath in $RepoRelativePaths) {
+        $normalized = $relativePath -replace '\\', '/'
+        $name = $normalized.Substring($normalized.LastIndexOf('/') + 1)
+        $blobId = Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $Commit -RepoRelativePath $normalized
+        $tempFile = Join-Path ([IO.Path]::GetTempPath()) "attrcuda-closure-$([Guid]::NewGuid().ToString('N')).tmp"
+        try {
+            $sha256 = Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $blobId -Destination $tempFile
+        } finally {
+            if (Test-Path -LiteralPath $tempFile) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
+        }
+        [void]$closure.Add([pscustomobject]@{
+            name = $name
+            repoRelativePath = $normalized
+            blobId = $blobId
+            sha256 = $sha256
+        })
+    }
+    return @($closure)
+}
+
+function Get-AttrCudaClosureDigestHex {
+    <#
+    .SYNOPSIS
+    The content-addressed digest of a resolved dependency closure.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1. sha256 of the sorted `<sha256>  <name>` lines (two-space
+    separator, sha256sum-shaped) of the closure's entries, newline-joined with a trailing
+    newline -- so any two generators that resolve the SAME closure at the SAME commit derive
+    the SAME digest regardless of discovery order, and the published cache directory name
+    (`smoke-runner-<digest16>`) is a pure function of the closure's content.
+    Sorted with [StringComparer]::Ordinal (fable minor, PR #144 round 3, carried forward from
+    round 2's culture-aware Sort-Object): the digest is a cross-host content address and must
+    not depend on the sorting host's culture, even though the 64-hex sha256 prefix makes an
+    actual ordinal/culture divergence practically impossible here. The Python test's sorted()
+    is ordinal, so this makes the two definitions exact rather than merely agreeing in practice.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Closure
+    )
+
+    $lines = [string[]]@($Closure | ForEach-Object { "$($_.sha256)  $($_.name)" })
+    [Array]::Sort($lines, [StringComparer]::Ordinal)
+    $joined = ($lines -join "`n") + "`n"
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $stream = [IO.MemoryStream]::new($bytes)
+    try {
+        (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Test-AttrCudaPathIsReparsePoint {
+    <#
+    .SYNOPSIS
+    True if Path exists and is a reparse point (symlink, junction or mount point); false if it
+    is a plain file/directory or does not exist at all.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2). Test-Path and Get-FileHash both resolve
+    THROUGH a reparse point to whatever it targets, so a hash-pin check that only ever calls
+    those two can be satisfied by a link whose TARGET -- not the staged, verified directory --
+    happens to carry the pinned bytes. Every closure directory and every member is checked with
+    this, before its content is trusted, so a link is refused rather than silently followed.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return $false }
+    return (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+}
+
+function Get-AttrCudaClosureDirectoryMismatch {
+    <#
+    .SYNOPSIS
+    Compare a directory against the expected closure EXACT SET; return $null when it matches
+    exactly, or a short reason string naming the first mismatch found. Never throws.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN). Round 1/2 defined this exact-set rule
+    twice -- once inline in the stager's "already staged" check, once inline in the attribution
+    job's ATTRCUDA_SMOKE_RUNNER_STALE gate -- which is exactly how the two could silently drift
+    apart. Moved here so both emitted jobs embed the BYTE-IDENTICAL function text
+    (Get-AttrCudaEmbeddedFunctionSource), never two copies that only look the same. "Matches
+    exactly" means: the directory exists, is not itself a reparse point, has EXACTLY -Entries.Count
+    children (no extra entries, no subdirectories among them), none of those children is a reparse
+    point, and every -Entries member is present with the pinned sha256.
+    -Entries is an array of [pscustomobject]@{ name; sha256 } (sha256 in any case; compared
+    case-insensitively). A plain array + -contains, not a HashSet: the template lint
+    (attr3_publish_write_scan.ps1 R4) only allowlists specific .NET static/instance members by
+    name, and this closure is a handful of files, so an O(n) membership test costs nothing here.
+    Returns $null on an exact match; otherwise a reason string. Never throws -- the caller (an
+    "already staged?" check vs. a hard pin gate) decides what a mismatch means.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Dir,
+        [Parameter(Mandatory = $true)][object[]]$Entries
+    )
+
+    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return "missing closure directory $Dir" }
+    if (Test-AttrCudaPathIsReparsePoint -Path $Dir) { return "closure directory $Dir is a reparse point" }
+
+    # Every EXPECTED entry is checked first, by name, so a refusal names WHICH dependency is
+    # stale or missing whenever one is -- before the broader "anything extra?" sweep below, whose
+    # own reason (a bare count) would otherwise mask that more useful, specific answer.
+    foreach ($entry in $Entries) {
+        $path = Join-Path $Dir $entry.name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            return "closure directory $Dir is missing $($entry.name)"
+        }
+        if (Test-AttrCudaPathIsReparsePoint -Path $path) {
+            return "closure directory $Dir entry $($entry.name) is a reparse point"
+        }
+        $actualSha = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualSha -ne $entry.sha256.ToLowerInvariant()) {
+            return "closure directory $Dir entry $($entry.name) sha256 mismatch: expected $($entry.sha256), actual $actualSha"
+        }
+    }
+
+    # Every expected entry is present and correct -- now prove there is nothing ELSE: no extra
+    # file, no extra subdirectory, no reparse point standing in for a plain file.
+    $actualEntries = @(Get-ChildItem -LiteralPath $Dir -Force)
+    if ($actualEntries.Count -ne $Entries.Count) {
+        return "closure directory $Dir has $($actualEntries.Count) entries, expected $($Entries.Count)"
+    }
+    $expectedNames = @($Entries | ForEach-Object { $_.name })
+    foreach ($actual in $actualEntries) {
+        if ($expectedNames -notcontains $actual.Name) {
+            return "closure directory $Dir has an unexpected entry $($actual.Name)"
+        }
+        if ($actual.PSIsContainer) {
+            return "closure directory $Dir entry $($actual.Name) is a subdirectory"
+        }
+        if (Test-AttrCudaPathIsReparsePoint -Path $actual.FullName) {
+            return "closure directory $Dir entry $($actual.Name) is a reparse point"
+        }
+    }
+    return $null
+}
+
 function Assert-AttrCudaWritableFileSlot {
     <#
     .SYNOPSIS
@@ -653,6 +1324,40 @@ function Publish-AttrCudaFileMoveNonOverwriting {
     $slot = Assert-AttrCudaNonOverwritingFileSlot -Path $Destination
     try {
         [IO.File]::Move($Source, $slot, $false)
+    } catch [IO.IOException] {
+        throw "ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS $slot already exists: $($_.Exception.Message)"
+    }
+    return $slot
+}
+
+function Publish-AttrCudaDirectoryMoveNonOverwriting {
+    <#
+    .SYNOPSIS
+    Atomically rename a directory into a destination outside the job-owned work tree WITHOUT
+    ever overwriting or deleting a same-named directory already there.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1: the smoke-runner closure directory is built under a temp name
+    and published in one rename, mirroring Publish-AttrCudaFileMoveNonOverwriting's race-free
+    publish for a single file. The parent is checked exactly like
+    Assert-AttrCudaNonOverwritingFileSlot (must exist, must not be a link); the destination slot
+    itself is never inspected or removed first. [System.IO.Directory]::Move throws IOException
+    when the destination already exists on Windows (no overwrite semantics for a directory
+    move), so there is no check-then-act window for a concurrent writer to land in between the
+    check and the rename.
+    On IOException the destination already exists; nothing has been moved, deleted or written --
+    the caller re-verifies the destination's content instead of this helper silently reporting
+    success either way.
+    Throws ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS when the destination is occupied.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $slot = Assert-AttrCudaNonOverwritingFileSlot -Path $Destination
+    try {
+        [IO.Directory]::Move($Source, $slot)
     } catch [IO.IOException] {
         throw "ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS $slot already exists: $($_.Exception.Message)"
     }
@@ -1000,7 +1705,15 @@ Export-ModuleMember -Function `
     Assert-AttrCudaFixtureCommittedBytes, `
     Resolve-AttrCudaCommittedBlobId, `
     Save-AttrCudaCommittedBlobBytes, `
+    Get-AttrCudaSmokeRunnerClosureManifest, `
+    Get-AttrCudaScriptLoadSites, `
+    Test-AttrCudaClosureScanExclusionMatch, `
+    Assert-AttrCudaClosureComplete, `
+    Resolve-AttrCudaSmokeRunnerClosure, `
+    Get-AttrCudaClosureDigestHex, `
     Assert-AttrCudaWritableFileSlot, `
+    Test-AttrCudaPathIsReparsePoint, `
+    Get-AttrCudaClosureDirectoryMismatch, `
     Assert-AttrCudaNonOverwritingFileSlot, `
     Read-AttrCudaBase64Payload, `
     Publish-AttrCudaBytes, `
@@ -1008,6 +1721,7 @@ Export-ModuleMember -Function `
     Publish-AttrCudaFileCopy, `
     Publish-AttrCudaFileMove, `
     Publish-AttrCudaFileMoveNonOverwriting, `
+    Publish-AttrCudaDirectoryMoveNonOverwriting, `
     New-AttrCudaDirectory, `
     Remove-AttrCudaPartialFile, `
     Assert-AttrCudaNoLinkBelowRoot, `
