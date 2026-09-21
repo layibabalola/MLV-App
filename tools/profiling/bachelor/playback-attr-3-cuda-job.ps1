@@ -25,8 +25,12 @@
 # -ClipPath and -FixtureSha256 are both REFUSED for an owner id: there is no owner-typed path on
 # this route, and a content hash is meaningless without the resolver's own cross-check against
 # the frozen table. An interpreter one-liner can still open any path; that residual is
-# unchanged. A two-part clip's continuation part is opened by the application itself, never
-# named by this code. The owner's consent record (receipts/owner-footage-consent-20260916.json
+# unchanged. Every verified part -- base part and any continuation part alike -- is named by
+# THIS code, never the application: each gets a neutral link name (AttrCudaOwnerFootage.psm1's
+# Get-AttrCudaOwnerFootageNeutralName), a held read-only handle opened before the smoke child
+# ever runs, and a re-verification of its content against the resolved length/sha256 while that
+# handle is held, all under a private per-job directory the application only ever sees by its
+# neutral names. The owner's consent record (receipts/owner-footage-consent-20260916.json
 # and its -correction.json) is evidence of consent, never an authorization. Adjudication:
 # .claude-state/fleet-runs/swarm-footage-route-20260916T2020Z/SYNTHESIS.md (round 1);
 # ATTR3-FOOTAGE-BIND-1 (round 2, this file).
@@ -340,14 +344,17 @@ $FixtureClipExtension = '.' + 'mlv'
 #     further -- a caller who passes BOTH a bogus -RepoRoot and a refused -ClipPath for an owner
 #     id must see PLAYBACK_ATTR3_CLIPPATH_REFUSED, never a RepoRoot error that only fires first
 #     because RepoRoot resolution used to sit ahead of this classification in the file. -------
-# ATTR3-FOOTAGE-BIND-1 PR-B round 5: -AgentRoot's shape check moved INSIDE each arm of this
-# if/else, after the owner-arm's own flag refusals -- round 4 put it ahead of the whole
-# if/else, so a malformed -AgentRoot threw PLAYBACK_ATTR3_AGENTROOT_INVALID before an owner id's
-# refused -FixtureSha256/-ClipPath ever got a chance to surface their own typed refusal first.
-# The fixture arm still validates -AgentRoot before using it to build -ClipPath (round 4's
-# reason: never echoes the value, for the same reason the ClipPath refusal never does -- the
-# refusal names only the parameter, not what was passed), it just now runs after entering the
-# fixture branch rather than ahead of the branch decision itself.
+# ATTR3-FOOTAGE-BIND-1 PR-B round 6 (astra major): the owner arm's -AgentRoot shape check no
+# longer lives in this if/else at all -- round 5 nested it inside the else branch, after the
+# owner arm's own -FixtureSha256/-ClipPath refusals, but STILL ahead of $RepoRoot resolution and
+# the resolver call below. -AgentRoot is never used to reach the resolver (only -ClipId and the
+# resolved -RepoRoot are), so a malformed -AgentRoot was still the first thing to throw for an
+# owner id whose -RepoRoot would otherwise have produced a resolver refusal -- the complete
+# owner-id decision is flag refusals, THEN RepoRoot resolution (the resolver needs it), THEN the
+# resolver call and its own typed refusal; -AgentRoot validation is unrelated to that decision and
+# now runs strictly after it, alongside "everything else" below. The fixture arm is UNCHANGED: it
+# still validates -AgentRoot first, before using it to derive -ClipPath, so it keeps its own
+# order (never echoing the value, for the same reason the ClipPath refusal never does).
 if ($isFixtureRehearsal) {
     if ($AgentRoot -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
         throw 'PLAYBACK_ATTR3_AGENTROOT_INVALID -AgentRoot contains characters outside the allowlist'
@@ -362,14 +369,15 @@ if ($isFixtureRehearsal) {
         throw "PLAYBACK_ATTR3_CLIPPATH_INVALID -ClipPath contains characters outside the allowlist: '$ClipPath'"
     }
 } else {
-    if ($FixtureSha256) {
+    # ATTR3-FOOTAGE-BIND-1 PR-B round 6 (sol minor): flag PRESENCE is refused, not flag
+    # TRUTHINESS -- $PSBoundParameters.ContainsKey() so an owner id with an explicitly bound
+    # empty -FixtureSha256/-ClipPath (e.g. -ClipPath '') is refused too, matching this file's own
+    # documented "refused outright" contract instead of being silently read as omission.
+    if ($PSBoundParameters.ContainsKey('FixtureSha256')) {
         throw "PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED -FixtureSha256 is refused for an owner clip id ('$ClipId')"
     }
-    if ($ClipPath) {
+    if ($PSBoundParameters.ContainsKey('ClipPath')) {
         throw "PLAYBACK_ATTR3_CLIPPATH_REFUSED -ClipPath is refused for an owner clip id ('$ClipId'): the footage path is resolved through tools/gates/resolve_consented_clip.py, never typed by a caller"
-    }
-    if ($AgentRoot -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
-        throw 'PLAYBACK_ATTR3_AGENTROOT_INVALID -AgentRoot contains characters outside the allowlist'
     }
 }
 
@@ -404,6 +412,17 @@ $ownerPartsJson = ''
 if (-not $isFixtureRehearsal) {
     $ownerPartsJson = $ownerPartsForJob | ConvertTo-Json -Compress -Depth 5
     if ($ownerPartsForJob.Count -eq 1) { $ownerPartsJson = "[$ownerPartsJson]" }
+}
+
+# ATTR3-FOOTAGE-BIND-1 PR-B round 6 (astra major): the owner arm's -AgentRoot shape check runs
+# HERE -- after the complete owner-id decision (flag refusals, RepoRoot resolution, the resolver
+# call and its own typed refusal) -- never before it. -AgentRoot plays no part in reaching the
+# resolver; it is used only below, to build the __AGENT_ROOT__ substitution baked into the
+# emitted job. Never echoes the value, same as every other path-shaped parameter's refusal.
+if (-not $isFixtureRehearsal) {
+    if ($AgentRoot -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
+        throw 'PLAYBACK_ATTR3_AGENTROOT_INVALID -AgentRoot contains characters outside the allowlist'
+    }
 }
 
 # --- only now: Import-Module and the embedded-function extraction, and everything else --------

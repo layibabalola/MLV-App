@@ -919,6 +919,27 @@ class AttributionJobOptionalClipPathTests(_PwshCase):
         )
         self.assertFalse(out_file.exists())
 
+    # ATTR3-FOOTAGE-BIND-1 PR-B round 6 (sol minor): -ClipPath/-FixtureSha256 are refused by flag
+    # PRESENCE ($PSBoundParameters.ContainsKey), not by truthiness -- so explicitly binding either
+    # flag to an empty string is refused too, matching the "refused outright" documented contract
+    # instead of being silently read as omission.
+    def test_an_owner_id_with_an_explicit_empty_clippath_is_still_refused(self) -> None:
+        proc, out_file = self._generate(ClipId="M16-1243", ClipPath="")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(
+            "PLAYBACK_ATTR3_CLIPPATH_REFUSED", normalize_pwsh_message_text(proc.stdout + proc.stderr)
+        )
+        self.assertFalse(out_file.exists())
+
+    def test_an_owner_id_with_an_explicit_empty_fixture_sha_is_still_refused(self) -> None:
+        proc, out_file = self._generate(ClipId="M16-1243", FixtureSha256="")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(
+            "PLAYBACK_ATTR3_FIXTURE_SHA_REFUSED",
+            normalize_pwsh_message_text(proc.stdout + proc.stderr),
+        )
+        self.assertFalse(out_file.exists())
+
     def test_a_fixture_id_with_an_explicit_clippath_is_still_accepted(self) -> None:
         clip_id = "tiny_dual_iso"
         extension = "." + "mlv"
@@ -1894,9 +1915,14 @@ class RepoRootOrderingTests(_PwshCase):
         self.staging.mkdir()
         self.bogus_repo_root = self.tmp / "does-not-exist" / "at-all"
 
-    def _generate(self, *, clip_path: str | None = None):
+    def _generate(self, *, clip_path: str | None = None, clip_path_explicit_empty: bool = False):
         out_file = self.staging / "job.ps1"
-        clip_path_args = f"-ClipPath '{clip_path}' " if clip_path else ""
+        if clip_path_explicit_empty:
+            clip_path_args = "-ClipPath '' "
+        elif clip_path:
+            clip_path_args = f"-ClipPath '{clip_path}' "
+        else:
+            clip_path_args = ""
         script = self.tmp / "generate.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
@@ -1918,6 +1944,20 @@ class RepoRootOrderingTests(_PwshCase):
         self.assertNotIn(str(self.bogus_repo_root), message)
         self.assertFalse(out_file.exists())
 
+    # ATTR3-FOOTAGE-BIND-1 PR-B round 6 (sol minor): an EXPLICITLY bound empty -ClipPath must be
+    # refused the same way, not read as omission and left to fall through to RepoRoot handling.
+    def test_a_bogus_reporoot_with_an_owner_id_and_an_explicit_empty_clippath_surfaces_clippath_refused(
+        self,
+    ) -> None:
+        proc, out_file = self._generate(clip_path_explicit_empty=True)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_CLIPPATH_REFUSED", message)
+        self.assertNotIn("PLAYBACK_ATTR3_REPOROOT_INVALID", message)
+        self.assertNotIn(str(self.bogus_repo_root), message)
+        self.assertFalse(out_file.exists())
+
     def test_a_bogus_reporoot_alone_surfaces_reporoot_invalid_without_echoing_the_path(self) -> None:
         proc, out_file = self._generate()
         message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
@@ -1930,11 +1970,16 @@ class RepoRootOrderingTests(_PwshCase):
 
 @requires_pwsh
 class AgentRootOrderingTests(_PwshCase):
-    """ATTR3-FOOTAGE-BIND-1 PR-B round 5 (STRUCTURAL): -AgentRoot's shape check now runs AFTER
-    the owner arm's own -FixtureSha256/-ClipPath refusals, not ahead of the whole flag-refusal
-    if/else the way round 4 left it. A caller who supplies both a malformed -AgentRoot and a
-    refused -ClipPath for an owner id must see PLAYBACK_ATTR3_CLIPPATH_REFUSED, never
-    PLAYBACK_ATTR3_AGENTROOT_INVALID masking it."""
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 5 (STRUCTURAL), narrowed round 6: -AgentRoot's shape check
+    for the OWNER arm now runs after the complete owner-id decision (flag refusals, RepoRoot
+    resolution, the resolver call) -- see AgentRootAfterResolverOrderingTests below for that
+    behavioural proof, which needs a git fixture the resolver can be pointed at. This class keeps
+    the ordering proof that needs no git fixture: a caller who supplies both a malformed
+    -AgentRoot and a refused -ClipPath for an owner id must see PLAYBACK_ATTR3_CLIPPATH_REFUSED,
+    never PLAYBACK_ATTR3_AGENTROOT_INVALID masking it (the flag refusal never even reaches
+    RepoRoot/the resolver), and that a malformed -AgentRoot ALONE, for a FIXTURE id, still throws
+    PLAYBACK_ATTR3_AGENTROOT_INVALID -- the fixture arm's own copy of this check is unaffected by
+    round 6 and still runs first, needing no RepoRoot resolution or resolver call at all."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -1942,16 +1987,24 @@ class AgentRootOrderingTests(_PwshCase):
         self.staging.mkdir()
         self.bad_agent_root = "not-a-drive-rooted-path"
 
-    def _generate(self, *, clip_path: str | None = None, agent_root: str | None = None):
+    def _generate(
+        self,
+        *,
+        clip_id: str = "M16-1243",
+        clip_path: str | None = None,
+        agent_root: str | None = None,
+        fixture_sha256: str | None = None,
+    ):
         out_file = self.staging / "job.ps1"
         clip_path_args = f"-ClipPath '{clip_path}' " if clip_path else ""
         agent_root_args = f"-AgentRoot '{agent_root}' " if agent_root is not None else ""
+        fixture_sha_args = f"-FixtureSha256 '{fixture_sha256}' " if fixture_sha256 is not None else ""
         script = self.tmp / "generate.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{'a' * 40}' "
-            f"-BuildManifestSha256 '{'b' * 64}' -ClipId 'M16-1243' "
-            f"{clip_path_args}{agent_root_args}"
+            f"-BuildManifestSha256 '{'b' * 64}' -ClipId '{clip_id}' "
+            f"{clip_path_args}{agent_root_args}{fixture_sha_args}"
             f"-OutFile '{out_file}'\n",
             encoding="utf-8",
         )
@@ -1970,12 +2023,57 @@ class AgentRootOrderingTests(_PwshCase):
         self.assertNotIn("PLAYBACK_ATTR3_AGENTROOT_INVALID", message)
         self.assertFalse(out_file.exists())
 
-    def test_a_malformed_agentroot_alone_surfaces_agentroot_invalid(self) -> None:
-        proc, out_file = self._generate(agent_root=self.bad_agent_root)
+    def test_a_malformed_agentroot_alone_for_a_fixture_id_surfaces_agentroot_invalid(self) -> None:
+        # A fixture id's own -AgentRoot check is unaffected by round 6 (it still runs before
+        # -FixtureSha256/-ClipPath, needing no RepoRoot resolution or resolver call), so this
+        # stays deterministic without a git fixture -- unlike the owner arm's copy, which now
+        # depends on the resolver call's own outcome (see AgentRootAfterResolverOrderingTests).
+        proc, out_file = self._generate(
+            clip_id="tiny_dual_iso", agent_root=self.bad_agent_root, fixture_sha256="c" * 64
+        )
         message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
 
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PLAYBACK_ATTR3_AGENTROOT_INVALID", message)
+        self.assertFalse(out_file.exists())
+
+
+@requires_pwsh
+@requires_git
+class AgentRootAfterResolverOrderingTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 6 (astra major): the owner arm's -AgentRoot shape check now
+    runs AFTER the resolver call, not before it -- round 5 left it inside the same if/else as the
+    flag refusals, but still ahead of $RepoRoot resolution and the resolver call, so a malformed
+    -AgentRoot masked a resolver refusal that would otherwise have fired first. Uses the same
+    fixture-repo seam as OwnerClipResolverOrderingTests (a throwaway repo with no
+    refs/remotes/fork/master, which the resolver always refuses deterministically) so the resolver
+    outcome never depends on real consent data."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo_missing_closure_sibling(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+        self.bad_agent_root = "not-a-drive-rooted-path"
+
+    def test_a_malformed_agentroot_with_a_resolver_refusal_surfaces_resolve_refused(self) -> None:
+        out_file = self.staging / "job.ps1"
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'M16-1243' "
+            f"-AgentRoot '{self.bad_agent_root}' "
+            f"-OutFile '{out_file}' -RepoRoot '{self.repo}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        message = normalize_pwsh_message_text(proc.stdout + proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PLAYBACK_ATTR3_OWNER_RESOLVE_REFUSED", message)
+        self.assertNotIn("PLAYBACK_ATTR3_AGENTROOT_INVALID", message)
         self.assertFalse(out_file.exists())
 
 

@@ -805,13 +805,15 @@ class AttributionJobOwnerClipRefusalTests(unittest.TestCase):
 
 
 class OwnerDecisionOrderingAstTests(unittest.TestCase):
-    """ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL). An AST census over the generator's own
-    TOP-LEVEL statements only -- a FunctionDefinitionAst is one top-level statement whose BODY
-    never executes at definition time, so this never descends into one. Proves: no
-    Import-Module, Get-AttrCudaEmbeddedFunctionSource, git invocation or Test-Path precedes the
-    statement that throws PLAYBACK_ATTR3_CLIPPATH_REFUSED, and that the $RepoRoot resolution
-    statement is the only thing standing between that decision and the resolver call
-    (Resolve-AttrCudaOwnerClipParts)."""
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL), extended round 6. An AST census over the
+    generator's own TOP-LEVEL statements only -- a FunctionDefinitionAst is one top-level
+    statement whose BODY never executes at definition time, so this never descends into one.
+    Proves: no Import-Module, Get-AttrCudaEmbeddedFunctionSource, git invocation or Test-Path
+    precedes the statement that throws PLAYBACK_ATTR3_CLIPPATH_REFUSED, that the $RepoRoot
+    resolution statement is the only thing standing between that decision and the resolver call
+    (Resolve-AttrCudaOwnerClipParts), and (round 6, astra major) that the resolver call itself
+    precedes the owner arm's own -AgentRoot shape-check statement -- so the complete owner-id
+    decision (flags, RepoRoot, resolver) always runs before AgentRoot validation, never after."""
 
     def _census(self) -> dict:
         import json
@@ -831,6 +833,7 @@ class OwnerDecisionOrderingAstTests(unittest.TestCase):
             "$throwIndex = -1\n"
             "$repoRootIndex = -1\n"
             "$resolverCallIndex = -1\n"
+            "$ownerAgentRootIndex = -1\n"
             "for ($i = 0; $i -lt $statements.Count; $i++) {\n"
             "    $stmt = $statements[$i]\n"
             "    if ($stmt -is [System.Management.Automation.Language.FunctionDefinitionAst]) { continue }\n"
@@ -849,9 +852,14 @@ class OwnerDecisionOrderingAstTests(unittest.TestCase):
             "    }\n"
             "    if ($repoRootIndex -lt 0 -and $stmt.Extent.Text -like '*Resolve-Path -LiteralPath $RepoRoot*') { $repoRootIndex = $i }\n"
             "    if ($resolverCallIndex -lt 0 -and $stmt.Extent.Text -like '*Resolve-AttrCudaOwnerClipParts -ClipId*') { $resolverCallIndex = $i }\n"
+            "    # The LAST top-level statement carrying this throw is the owner arm's standalone,\n"
+            "    # post-resolver AgentRoot check -- the fixture arm's own copy lives earlier, nested\n"
+            "    # inside the owner/fixture flag-refusal if/else.\n"
+            "    if ($stmt.Extent.Text -like '*PLAYBACK_ATTR3_AGENTROOT_INVALID*') { $ownerAgentRootIndex = $i }\n"
             "}\n"
             "[pscustomobject]@{ forbiddenIndex = $forbiddenIndex; throwIndex = $throwIndex; "
-            "repoRootIndex = $repoRootIndex; resolverCallIndex = $resolverCallIndex } | ConvertTo-Json -Compress\n"
+            "repoRootIndex = $repoRootIndex; resolverCallIndex = $resolverCallIndex; "
+            "ownerAgentRootIndex = $ownerAgentRootIndex } | ConvertTo-Json -Compress\n"
         )
         with tempfile.TemporaryDirectory(prefix="attr3-ast-order-") as tmp:
             script_path = Path(tmp) / "census.ps1"
@@ -887,6 +895,19 @@ class OwnerDecisionOrderingAstTests(unittest.TestCase):
         # CLIPPATH decision and the resolver call is RepoRoot's own Resolve-Path.
         self.assertGreater(census["forbiddenIndex"], census["resolverCallIndex"])
 
+    def test_resolver_call_precedes_the_owner_arm_agentroot_validation(self) -> None:
+        # ATTR3-FOOTAGE-BIND-1 PR-B round 6 (astra major): the complete owner-id decision -- flag
+        # refusals, then RepoRoot resolution, then the resolver call and its own typed refusal --
+        # must run before AgentRoot validation (and anything else unrelated), never after it.
+        census = self._census()
+        self.assertGreaterEqual(census["resolverCallIndex"], 0, "resolver call statement not found")
+        self.assertGreaterEqual(census["ownerAgentRootIndex"], 0, "owner-arm AgentRoot check not found")
+        self.assertLess(
+            census["resolverCallIndex"],
+            census["ownerAgentRootIndex"],
+            "the owner arm's AgentRoot validation precedes the resolver invocation",
+        )
+
 
 class FirstThrowCapableStatementAstTests(unittest.TestCase):
     """ATTR3-FOOTAGE-BIND-1 PR-B round 5 (STRUCTURAL). Generalizes
@@ -896,8 +917,11 @@ class FirstThrowCapableStatementAstTests(unittest.TestCase):
     it contains a ThrowStatementAst directly, or it calls a function (by name) whose own body
     contains a ThrowStatementAst -- must be the owner/fixture flag-refusal if/else block itself.
     Round 4 left -AgentRoot's shape check as a standalone `if` ahead of that block, so it was the
-    first throw-capable statement instead; round 5 folds it into both arms of the if/else so the
-    block remains the first thing that can throw."""
+    first throw-capable statement instead; round 5 folded it into both arms of the if/else so the
+    block remains the first thing that can throw. Round 6 moves the OWNER arm's copy out again --
+    now to a standalone statement AFTER the resolver call, per OwnerDecisionOrderingAstTests --
+    but the FIXTURE arm's own copy stays nested here, so this block is still the first thing that
+    can throw for either arm."""
 
     def _first_throw_capable(self) -> dict:
         import json
