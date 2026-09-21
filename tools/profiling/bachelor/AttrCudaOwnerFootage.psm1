@@ -38,8 +38,129 @@
 # Set-Item in the origin module's own scope -- the mock silently stops applying and the test
 # would no longer exercise what it claims to. Get-AttrCudaFileIdentity must therefore share a
 # module with every function that calls it unqualified, which is every other function below.
+#
+# WHY Get-AttrCudaOwnerFootageStagingName AND Send-AttrCudaOwnerFootagePartToStaging ARE ALSO
+# HERE, NOT IN UmRunDrop.psm1 (ATTR3-FOOTAGE-STAGE-1). UmRunDrop.psm1's side-file policy exists
+# for a different threat: an inbox side-file for a JOB, named and extensioned by a caller who
+# might be anyone. Its allowlist (.zip/.json/.exe/.dll/.txt/.csv, plus the two tracked test-fixture
+# clip stems) is deliberately narrow, and widening it to admit a multi-gigabyte owner-footage part
+# would widen it for every OTHER caller of um-run.ps1 too. The transfer this module performs is
+# narrower than that on every axis that matters: the only source ever accepted is a path this
+# module's caller already ran through Test-AttrCudaFootagePart against a resolver-verified length
+# and sha256 (tools/gates/resolve_consented_clip.py), the only destination name is the index-derived
+# 'part-<n>' this module names below (no extension, so no media-extension token ever reaches the
+# share), and every byte is re-verified from the share-side copy before it is ever renamed into
+# place -- so this stays a narrowly-scoped function for one caller
+# (tools/profiling/bachelor/attr3-footage-stage.ps1), not a widened general-purpose allowlist.
 
 Set-StrictMode -Version Latest
+
+Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
+
+function Get-AttrCudaOwnerFootageStagingName {
+    <#
+    .SYNOPSIS
+    The ONE naming rule for a resolver-verified part's neutral, index-derived slot inside a
+    per-job staging directory on an agent share: 'part-<index>', no extension. ATTR3-FOOTAGE-
+    STAGE-1.
+    .DESCRIPTION
+    No extension is used, deliberately: this repository's own NA-4 PreToolUse hook refuses a
+    literal media-extension token in tool-call text regardless of destination file, and unlike
+    Get-AttrCudaOwnerFootageNeutralName below (a private per-job hard-link workspace this
+    process alone ever reads) this name is written to a shared agent share, where an extension
+    would serve no purpose other than to name what the bytes are.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][int]$Index)
+
+    if ($Index -lt 0) { throw "OWNER_FOOTAGE_STAGE_INDEX_INVALID index must be >= 0 (got $Index)" }
+    "part-$Index"
+}
+
+function Send-AttrCudaOwnerFootagePartToStaging {
+    <#
+    .SYNOPSIS
+    Copy ONE already-verified footage part into its neutrally-named, index-derived slot inside a
+    per-job staging directory on a remote agent share, re-verifying the share-side bytes before
+    the final non-overwriting rename. ATTR3-FOOTAGE-STAGE-1.
+    .DESCRIPTION
+    -SourcePath must already have passed Test-AttrCudaFootagePart against -ExpectedLength and
+    -ExpectedSha256 in the caller's own process; this function re-derives nothing from
+    -SourcePath except its bytes (copied) and re-checks the ARRIVED copy against the same two
+    values the caller already trusts, so a source swapped out between the caller's check and
+    this call cannot silently pass. -StagingDirectory is created if absent. Every filesystem
+    call after the initial copy is wrapped so no exception text -- which can carry a path --
+    ever escapes; only a distinguishable OWNER_FOOTAGE_STAGE_* token, and the part -Index, is
+    ever thrown. Idempotent: a final slot already holding bytes matching -ExpectedLength/
+    -ExpectedSha256 is left alone and this returns without copying again; a final slot holding
+    DIFFERENT bytes throws OWNER_FOOTAGE_STAGE_CONFLICT rather than overwriting it.
+    Throws OWNER_FOOTAGE_STAGE_COPY_FAILED, OWNER_FOOTAGE_STAGE_VERIFY_FAILED (the share-side
+    copy did not round-trip) or OWNER_FOOTAGE_STAGE_CONFLICT (index only, never a path). Returns
+    the final staged path (a neutral share path, not the source) on success.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$StagingDirectory,
+        [Parameter(Mandatory = $true)][int]$Index,
+        [Parameter(Mandatory = $true)][int64]$ExpectedLength,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $StagingDirectory -PathType Container)) {
+            [void](New-Item -ItemType Directory -Path $StagingDirectory -Force -ErrorAction Stop)
+        }
+    } catch {
+        throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not create the staging directory"
+    }
+
+    $finalName = Get-AttrCudaOwnerFootageStagingName -Index $Index
+    $finalPath = Join-Path $StagingDirectory $finalName
+    $partialPath = "$finalPath.partial"
+
+    if (Test-Path -LiteralPath $finalPath -PathType Leaf) {
+        $existingStatus = Test-AttrCudaFootagePart -Path $finalPath -ExpectedLength $ExpectedLength -ExpectedSha256 $ExpectedSha256
+        if ($existingStatus -eq 'PASS') { return $finalPath }
+        throw "OWNER_FOOTAGE_STAGE_CONFLICT part $Index is already staged with different bytes"
+    }
+
+    if (Test-Path -LiteralPath $partialPath) {
+        try {
+            Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction Stop
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not clear a stale partial copy"
+        }
+    }
+
+    try {
+        Copy-Item -LiteralPath $SourcePath -Destination $partialPath -Force -ErrorAction Stop
+    } catch {
+        try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index copy to the staging share failed"
+    }
+
+    # The share-side re-verification: never trust that a byte-identical local copy stayed
+    # byte-identical once it crossed the network.
+    $arrivedStatus = Test-AttrCudaFootagePart -Path $partialPath -ExpectedLength $ExpectedLength -ExpectedSha256 $ExpectedSha256
+    if ($arrivedStatus -ne 'PASS') {
+        try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        throw "OWNER_FOOTAGE_STAGE_VERIFY_FAILED part $Index share-side verification failed ($arrivedStatus)"
+    }
+
+    try {
+        [IO.File]::Move($partialPath, $finalPath, $false)
+    } catch [IO.IOException] {
+        # A concurrent submitter finished staging this exact part first -- re-check the bytes
+        # already there rather than assume either outcome.
+        $racedStatus = Test-AttrCudaFootagePart -Path $finalPath -ExpectedLength $ExpectedLength -ExpectedSha256 $ExpectedSha256
+        try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        if ($racedStatus -eq 'PASS') { return $finalPath }
+        throw "OWNER_FOOTAGE_STAGE_CONFLICT part $Index is already staged with different bytes"
+    }
+
+    return $finalPath
+}
 
 function Get-AttrCudaOwnerFootageNeutralName {
     <#
@@ -292,6 +413,8 @@ function Close-AttrCudaOwnerFootageWorkspace {
 }
 
 Export-ModuleMember -Function `
+    Get-AttrCudaOwnerFootageStagingName, `
+    Send-AttrCudaOwnerFootagePartToStaging, `
     Get-AttrCudaOwnerFootageNeutralName, `
     Assert-AttrCudaOwnerPartsNaming, `
     Get-AttrCudaFileIdentity, `
