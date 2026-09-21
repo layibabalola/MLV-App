@@ -60,7 +60,8 @@ and a comment opener encountered while already inside a literal can never
 start a comment, because both are driven off the same one pass rather than
 two passes racing over different inputs. `_lex` also understands raw string
 literals (`R"delim( ... )delim"`, including a custom delimiter), which
-neither predecessor did.
+neither predecessor did. (Round 9 later removes this modelling entirely in
+favor of an unconditional refusal -- see below.)
 
 Round 7 (hub ruling, closing the lexing question for good): this tripwire is a
 REGRESSION TRIPWIRE over one function, not a general C++ lexer -- it must
@@ -88,22 +89,26 @@ Two precision items closed:
 
 Fail-closed, strict-mode only (see below): a backslash immediately followed
 by a newline (optionally `\r\n`) ANYWHERE in the scanned text -- in code, in
-a comment, or inside a string/char/raw-string literal; a `#` character
-ANYWHERE in the CODE view (i.e. outside a comment and outside a string/char
-literal), at any column; a digit separator (an apostrophe directly between
-two alphanumeric characters, e.g. `1'000`); an encoding-prefixed raw string
-(`LR"`, `uR"`, `UR"`, `u8R"`); a trigraph (`??=`, `??/`, `??'`, `??(`, `??)`,
+a comment, or inside a string/char literal; a `#` character ANYWHERE in the
+CODE view (i.e. outside a comment and outside a string/char literal), at any
+column; a digit separator (an apostrophe directly between two alphanumeric
+characters, e.g. `1'000`); a trigraph (`??=`, `??/`, `??'`, `??(`, `??)`,
 `??!`, `??<`, `??>`, `??-`). Each raises `UnsupportedConstructError` naming
 the construct and the 1-based line within the scanned text.
 
-Strictness is scoped to the EXTRACTED FUNCTION BODY only, never the whole
-source file: `_lex` takes a `strict` flag (default `False`); only
-`_find_returns_with_context`, which lexes the already-extracted body, passes
-`strict=True`. `_extract_function_body` lexes the FULL ~20k-line source file
-just to find the function's matching braces, and that file legitimately
-contains hundreds of preprocessor directives elsewhere -- failing closed
-there would break body extraction on constructs that have nothing to do with
-`presentPlaybackPreparedFrame`.
+Raw string literals are a separate, UNCONDITIONAL refusal -- not scoped to
+strict mode at all. See Round 9 below.
+
+Strictness (for the constructs above) is scoped to the EXTRACTED FUNCTION
+BODY only, never the whole source file: `_lex` takes a `strict` flag
+(default `False`); only `_find_returns_with_context`, which lexes the
+already-extracted body, passes `strict=True`. `_extract_function_body` lexes
+the FULL ~20k-line source file just to find the function's matching braces,
+and that file legitimately contains hundreds of preprocessor directives
+elsewhere -- failing closed there on those constructs would break body
+extraction on constructs that have nothing to do with
+`presentPlaybackPreparedFrame`. Raw strings are the one exception to this
+scoping (see Round 9): that refusal applies to the full-source pass too.
 
 Round 8 (hub ruling, refuse whole CLASSES instead of modelling more
 corners): round 7 left two lexical gaps, both traceable to the same root
@@ -131,6 +136,41 @@ legitimately contains one outside a literal. Comment-continuation modelling
 is otherwise unconditional (both calls, i.e. `//` and block comments still
 close normally at a plain newline / `*/`), since that is simply correct
 lexing, not a fail-closed policy.
+
+Round 9 (hub ruling, refuse the whole raw-string CLASS, everywhere): sol r8
+found the round-6 raw-string MODEL itself was the hazard, not a missing
+corner of it. A standard unprefixed raw string whose delimiter contains a
+brace (e.g. `R"}(payload)}"`) is valid C++ and was accepted, but the old
+`_RAW_STRING` state only blanked braces found in the literal's CONTENT --
+the delimiter text itself (scanned while still in `_CODE` state, before the
+state transition) was left untouched in both output views. A `{` or `}`
+sitting in the delimiter therefore leaked into `comment_masked` as a live,
+unbalanced brace. `_extract_function_body` counts every visible brace in
+exactly that view to find the function's closing `}`, so a leaked delimiter
+brace could desync its depth counter and end extraction early -- before a
+later, untraced `return;` -- letting that return escape the tripwire
+entirely while it still reports success.
+
+The fix removes the raw-string state machine outright rather than patching
+the delimiter scan: `presentPlaybackPreparedFrame` is not expected to
+contain a raw string at all, so there is nothing worth modeling correctly.
+`_lex` now raises `UnsupportedConstructError` the instant it sees a raw
+string open -- `R"`, or an encoding-prefixed `LR"`/`uR"`/`UR"`/`u8R"`, not
+preceded by an identifier character -- UNCONDITIONALLY, regardless of
+*strict*. This is deliberately broader than every other refusal in this
+file: `_extract_function_body`'s non-strict, whole-~20k-line-file pass now
+also fails closed on a raw string, anywhere in the file, not just inside
+this one function's body. That is a real behavioral cost (an unrelated raw
+string anywhere else in MainWindow.cpp would now break this tripwire) that
+the hub ruling accepts deliberately, because "fail closed and force a human
+to look" is exactly the contract this module exists to uphold, and because
+no raw string currently exists anywhere in that file (see
+`test_real_source_has_no_unsupported_constructs_during_extraction` below).
+An identifier that merely ENDS in `R` immediately before a `"` (so it is
+not actually raw-string syntax -- e.g. `FOOR"x"`) is not affected: the same
+"preceding character is not an identifier character" guard round 6 already
+used for the `R"` opener still applies, now uniformly to the prefixed forms
+too.
 """
 from pathlib import Path
 import re
@@ -147,11 +187,9 @@ TRACE_CALL = "logInteractionEvent("
 DROP_COUNTER_CALL = "m_presentNothingDropCount.fetch_add("
 PRESENT_NOTHING_MARKER = "draw_frame_ready.present_nothing"
 
-_CODE, _LINE_COMMENT, _BLOCK_COMMENT, _STRING, _CHAR, _RAW_STRING = range(6)
-_RAW_DELIM_STOP = "()\\\t\n "
-_RAW_DELIM_MAX_LEN = 16
+_CODE, _LINE_COMMENT, _BLOCK_COMMENT, _STRING, _CHAR = range(5)
 
-_ENCODED_RAW_STRING_PREFIX = re.compile(r"(u8|[LuU])R\"")
+_RAW_STRING_OPEN = re.compile(r"(?:u8|[LuU])?R\"")
 _TRIGRAPH = re.compile(r"\?\?[=/'()!<>\-]")
 
 
@@ -172,42 +210,46 @@ def _lex(text: str, *, strict: bool = False):
     """Single pass over *text* producing two same-length views.
 
     Returns ``(comment_masked, code_only)``:
-      - ``comment_masked``: comment bodies blanked; string/char/raw-string
-        CONTENTS are left intact, except braces inside them are blanked so
-        they can never distort brace-depth tracking. Quote and comment
-        delimiters stay visible.
-      - ``code_only``: comment bodies blanked AND string/char/raw-string
-        contents also blanked, leaving only the delimiting punctuation --
-        so a token that exists only inside a literal cannot match against
-        it.
+      - ``comment_masked``: comment bodies blanked; string/char CONTENTS
+        are left intact, except braces inside them are blanked so they can
+        never distort brace-depth tracking. Quote and comment delimiters
+        stay visible.
+      - ``code_only``: comment bodies blanked AND string/char contents
+        also blanked, leaving only the delimiting punctuation -- so a
+        token that exists only inside a literal cannot match against it.
 
-    Handles line comments, block comments, string literals, char literals
-    and raw string literals (`R"delim( ... )delim"`, including a custom
-    delimiter), with backslash escapes honoured inside normal string/char
-    literals (an escaped closing quote does not end the literal). Both
-    views are driven off ONE state machine over the ORIGINAL text -- never
-    a previously masked copy -- so a quote or apostrophe encountered while
-    already inside a comment can never flip literal state, and a `//` or
-    `/*` encountered while already inside a literal can never start a
-    comment. Newlines are preserved verbatim in both views so line numbers
-    stay accurate, and both views are exactly ``len(text)`` long.
+    Handles line comments, block comments, string literals and char
+    literals, with backslash escapes honoured inside them (an escaped
+    closing quote does not end the literal). Raw string literals
+    (`R"delim( ... )delim"`, prefixed or not) are not modeled at all --
+    `_lex` raises `UnsupportedConstructError` UNCONDITIONALLY the moment it
+    sees one open, in both strict and non-strict calls; see the Round 9
+    module docstring note for why. Both views are driven off ONE state
+    machine over the ORIGINAL text -- never a previously masked copy -- so
+    a quote or apostrophe encountered while already inside a comment can
+    never flip literal state, and a `//` or `/*` encountered while already
+    inside a literal can never start a comment. Newlines are preserved
+    verbatim in both views so line numbers stay accurate, and both views
+    are exactly ``len(text)`` long.
 
-    When *strict* is True, raises `UnsupportedConstructError` (naming the
-    construct and its 1-based line in *text*) on any construct this lexer
-    refuses to model: a backslash immediately followed by a newline
-    (optionally `\r\n`), ANYWHERE in *text* -- in code, in a comment, or
-    inside a string/char/raw-string literal (line splicing happens before
-    tokenization in C++, so no lexical position is safe from it, and this
-    is refused as a whole class rather than modelled corner by corner); a
-    `#` character ANYWHERE in the CODE view (outside a comment and outside
-    a string/char literal), at any column -- a function body here never
-    legitimately contains one outside a literal; a digit separator (an
-    apostrophe directly between two alphanumeric characters); an
-    encoding-prefixed raw string (`LR"`, `uR"`, `UR"`, `u8R"`); or a
-    trigraph. *strict* must stay scoped to an already-extracted function
-    body -- the whole source file legitimately contains constructs (real
-    preprocessor directives and line continuations, at minimum) that have
-    nothing to do with any one function.
+    When *strict* is True, additionally raises `UnsupportedConstructError`
+    (naming the construct and its 1-based line in *text*) on any other
+    construct this lexer refuses to model: a backslash immediately
+    followed by a newline (optionally `\r\n`), ANYWHERE in *text* -- in
+    code, in a comment, or inside a string/char literal (line splicing
+    happens before tokenization in C++, so no lexical position is safe
+    from it, and this is refused as a whole class rather than modelled
+    corner by corner); a `#` character ANYWHERE in the CODE view (outside
+    a comment and outside a string/char literal), at any column -- a
+    function body here never legitimately contains one outside a literal;
+    a digit separator (an apostrophe directly between two alphanumeric
+    characters); or a trigraph. These *strict*-gated checks must stay
+    scoped to an already-extracted function body -- the whole source file
+    legitimately contains constructs (real preprocessor directives and
+    line continuations, at minimum) that have nothing to do with any one
+    function. The raw-string refusal above is the one exception: it is
+    NOT gated by *strict*, because the function is not expected to
+    contain one and modeling it correctly turned out to be its own hazard.
     """
     if strict:
         trigraph_match = _TRIGRAPH.search(text)
@@ -227,7 +269,6 @@ def _lex(text: str, *, strict: bool = False):
     code_out = list(text)
 
     state = _CODE
-    raw_terminator = ""
     index = 0
     while index < length:
         char = text[index]
@@ -249,13 +290,6 @@ def _lex(text: str, *, strict: bool = False):
                 raise UnsupportedConstructError(
                     f"digit separator at line {_line_at(text, index)}"
                 )
-            if strict and _ENCODED_RAW_STRING_PREFIX.match(text, index) and (
-                index == 0 or not _is_ident_char(text[index - 1])
-            ):
-                raise UnsupportedConstructError(
-                    "encoding-prefixed raw string literal at line "
-                    f"{_line_at(text, index)}"
-                )
             if char == "/" and index + 1 < length and text[index + 1] == "/":
                 comment_out[index] = comment_out[index + 1] = " "
                 code_out[index] = code_out[index + 1] = " "
@@ -269,29 +303,17 @@ def _lex(text: str, *, strict: bool = False):
                 index += 2
                 continue
             if (
-                char == "R"
-                and index + 1 < length
-                and text[index + 1] == '"'
+                char in ("R", "u", "U", "L")
                 and (index == 0 or not _is_ident_char(text[index - 1]))
+                and _RAW_STRING_OPEN.match(text, index)
             ):
-                delim_start = index + 2
-                delim_end = delim_start
-                while (
-                    delim_end < length
-                    and delim_end - delim_start < _RAW_DELIM_MAX_LEN
-                    and text[delim_end] not in _RAW_DELIM_STOP
-                ):
-                    delim_end += 1
-                if delim_end < length and text[delim_end] == "(":
-                    raw_terminator = ")" + text[delim_start:delim_end] + '"'
-                    state = _RAW_STRING
-                    index = delim_end + 1
-                    continue
-                # 'R"' that never reaches a delimiter-closing '(' is not a
-                # raw string literal -- fall through and re-scan from here
-                # as ordinary code, one character at a time.
-                index += 1
-                continue
+                # Round 9 (hub ruling): refuse EVERY raw string literal --
+                # prefixed or not, any delimiter -- unconditionally, in both
+                # strict and non-strict lexing. See the Round 9 docstring
+                # note for why this construct is no longer modeled at all.
+                raise UnsupportedConstructError(
+                    f"raw string literal at line {_line_at(text, index)}"
+                )
             if char == '"':
                 state = _STRING
                 index += 1
@@ -330,21 +352,6 @@ def _lex(text: str, *, strict: bool = False):
             if char != "\n":
                 comment_out[index] = " "
                 code_out[index] = " "
-            index += 1
-            continue
-
-        if state == _RAW_STRING:
-            # Raw strings do not process escapes or nested quoting -- only
-            # the exact `)delim"` terminator ends them, so a `)"`, `//` or
-            # `/*` that doesn't match the terminator is just content.
-            if text[index : index + len(raw_terminator)] == raw_terminator:
-                index += len(raw_terminator)
-                state = _CODE
-                continue
-            if char != "\n":
-                code_out[index] = " "
-                if char in "{}":
-                    comment_out[index] = " "
             index += 1
             continue
 
@@ -609,12 +616,6 @@ class LexerDirectTests(unittest.TestCase):
                 "x = '" + " " * 2 + "';\n",
             ),
             (
-                "raw string with )\", // and braces via a custom delimiter",
-                'x = ' + 'R"XY(' + 'a)"b//c{d}e' + ')XY"' + ";\n",
-                'x = ' + 'R"XY(' + 'a)"b//c d e' + ')XY"' + ";\n",
-                'x = ' + 'R"XY(' + " " * 11 + ')XY"' + ";\n",
-            ),
-            (
                 "brace inside a string",
                 'x = "{}";\n',
                 'x = "  ";\n',
@@ -704,6 +705,23 @@ class PresentPlaybackPreparedFrameTracesDropsTests(unittest.TestCase):
                 f"refuses to model: {exc}"
             )
 
+    def test_real_source_has_no_raw_string_during_extraction(self):
+        # Round 9: raw-string refusal now applies to the non-strict,
+        # whole-~20k-line-file extraction pass too, not just the extracted
+        # body. `presentPlaybackPreparedFrame` is not expected to contain
+        # one, and neither is the rest of MainWindow.cpp -- assert the
+        # full-source lex this tripwire actually performs stays clean, so
+        # a future raw string anywhere in that file surfaces here instead
+        # of silently corrupting extraction for some other function later.
+        source = MAIN_WINDOW_CPP.read_text(encoding="utf-8")
+        try:
+            _extract_function_body(source, FUNCTION_NAME)
+        except UnsupportedConstructError as exc:
+            self.fail(
+                "MainWindow.cpp contains a raw string literal, which this "
+                f"tripwire's extraction pass now refuses unconditionally: {exc}"
+            )
+
 
 class TripwireMutationTests(unittest.TestCase):
     """In-memory mutations of a synthetic present_nothing exit, proving the
@@ -727,6 +745,38 @@ class TripwireMutationTests(unittest.TestCase):
         untraced, uncounted = self._untraced_and_uncounted(body)
         self.assertEqual([], untraced)
         self.assertEqual([], uncounted)
+
+    def test_raw_string_with_brace_delimiter_during_extraction_fails_closed(
+        self,
+    ):
+        # sol r8's exact defect, reproduced end-to-end through
+        # `_extract_function_body`: a properly traced return, then a
+        # standard unprefixed raw string whose delimiter contains a brace,
+        # then a later untraced return. Under round 6/7/8's raw-string
+        # MODEL, the delimiter's `}` leaked into the brace-counting view
+        # unblanked, so extraction ended at that phantom `}` -- before the
+        # untraced return -- and the mutation was wrongly accepted as
+        # passing (returns_seen=1, untraced_seen=[]). Round 9 deletes the
+        # model and refuses the raw string unconditionally, so extraction
+        # now fails closed instead of silently truncating.
+        source = (
+            "void MainWindow::" + FUNCTION_NAME + "()\n"
+            "{\n"
+            "    if( x )\n"
+            "    {\n"
+            "        logInteractionEvent(\n"
+            '            QStringLiteral("draw_frame_ready.present_nothing") );\n'
+            "        m_presentNothingDropCount.fetch_add( 1 );\n"
+            "        return;\n"
+            "    }\n"
+            "    const char *s = " + 'R"}(' + "payload" + ')}"' + ";\n"
+            "    if( laterDrop )\n"
+            "        return;\n"
+            "}\n"
+        )
+        with self.assertRaises(UnsupportedConstructError) as ctx:
+            _extract_function_body(source, FUNCTION_NAME)
+        self.assertIn("raw string literal", str(ctx.exception))
 
     def test_trace_in_earlier_nested_sibling_block_is_rejected(self):
         body = _make_sample_body(trace_in_sibling=True, trace_in_own_block=False)
@@ -913,17 +963,60 @@ class LexerStrictModeTests(unittest.TestCase):
             _lex(text, strict=True)
         self.assertIn("digit separator", str(ctx.exception))
 
-    def test_encoded_raw_string_prefixes_are_refused(self):
+    def test_encoded_raw_string_prefixes_are_refused_unconditionally(self):
+        # Round 9: raw-string refusal is no longer strict-only -- it fires
+        # in BOTH strict and non-strict calls, so both are exercised here.
         for prefix in ("L", "u", "U", "u8"):
-            with self.subTest(prefix=prefix):
-                text = "x = " + prefix + 'R"(hi)";\n'
-                with self.assertRaises(UnsupportedConstructError) as ctx:
-                    _lex(text, strict=True)
-                self.assertIn("encoding-prefixed raw string", str(ctx.exception))
+            for strict in (True, False):
+                with self.subTest(prefix=prefix, strict=strict):
+                    text = "x = " + prefix + 'R"(hi)";\n'
+                    with self.assertRaises(UnsupportedConstructError) as ctx:
+                        _lex(text, strict=strict)
+                    self.assertIn("raw string literal", str(ctx.exception))
 
-    def test_unprefixed_raw_string_is_not_refused(self):
+    def test_unprefixed_raw_string_is_refused_unconditionally(self):
+        # Round 9 (hub ruling): round 7/8 explicitly accepted this exact
+        # text ("test_unprefixed_raw_string_is_not_refused"); round 9
+        # deletes the raw-string model entirely and refuses it instead, in
+        # both strict and non-strict calls.
         text = 'x = R"(hi)";\n'
-        _lex(text, strict=True)
+        for strict in (True, False):
+            with self.subTest(strict=strict):
+                with self.assertRaises(UnsupportedConstructError) as ctx:
+                    _lex(text, strict=strict)
+                self.assertIn("raw string literal", str(ctx.exception))
+
+    def test_raw_string_with_brace_in_delimiter_is_refused_unconditionally(
+        self,
+    ):
+        # sol r8's exact repro: a standard unprefixed raw string whose
+        # delimiter contains a brace. The round-6/7/8 lexer accepted this
+        # but mis-lexed it -- the delimiter's `}` leaked into the
+        # comment-masked view unblanked, corrupting brace-depth counting
+        # for whoever counts braces in that view (function extraction).
+        # Round 9 refuses the whole raw-string class before that mis-lex
+        # can ever happen, in both strict and non-strict calls.
+        text = 'x = ' + 'R"}(' + 'payload' + ')}"' + ";\n"
+        for strict in (True, False):
+            with self.subTest(strict=strict):
+                with self.assertRaises(UnsupportedConstructError) as ctx:
+                    _lex(text, strict=strict)
+                self.assertIn("raw string literal", str(ctx.exception))
+
+    def test_identifier_ending_in_r_before_a_string_is_not_mistaken_for_raw_string(
+        self,
+    ):
+        # An identifier that merely ends in `R` immediately before a `"` is
+        # not actually raw-string syntax (`FOOR"x"` is not valid C++), so
+        # these constructions -- suggested in the round 9 brief -- must not
+        # be refused: `R` appearing only as string CONTENT, and a
+        # macro-like identifier followed by a separately-spaced string.
+        for text in (
+            'x = QStringLiteral("R");\n',
+            'x = BAR "x";\n',
+        ):
+            with self.subTest(text=text):
+                _lex(text, strict=True)
 
     def test_trigraph_is_refused(self):
         text = "int a;\n??/\nint b;\n"
@@ -968,11 +1061,15 @@ class LexerStrictModeTests(unittest.TestCase):
         text = 'x = "a#b";\n'
         _lex(text, strict=True)
 
-    def test_non_strict_mode_never_raises_on_any_refused_construct(self):
+    def test_non_strict_mode_never_raises_on_any_strict_only_construct(self):
+        # Raw strings are deliberately NOT in this list -- round 9 makes
+        # that refusal unconditional, so it fires in non-strict calls too
+        # (see the LexerStrictModeTests raw-string tests above). Every
+        # construct here stays strict-only, matching `_extract_function_body`
+        # lexing the whole source file non-strict.
         texts = [
             "int a = 1 + \\\n2;\n",
             "int n = 1'000;\n",
-            'x = LR"(hi)";\n',
             "??/\n",
             "#define X 1\n",
             "int a = 2 # 3;\n",
