@@ -778,6 +778,81 @@ bool GpuDisplayWindow::readGpuReconSourceBayer16Texture(QByteArray *textureBytes
 #endif
 }
 
+bool GpuDisplayWindow::grabPresentedFramebufferIfActive(QImage *outImage, QString *reason)
+{
+    GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
+    if ( !win )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU window framebuffer readback requires an active GPU display window");
+        return false;
+    }
+    if ( QThread::currentThread() != win->thread() )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU window framebuffer readback must run on the GUI thread");
+        return false;
+    }
+    if ( !win->isExposed() || !win->isValid() )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU window framebuffer readback requires an exposed, valid window");
+        return false;
+    }
+
+    QOpenGLContext *glContext = win->context();
+    if ( !glContext )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU window framebuffer readback requires an initialized OpenGL context");
+        return false;
+    }
+    const bool needsCurrent = QOpenGLContext::currentContext() != glContext;
+    const bool madeCurrent = needsCurrent ? (win->makeCurrent(), true) : false;
+
+    // Re-render the retained presentation state into this window's OWN default framebuffer
+    // and read it back IMMEDIATELY, before Qt's paint-event cycle gets a chance to run
+    // again -- QOpenGLWindow::grabFramebuffer() on a NoPartialUpdate window (this one) reads
+    // the default framebuffer as it stands at call time, which, once a swap has already
+    // happened (as it always has by the time a screenshot is requested), is the BACK buffer
+    // left over from a PRIOR frame with content the GL spec leaves undefined after swap --
+    // measured here as a solid black readback despite a successful present. Calling our own
+    // paintGL() draws the still-current texture fresh into that framebuffer right before the
+    // read, so what is captured is guaranteed to be what paintGL just drew, not swap leftovers.
+    win->paintGL();
+
+    if ( !win->m_texture )
+    {
+        if ( madeCurrent ) win->doneCurrent();
+        if ( reason ) *reason = QStringLiteral("GPU window framebuffer readback found no presented texture");
+        return false;
+    }
+
+    const qreal dpr = win->devicePixelRatio();
+    const int fbw = static_cast<int>( win->width() * dpr );
+    const int fbh = static_cast<int>( win->height() * dpr );
+    if ( fbw <= 0 || fbh <= 0 )
+    {
+        if ( madeCurrent ) win->doneCurrent();
+        if ( reason ) *reason = QStringLiteral("GPU window framebuffer readback found a non-positive window size");
+        return false;
+    }
+
+    QImage grabbed( fbw, fbh, QImage::Format_RGBA8888 );
+    win->glPixelStorei( GL_PACK_ALIGNMENT, 1 );
+    win->glReadPixels( 0, 0, fbw, fbh, GL_RGBA, GL_UNSIGNED_BYTE, grabbed.bits() );
+    const GLenum error = win->glGetError();
+    if ( madeCurrent ) win->doneCurrent();
+    if ( error != GL_NO_ERROR )
+    {
+        if ( reason ) *reason = QStringLiteral(
+            "glReadPixels failed for GPU window framebuffer readback with GL error 0x%1")
+            .arg( static_cast<unsigned int>( error ), 0, 16 );
+        return false;
+    }
+
+    // GL reads bottom-up; QImage rows are top-down.
+    if ( outImage ) *outImage = grabbed.flipped( Qt::Vertical );
+    if ( reason ) reason->clear();
+    return true;
+}
+
 void GpuDisplayWindow::initializeGL()
 {
     initializeOpenGLFunctions();

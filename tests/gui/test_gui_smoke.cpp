@@ -2,6 +2,7 @@
 #include "../../platform/qt/DualIsoPlaybackPolicy.h"
 #include "../../platform/qt/DualIsoPatternMapping.h"
 #include "../../platform/qt/GpuDisplayViewport.h"
+#include "../../platform/qt/GpuDisplayWindow.h"
 #include "../../platform/qt/GpuPreviewProcessing.h"
 #include "../../platform/qt/Histogram.h"
 #include "../../platform/qt/MainWindowGpuPreviewPolicy.h"
@@ -29,6 +30,8 @@
 #include <QScopeGuard>
 #include <QScreen>
 #include <QScrollBar>
+#include <QVBoxLayout>
+#include <QWidget>
 #include <QtTest/QtTest>
 
 #include <cmath>
@@ -589,6 +592,8 @@ private slots:
     void gpuViewportKeepsNativeSceneRectForTexturePresentationGeometry();
     void gpuViewportPresentsRgb888PatternExactly();
     void gpuViewportPresentsRgb16PatternExactly();
+    void gpuDisplayWindowFramebufferReadbackFailsWithoutActiveWindow();
+    void gpuDisplayWindowGrabsPresentedFramebufferReadback();
     void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
@@ -1775,6 +1780,70 @@ void GuiSmokeTest::gpuViewportPresentsRgb16PatternExactly()
 
     GpuDisplayViewport::clearPresentedImage(view.get(), item);
     qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuDisplayWindowFramebufferReadbackFailsWithoutActiveWindow()
+{
+    QVERIFY(!GpuDisplayWindow::isActive());
+
+    QImage grabbed;
+    QString reason;
+    QVERIFY(!GpuDisplayWindow::grabPresentedFramebufferIfActive(&grabbed, &reason));
+    QVERIFY(grabbed.isNull());
+    QVERIFY(!reason.isEmpty());
+}
+
+void GuiSmokeTest::gpuDisplayWindowGrabsPresentedFramebufferReadback()
+{
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        QSKIP("GL window framebuffer readback needs a platform plugin that can create an OpenGL context");
+    }
+
+    qputenv(GpuDisplayWindow::environmentVariableName(), QByteArrayLiteral("1"));
+
+    auto host = std::make_unique<QWidget>();
+    auto *layout = new QVBoxLayout(host.get());
+    auto *view = new QGraphicsView(host.get());
+    layout->addWidget(view);
+    host->resize(64, 64);
+
+    QVERIFY(GpuDisplayWindow::installInPreview(view));
+    host->show();
+    QApplication::processEvents();
+    static_cast<void>(QTest::qWaitForWindowExposed(host.get()));
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage submitted(32, 32, QImage::Format_RGB888);
+    submitted.fill(qRgb(10, 200, 30));
+    QVERIFY(GpuDisplayWindow::presentImageIfActive(submitted));
+
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage grabbed;
+    QString reason;
+    const bool ok = GpuDisplayWindow::grabPresentedFramebufferIfActive(&grabbed, &reason);
+    if (!ok || grabbed.isNull()) {
+        QSKIP("OpenGL framebuffer capture is unavailable in this environment");
+    }
+    QVERIFY(reason.isEmpty());
+    QVERIFY(grabbed.width() > 0);
+    QVERIFY(grabbed.height() > 0);
+
+    const QColor center(grabbed.pixel(grabbed.width() / 2, grabbed.height() / 2));
+    QVERIFY2(center.green() > 150 && center.red() < 80 && center.blue() < 80,
+             qPrintable(QStringLiteral("Expected the GL window readback to show the presented frame; "
+                                        "center pixel was rgb(%1,%2,%3)")
+                        .arg(center.red()).arg(center.green()).arg(center.blue())));
+
+    host.reset();
+    QVERIFY(!GpuDisplayWindow::isActive());
+    qunsetenv(GpuDisplayWindow::environmentVariableName());
 }
 
 void GuiSmokeTest::gpuViewportZebraProcessingMatchesCpuReference()

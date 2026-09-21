@@ -63,6 +63,7 @@ extern "C" {
 #include <QDate>
 #include <QStorageInfo>
 #include <QColorDialog>
+#include <QPainter>
 #include <algorithm>
 #include <cstring>
 #include <functional>
@@ -9179,6 +9180,40 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         qApp->processEvents( QEventLoop::AllEvents );
 
         QPixmap windowScreenshot = grab();
+        QString windowScreenshotMethod = QStringLiteral("app_internal_window_grab");
+        bool glWindowComposited = false;
+        QString glWindowCompositeReason;
+        if( GpuDisplayWindow::isActive() )
+        {
+            QWidget *glWindowContainer =
+                findChild<QWidget *>( QStringLiteral("gpuDisplayWindowContainer") );
+            if( !glWindowContainer || !glWindowContainer->isVisible() )
+            {
+                glWindowCompositeReason = QStringLiteral(
+                    "GPU window container is not visible for window-screenshot compositing" );
+            }
+            else
+            {
+                QImage glWindowFrame;
+                if( GpuDisplayWindow::grabPresentedFramebufferIfActive(
+                        &glWindowFrame, &glWindowCompositeReason )
+                 && !glWindowFrame.isNull()
+                 && !windowScreenshot.isNull() )
+                {
+                    const QPoint containerTopLeft =
+                        glWindowContainer->mapTo( this, QPoint( 0, 0 ) );
+                    const QRect targetRect(
+                        containerTopLeft, glWindowContainer->size() );
+                    QPainter windowScreenshotPainter( &windowScreenshot );
+                    windowScreenshotPainter.drawImage( targetRect, glWindowFrame );
+                    windowScreenshotPainter.end();
+                    glWindowComposited = true;
+                    windowScreenshotMethod = QStringLiteral(
+                        "app_internal_window_grab_composited_gl_window_framebuffer_readback" );
+                }
+            }
+        }
+
         QFileInfo windowScreenshotInfo( options.windowScreenshotOutputPath );
         if( !windowScreenshotInfo.absoluteDir().exists()
          && !QDir().mkpath( windowScreenshotInfo.absolutePath() ) )
@@ -9198,10 +9233,15 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
         logInteractionEvent(
             QStringLiteral("gui_smoke.window_screenshot"),
-            QStringLiteral("path=\"%1\" width=%2 height=%3 method=app_internal_window_grab fps_status=\"%4\"")
+            QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4 gl_window_active=%5 "
+                            "gl_window_composited=%6 gl_window_composite_reason=\"%7\" fps_status=\"%8\"")
                 .arg( windowScreenshotInfo.absoluteFilePath() )
                 .arg( windowScreenshot.width() )
                 .arg( windowScreenshot.height() )
+                .arg( windowScreenshotMethod )
+                .arg( bool01( GpuDisplayWindow::isActive() ) )
+                .arg( bool01( glWindowComposited ) )
+                .arg( glWindowCompositeReason )
                 .arg( m_pFpsStatus ? m_pFpsStatus->text() : QStringLiteral("unavailable") ) );
     }
 
@@ -9231,7 +9271,20 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
         QPixmap screenshot;
         QString screenshotMethod = QStringLiteral("app_internal_presented_pixmap");
-        if( ( GpuDisplayViewport::isTexturePresentationActive( ui->graphicsView )
+        QString glWindowReadbackReason;
+        if( GpuDisplayWindow::isActive() )
+        {
+            QImage glWindowFrame;
+            if( GpuDisplayWindow::grabPresentedFramebufferIfActive(
+                    &glWindowFrame, &glWindowReadbackReason )
+             && !glWindowFrame.isNull() )
+            {
+                screenshot = QPixmap::fromImage( glWindowFrame );
+                screenshotMethod = QStringLiteral("gl_window_framebuffer_readback");
+            }
+        }
+        if( screenshot.isNull()
+         && ( GpuDisplayViewport::isTexturePresentationActive( ui->graphicsView )
            || GpuDisplayViewport::hasPresentedGpuReconTexture( ui->graphicsView ) )
          && ui->graphicsView
          && ui->graphicsView->viewport() )
@@ -9280,7 +9333,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
         logInteractionEvent(
             QStringLiteral("gui_smoke.screenshot"),
-            QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4 bytes=%5 sha256=%6 frame=%7 serial=%8 generation=%9")
+            QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4 bytes=%5 sha256=%6 frame=%7 serial=%8 "
+                            "generation=%9 gl_window_active=%10 gl_window_readback_reason=\"%11\"")
                 .arg( screenshotInfo.absoluteFilePath() )
                 .arg( screenshot.width() )
                 .arg( screenshot.height() )
@@ -9289,7 +9343,9 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                 .arg( QString::fromLatin1( screenshotSha256 ) )
                 .arg( screenshotFrame )
                 .arg( screenshotSerial )
-                .arg( screenshotGeneration ) );
+                .arg( screenshotGeneration )
+                .arg( bool01( GpuDisplayWindow::isActive() ) )
+                .arg( glWindowReadbackReason ) );
     }
 
     if( ui->actionPlay->isChecked() )

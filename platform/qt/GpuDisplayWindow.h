@@ -76,6 +76,16 @@ public:
                                                         int *width,
                                                         int *height,
                                                         QString *reason = nullptr);
+    /* Read back the frame this window's OWN swapchain most recently presented: re-runs
+     * paintGL() against the still-current texture/state and reads the resulting default
+     * framebuffer with glReadPixels immediately afterward, before any further swap can
+     * leave it stale -- QOpenGLWindow::grabFramebuffer() reads the default framebuffer as
+     * it stands at call time, which for this NoPartialUpdate window is the back buffer left
+     * over from a prior frame once a swap has already happened, with content the GL spec
+     * leaves undefined post-swap (measured: a solid black readback despite a successful
+     * present). Never a screen-region capture. GUI-thread only; call after a completed
+     * present. Image size is the window's real device-pixel framebuffer size. */
+    static bool grabPresentedFramebufferIfActive(QImage *outImage, QString *reason = nullptr);
     /* Logical size of the active preview window (empty if none). Used by the display
      * scene-geometry calc so the playback preview resolution tracks the QOpenGLWindow
      * surface, not the hidden QGraphicsView. GUI-thread only. */
