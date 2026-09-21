@@ -200,24 +200,15 @@ inline bool mainWindowUsesGpuAmazeDebayer(
         && state.renderThreadUsingGpuAmazeDebayer;
 }
 
-inline bool mainWindowAllowsGpuPlaybackReconTexturePresentation(
-    const MainWindowGpuPreviewPolicyState &state);
-
 inline bool mainWindowAllowsGpuAmazeTexturePresentation(
     const MainWindowGpuPreviewPolicyState &state)
 {
-    // CUDA-SCALE4-ZERO-PRESENT-1 round 2: the widget-viewport requirement below
-    // exists only because presentAmazePostWbTexture/presentRgb16 have no
-    // GpuDisplayWindow routing (see round-1 root cause). The scale-1 recon
-    // texture-no-readback ("tex-nr") route presents through
-    // GpuDisplayWindow::presentGpuPlaybackReconAmazePostWbTextureIfActive
-    // instead, which *does* route through the GL window -- so when that route
-    // is eligible, presentation can succeed in window mode without a widget
-    // viewport, and the widget-viewport requirement must not apply.
+    // CUDA-SCALE4-ZERO-PRESENT-1: presentAmazePostWbTexture/presentRgb16 have no
+    // GpuDisplayWindow routing (see root cause), so the AMaZE-texture-present
+    // route requires the QOpenGLWidget viewport unconditionally.
     return mainWindowUsesGpuAmazeDebayer(state)
         && state.gpuAmazeTexturePresentationEnvironmentRequested
-        && ( state.gpuWidgetViewportInstalled
-             || mainWindowAllowsGpuPlaybackReconTexturePresentation(state) );
+        && state.gpuWidgetViewportInstalled;
 }
 
 inline bool mainWindowUsesGpuAmazeTexturePresentation(

@@ -5,8 +5,13 @@ hit `!framePresentedByViewport && displayImage.isNull()`, release the render
 slot, and `return;` with no trace, no counter and no draw_frame_ready.end --
 the GUI thread simply dropped the frame. This is a SUPPLEMENT to the C++
 policy tests in tests/gui/test_gui_smoke.cpp, not a replacement: it only
-checks source shape (every bare `return;` inside the function is preceded by
-a logInteractionEvent(...) call within a few lines), not runtime behavior.
+checks source shape, not runtime behavior.
+
+Round 3: the trace requirement is scoped to the nearest enclosing brace block
+(not a fixed line lookback), so a trace call sitting in a sibling or outer
+block can no longer satisfy a `return;` it doesn't actually cover. The
+`return;` scan matches the token anywhere in the body -- including inline
+`if( x ) return;` -- not just a whole line containing only `return;`.
 """
 from pathlib import Path
 import re
@@ -17,8 +22,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MAIN_WINDOW_CPP = ROOT / "platform/qt/MainWindow.cpp"
 
 FUNCTION_NAME = "presentPlaybackPreparedFrame"
-# How many lines above a bare `return;` we accept a tracing call within.
-TRACE_LOOKBACK_LINES = 20
+
+RETURN_PATTERN = re.compile(r"\breturn\s*;")
 
 
 def _extract_function_body(source: str, function_name: str) -> str:
@@ -45,41 +50,67 @@ def _extract_function_body(source: str, function_name: str) -> str:
     return source[body_start:body_end]
 
 
+def _find_returns_with_enclosing_block(body: str):
+    """Return a list of (return_start_index, enclosing_block_start_index).
+
+    The enclosing block is the nearest unclosed `{` at the point the
+    `return;` token is encountered -- i.e. the innermost brace scope the
+    return statement actually executes in, whether it sits alone on its own
+    line or inline after an `if( ... )`.
+    """
+    stack = [0]
+    results = []
+    index = 0
+    length = len(body)
+    while index < length:
+        char = body[index]
+        if char == "{":
+            stack.append(index + 1)
+            index += 1
+        elif char == "}":
+            if len(stack) > 1:
+                stack.pop()
+            index += 1
+        else:
+            match = RETURN_PATTERN.match(body, index)
+            if match:
+                results.append((match.start(), stack[-1]))
+                index = match.end()
+            else:
+                index += 1
+    return results
+
+
 class PresentPlaybackPreparedFrameTracesDropsTests(unittest.TestCase):
-    def test_every_bare_return_is_preceded_by_a_traced_event(self):
+    def test_every_return_is_traced_within_its_own_block(self):
         source = MAIN_WINDOW_CPP.read_text(encoding="utf-8")
         body = _extract_function_body(source, FUNCTION_NAME)
-        body_lines = body.split("\n")
 
-        bare_return_pattern = re.compile(r"^\s*return\s*;\s*$")
         untraced_returns = []
-        for line_index, line in enumerate(body_lines):
-            if not bare_return_pattern.match(line):
-                continue
-            lookback_start = max(0, line_index - TRACE_LOOKBACK_LINES)
-            preceding = "\n".join(body_lines[lookback_start:line_index])
-            if "logInteractionEvent(" not in preceding:
-                # 1-indexed within the function body, for a readable message.
-                untraced_returns.append(line_index + 1)
+        for return_start, block_start in _find_returns_with_enclosing_block(body):
+            preceding_in_block = body[block_start:return_start]
+            if "logInteractionEvent(" not in preceding_in_block:
+                # 1-indexed line within the function body, for a readable message.
+                line_number = body.count("\n", 0, return_start) + 1
+                untraced_returns.append(line_number)
 
         self.assertEqual(
             [],
             untraced_returns,
-            f"{FUNCTION_NAME} has bare `return;` statement(s) at body line(s) "
-            f"{untraced_returns} with no logInteractionEvent(...) call in the "
-            f"preceding {TRACE_LOOKBACK_LINES} lines -- a dropped frame must "
-            "never be silent.",
+            f"{FUNCTION_NAME} has `return;` statement(s) at body line(s) "
+            f"{untraced_returns} with no logInteractionEvent(...) call earlier "
+            "in the same enclosing block -- a dropped frame must never be "
+            "silent.",
         )
 
-    def test_function_has_at_least_one_bare_return_to_guard(self):
+    def test_function_has_at_least_one_return_to_guard(self):
         # Guards against the extraction regex silently matching nothing (e.g.
         # after an unrelated refactor renames or removes the early-out).
         source = MAIN_WINDOW_CPP.read_text(encoding="utf-8")
         body = _extract_function_body(source, FUNCTION_NAME)
-        bare_return_pattern = re.compile(r"^\s*return\s*;\s*$", re.MULTILINE)
         self.assertTrue(
-            bare_return_pattern.search(body),
-            f"{FUNCTION_NAME} no longer contains a bare `return;` -- "
+            RETURN_PATTERN.search(body),
+            f"{FUNCTION_NAME} no longer contains a `return;` -- "
             "re-check whether this tripwire is still needed.",
         )
 

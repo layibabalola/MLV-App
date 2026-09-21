@@ -28028,6 +28028,8 @@ void MainWindow::drawFrameReady()
 
     MainWindowGpuPreviewPolicyState gpuPreviewPolicy = requestContext.gpuPreviewPolicy;
     gpuPreviewPolicy.gpuViewportInstalled = gpuViewportInstalled;
+    gpuPreviewPolicy.gpuWidgetViewportInstalled =
+        GpuDisplayViewport::isInstalledOn( ui->graphicsView );
 
     const bool gpu16PreviewActive = mainWindowUsesGpu16PreviewPresentation( gpuPreviewPolicy );
     const bool gpuPreviewProcessingActive = mainWindowUsesGpuPreviewProcessing( gpuPreviewPolicy );
