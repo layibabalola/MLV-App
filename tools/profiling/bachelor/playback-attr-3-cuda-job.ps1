@@ -166,7 +166,12 @@ param(
     # here) in the evidence manifest for audit trail.
     [string]$ConsentReceiptFileName = 'owner-footage-consent-20260916.json',
 
-    [string]$LlrawprocRelativePath = 'src/mlv/llrawproc/llrawproc.c'
+    [string]$LlrawprocRelativePath = 'src/mlv/llrawproc/llrawproc.c',
+
+    # ATTR3-SMOKE-RUNNER-PIN-1: the smoke runner is a TRACKED repository script, not a build
+    # artifact, so its pin is derived from -SourceCommit locally rather than passed in -- see
+    # the __SMOKE_RUNNER_SHA256__ substitution below.
+    [string]$SmokeRunnerRelativePath = 'tools/profiling/run-release-gui-smoke.ps1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -201,6 +206,27 @@ if ($LASTEXITCODE -ne 0 -or $llrawprocBlobId -notmatch '^[0-9a-f]{40}$') {
 }
 if ($PresentMonSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
     throw "PresentMonSha256 is not a 64-hex sha256: $PresentMonSha256"
+}
+
+# ATTR3-SMOKE-RUNNER-PIN-1: pinned the SAME way PresentMon's sha is (a template placeholder
+# baked in here, validated as 64 hex, checked before the runner launches) -- but DERIVED from
+# -SourceCommit rather than hardcoded, because the runner is a tracked repository script and
+# both this generator and attr3-stage-smoke-runner-job.ps1 can resolve the identical git blob
+# independently, with no value needing to be threaded between the two. Bytes are read as
+# COMMITTED at $SourceCommit (git cat-file blob, never the working tree), so a CRLF checkout
+# can never disagree with what the stage job publishes into the cache.
+$smokeRunnerBlobId = Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $SourceCommit -RepoRelativePath $SmokeRunnerRelativePath
+$smokeRunnerPinTemp = Join-Path ([IO.Path]::GetTempPath()) "attrcuda-smoke-runner-pin-$([Guid]::NewGuid().ToString('N')).tmp"
+try {
+    $smokeRunnerSha256 = Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $smokeRunnerBlobId -Destination $smokeRunnerPinTemp
+} finally {
+    if (Test-Path -LiteralPath $smokeRunnerPinTemp) { Remove-Item -LiteralPath $smokeRunnerPinTemp -Force -ErrorAction SilentlyContinue }
+}
+# Fable minor (round 2): validated as 64 lowercase hex before it is substituted into the emitted
+# job, the same way -PresentMonSha256 is validated above -- this value gates
+# ATTRCUDA_SMOKE_RUNNER_STALE and deserves the identical shape check.
+if ($smokeRunnerSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw "ATTRCUDA_BLOB_SHA_MALFORMED resolved smoke-runner sha256 is not 64 lowercase hex: '$smokeRunnerSha256'"
 }
 
 $shortSha = $SourceCommit.Substring(0, 12)
@@ -256,6 +282,7 @@ $BasePackageZip = '__BASE_PACKAGE_ZIP__'
 $BasePackageExeName = '__BASE_PACKAGE_EXE_NAME__'
 $PresentMonName = '__PRESENTMON_NAME__'
 $PresentMonSha = '__PRESENTMON_SHA256__'
+$SmokeRunnerSha256 = '__SMOKE_RUNNER_SHA256__'
 $ConsentReceiptFileName = '__CONSENT_RECEIPT__'
 $FixtureRehearsal = __FIXTURE_REHEARSAL__
 $FixtureSha256 = '__FIXTURE_SHA256__'
@@ -471,8 +498,26 @@ foreach ($check in $manifestChecks) {
     if ([string]::IsNullOrWhiteSpace($check.expectedSha)) { throw "build manifest $buildManifestName is missing a sha256 for $($check.label)" }
     if ((Get-Sha $check.path) -ne $check.expectedSha.ToUpperInvariant()) { throw "hash mismatch (vs build manifest $buildManifestName) for $($check.path)" }
 }
-foreach ($name in @($PresentMonName, 'run-release-gui-smoke.ps1')) {
-    if (-not (Test-Path -LiteralPath (Join-Path $Cache $name))) { throw "cache missing $name" }
+if (-not (Test-Path -LiteralPath (Join-Path $Cache $PresentMonName))) { throw "cache missing $PresentMonName" }
+# ATTR3-SMOKE-RUNNER-PIN-1 (BLOCKER): existence alone proved nothing about which bytes were
+# staged. Bachelor ran a copy of run-release-gui-smoke.ps1 from before commit f401bf9a --
+# passing this same existence check -- that used the pre-f401bf9a log layout and wrote no
+# evidence.runLogSnapshot, so Resolve-AttrCudaSmokeRunLog correctly refused it at exit 16 after
+# a scarce quiet venue window had already been spent. The cache copy is now hash-pinned exactly
+# like PresentMon above (a template placeholder, validated as 64 hex), and refused HERE --
+# before PresentMon starts, before the app launches, before any run is spent.
+# round 2 BLOCKER: the cache name is now content-addressed (derived from the very sha256 this
+# check pins against), not the old fixed name -- a stager can never be asked to overwrite
+# whatever bytes already sit under the old fixed name, and this check can never be satisfied by
+# them either, because it never looks at that name.
+$SmokeRunnerCacheName = "run-release-gui-smoke-$($SmokeRunnerSha256.Substring(0, 16)).ps1"
+$smokeRunnerCachePath = Join-Path $Cache $SmokeRunnerCacheName
+if (-not (Test-Path -LiteralPath $smokeRunnerCachePath -PathType Leaf)) {
+    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing $SmokeRunnerCacheName"
+}
+$smokeRunnerActualSha = Get-Sha $smokeRunnerCachePath
+if ($smokeRunnerActualSha -ne $SmokeRunnerSha256.ToUpperInvariant()) {
+    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache $SmokeRunnerCacheName sha256 mismatch: expected $SmokeRunnerSha256, actual $smokeRunnerActualSha"
 }
 # NA-4: open exactly the one authorized path baked in by the generator -- no lookup.
 $clipPath = $AuthorizedClipPath
@@ -561,7 +606,7 @@ $legOut = Join-Path $Work 'out\diagnostic'
 New-Item -ItemType Directory -Path $legOut -Force | Out-Null
 $resultPath = Join-Path $legOut 'result.json'
 $presentMonPath = Join-Path $legOut 'presentmon.csv'
-$smoke = Join-Path $Cache 'run-release-gui-smoke.ps1'
+$smoke = $smokeRunnerCachePath
 $envs = @(
     'MLVAPP_PLAYBACK_QUALITY_MODE=phase3_hq',
     'MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW=0',
@@ -817,6 +862,7 @@ $text = $template.
     Replace('__BASE_PACKAGE_EXE_NAME__', $BasePackageExeName).
     Replace('__PRESENTMON_NAME__', $PresentMonName).
     Replace('__PRESENTMON_SHA256__', $PresentMonSha256).
+    Replace('__SMOKE_RUNNER_SHA256__', $smokeRunnerSha256).
     Replace('__CONSENT_RECEIPT__', $ConsentReceiptFileName).
     Replace('__FIXTURE_REHEARSAL__', $fixtureRehearsalLiteral).
     Replace('__AGENT_ROOT__', $AgentRoot).
@@ -838,4 +884,5 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Dir
     reconName = $reconName
     rangeHeadSha = $SourceCommit
     llrawprocBlobId = $llrawprocBlobId
+    smokeRunnerSha256 = $smokeRunnerSha256
 }

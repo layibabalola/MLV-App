@@ -373,6 +373,84 @@ function Assert-AttrCudaFixtureCommittedBytes {
     $workingHash
 }
 
+function Resolve-AttrCudaCommittedBlobId {
+    <#
+    .SYNOPSIS
+    Resolve the git blob id of a repo-relative path AS COMMITTED at a given commit.
+    .DESCRIPTION
+    Generator-only: never embedded into an emitted job, because the measurement host has no
+    checkout and no git. This lets two independent generators -- one that pins an expected
+    hash into the attribution job, one that stages the matching bytes into the cache -- each
+    derive the SAME blob id from the SAME -SourceCommit without either taking the other's word
+    for it (ATTR3-SMOKE-RUNNER-PIN-1).
+    Throws ATTRCUDA_BLOB_UNRESOLVED.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$Commit,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRelativePath
+    )
+
+    $blobId = (& git -C $RepoRoot rev-parse "${Commit}:${RepoRelativePath}" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($blobId)) {
+        throw "ATTRCUDA_BLOB_UNRESOLVED could not resolve ${Commit}:${RepoRelativePath} in $RepoRoot"
+    }
+    $blobId = $blobId.Trim()
+    if ($blobId -notmatch '^[0-9a-f]{40}$') {
+        throw "ATTRCUDA_BLOB_UNRESOLVED ${Commit}:${RepoRelativePath} did not resolve to a blob id (got '$blobId')"
+    }
+    $blobId
+}
+
+function Save-AttrCudaCommittedBlobBytes {
+    <#
+    .SYNOPSIS
+    Write a git blob's exact committed bytes to -Destination and return their sha256.
+    .DESCRIPTION
+    Generator-only, same reason as Resolve-AttrCudaCommittedBlobId. `git cat-file blob <id>` is
+    streamed to -Destination through Start-Process -RedirectStandardOutput, which redirects the
+    child process's raw stdout HANDLE straight to the file -- never through a PowerShell text
+    pipeline, which decodes/re-encodes command output and would silently rewrite CRLF sequences
+    on the way through. Byte-exactness is the entire point: hashing anything else (a working-tree
+    checkout, a captured `git show` string) would pin bytes that a core.autocrlf setting or a
+    dirty tree could quietly disagree with.
+    ATTR3-SMOKE-RUNNER-PIN-1 (BLOCKER, round 2): -RepoRoot used to be passed as a `-C $RepoRoot`
+    pair inside -ArgumentList, which Start-Process joins into a single command line WITHOUT
+    quoting each element. The real repository root contains a space
+    (`C:\!Layi Wkspc\MLV-App`), so that command line handed git the bare token `Wkspc\MLV-App` as
+    if it were the next argument, and every real-repository call threw ATTRCUDA_BLOB_READ_FAILED.
+    -WorkingDirectory sets the child process's start directory directly (never tokenized onto the
+    command line), so no argument here can ever contain a space to mis-split.
+    Throws ATTRCUDA_BLOB_READ_FAILED.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$BlobId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    $proc = Start-Process -FilePath 'git' -WorkingDirectory $RepoRoot -ArgumentList @('cat-file', 'blob', $BlobId) `
+        -RedirectStandardOutput $Destination -NoNewWindow -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        throw "ATTRCUDA_BLOB_READ_FAILED git cat-file blob $BlobId exited $($proc.ExitCode)"
+    }
+    (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
 function Assert-AttrCudaWritableFileSlot {
     <#
     .SYNOPSIS
@@ -422,6 +500,61 @@ function Publish-AttrCudaText {
     $slot = Assert-AttrCudaWritableFileSlot -Path $Path
     $text = if ($null -eq $Value) { '' } else { (@($Value) | ForEach-Object { [string]$_ }) -join [Environment]::NewLine }
     [IO.File]::WriteAllText($slot, $text + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    return $slot
+}
+
+function Read-AttrCudaBase64Payload {
+    <#
+    .SYNOPSIS
+    Decode a base64-embedded payload and return both its raw bytes and lowercase sha256.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-PIN-1, round 2: the smoke-runner stager embeds the runner's committed
+    bytes INLINE in the emitted job (no side file, no inbox -- UmRunDrop.psm1's side-file name
+    policy rejects a bare `.ps1`). This exists so [Convert]::FromBase64String never appears as
+    literal template text: tools/repo_hygiene/attr3_publish_write_scan.ps1's R4 rule allowlists
+    .NET static members in the TEMPLATE by name, and this repository's policy is that a job
+    template stays inside that allowlist -- decode-and-hash instead lives here, in the module
+    that is the job's actual safety boundary, spliced in and called by NAME like every other
+    embedded verifier. Get-FileHash -InputStream is used for the digest (an already-allowlisted
+    cmdlet) rather than a raw [Security.Cryptography.SHA256] call, for the same reason.
+    Throws ATTRCUDA_BASE64_MALFORMED.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Base64
+    )
+
+    try {
+        $bytes = [Convert]::FromBase64String($Base64)
+    } catch {
+        throw "ATTRCUDA_BASE64_MALFORMED payload is not valid base64: $($_.Exception.Message)"
+    }
+    $stream = [IO.MemoryStream]::new($bytes)
+    try {
+        $sha256 = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+    }
+    [pscustomobject]@{ bytes = $bytes; sha256 = $sha256 }
+}
+
+function Publish-AttrCudaBytes {
+    <#
+    .SYNOPSIS
+    Write raw bytes to a destination outside the job-owned work tree, slot-checked in the same
+    call -- the byte-array counterpart of Publish-AttrCudaText (sol PR #133 r5's guard-with-the-
+    write pattern), for a payload that arrived decoded rather than copied from another file.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes
+    )
+
+    $slot = Assert-AttrCudaWritableFileSlot -Path $Path
+    [IO.File]::WriteAllBytes($slot, $Bytes)
     return $slot
 }
 
@@ -865,8 +998,12 @@ Export-ModuleMember -Function `
     Assert-AttrCudaDirectChild, `
     Assert-AttrCudaBuildManifest, `
     Assert-AttrCudaFixtureCommittedBytes, `
+    Resolve-AttrCudaCommittedBlobId, `
+    Save-AttrCudaCommittedBlobBytes, `
     Assert-AttrCudaWritableFileSlot, `
     Assert-AttrCudaNonOverwritingFileSlot, `
+    Read-AttrCudaBase64Payload, `
+    Publish-AttrCudaBytes, `
     Publish-AttrCudaText, `
     Publish-AttrCudaFileCopy, `
     Publish-AttrCudaFileMove, `
