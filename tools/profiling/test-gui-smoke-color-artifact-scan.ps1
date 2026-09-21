@@ -54,6 +54,68 @@ function New-CheckerPng {
     finally { $bitmap.Dispose() }
 }
 
+function New-DarkPedestalPng {
+    # Reproduces the ATTR3-VISUAL-QUALITY-EVIDENCE-1 bad GPU scale-1 capture's statistic
+    # in miniature: textured (per-channel range > 2, so the uniform-image guard does not
+    # catch it), but every sampled pixel stays under a low peak value in every channel, and
+    # the channels are clipped unevenly relative to each other -- peak(R,G,B) < 96 and
+    # peak/trough > 1.3, the "black-pedestal" signature this scanner fails closed on.
+    param([string]$Path, [int]$Width = 640, [int]$Height = 360)
+    $bitmap = [System.Drawing.Bitmap]::new($Width, $Height)
+    try {
+        for ($y = 0; $y -lt $Height; ++$y) {
+            for ($x = 0; $x -lt $Width; ++$x) {
+                $r = 4 + (($x + $y) % 36)
+                $g = 4 + ((($x * 2) + $y) % 56)
+                $b = 4 + (($x + ($y * 2)) % 51)
+                $bitmap.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($r, $g, $b))
+            }
+        }
+        $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    }
+    finally { $bitmap.Dispose() }
+}
+
+function New-DarkBalancedWideRangePng {
+    # A genuinely dark-but-correct analog to the receipt-B evidence frame (a real dark
+    # scene, not a corrupted readback): textured, with a per-channel peak well above the
+    # too-dark threshold and the channels moving together (no skew -- R, G, and B are the
+    # same value at every pixel), so it must NOT be flagged even though most of the frame
+    # is near-black. Proves the guard is not a blanket darkness check.
+    param([string]$Path, [int]$Width = 640, [int]$Height = 360)
+    $bitmap = [System.Drawing.Bitmap]::new($Width, $Height)
+    try {
+        for ($y = 0; $y -lt $Height; ++$y) {
+            for ($x = 0; $x -lt $Width; ++$x) {
+                $shade = 4 + (($x -bxor $y) % 122)
+                $bitmap.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($shade, $shade, $shade))
+            }
+        }
+        $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    }
+    finally { $bitmap.Dispose() }
+}
+
+function New-DarkBalancedNarrowRangePng {
+    # KNOWN LIMITATION, exercised deliberately: a legitimately dark, low-peak scene with
+    # NO channel skew (R = G = B throughout, peak well under 96). The peak+skew rule is
+    # intentionally conservative (AND, not OR) so it never flags a balanced dark image --
+    # this synthetic capture is exactly the shape the guard does not catch, and is asserted
+    # to still pass so a future change to the rule cannot silently loosen it further.
+    param([string]$Path, [int]$Width = 640, [int]$Height = 360)
+    $bitmap = [System.Drawing.Bitmap]::new($Width, $Height)
+    try {
+        for ($y = 0; $y -lt $Height; ++$y) {
+            for ($x = 0; $x -lt $Width; ++$x) {
+                $shade = 4 + (($x + $y) % 56)
+                $bitmap.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($shade, $shade, $shade))
+            }
+        }
+        $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    }
+    finally { $bitmap.Dispose() }
+}
+
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("mlvapp-color-artifact-scan-test-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
@@ -91,6 +153,39 @@ try {
     Assert-True ([string]::IsNullOrEmpty($checkerScan.captureInvalidReason)) `
         "A clear capture must not carry a capture-invalid reason."
 
+    # A dark-but-textured capture whose every sampled pixel stays under a low peak in every
+    # channel, with the channels clipped unevenly relative to each other, must fail closed
+    # as capture-too-dark rather than compute artifact ratios over an unusable frame and
+    # pass as clear-heuristic (the S1-frame.png shape from evidence/vq1-check-63b346d2).
+    $darkPedestalPath = Join-Path $tempDir "dark-pedestal.png"
+    New-DarkPedestalPng -Path $darkPedestalPath
+    $darkPedestalScan = Get-ScreenshotColorArtifactScan -Path $darkPedestalPath
+    Assert-True ($darkPedestalScan.verdict -eq "capture-too-dark") `
+        "Dark, channel-skewed, low-peak capture should scan as capture-too-dark; observed $($darkPedestalScan.verdict)."
+    Assert-True (-not [string]::IsNullOrWhiteSpace($darkPedestalScan.captureInvalidReason)) `
+        "capture-too-dark must record the measured statistics as its reason."
+    Assert-True ($darkPedestalScan.thresholds.verdictsThatFailWhenRequested -contains "capture-too-dark") `
+        "capture-too-dark must be listed as a failing verdict when requested."
+
+    # A genuinely dark scene (most sampled pixels near-black) whose channels move together
+    # and whose peak clears the too-dark threshold must NOT be flagged -- this guard is not
+    # a blanket darkness check (the receipt-B evidence frame's shape: real, dark, correct).
+    $darkWidePath = Join-Path $tempDir "dark-wide-range.png"
+    New-DarkBalancedWideRangePng -Path $darkWidePath
+    $darkWideScan = Get-ScreenshotColorArtifactScan -Path $darkWidePath
+    Assert-True ($darkWideScan.verdict -ne "capture-too-dark") `
+        "A dark but wide-range, channel-balanced capture must not be flagged as capture-too-dark; observed $($darkWideScan.verdict)."
+
+    # KNOWN LIMITATION exercised deliberately: a legitimately dark, low-peak, channel-
+    # balanced capture is not caught by this (intentionally conservative, AND-combined)
+    # rule. Pinned here so a future tightening of the rule is a deliberate decision, not
+    # a silent behavior change.
+    $darkNarrowPath = Join-Path $tempDir "dark-balanced-narrow-range.png"
+    New-DarkBalancedNarrowRangePng -Path $darkNarrowPath
+    $darkNarrowScan = Get-ScreenshotColorArtifactScan -Path $darkNarrowPath
+    Assert-True ($darkNarrowScan.verdict -ne "capture-too-dark") `
+        "A low-peak but channel-balanced capture is a documented gap and must not be flagged as capture-too-dark; observed $($darkNarrowScan.verdict)."
+
     # A missing/unreadable path must still report the pre-existing not-captured
     # verdict -- the new guard only applies once an image is actually opened.
     $missingScan = Get-ScreenshotColorArtifactScan -Path (Join-Path $tempDir "does-not-exist.png")
@@ -108,7 +203,7 @@ $wrapperPath = Join-Path $PSScriptRoot 'run-release-gui-smoke.ps1'
 $wrapperText = Get-Content -LiteralPath $wrapperPath -Raw
 foreach ($requiredSymbol in @(
     "'gui-smoke-color-artifact-scan.ps1'",
-    '"suspect-block-or-bar", "scan-error", "capture-invalid"',
+    '"suspect-block-or-bar", "scan-error", "capture-invalid", "capture-too-dark"',
     '"app_internal_gl_viewport_grab", "gl_window_framebuffer_readback"'
 )) {
     Assert-True $wrapperText.Contains($requiredSymbol) `

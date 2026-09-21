@@ -204,6 +204,40 @@ public static class MlvGuiSmokeColorArtifactScanner
                 (maxG - minG) <= UniformChannelRangeThreshold &&
                 (maxB - minB) <= UniformChannelRangeThreshold;
 
+            // A capture that is NOT uniform (it has texture/variation, so the guard above does
+            // not catch it) can still be evidence of nothing useful: a near-black readback whose
+            // every pixel sits under the luminance floor computes every artifact ratio as 0/0 and
+            // would otherwise fall through to "clear-heuristic" even though no pixel was ever
+            // bright enough to be scored. ATTR3-VISUAL-QUALITY-EVIDENCE-1 round 3: the real bad
+            // GPU scale-1 capture that motivated this guard does NOT hit that exact zero-visible
+            // shape (roughly two-thirds of its sampled pixels clear the luminance-24 floor), so
+            // darkness/visibility fraction alone cannot separate it from a genuinely dark-but-
+            // correct scene at comparable median brightness (measured ~35-36/255 for both). What
+            // DOES separate them is the bad capture's black-pedestal signature: every sampled
+            // pixel, across the WHOLE frame, stays under a low peak value in every channel (a
+            // "tight low range" -- min is already ~0, so the per-channel max IS the range), with
+            // the channels clipped unevenly relative to each other (a "channel skew" a real,
+            // correctly rendered dark scene does not show at comparable exposure). Both conditions
+            // are required (AND, not OR) to keep this conservative: a legitimately dark-but-wide-
+            // range frame (e.g. the receipt-B evidence, per-channel peaks ~119-130) fails the tight-
+            // low-peak test alone and is never flagged. The near-zero-visible degenerate case is
+            // also covered directly, since it is a stricter version of the same signature.
+            double visibleFraction = sampleCount > 0 ? (double)visible / sampleCount : 0.0;
+            const double NearZeroVisibleFractionThreshold = 0.02;
+            bool nearZeroVisible = sampleCount > 0 && visibleFraction < NearZeroVisibleFractionThreshold;
+
+            int peakChannelValue = Math.Max(maxR, Math.Max(maxG, maxB));
+            int troughChannelValue = Math.Min(maxR, Math.Min(maxG, maxB));
+            const int PeakBrightnessThreshold = 96;
+            const double ChannelSkewRatioThreshold = 1.3;
+            double channelSkewRatio = troughChannelValue > 0
+                ? (double)peakChannelValue / troughChannelValue
+                : (peakChannelValue > 0 ? double.PositiveInfinity : 1.0);
+            bool blackPedestalSuspect =
+                peakChannelValue < PeakBrightnessThreshold && channelSkewRatio > ChannelSkewRatioThreshold;
+
+            bool tooDark = !uniformImage && sampleCount > 0 && (nearZeroVisible || blackPedestalSuspect);
+
             string verdict;
             string captureInvalidReason = null;
             if (uniformImage)
@@ -212,6 +246,15 @@ public static class MlvGuiSmokeColorArtifactScanner
                 captureInvalidReason = string.Format(
                     "capture is uniform: sampled channel ranges R={0} G={1} B={2} over {3} samples",
                     maxR - minR, maxG - minG, maxB - minB, sampleCount);
+            }
+            else if (tooDark)
+            {
+                verdict = "capture-too-dark";
+                captureInvalidReason = string.Format(
+                    "capture is too dark to evaluate: visible={0}/{1} ({2:P1}), peak channel value={3}, " +
+                    "trough channel value={4}, channel skew ratio={5:F2} (peak<{6} and skew>{7:F1} required)",
+                    visible, sampleCount, visibleFraction, peakChannelValue, troughChannelValue,
+                    channelSkewRatio, PeakBrightnessThreshold, ChannelSkewRatioThreshold);
             }
             else
             {
@@ -287,7 +330,9 @@ function Get-ScreenshotColorArtifactScan {
                 tileSupportRatio = 0.10
                 globalRatio = 0.12
                 globalArtifactRatio = 0.18
-                verdictsThatFailWhenRequested = @("suspect-block-or-bar", "scan-error", "capture-invalid")
+                peakBrightnessThreshold = 96
+                channelSkewRatio = 1.3
+                verdictsThatFailWhenRequested = @("suspect-block-or-bar", "scan-error", "capture-invalid", "capture-too-dark")
             }
             note = "Sampled presented-frame screenshot scan for magenta/pink/green bars, tinted blocks, and severe global color-axis spikes; isolated high-saturation tiles are informational unless supported by band/global evidence."
             error = $null

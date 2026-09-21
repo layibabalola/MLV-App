@@ -2136,12 +2136,14 @@ class StageFixtureJobCommittedBytesWiringTests(_PwshCase):
 
 
 # --------------------------------------------------------------------------------------------
-# ATTR3-SMOKE-RUNNER-DEPS-1: the runner is not standalone -- it dot-sources two siblings and
+# ATTR3-SMOKE-RUNNER-DEPS-1: the runner is not standalone -- it dot-sources three siblings and
 # imports a module, all resolved through $PSScriptRoot at runtime. Round 1 staged the runner
 # alone (ATTR3-SMOKE-RUNNER-PIN-1) and Bachelor could not even launch it: PresentMon never saw
-# a target and PRESENTMON_TIMEOUT masked the real cause. The full dependency CLOSURE is now
-# derived mechanically (Resolve-AttrCudaSmokeRunnerClosure), staged into one content-addressed
-# subdirectory (smoke-runner-<digest16>), and every file in it is hash-pinned before launch.
+# a target and PRESENTMON_TIMEOUT masked the real cause. The full dependency CLOSURE is an
+# explicitly pinned five-file manifest (Get-AttrCudaSmokeRunnerClosureManifest, resolved via
+# Resolve-AttrCudaSmokeRunnerClosure) -- never mechanically derived or scanned for -- staged into
+# one content-addressed subdirectory (smoke-runner-<digest16>), and every file in it is
+# hash-pinned before launch.
 # --------------------------------------------------------------------------------------------
 
 # Expected discovery order for the shared fixture repo's runner (see _make_fixture_repo): the
@@ -2997,8 +2999,10 @@ class SmokeRunnerStageJobTests(_PwshCase):
     cache DIRECTORY out, every file's sha256 == its committed blob.
 
     ATTR3-SMOKE-RUNNER-DEPS-1: staging the runner alone left Bachelor unable to launch it at all
-    (round 1 PRESENTMON_TIMEOUT). The closure is derived mechanically from the shared fixture
-    repo's real $PSScriptRoot loads (see _make_fixture_repo), never hand-listed here.
+    (round 1 PRESENTMON_TIMEOUT). The closure is the explicitly pinned five-file manifest
+    (Get-AttrCudaSmokeRunnerClosureManifest) -- never mechanically derived or scanned for; the
+    shared fixture repo's $PSScriptRoot loads (see _make_fixture_repo) exist to prove the pinned
+    list still matches what the real files load, not to discover the list.
 
     No side file, no inbox: the emitted job carries every closure file's bytes INLINE (base64),
     exactly as the single-file stager did (ATTR3-SMOKE-RUNNER-PIN-1 round 2) -- there is no inbox

@@ -1472,7 +1472,7 @@ if ($SettleCpuMaxMs -gt 0 -or $SettleCpuStableMs -gt 0) {
         $cpuSettled = ($cpuSettle.settled -eq 1)
     }
 }
-$colorArtifactFailureVerdicts = @("suspect-block-or-bar", "scan-error", "capture-invalid")
+$colorArtifactFailureVerdicts = @("suspect-block-or-bar", "scan-error", "capture-invalid", "capture-too-dark")
 $colorArtifactVerdict =
     if ($null -ne $colorArtifactScan) { [string]$colorArtifactScan.verdict } else { "not-captured" }
 $colorArtifactScanPassed =

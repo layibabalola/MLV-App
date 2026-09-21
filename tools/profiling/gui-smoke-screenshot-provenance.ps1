@@ -183,6 +183,17 @@ function Copy-GuiSmokeStableProperties {
     return [pscustomobject]$copy
 }
 
+# KNOWN LIMITATION (ATTR3-VISUAL-QUALITY-EVIDENCE-1, part 1; not fixed this round -- carried
+# forward as documented follow-up work, not silently accepted). The GPU-recon TEXTURE
+# presentation path never emits a draw_frame_ready.present_content line (or its associated
+# ready-begin/render-request) for the frame it presents, only the CPU displayImage path does
+# (platform/qt/MainWindow.cpp ~:5880-5906). So -RequireFreshScreenshotRender can never pass on
+# that texture path today: the chain below always fails at 'missing-associated-present-content'
+# (and the hash checks that depend on it), even for a valid, correctly-presented capture. This
+# is fail-closed and correct -- it never falsely certifies freshness it cannot prove -- but a red
+# result on that path must be read as "provenance not yet wired for this path", never as a flake
+# or as evidence of a bad frame. Part 2 is expected to add present-content logging to the texture
+# path; until then, treat any texture-path -RequireFreshScreenshotRender run as permanently red.
 function Get-GuiSmokeScreenshotProvenanceV2 {
     [CmdletBinding()]
     param(

@@ -815,6 +815,15 @@ bool GpuDisplayWindow::grabPresentedFramebufferIfActive(QImage *outImage, QStrin
     // measured here as a solid black readback despite a successful present. Calling our own
     // paintGL() draws the still-current texture fresh into that framebuffer right before the
     // read, so what is captured is guaranteed to be what paintGL just drew, not swap leftovers.
+    //
+    // KNOWN LIMITATION (ATTR3-VISUAL-QUALITY-EVIDENCE-1, part 1; carried forward as documented
+    // follow-up work, not fixed this round): paintGL() itself calls updateTextureIfNeeded(), so
+    // if a new frame has been submitted-but-not-yet-presented when a screenshot is requested
+    // (m_textureDirty already set, no paint event run yet), this call uploads and captures that
+    // pending frame one frame AHEAD of whatever frame/serial the smoke log most recently recorded
+    // as presented. This is never a silent wrong-pass: -RequireFreshScreenshotRender's frame/hash
+    // association (gui-smoke-screenshot-provenance.ps1) fails closed on the resulting mismatch,
+    // so a coherence gap here surfaces as a provenance failure, not a false-clean capture.
     win->paintGL();
 
     if ( !win->m_texture )
