@@ -42,6 +42,25 @@ matched against `direct_code`, so a token that exists only inside a comment
 or a string literal no longer counts. `is_present_nothing` is matched
 against `direct_text`, since the `draw_frame_ready.present_nothing` marker
 is itself a string literal and must stay visible for that match to work.
+
+Round 6 (sol r5 minor, structural): rounds 3-5 each found a precision hole in
+the same two-pass shape -- `_mask_all_literals` started from the
+comment-masked copy but drove its own quote-state machine over the ORIGINAL
+unmasked text, so an unmatched quote or apostrophe sitting inside a comment
+could desync that second scan and let a later string literal's contents
+leak into `direct_code` unblanked (sol's concrete repro: a comment
+containing an unmatched `"`, followed by a QStringLiteral holding only the
+trace/counter/marker tokens, was classified as a real trace). Two separate
+passes over two differently-masked texts is the root mechanism, so both
+`_mask_comments_and_string_braces` and `_mask_all_literals` are replaced by
+one `_lex(text)` function: a SINGLE state machine walks the ORIGINAL text
+exactly once and produces both views together. A quote or apostrophe
+encountered while already inside a comment can never change literal state,
+and a comment opener encountered while already inside a literal can never
+start a comment, because both are driven off the same one pass rather than
+two passes racing over different inputs. `_lex` also understands raw string
+literals (`R"delim( ... )delim"`, including a custom delimiter), which
+neither predecessor did.
 """
 from pathlib import Path
 import re
@@ -58,115 +77,162 @@ TRACE_CALL = "logInteractionEvent("
 DROP_COUNTER_CALL = "m_presentNothingDropCount.fetch_add("
 PRESENT_NOTHING_MARKER = "draw_frame_ready.present_nothing"
 
+_CODE, _LINE_COMMENT, _BLOCK_COMMENT, _STRING, _CHAR, _RAW_STRING = range(6)
+_RAW_DELIM_STOP = "()\\\t\n "
+_RAW_DELIM_MAX_LEN = 16
 
-def _mask_comments_and_string_braces(text: str) -> str:
-    """Same-length copy of *text* with comment bodies blanked and braces
-    inside string/char literals blanked, so neither can distort brace-depth
-    tracking or produce phantom `return;` / `logInteractionEvent(` matches.
-    Newlines are preserved everywhere so line numbers stay accurate. All
-    other string-literal content (e.g. the present_nothing marker text) is
-    left intact.
+
+def _is_ident_char(char: str) -> bool:
+    return char.isalnum() or char == "_"
+
+
+def _lex(text: str):
+    """Single pass over *text* producing two same-length views.
+
+    Returns ``(comment_masked, code_only)``:
+      - ``comment_masked``: comment bodies blanked; string/char/raw-string
+        CONTENTS are left intact, except braces inside them are blanked so
+        they can never distort brace-depth tracking. Quote and comment
+        delimiters stay visible.
+      - ``code_only``: comment bodies blanked AND string/char/raw-string
+        contents also blanked, leaving only the delimiting punctuation --
+        so a token that exists only inside a literal cannot match against
+        it.
+
+    Handles line comments, block comments, string literals, char literals
+    and raw string literals (`R"delim( ... )delim"`, including a custom
+    delimiter), with backslash escapes honoured inside normal string/char
+    literals (an escaped closing quote does not end the literal). Both
+    views are driven off ONE state machine over the ORIGINAL text -- never
+    a previously masked copy -- so a quote or apostrophe encountered while
+    already inside a comment can never flip literal state, and a `//` or
+    `/*` encountered while already inside a literal can never start a
+    comment. Newlines are preserved verbatim in both views so line numbers
+    stay accurate, and both views are exactly ``len(text)`` long.
     """
-    out = list(text)
     length = len(text)
+    comment_out = list(text)
+    code_out = list(text)
+
+    state = _CODE
+    raw_terminator = ""
     index = 0
-    state = None  # None | "line_comment" | "block_comment" | "string" | "char"
     while index < length:
         char = text[index]
-        if state is None:
+
+        if state == _CODE:
             if char == "/" and index + 1 < length and text[index + 1] == "/":
-                out[index] = " "
-                out[index + 1] = " "
-                state = "line_comment"
+                comment_out[index] = comment_out[index + 1] = " "
+                code_out[index] = code_out[index + 1] = " "
+                state = _LINE_COMMENT
                 index += 2
                 continue
             if char == "/" and index + 1 < length and text[index + 1] == "*":
-                out[index] = " "
-                out[index + 1] = " "
-                state = "block_comment"
+                comment_out[index] = comment_out[index + 1] = " "
+                code_out[index] = code_out[index + 1] = " "
+                state = _BLOCK_COMMENT
                 index += 2
                 continue
+            if (
+                char == "R"
+                and index + 1 < length
+                and text[index + 1] == '"'
+                and (index == 0 or not _is_ident_char(text[index - 1]))
+            ):
+                delim_start = index + 2
+                delim_end = delim_start
+                while (
+                    delim_end < length
+                    and delim_end - delim_start < _RAW_DELIM_MAX_LEN
+                    and text[delim_end] not in _RAW_DELIM_STOP
+                ):
+                    delim_end += 1
+                if delim_end < length and text[delim_end] == "(":
+                    raw_terminator = ")" + text[delim_start:delim_end] + '"'
+                    state = _RAW_STRING
+                    index = delim_end + 1
+                    continue
+                # 'R"' that never reaches a delimiter-closing '(' is not a
+                # raw string literal -- fall through and re-scan from here
+                # as ordinary code, one character at a time.
+                index += 1
+                continue
             if char == '"':
-                state = "string"
+                state = _STRING
                 index += 1
                 continue
             if char == "'":
-                state = "char"
+                state = _CHAR
                 index += 1
                 continue
             index += 1
             continue
-        if state == "line_comment":
+
+        if state == _LINE_COMMENT:
+            # A quote or apostrophe here NEVER changes state -- only a
+            # newline ends a line comment.
             if char == "\n":
-                state = None
+                state = _CODE
             else:
-                out[index] = " "
+                comment_out[index] = " "
+                code_out[index] = " "
             index += 1
             continue
-        if state == "block_comment":
+
+        if state == _BLOCK_COMMENT:
+            # A quote or apostrophe here NEVER changes state, and comments
+            # do not nest -- the first `*/` ends it even if `/*` appeared
+            # again inside.
             if char == "*" and index + 1 < length and text[index + 1] == "/":
-                out[index] = " "
-                out[index + 1] = " "
-                state = None
+                comment_out[index] = comment_out[index + 1] = " "
+                code_out[index] = code_out[index + 1] = " "
+                state = _CODE
                 index += 2
                 continue
             if char != "\n":
-                out[index] = " "
+                comment_out[index] = " "
+                code_out[index] = " "
             index += 1
             continue
-        # state in ("string", "char")
-        closing = '"' if state == "string" else "'"
-        if char == "\\" and index + 1 < length:
-            if text[index + 1] in "{}":
-                out[index + 1] = " "
-            index += 2
-            continue
-        if char in "{}":
-            out[index] = " "
-            index += 1
-            continue
-        if char == closing:
-            state = None
-        index += 1
-    return "".join(out)
 
-
-def _mask_all_literals(text: str) -> str:
-    """Same-length CODE-ONLY view of *text*: comment bodies blanked (via
-    `_mask_comments_and_string_braces`) AND the full contents of string/char
-    literals also blanked, leaving only the quote characters and newlines
-    behind. Unlike `_mask_comments_and_string_braces`, which leaves string
-    contents intact so the `draw_frame_ready.present_nothing` marker stays
-    visible, this view exists so a token (e.g. `logInteractionEvent(`) that
-    appears only inside a string or char literal cannot match against it.
-    """
-    out = list(_mask_comments_and_string_braces(text))
-    length = len(text)
-    index = 0
-    state = None  # None | "string" | "char"
-    while index < length:
-        char = text[index]
-        if state is None:
-            if char == '"':
-                state = "string"
-            elif char == "'":
-                state = "char"
+        if state == _RAW_STRING:
+            # Raw strings do not process escapes or nested quoting -- only
+            # the exact `)delim"` terminator ends them, so a `)"`, `//` or
+            # `/*` that doesn't match the terminator is just content.
+            if text[index : index + len(raw_terminator)] == raw_terminator:
+                index += len(raw_terminator)
+                state = _CODE
+                continue
+            if char != "\n":
+                code_out[index] = " "
+                if char in "{}":
+                    comment_out[index] = " "
             index += 1
             continue
-        closing = '"' if state == "string" else "'"
+
+        # state in (_STRING, _CHAR): a comment opener here is just content,
+        # it can never start a comment.
+        closing = '"' if state == _STRING else "'"
         if char == "\\" and index + 1 < length:
-            if text[index + 1] != "\n":
-                out[index + 1] = " "
+            code_out[index] = " "
+            escaped = text[index + 1]
+            if escaped != "\n":
+                code_out[index + 1] = " "
+                if escaped in "{}":
+                    comment_out[index + 1] = " "
             index += 2
             continue
         if char == closing:
-            state = None
+            state = _CODE
             index += 1
             continue
         if char != "\n":
-            out[index] = " "
+            code_out[index] = " "
+            if char in "{}":
+                comment_out[index] = " "
         index += 1
-    return "".join(out)
+
+    return "".join(comment_out), "".join(code_out)
 
 
 def _extract_function_body(source: str, function_name: str) -> str:
@@ -176,7 +242,7 @@ def _extract_function_body(source: str, function_name: str) -> str:
     )
     assert start_match is not None, f"could not locate {function_name} definition"
 
-    masked_source = _mask_comments_and_string_braces(source)
+    masked_source, _ = _lex(source)
     body_start = start_match.end()
     depth = 1
     index = body_start
@@ -207,8 +273,7 @@ def _find_returns_with_context(body: str):
     `direct_code` additionally has string/char contents blanked -- the
     CODE-ONLY view, so a token sitting only inside a literal cannot match.
     """
-    masked = _mask_comments_and_string_braces(body)
-    code_masked = _mask_all_literals(body)
+    masked, code_masked = _lex(body)
     frame_starts = [0]
     frame_segments = [[]]
     results = []
@@ -267,48 +332,65 @@ def _make_sample_body(
     extra_untraced_return: bool = False,
     trace_only_in_comment: bool = False,
     counter_only_in_string_literal: bool = False,
+    comment_unmatched_quote_then_string_only_tokens: bool = False,
 ) -> str:
     """Synthetic stand-in for presentPlaybackPreparedFrame's present_nothing
     exit, shaped to exercise the tripwire in isolation from the rest of the
     real function. Used only in-memory by the mutation tests below -- never
     written to disk.
     """
-    if trace_only_in_comment:
+    if comment_unmatched_quote_then_string_only_tokens:
+        # sol r4/r5's exact repro shape: a comment holding an UNMATCHED
+        # double quote, followed by a string literal whose CONTENTS are the
+        # only place the trace/counter/marker tokens appear. Under the old
+        # two-pass `_mask_all_literals`, the comment's stray quote desynced
+        # the second scan's quote-state machine, so this string's contents
+        # leaked into `direct_code` unblanked and looked like a real call.
         own_log = (
-            "        // logInteractionEvent( "
-            'QStringLiteral("draw_frame_ready.present_nothing") );\n'
-        )
-    elif trace_in_own_block:
-        own_log = (
-            "        logInteractionEvent(\n"
-            '            QStringLiteral("draw_frame_ready.present_nothing"),\n'
-            '            QStringLiteral("serial=%1").arg( task.requestSerial ) );\n'
-        )
-    else:
-        own_log = ""
-
-    sibling_block = (
-        "        if( diagnosticsEnabled )\n"
-        "        {\n"
-        "            logInteractionEvent(\n"
-        '                QStringLiteral("draw_frame_ready.present_nothing"),\n'
-        '                QStringLiteral("serial=%1").arg( task.requestSerial ) );\n'
-        "        }\n"
-        if trace_in_sibling
-        else ""
-    )
-
-    if counter_only_in_string_literal:
-        counter = (
-            "        QStringLiteral( \"debug note: would call "
+            '        // unmatched quote: "\n'
+            '        QStringLiteral( "logInteractionEvent( '
+            "draw_frame_ready.present_nothing ) "
             'm_presentNothingDropCount.fetch_add( 1 )" );\n'
         )
+        sibling_block = ""
+        counter = ""
     else:
-        counter = (
-            "        m_presentNothingDropCount.fetch_add( 1, std::memory_order_acq_rel );\n"
-            if include_counter
+        if trace_only_in_comment:
+            own_log = (
+                "        // logInteractionEvent( "
+                'QStringLiteral("draw_frame_ready.present_nothing") );\n'
+            )
+        elif trace_in_own_block:
+            own_log = (
+                "        logInteractionEvent(\n"
+                '            QStringLiteral("draw_frame_ready.present_nothing"),\n'
+                '            QStringLiteral("serial=%1").arg( task.requestSerial ) );\n'
+            )
+        else:
+            own_log = ""
+
+        sibling_block = (
+            "        if( diagnosticsEnabled )\n"
+            "        {\n"
+            "            logInteractionEvent(\n"
+            '                QStringLiteral("draw_frame_ready.present_nothing"),\n'
+            '                QStringLiteral("serial=%1").arg( task.requestSerial ) );\n'
+            "        }\n"
+            if trace_in_sibling
             else ""
         )
+
+        if counter_only_in_string_literal:
+            counter = (
+                "        QStringLiteral( \"debug note: would call "
+                'm_presentNothingDropCount.fetch_add( 1 )" );\n'
+            )
+        else:
+            counter = (
+                "        m_presentNothingDropCount.fetch_add( 1, std::memory_order_acq_rel );\n"
+                if include_counter
+                else ""
+            )
 
     body = (
         "    if( !framePresentedByViewport && displayImage.isNull() )\n"
@@ -327,6 +409,84 @@ def _make_sample_body(
 
     body += "    presentActualFrame( displayImage );\n"
     return body
+
+
+class LexerDirectTests(unittest.TestCase):
+    """Direct, table-driven tests of `_lex` in isolation from the tripwire
+    logic above -- each case proves one precision requirement from the
+    round 6 brief by asserting BOTH output views exactly.
+    """
+
+    def test_lexer_cases(self):
+        cases = [
+            (
+                "quote inside a line comment",
+                'int a; // say "hi"\nint b;\n',
+                "int a; " + " " * 11 + "\nint b;\n",
+                "int a; " + " " * 11 + "\nint b;\n",
+            ),
+            (
+                "apostrophe inside a block comment",
+                "int a; /* it's ok */ int b;\n",
+                "int a; " + " " * 13 + " int b;\n",
+                "int a; " + " " * 13 + " int b;\n",
+            ),
+            (
+                "// inside a string",
+                'x = "a//b";\n',
+                'x = "a//b";\n',
+                'x = "' + " " * 4 + '";\n',
+            ),
+            (
+                "/* inside a string",
+                'x = "a/*b*/c";\n',
+                'x = "a/*b*/c";\n',
+                'x = "' + " " * 7 + '";\n',
+            ),
+            (
+                "escaped quote inside a string",
+                'x = "a\\"b";\n',
+                'x = "a\\"b";\n',
+                'x = "' + " " * 4 + '";\n',
+            ),
+            (
+                "char literal '\"'",
+                "x = " + "'" + '"' + "'" + ";\n",
+                "x = " + "'" + '"' + "'" + ";\n",
+                "x = '" + " " + "';\n",
+            ),
+            (
+                "char literal '\\''",
+                "x = " + "'" + "\\" + "'" + "'" + ";\n",
+                "x = " + "'" + "\\" + "'" + "'" + ";\n",
+                "x = '" + " " * 2 + "';\n",
+            ),
+            (
+                "raw string with )\", // and braces via a custom delimiter",
+                'x = ' + 'R"XY(' + 'a)"b//c{d}e' + ')XY"' + ";\n",
+                'x = ' + 'R"XY(' + 'a)"b//c d e' + ')XY"' + ";\n",
+                'x = ' + 'R"XY(' + " " * 11 + ')XY"' + ";\n",
+            ),
+            (
+                "brace inside a string",
+                'x = "{}";\n',
+                'x = "  ";\n',
+                'x = "  ";\n',
+            ),
+            (
+                "nested comment-looking text (comments do not nest)",
+                "/* outer /* still comment */ after\n",
+                " " * 28 + " after\n",
+                " " * 28 + " after\n",
+            ),
+        ]
+        for name, text, expected_comment_masked, expected_code_only in cases:
+            with self.subTest(name=name):
+                comment_masked, code_only = _lex(text)
+                self.assertEqual(len(comment_masked), len(text))
+                self.assertEqual(len(code_only), len(text))
+                self.assertEqual(comment_masked, expected_comment_masked)
+                self.assertEqual(code_only, expected_code_only)
 
 
 class PresentPlaybackPreparedFrameTracesDropsTests(unittest.TestCase):
@@ -449,6 +609,28 @@ class TripwireMutationTests(unittest.TestCase):
             "an m_presentNothingDropCount.fetch_add(...) token sitting only "
             "inside a string literal must not satisfy the drop-counter "
             "requirement",
+        )
+
+    def test_unmatched_quote_in_earlier_comment_then_string_only_tokens_is_rejected(
+        self,
+    ):
+        # sol r4/r5's exact repro: an unmatched quote inside a comment,
+        # earlier in the block, followed by a string literal that is the
+        # ONLY place the trace/counter/marker tokens appear. The old
+        # two-pass `_mask_all_literals` desynced on the comment's stray
+        # quote and let this string's contents leak into `direct_code`
+        # unblanked, so it was wrongly accepted as a real trace+counter.
+        body = _make_sample_body(
+            comment_unmatched_quote_then_string_only_tokens=True
+        )
+        untraced, uncounted = self._untraced_and_uncounted(body)
+        self.assertNotEqual(
+            [],
+            untraced,
+            "logInteractionEvent(...) and m_presentNothingDropCount.fetch_add(...) "
+            "tokens sitting only inside a string literal -- reached after an "
+            "unmatched quote in an earlier comment -- must not satisfy the "
+            "trace/counter requirement",
         )
 
 
