@@ -29,6 +29,55 @@ def _load(path, name):
     return module
 
 
+class _FakeProc:
+    """Stands in for ``subprocess.Popen`` with a fixed, already-known stdout/stderr payload."""
+
+    def __init__(self, stdout_bytes, stderr_bytes=b"", returncode=0):
+        self.stdout = io.BytesIO(stdout_bytes)
+        self.stderr = io.BytesIO(stderr_bytes)
+        self.returncode = returncode
+        self.killed = False
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self):
+        return self.returncode
+
+
+class _InfiniteStdout:
+    """A ``stdout`` whose ``read(n)`` never runs dry -- proves the caller stops asking for more
+    once the cap is exceeded, rather than draining the (here, effectively unbounded) stream.
+    """
+
+    def __init__(self, chunk_size):
+        self.chunk_size = chunk_size
+        self.calls = 0
+
+    def read(self, n):
+        self.calls += 1
+        if self.calls > 10000:
+            raise AssertionError("read() called too many times; the size cap was not enforced")
+        return b"x" * self.chunk_size
+
+    def close(self):
+        pass
+
+
+class _FakeInfiniteProc:
+    def __init__(self, chunk_size):
+        self.stdout = _InfiniteStdout(chunk_size)
+        self.stderr = io.BytesIO(b"")
+        self.returncode = 0
+        self.killed = False
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self):
+        return self.returncode
+
+
 class ResolveConsentedClipTests(unittest.TestCase):
     def setUp(self):
         self.rcc = _load(RESOLVER, "_resolve_consented_clip_under_test")
@@ -178,15 +227,92 @@ class ResolveConsentedClipTests(unittest.TestCase):
         )
 
     def test_resolve_invokes_git_with_the_full_ref_when_no_spec_bytes_given(self):
-        completed = mock.Mock(returncode=0, stdout=self.spec_bytes, stderr=b"")
-        with mock.patch.object(self.rcc.subprocess, "run", return_value=completed) as run:
+        fake = _FakeProc(self.spec_bytes)
+        with mock.patch.object(self.rcc.subprocess, "Popen", return_value=fake) as popen:
             # spec_bytes genuinely omitted here (not routed through the _resolve helper, which
             # substitutes self.spec_bytes for a bare None) so the git codepath actually fires.
             self.rcc.resolve("FIX-0001", ".", table=self.table)
-        self.assertEqual(run.call_count, 1)
-        argv = run.call_args[0][0]
+        self.assertEqual(popen.call_count, 1)
+        argv = popen.call_args[0][0]
         self.assertIn("refs/remotes/fork/master:tools/gates/output-budget.json", argv[-1])
         self.assertNotIn("fork/master", [a for a in argv if a != argv[-1]])
+
+    def test_git_show_failure_raises_spec_read_error_without_holding_a_run_result(self):
+        fake = _FakeProc(b"", stderr_bytes=b"fatal: bad object", returncode=128)
+        with mock.patch.object(self.rcc.subprocess, "Popen", return_value=fake):
+            with self.assertRaises(self.rcc.SpecReadError) as ctx:
+                self.rcc.resolve("FIX-0001", ".", table=self.table)
+        self.assertIn("fatal: bad object", str(ctx.exception))
+
+    # -- streaming size cap: the child is read incrementally and killed the instant the cap is
+    # exceeded, never buffered in full first (round 4, defect 1) ------------------------------
+    def test_size_cap_streams_incrementally_and_kills_the_child_without_buffering_it_all(self):
+        fake = _FakeInfiniteProc(chunk_size=65536)
+        with mock.patch.object(self.rcc.subprocess, "Popen", return_value=fake):
+            with self.assertRaises(self.rcc.SpecTooLargeError):
+                self.rcc.resolve("FIX-0001", ".", table=self.table)
+        self.assertTrue(fake.killed)
+        # A correct implementation stops reading a small, bounded number of chunks past the cap
+        # (cap / chunk size, plus a small constant). An implementation that buffered the whole
+        # (here, effectively unbounded) stream before checking the length would call read() far
+        # more times than this -- or hang -- before ever raising.
+        max_expected_calls = (self.rcc.SPEC_CAP_BYTES // fake.stdout.chunk_size) + 4
+        self.assertLessEqual(fake.stdout.calls, max_expected_calls)
+
+    # -- the ref is validated as a FULL ref, never a short one or any other selector (round 4,
+    # defect 2: the CLI's public --ref option is gone; resolve()'s own ref= parameter is
+    # validated the same way regardless of caller) --------------------------------------------
+    def test_cli_has_no_ref_option(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = self.rcc.main(["--clip-id", "FIX-0001", "--ref", "refs/remotes/fork/master"])
+        self.assertEqual(code, 2)
+
+    def test_resolve_rejects_a_short_ref(self):
+        with self.assertRaises(self.rcc.InvalidRefError):
+            self.rcc.resolve("FIX-0001", ".", ref="master", spec_bytes=self.spec_bytes, table=self.table)
+
+    def test_resolve_rejects_head(self):
+        with self.assertRaises(self.rcc.InvalidRefError):
+            self.rcc.resolve("FIX-0001", ".", ref="HEAD", spec_bytes=self.spec_bytes, table=self.table)
+
+    def test_resolve_rejects_a_dotdot_range(self):
+        with self.assertRaises(self.rcc.InvalidRefError):
+            self.rcc.resolve(
+                "FIX-0001", ".", ref="refs/remotes/fork/master..refs/remotes/fork/other",
+                spec_bytes=self.spec_bytes, table=self.table,
+            )
+
+    def test_resolve_rejects_a_colon_path_suffix(self):
+        with self.assertRaises(self.rcc.InvalidRefError):
+            self.rcc.resolve(
+                "FIX-0001", ".", ref="refs/remotes/fork/master:some/other/file",
+                spec_bytes=self.spec_bytes, table=self.table,
+            )
+
+    def test_resolve_rejects_an_at_brace_reflog_selector(self):
+        with self.assertRaises(self.rcc.InvalidRefError):
+            self.rcc.resolve(
+                "FIX-0001", ".", ref="refs/remotes/fork/master@{yesterday}",
+                spec_bytes=self.spec_bytes, table=self.table,
+            )
+
+    def test_resolve_rejects_a_caret_parent_selector(self):
+        with self.assertRaises(self.rcc.InvalidRefError):
+            self.rcc.resolve(
+                "FIX-0001", ".", ref="refs/remotes/fork/master^{tree}",
+                spec_bytes=self.spec_bytes, table=self.table,
+            )
+
+    def test_resolve_rejects_a_tilde_ancestry_selector(self):
+        with self.assertRaises(self.rcc.InvalidRefError):
+            self.rcc.resolve(
+                "FIX-0001", ".", ref="refs/remotes/fork/master~1",
+                spec_bytes=self.spec_bytes, table=self.table,
+            )
+
+    def test_resolve_accepts_the_default_full_ref(self):
+        # Does not raise InvalidRefError; other assertions belong to the PASS-path tests above.
+        self._resolve("FIX-0001")
 
     # -- CLI never prints a path --------------------------------------------------------------------
     def test_cli_summary_never_prints_a_path_on_pass(self):
@@ -224,6 +350,65 @@ class ResolveConsentedClipTests(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(payload["status"], "PART_MISMATCH")
         self.assertFalse(payload["ok"])
+
+    # -- a malformed spec field never reaches the summary, not even truncated (round 4, defect 3)
+    def test_cli_summary_never_leaks_a_path_smuggled_in_the_length_field(self):
+        spec_parts = [dict(part) for part in self.spec_parts]
+        spec_parts[1]["length"] = "C:/temp/%s/sneaky.raw" % TOKEN
+        spec = {"clips": [{"id": "FIX-0001", "parts": spec_parts}]}
+
+        real_resolve = self.rcc.resolve
+
+        def fake_resolve(clip_id, repo_root, ref=self.rcc.DEFAULT_REF, spec_bytes=None, table=None):
+            return real_resolve(
+                clip_id, repo_root, ref=ref, spec_bytes=json.dumps(spec).encode("utf-8"), table=self.table
+            )
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(self.rcc, "resolve", side_effect=fake_resolve):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.rcc.main(["--clip-id", "FIX-0001"])
+        self.assertEqual(code, 1)
+        self.assertNotIn(TOKEN, out.getvalue())
+        self.assertNotIn(TOKEN, err.getvalue())
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["parts"][1]["length"], "<malformed>")
+        self.assertEqual(payload["parts"][1]["status"], self.rcc.LENGTH_MISMATCH)
+        self.assertEqual(payload["parts"][0]["length"], len(self.contents[0]))
+
+    def test_cli_summary_never_leaks_a_path_smuggled_in_the_sha256_field(self):
+        spec_parts = [dict(part) for part in self.spec_parts]
+        spec_parts[1]["sha256"] = "C:/temp/%s/sneaky.raw" % TOKEN
+        spec = {"clips": [{"id": "FIX-0001", "parts": spec_parts}]}
+
+        real_resolve = self.rcc.resolve
+
+        def fake_resolve(clip_id, repo_root, ref=self.rcc.DEFAULT_REF, spec_bytes=None, table=None):
+            return real_resolve(
+                clip_id, repo_root, ref=ref, spec_bytes=json.dumps(spec).encode("utf-8"), table=self.table
+            )
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(self.rcc, "resolve", side_effect=fake_resolve):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.rcc.main(["--clip-id", "FIX-0001"])
+        self.assertEqual(code, 1)
+        self.assertNotIn(TOKEN, out.getvalue())
+        self.assertNotIn(TOKEN, err.getvalue())
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["parts"][1]["sha256_12"], "<malformed>")
+        self.assertEqual(payload["parts"][1]["status"], self.rcc.SHA256_MISMATCH)
+
+    def test_safe_summary_length_rejects_bool_and_non_int(self):
+        self.assertEqual(self.rcc._safe_summary_length(True), "<malformed>")
+        self.assertEqual(self.rcc._safe_summary_length("123"), "<malformed>")
+        self.assertEqual(self.rcc._safe_summary_length(123), 123)
+
+    def test_safe_summary_sha_prefix_rejects_non_hex_and_wrong_length(self):
+        self.assertEqual(self.rcc._safe_summary_sha_prefix("not-hex" * 10), "<malformed>")
+        self.assertEqual(self.rcc._safe_summary_sha_prefix("a" * 63), "<malformed>")
+        self.assertEqual(self.rcc._safe_summary_sha_prefix("A" * 64), "<malformed>")  # uppercase refused
+        self.assertEqual(self.rcc._safe_summary_sha_prefix("a" * 64), "a" * 12)
 
     def test_cli_usage_error_exits_2(self):
         with contextlib.redirect_stderr(io.StringIO()):

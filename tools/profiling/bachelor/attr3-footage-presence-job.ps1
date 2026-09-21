@@ -34,8 +34,10 @@
 # job file path it just wrote -- never a footage path.
 #
 # NO PUBLISH, NO PLAYBACK. The emitted job opens nothing for playback, deploys nothing, and writes
-# nothing to disk except its own stdout: a per-part PASS/MISSING/UNREADABLE/LENGTH_MISMATCH/
-# SHA256_MISMATCH line, one RESULT= line, and one path-free JSON summary line.
+# nothing to disk except its own stdout: a per-part PASS/NOT_FOUND/ACCESS_DENIED/UNREADABLE/
+# LENGTH_MISMATCH/SHA256_MISMATCH line, one RESULT= line (FOOTAGE_PRESENT/FOOTAGE_ABSENT/
+# FOOTAGE_MISMATCH/FOOTAGE_INDETERMINATE -- see Attr3FootagePresenceJob.psm1's job template for
+# the exact mapping and exit codes 0-3), and one path-free JSON summary line.
 #
 # Usage:
 #   pwsh -NoProfile -File tools\profiling\bachelor\attr3-footage-presence-job.ps1 `

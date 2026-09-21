@@ -8,10 +8,12 @@ part's length, content sha256 and the sha256 of the hook's own ``norm()`` of the
 never opens, hashes or reads footage bytes itself -- that is the presence job's job, on a
 different host.
 
-THE SPEC IS READ FROM A GIT REF, NEVER THE WORKING TREE, and never a short ref name: the caller
-must always pass (or accept the default) full ref
+THE SPEC IS READ FROM A GIT REF, NEVER THE WORKING TREE, and never a short ref name: the CLI
+offers no way to name a ref at all -- it always uses the pinned default full ref
 ``refs/remotes/fork/master``, so the bytes resolved are the reviewed, merged bytes, not whatever a
-worktree happens to hold.
+worktree happens to hold. ``resolve()`` still accepts a ``ref`` parameter for tests, but every
+value -- default or test-supplied -- is validated as a full ``refs/remotes/...`` ref before use
+(see ``_validate_full_ref``); a short ref, a range, or any other git revision selector is refused.
 
 NO PATH IS EVER PRINTED.  ``resolve()`` returns real paths (parts carry them, and
 ``--emit-json`` writes them to a file for a generator to consume), but the CLI's own stdout in
@@ -26,8 +28,10 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 
 _GATES_DIR = os.path.dirname(os.path.abspath(__file__))
 if _GATES_DIR not in sys.path:
@@ -45,6 +49,47 @@ PASS = "PASS"
 LENGTH_MISMATCH = "LENGTH_MISMATCH"
 SHA256_MISMATCH = "SHA256_MISMATCH"
 PATH_NORM_MISMATCH = "PATH_NORM_MISMATCH"
+
+# A full ref only: refs/remotes/<remote>/<rest>, no ``..`` range syntax and -- because none of
+# ``:``, ``@{``, ``^`` or ``~`` is in the allowed character class -- no path suffix, reflog
+# selector, ancestry, or tilde-count selector either.  This is round 4's fix for the CLI's former
+# public ``--ref`` option (now removed) and for ``resolve()``'s own ``ref`` parameter, which
+# still exists for tests but is validated the same way regardless of caller.
+_FULL_REF_RX = re.compile(r"^refs/remotes/[A-Za-z0-9._/-]+$")
+
+_SHA256_HEX_RX = re.compile(r"^[0-9a-f]{64}$")
+
+_MALFORMED = "<malformed>"
+
+
+def _validate_full_ref(ref):
+    """-> ``ref`` unchanged if it is a full ``refs/remotes/...`` ref; else raises ``InvalidRefError``."""
+    if not isinstance(ref, str) or not _FULL_REF_RX.match(ref) or ".." in ref:
+        raise InvalidRefError(None, "ref must match refs/remotes/<remote>/<branch>; no short refs, "
+                                     "'..', ':', '@{', '^' or '~'")
+    return ref
+
+
+def _safe_summary_length(length):
+    """-> ``length`` if it is a plain int (never bool); else the literal ``<malformed>``.
+
+    Guards ``_summary_json`` against a spec whose ``length`` field is not actually a length --
+    e.g. a string carrying a path -- reaching stdout verbatim.
+    """
+    if isinstance(length, bool) or not isinstance(length, int):
+        return _MALFORMED
+    return length
+
+
+def _safe_summary_sha_prefix(sha256):
+    """-> the first 12 characters of ``sha256`` if it is 64 lowercase hex chars; else ``<malformed>``.
+
+    Guards ``_summary_json`` against a spec whose ``sha256`` field is not actually a sha256 --
+    e.g. a string carrying a path -- having any of its characters reach stdout.
+    """
+    if not isinstance(sha256, str) or not _SHA256_HEX_RX.match(sha256):
+        return _MALFORMED
+    return sha256[:12]
 
 
 class ResolveError(Exception):
@@ -103,6 +148,12 @@ class SpecTooLargeError(ResolveError):
     code = "SPEC_TOO_LARGE"
 
 
+class InvalidRefError(ResolveError):
+    """``ref`` is not a full ``refs/remotes/...`` ref (see ``_validate_full_ref``)."""
+
+    code = "INVALID_REF"
+
+
 class SpecReadError(ResolveError):
     """``git show`` of the pinned ref failed."""
 
@@ -138,12 +189,60 @@ def _git_show_argv(repo_root, ref):
     ]
 
 
+_READ_CHUNK_BYTES = 65536
+
+
 def _read_spec_bytes(repo_root, ref):
+    """Stream ``git show``'s stdout in bounded chunks, refusing (and killing the child) the
+    instant more than ``SPEC_CAP_BYTES`` has arrived -- never buffering an unbounded amount of
+    child output in memory first and checking the length only afterwards (round 4, defect 1).
+    """
     argv = _git_show_argv(repo_root, ref)
-    proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    stderr_chunks = []
+
+    def _drain_stderr():
+        try:
+            while True:
+                chunk = proc.stderr.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                stderr_chunks.append(chunk)
+        except (OSError, ValueError):
+            pass
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    chunks = []
+    total = 0
+    oversized = False
+    try:
+        while True:
+            chunk = proc.stdout.read(_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > SPEC_CAP_BYTES:
+                oversized = True
+                break
+            chunks.append(chunk)
+    finally:
+        if oversized:
+            proc.kill()
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+        proc.wait()
+        stderr_thread.join(timeout=5)
+
+    if oversized:
+        raise SpecTooLargeError(None, "exceeds cap %d bytes" % SPEC_CAP_BYTES)
     if proc.returncode != 0:
-        raise SpecReadError(None, proc.stderr.decode("utf-8", "replace").strip())
-    return proc.stdout
+        raise SpecReadError(None, b"".join(stderr_chunks).decode("utf-8", "replace").strip())
+    return b"".join(chunks)
 
 
 def _load_spec(repo_root, ref, spec_bytes):
@@ -176,8 +275,10 @@ def resolve(clip_id, repo_root, ref=DEFAULT_REF, spec_bytes=None, table=None):
 
     Raises a typed ``ResolveError`` subclass on any refusal.  ``spec_bytes`` and ``table`` exist
     for tests only; production callers pass neither and get the pinned ref and the hook's frozen
-    table.
+    table.  ``ref`` -- default or caller-supplied -- is always validated as a full
+    ``refs/remotes/...`` ref before use; anything else raises ``InvalidRefError``.
     """
+    ref = _validate_full_ref(ref)
     spec = _load_spec(repo_root, ref, spec_bytes)
     clip = _find_clip(spec, clip_id)
     spec_parts = clip.get("parts") or []
@@ -222,6 +323,11 @@ def resolve(clip_id, repo_root, ref=DEFAULT_REF, spec_bytes=None, table=None):
 
 
 def _summary_json(clip_id, status, parts):
+    # ``part.length`` and ``part.sha256`` come from the SPEC -- untrusted input read from a git
+    # ref -- not from the hook's frozen table.  Each is validated for type/shape immediately
+    # before it can reach this JSON; a field that is not actually a length or a sha256 (e.g. a
+    # string carrying a path) is reported as the literal ``<malformed>`` and none of its
+    # characters ever reach output (round 4, defect 3).
     return json.dumps(
         {
             "clipId": clip_id,
@@ -229,7 +335,12 @@ def _summary_json(clip_id, status, parts):
             "status": status,
             "partCount": len(parts),
             "parts": [
-                {"index": part.index, "length": part.length, "sha256_12": part.sha256[:12], "status": part.status}
+                {
+                    "index": part.index,
+                    "length": _safe_summary_length(part.length),
+                    "sha256_12": _safe_summary_sha_prefix(part.sha256),
+                    "status": part.status,
+                }
                 for part in parts
             ],
         },
@@ -250,10 +361,15 @@ def _write_emit_json(path, clip_id, parts):
 
 
 def main(argv=None):
+    # No ``--ref`` option (round 4, defect 2): the CLI always resolves against the pinned
+    # DEFAULT_REF.  Naming a ref was never something a caller needed to do to answer "does the
+    # frozen spec agree with the hook's table for this clip id", and a public option accepting
+    # an arbitrary git revision selector (a short ref, a range, a reflog entry, an ancestry
+    # walk) is refused rather than offered.  ``resolve()`` keeps its ``ref`` parameter for
+    # tests, validated the same way regardless of caller.
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--clip-id", required=True)
     parser.add_argument("--repo-root", default=".")
-    parser.add_argument("--ref", default=DEFAULT_REF)
     parser.add_argument("--emit-json", default=None, help="write the full resolved parts, paths included, to FILE")
     try:
         args = parser.parse_args(argv)
@@ -261,7 +377,7 @@ def main(argv=None):
         return 2 if exc.code else 0
 
     try:
-        parts = resolve(args.clip_id, args.repo_root, ref=args.ref)
+        parts = resolve(args.clip_id, args.repo_root)
     except PartMismatchError as exc:
         sys.stdout.write(_summary_json(args.clip_id, exc.code, exc.parts) + "\n")
         return 1

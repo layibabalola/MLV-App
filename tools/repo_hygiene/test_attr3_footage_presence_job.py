@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -197,7 +198,10 @@ class FootagePresenceJobTests(unittest.TestCase):
         self.assertIn("RESULT=FOOTAGE_PRESENT", run.stdout)
         self.assertIn("PART=0 STATUS=PASS", run.stdout)
 
-    # ---- emitted job: the five required statuses, now decoding base64 first ----------------------
+    # ---- emitted job: honest per-part statuses (round 4) and the four overall results ------------
+    # NOT_FOUND / ACCESS_DENIED / UNREADABLE / LENGTH_MISMATCH / SHA256_MISMATCH / PASS per part;
+    # FOOTAGE_PRESENT / FOOTAGE_ABSENT / FOOTAGE_MISMATCH / FOOTAGE_INDETERMINATE overall -- see
+    # Attr3FootagePresenceJob.psm1's job template for the exact mapping this exercises.
 
     def test_pass_when_both_parts_match(self) -> None:
         job = self.job_path(self.generate())
@@ -211,15 +215,15 @@ class FootagePresenceJobTests(unittest.TestCase):
         self.assertEqual(payload["result"], "FOOTAGE_PRESENT")
         self.assertEqual([p["status"] for p in payload["parts"]], ["PASS", "PASS"])
 
-    def test_missing_both_parts_is_footage_absent(self) -> None:
+    def test_both_parts_not_found_is_footage_absent(self) -> None:
         job = self.job_path(self.generate())
         for path in self.paths:
             Path(path).unlink()
         run = self.run_job(job)
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn("RESULT=FOOTAGE_ABSENT", run.stdout)
-        self.assertIn("PART=0 STATUS=MISSING", run.stdout)
-        self.assertIn("PART=1 STATUS=MISSING", run.stdout)
+        self.assertIn("PART=0 STATUS=NOT_FOUND", run.stdout)
+        self.assertIn("PART=1 STATUS=NOT_FOUND", run.stdout)
         self._assert_no_token(run.stdout, run.stderr)
 
     def test_length_mismatch_is_footage_mismatch(self) -> None:
@@ -244,14 +248,77 @@ class FootagePresenceJobTests(unittest.TestCase):
         self.assertIn("PART=0 STATUS=PASS", run.stdout)
         self._assert_no_token(run.stdout, run.stderr)
 
-    def test_one_part_bad_one_good_is_footage_mismatch(self) -> None:
+    def test_one_part_not_found_one_pass_is_footage_indeterminate(self) -> None:
+        # A PASS mixed with a NOT_FOUND never observed a byte difference on any part -- it
+        # cannot honestly be called PRESENT, ABSENT or MISMATCH (round 4, defect 5): this is a
+        # BEHAVIOUR CHANGE from round 2/3, which folded this combination into FOOTAGE_MISMATCH.
         job = self.job_path(self.generate())
         Path(self.paths[1]).unlink()
         run = self.run_job(job)
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        self.assertIn("RESULT=FOOTAGE_INDETERMINATE", run.stdout)
+        self.assertIn("PART=0 STATUS=PASS", run.stdout)
+        self.assertIn("PART=1 STATUS=NOT_FOUND", run.stdout)
+        self._assert_no_token(run.stdout, run.stderr)
+
+    def test_one_part_not_found_one_length_mismatch_is_still_footage_mismatch(self) -> None:
+        # An actually-observed byte difference on one part still yields MISMATCH even alongside
+        # a NOT_FOUND part, per the documented mapping (MISMATCH is not conditioned on the
+        # ABSENCE of NOT_FOUND parts -- only on the absence of ACCESS_DENIED/UNREADABLE ones).
+        job = self.job_path(self.generate())
+        Path(self.paths[0]).unlink()
+        Path(self.paths[1]).write_bytes(self.contents[1] + b"!")
+        run = self.run_job(job)
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertIn("RESULT=FOOTAGE_MISMATCH", run.stdout)
-        self.assertIn("PART=0 STATUS=PASS", run.stdout)
-        self.assertIn("PART=1 STATUS=MISSING", run.stdout)
+        self.assertIn("PART=0 STATUS=NOT_FOUND", run.stdout)
+        self.assertIn("PART=1 STATUS=LENGTH_MISMATCH", run.stdout)
+        self._assert_no_token(run.stdout, run.stderr)
+
+    def test_unreadable_status_when_file_is_locked_during_hash(self) -> None:
+        # Neither ItemNotFoundException nor UnauthorizedAccessException: an exclusive read lock
+        # held by another process makes Get-Item's stat succeed (length unchanged) but
+        # Get-FileHash's open fail with a plain sharing-violation IOException, which must land as
+        # UNREADABLE -- not escape the try/catch, and not print the path.
+        job = self.job_path(self.generate())
+        locked_path = self.paths[0]
+        script = (
+            f"$fs = [System.IO.File]::Open('{locked_path}', [System.IO.FileMode]::Open, "
+            f"[System.IO.FileAccess]::Read, [System.IO.FileShare]::None); "
+            f"try {{ & '{PWSH}' -NoLogo -NoProfile -NonInteractive -File '{job}'; "
+            f"Write-Output \"CHILD_EXIT=$LASTEXITCODE\" }} finally {{ $fs.Dispose() }}"
+        )
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True,
+        )
+        self.assertIn("PART=0 STATUS=UNREADABLE", proc.stdout, proc.stdout + proc.stderr)
+        self.assertIn("PART=1 STATUS=PASS", proc.stdout, proc.stdout + proc.stderr)
+        self.assertIn("RESULT=FOOTAGE_INDETERMINATE", proc.stdout)
+        self.assertIn("CHILD_EXIT=3", proc.stdout)
+        self._assert_no_token(proc.stdout, proc.stderr)
+
+    def test_access_denied_status_when_acl_denies_read(self) -> None:
+        # A synthetic file with an ACL that denies read to the current user, created and cleaned
+        # up entirely within this test's own temp directory.
+        job = self.job_path(self.generate())
+        target = self.paths[0]
+        user = os.environ.get("USERNAME", "")
+        self.assertTrue(user, "USERNAME must be set to run the ACL-denial test")
+        deny = subprocess.run(
+            ["icacls", target, "/deny", f"{user}:(R)"], capture_output=True, text=True,
+        )
+        self.assertEqual(deny.returncode, 0, deny.stdout + deny.stderr)
+        try:
+            run = self.run_job(job)
+        finally:
+            subprocess.run(
+                ["icacls", target, "/remove:d", user], capture_output=True, text=True,
+            )
+        self.assertIn("PART=0 STATUS=ACCESS_DENIED", run.stdout, run.stdout + run.stderr)
+        self.assertIn("PART=1 STATUS=PASS", run.stdout, run.stdout + run.stderr)
+        self.assertIn("RESULT=FOOTAGE_INDETERMINATE", run.stdout)
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
         self._assert_no_token(run.stdout, run.stderr)
 
 

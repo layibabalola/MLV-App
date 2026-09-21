@@ -49,6 +49,13 @@ function New-Attr3FootagePresenceJob {
     base64 encoding is, regardless of what this check would have allowed through.
     Throws a distinguishable ATTR3_PRESENCE_* token on any refusal; returns a pscustomobject
     describing the emitted job otherwise.
+    On Bachelor, the emitted job checks each part with every filesystem call wrapped in its own
+    try/catch (round 4), reporting an honest per-part status -- PASS, NOT_FOUND, ACCESS_DENIED,
+    UNREADABLE, LENGTH_MISMATCH or SHA256_MISMATCH -- and an overall result of FOOTAGE_PRESENT
+    (exit 0), FOOTAGE_ABSENT (exit 1), FOOTAGE_MISMATCH (exit 2) or FOOTAGE_INDETERMINATE (exit
+    3); see the mapping documented above the overall-result block in the job template below for
+    the exact rule. No exception's own text ever reaches this job's output, since it can contain
+    the part's real path.
     #>
     [CmdletBinding()]
     param(
@@ -150,28 +157,36 @@ foreach ($rawPart in $RawParts) {
     $decoded = Read-AttrCudaBase64Payload -Base64 $rawPart.pathBase64
     $partPath = [Text.Encoding]::UTF8.GetString($decoded.bytes)
 
+    # Every filesystem operation on this part is wrapped in its own try/catch (round 4, defect
+    # 4). Under $ErrorActionPreference = 'Stop', an UNWRAPPED Test-Path/Get-Item call can throw a
+    # TERMINATING error on a provider or access failure -- which would escape this loop entirely
+    # (skipping every remaining part and the final RESULT/JSON lines) and print the exception's
+    # own text, which can contain $partPath, to this job's stderr via PowerShell's default
+    # uncaught-error reporting. Nothing below ever writes $_, $_.Exception or its .Message --
+    # only a fixed status TOKEN never derived from exception text.
     $status = $null
     $actualLength = $null
-    if (-not (Test-Path -LiteralPath $partPath -PathType Leaf)) {
-        $status = 'MISSING'
-    } else {
-        try {
-            $actualLength = (Get-Item -LiteralPath $partPath -Force).Length
-        } catch {
-            $status = 'UNREADABLE'
-        }
+    try {
+        $actualLength = (Get-Item -LiteralPath $partPath -Force -ErrorAction Stop).Length
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        $status = 'NOT_FOUND'
+    } catch [System.UnauthorizedAccessException] {
+        $status = 'ACCESS_DENIED'
+    } catch {
+        $status = if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' }
     }
+
     if (-not $status) {
         if ($actualLength -ne [int64]$rawPart.length) {
             $status = 'LENGTH_MISMATCH'
         } else {
             try {
-                $actualSha256 = (Get-FileHash -LiteralPath $partPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            } catch {
-                $status = 'UNREADABLE'
-            }
-            if (-not $status) {
+                $actualSha256 = (Get-FileHash -LiteralPath $partPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
                 $status = if ($actualSha256 -eq $rawPart.sha256) { 'PASS' } else { 'SHA256_MISMATCH' }
+            } catch [System.UnauthorizedAccessException] {
+                $status = 'ACCESS_DENIED'
+            } catch {
+                $status = if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'ACCESS_DENIED' } else { 'UNREADABLE' }
             }
         }
     }
@@ -184,13 +199,31 @@ foreach ($rawPart in $RawParts) {
     })
 }
 
+# Overall-result mapping (round 4, defect 5). Each per-part status above is honest about WHY a
+# part failed, so the overall result can distinguish "definitely not there" from "could not
+# tell" instead of folding every non-PASS reason into MISSING/UNREADABLE as before:
+#   FOOTAGE_PRESENT       exit 0  every part is PASS.
+#   FOOTAGE_ABSENT        exit 1  every part is NOT_FOUND.
+#   FOOTAGE_MISMATCH      exit 2  at least one part is LENGTH_MISMATCH or SHA256_MISMATCH (a
+#                                 byte difference was actually OBSERVED on a readable part) AND
+#                                 no part is ACCESS_DENIED or UNREADABLE.
+#   FOOTAGE_INDETERMINATE exit 3  anything else -- e.g. any ACCESS_DENIED/UNREADABLE part, or a
+#                                 mix of PASS and NOT_FOUND with no part actually differing --
+#                                 cannot honestly be called PRESENT, ABSENT or MISMATCH.
 $statuses = @($results | ForEach-Object { $_.status })
+$diffStatuses = @('LENGTH_MISMATCH', 'SHA256_MISMATCH')
+$uncertainStatuses = @('ACCESS_DENIED', 'UNREADABLE')
 if (($statuses | Where-Object { $_ -ne 'PASS' }).Count -eq 0) {
     $overall = 'FOOTAGE_PRESENT'; $exitCode = 0
-} elseif (($statuses | Where-Object { $_ -ne 'MISSING' }).Count -eq 0) {
+} elseif (($statuses | Where-Object { $_ -ne 'NOT_FOUND' }).Count -eq 0) {
     $overall = 'FOOTAGE_ABSENT'; $exitCode = 1
-} else {
+} elseif (
+    ($statuses | Where-Object { $diffStatuses -contains $_ }).Count -ge 1 -and
+    ($statuses | Where-Object { $uncertainStatuses -contains $_ }).Count -eq 0
+) {
     $overall = 'FOOTAGE_MISMATCH'; $exitCode = 2
+} else {
+    $overall = 'FOOTAGE_INDETERMINATE'; $exitCode = 3
 }
 
 Write-Output "RESULT=$overall CLIP=$ClipId PARTS=$PartCount"
