@@ -1014,6 +1014,7 @@ private:
     uint64_t m_playbackSmokeStartDecodeRequestsIssued = 0;
     uint64_t m_playbackSmokeStartPrepStaleDrops = 0;
     uint64_t m_playbackSmokeStartPrepGenerationDrops = 0;
+    uint64_t m_playbackSmokeStartPresentNothingDrops = 0;
     uint64_t m_playbackSmokeStartPrepReplacedBefore = 0;
     uint64_t m_playbackSmokeStartPrepReplacedAfter = 0;
     uint64_t m_playbackSmokeStartScopeUpdates = 0;
@@ -1309,6 +1310,7 @@ private:
     std::atomic<uint64_t> m_playbackPrepGenerationDropCount{0};
     std::atomic<uint64_t> m_playbackPrepReplacedBeforeComputeCount{0};
     std::atomic<uint64_t> m_playbackPrepReplacedAfterComputeCount{0};
+    std::atomic<uint64_t> m_presentNothingDropCount{0};
     bool m_lastPresentedFrameUsedGpuBilinearDebayer = false;
     int m_lastPresentedPlaybackScaleFactorActive = 1;
     QString m_lastPresentedGpuBilinearFallbackReason;

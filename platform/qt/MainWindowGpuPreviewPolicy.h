@@ -48,6 +48,7 @@ enum class GpuPlaybackPipelineStatus
 struct MainWindowGpuPreviewPolicyState
 {
     bool gpuViewportInstalled = false;
+    bool gpuWidgetViewportInstalled = false;
     GpuPreviewProcessingBackendRequest gpuPreviewProcessingBackendRequest =
         GpuPreviewProcessingBackendRequest::Auto;
     bool gpuPreviewProcessingEnvironmentRequested = false;
@@ -202,8 +203,12 @@ inline bool mainWindowUsesGpuAmazeDebayer(
 inline bool mainWindowAllowsGpuAmazeTexturePresentation(
     const MainWindowGpuPreviewPolicyState &state)
 {
+    // CUDA-SCALE4-ZERO-PRESENT-1: presentAmazePostWbTexture/presentRgb16 have no
+    // GpuDisplayWindow routing (see root cause), so the AMaZE-texture-present
+    // route requires the QOpenGLWidget viewport unconditionally.
     return mainWindowUsesGpuAmazeDebayer(state)
-        && state.gpuAmazeTexturePresentationEnvironmentRequested;
+        && state.gpuAmazeTexturePresentationEnvironmentRequested
+        && state.gpuWidgetViewportInstalled;
 }
 
 inline bool mainWindowUsesGpuAmazeTexturePresentation(
