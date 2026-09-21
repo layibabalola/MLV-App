@@ -888,6 +888,71 @@ class OwnerDecisionOrderingAstTests(unittest.TestCase):
         self.assertGreater(census["forbiddenIndex"], census["resolverCallIndex"])
 
 
+class ParamBlockBindingTimeAstTests(unittest.TestCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 4 (BINDING-TIME ORDERING). An AST census over the
+    generator's own $ast.ParamBlock: no parameter DEFAULT expression may invoke
+    Resolve-Path/Test-Path/Get-Item/Get-ChildItem/git/Join-Path (a default runs at BIND TIME,
+    before this script's first statement -- see -RepoRoot's own round-4 comment), and no
+    path-shaped parameter (-ClipPath/-RepoRoot/-AgentRoot/-OutFile) may carry a ValidatePattern or
+    ValidateScript attribute (PowerShell's own binding-failure message echoes a rejected value
+    verbatim, disclosing a path-shaped string before this file's own path-free refusal ever runs).
+    Hash/filename-shaped parameters (-SourceCommit, -BuildManifestSha256, the .zip/.exe/.json
+    name parameters) are exempt: a commit hash or a plain filename cannot itself carry a path.
+    """
+
+    def _param_census(self) -> dict:
+        import json
+        import tempfile
+
+        if PWSH is None:
+            self.skipTest("pwsh is not on PATH")
+        script = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$text = [IO.File]::ReadAllText('{ATTRIBUTION_JOB}')\n"
+            "$tokens = $null; $errors = $null\n"
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)\n"
+            "if ($errors.Count -gt 0) { throw ('PARSE_ERROR: ' + ($errors -join '; ')) }\n"
+            "$pathParams = @('ClipPath', 'RepoRoot', 'AgentRoot', 'OutFile')\n"
+            "$forbiddenDefaultNames = @('Resolve-Path', 'Test-Path', 'Get-Item', 'Get-ChildItem', 'git', 'Join-Path')\n"
+            "$violations = [System.Collections.Generic.List[string]]::new()\n"
+            "foreach ($p in $ast.ParamBlock.Parameters) {\n"
+            "    $name = $p.Name.VariablePath.UserPath\n"
+            "    if ($null -ne $p.DefaultValue) {\n"
+            "        $commands = $p.DefaultValue.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)\n"
+            "        foreach ($c in $commands) {\n"
+            "            $cn = $c.GetCommandName()\n"
+            "            if ($null -ne $cn -and ($forbiddenDefaultNames -icontains $cn)) { [void]$violations.Add(\"DEFAULT_IO:${name}:${cn}\") }\n"
+            "        }\n"
+            "    }\n"
+            "    foreach ($attr in $p.Attributes) {\n"
+            "        if ($attr -isnot [System.Management.Automation.Language.AttributeAst]) { continue }\n"
+            "        $attrName = $attr.TypeName.Name\n"
+            "        if ((@('ValidatePattern', 'ValidateScript') -icontains $attrName) -and ($pathParams -icontains $name)) {\n"
+            "            [void]$violations.Add(\"VALIDATOR:${name}:${attrName}\")\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "$violations | ConvertTo-Json -Compress\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="attr3-param-ast-") as tmp:
+            script_path = Path(tmp) / "param_census.ps1"
+            script_path.write_text(script, encoding="utf-8")
+            proc = subprocess.run(
+                [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script_path)],
+                capture_output=True, text=True,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        raw = proc.stdout.strip()
+        if not raw:
+            return []
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else [parsed]
+
+    def test_no_param_default_does_io_and_no_path_param_carries_a_validator(self) -> None:
+        violations = self._param_census()
+        self.assertEqual(violations, [], f"param block violations: {violations}")
+
+
 class RetiredCompileJobTests(unittest.TestCase):
     """The old route must refuse, and say where to go instead."""
 

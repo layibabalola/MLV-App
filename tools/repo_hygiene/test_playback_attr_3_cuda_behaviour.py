@@ -1377,6 +1377,268 @@ class AttributionJobOwnerContentAuthenticationTests(_PwshCase):
 
 
 @requires_pwsh
+class OwnerFootagePrivateDirectoryLeakAndRefusalTests(_PwshCase):
+    """ATTR3-FOOTAGE-BIND-1 PR-B round 4: the leak proof, the sibling-isolation proof, and the
+    cross-volume / identity-mismatch refusal paths for the private per-job directory.
+
+    The cross-volume and identity-mismatch cases are exercised by MOCKING
+    Get-AttrCudaFileIdentity inside the module's own scope (`& $module { Set-Item -Path
+    function:... }`) rather than by requiring a second real volume or a real hardware race --
+    New-AttrCudaOwnerFootageLink is called directly, so this is a statement about the CODE PATH
+    taken when the identity comparison itself reports a mismatch, not about the real OS.
+    """
+
+    def _extract_content_check(self) -> str:
+        # Duplicated from AttributionJobOwnerContentAuthenticationTests rather than shared, in
+        # keeping with this file's own convention of keeping each test class self-contained.
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        pub_created = text.index("[void](New-AttrCudaDirectory -Path $Pub)")
+        start = text.index("if ($FixtureRehearsal) {", pub_created)
+        end = text.index("\ntry {\nExpand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip)", start)
+        self.assertGreater(end, start, "owner/fixture content-check markers moved in the generator")
+        return text[start:end]
+
+    def _extract_cmd_build(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start = text.index("$envList = \"'\" + ($envs -join")
+        end = text.index("\n$presentMonProc = Start-PresentMonCapture", start)
+        self.assertGreater(end, start, "cmd-build markers moved in the generator")
+        return text[start:end]
+
+    def _owner_parts_json(self, parts) -> str:
+        baked = [
+            {
+                "index": part["index"],
+                "pathBase64": base64.b64encode(part["path"].encode("utf-8")).decode("ascii"),
+                "length": part["length"],
+                "sha256": part["sha256"],
+            }
+            for part in parts
+        ]
+        return json.dumps(baked)
+
+    def _run_owner_content_check(self, *, parts, pub: Path, work: Path) -> subprocess.CompletedProcess:
+        pub.mkdir(parents=True)
+        work.mkdir(parents=True, exist_ok=True)
+        block = self._extract_content_check()
+        owner_parts_json = self._owner_parts_json(parts).replace("'", "''")
+        script = self.tmp / "owner-leak-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            "$FixtureRehearsal = $false\n"
+            f"$OwnerPartsJson = '{owner_parts_json}'\n"
+            "$ClipId = 'FIX-OWNER-LEAK-0001'\n"
+            f"$SourceCommit = '{'d' * 40}'\n"
+            f"$Pub = '{pub}'\n"
+            f"$Work = '{work}'\n"
+            "$ownerLinkHandles = [System.Collections.Generic.List[object]]::new()\n"
+            "function Save-Json($Object, [string]$Path) {\n"
+            "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
+            "}\n"
+            + block + "\n"
+            "Write-Output ('CLIPPATH=' + $clipPath)\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script)
+
+    def _build_cmd(self, *, clip_path: str) -> str:
+        block = self._extract_cmd_build()
+        script = self.tmp / "cmd-build-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            "$envs = @('FAKE_ENV=1')\n"
+            "$smoke = 'C:\\fake\\smoke.ps1'\n"
+            "$exePath = 'C:\\fake\\app.exe'\n"
+            "$resultPath = 'C:\\fake\\result.json'\n"
+            f"$clipPath = '{clip_path}'\n"
+            + block + "\n"
+            "Write-Output ('CMD=' + $cmd)\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        marker = "CMD="
+        line = next(line for line in proc.stdout.splitlines() if line.startswith(marker))
+        return line[len(marker) :]
+
+    def test_no_sentinel_leak_in_command_line_or_publish_directory(self) -> None:
+        # SENTINEL: a unique string embedded ONLY in the owner's real (never-published) directory.
+        sentinel = "SENTINELOWNERPATH0001"
+        base_extension = "." + "MLV"
+        src_dir = self.tmp / f"real-owner-dir-{sentinel}"
+        src_dir.mkdir()
+        part0_path = src_dir / ("source" + base_extension)
+        part0_bytes = b"leak proof sentinel bytes " * 40
+        part0_path.write_bytes(part0_bytes)
+        part0 = str(part0_path).replace("\\", "/")
+        parts = [{"index": 0, "path": part0, "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()}]
+        pub = self.tmp / "agent" / "outbox" / "owner-sentinel.artifacts"
+        work = self.tmp / "work"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub, work=work)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertNotIn(sentinel, proc.stdout)
+        marker = "CLIPPATH="
+        line = next(line for line in proc.stdout.splitlines() if line.startswith(marker))
+        clip_path = line[len(marker) :]
+        self.assertNotIn(sentinel, clip_path)
+
+        # Nothing this stage publishes (there is nothing to publish on the success path at this
+        # extraction boundary, but the directory is checked anyway) names the sentinel.
+        for candidate in pub.rglob("*"):
+            if candidate.is_file():
+                self.assertNotIn(sentinel, candidate.read_text(encoding="utf-8", errors="ignore"))
+
+        cmd = self._build_cmd(clip_path=clip_path)
+        self.assertNotIn(sentinel, cmd)
+        self.assertIn(clip_path, cmd)
+
+    def test_sibling_and_sidecar_files_are_never_linked_into_the_private_directory(self) -> None:
+        base_extension = "." + "MLV"
+        continuation_extension = "." + "M00"
+        sidecar_extension = "." + "MAPP"
+        src_dir = self.tmp / "owner-source-with-siblings"
+        src_dir.mkdir()
+        part0_path = src_dir / ("source" + base_extension)
+        part0_bytes = b"sibling isolation part zero " * 40
+        part0_path.write_bytes(part0_bytes)
+        # An UNVERIFIED sibling continuation part -- never named in the parts list -- and a stray
+        # sidecar file, both beside the verified source.
+        (src_dir / ("source" + continuation_extension)).write_bytes(b"unverified sibling continuation part")
+        (src_dir / ("source" + sidecar_extension)).write_bytes(b"stray sidecar bytes")
+        part0 = str(part0_path).replace("\\", "/")
+        parts = [{"index": 0, "path": part0, "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()}]
+        pub = self.tmp / "agent" / "outbox" / "owner-siblings.artifacts"
+        work = self.tmp / "work"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub, work=work)
+
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        private_dir_name = "owner-" + "clip"
+        private_dir = work / private_dir_name
+        entries = sorted(p.name for p in private_dir.iterdir())
+        self.assertEqual(entries, [private_dir_name + base_extension])
+
+    def test_more_than_100_parts_is_refused_as_not_contiguous(self) -> None:
+        base_extension = "." + "MLV"
+        src_dir = self.tmp / "owner-too-many-parts"
+        src_dir.mkdir()
+        parts = []
+        for index in range(101):
+            extension = base_extension if index == 0 else ("." + "M{0:02d}".format(index - 1))
+            part_path = src_dir / (f"source-{index}" + extension)
+            part_bytes = f"part {index}".encode("utf-8")
+            part_path.write_bytes(part_bytes)
+            parts.append({
+                "index": index,
+                "path": str(part_path).replace("\\", "/"),
+                "length": len(part_bytes),
+                "sha256": hashlib.sha256(part_bytes).hexdigest(),
+            })
+        pub = self.tmp / "agent" / "outbox" / "owner-too-many.artifacts"
+        work = self.tmp / "work"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub, work=work)
+
+        self.assertEqual(proc.returncode, 20, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=OWNER_PARTS_NOT_CONTIGUOUS", proc.stdout)
+        summary = json.loads((pub / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["result"], "OWNER_PARTS_NOT_CONTIGUOUS")
+
+    def test_a_gap_in_part_indices_is_refused_as_not_contiguous(self) -> None:
+        base_extension = "." + "MLV"
+        continuation_extension = "." + "M01"
+        src_dir = self.tmp / "owner-gap-parts"
+        src_dir.mkdir()
+        part0_path = src_dir / ("source" + base_extension)
+        part0_bytes = b"gap test part zero"
+        part0_path.write_bytes(part0_bytes)
+        # Index 1 is MISSING: index 0 then jumps straight to index 2.
+        part2_path = src_dir / ("source" + continuation_extension)
+        part2_bytes = b"gap test part two"
+        part2_path.write_bytes(part2_bytes)
+        parts = [
+            {"index": 0, "path": str(part0_path).replace("\\", "/"), "length": len(part0_bytes), "sha256": hashlib.sha256(part0_bytes).hexdigest()},
+            {"index": 2, "path": str(part2_path).replace("\\", "/"), "length": len(part2_bytes), "sha256": hashlib.sha256(part2_bytes).hexdigest()},
+        ]
+        pub = self.tmp / "agent" / "outbox" / "owner-gap.artifacts"
+        work = self.tmp / "work"
+
+        proc = self._run_owner_content_check(parts=parts, pub=pub, work=work)
+
+        self.assertEqual(proc.returncode, 20, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("RESULT=OWNER_PARTS_NOT_CONTIGUOUS", proc.stdout)
+
+    def test_cross_volume_refusal_when_source_and_directory_report_different_volumes(self) -> None:
+        base_extension = "." + "MLV"
+        src_dir = self.tmp / "owner-cross-volume-source"
+        src_dir.mkdir()
+        source_path = src_dir / ("source" + base_extension)
+        source_path.write_bytes(b"cross volume refusal bytes")
+        directory = self.tmp / "owner-cross-volume-directory"
+        directory.mkdir()
+
+        script = self.tmp / "cross-volume-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            "$mod = Get-Module AttrCudaArtifacts\n"
+            f"$global:AttrCudaTestSourcePath = '{source_path}'\n"
+            "& $mod {\n"
+            "    Set-Item -Path function:Get-AttrCudaFileIdentity -Value {\n"
+            "        param([string]$Path)\n"
+            "        $serial = if ($Path -eq $global:AttrCudaTestSourcePath) { 111 } else { 222 }\n"
+            "        [pscustomobject]@{ VolumeSerialNumber = $serial; FileIndexHigh = 1; FileIndexLow = 1; NumberOfLinks = 1 }\n"
+            "    }\n"
+            "}\n"
+            f"try {{ [void](New-AttrCudaOwnerFootageLink -Directory '{directory}' -Index 0 -SourcePath $global:AttrCudaTestSourcePath); Write-Output 'NO_THROW' }}\n"
+            "catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("THREW OWNER_FOOTAGE_LINK_CROSS_VOLUME", proc.stdout)
+        # No hard link was left behind by the refused attempt.
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_identity_mismatch_after_link_creation_is_refused(self) -> None:
+        base_extension = "." + "MLV"
+        src_dir = self.tmp / "owner-identity-mismatch-source"
+        src_dir.mkdir()
+        source_path = src_dir / ("source" + base_extension)
+        source_path.write_bytes(b"identity mismatch refusal bytes")
+        directory = self.tmp / "owner-identity-mismatch-directory"
+        directory.mkdir()
+
+        script = self.tmp / "identity-mismatch-probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            "$mod = Get-Module AttrCudaArtifacts\n"
+            f"$sourcePath = '{source_path}'\n"
+            f"$directory = '{directory}'\n"
+            "$global:AttrCudaTestExpectedLinkPath = Join-Path $directory (Get-AttrCudaOwnerFootageNeutralName -Index 0)\n"
+            "& $mod {\n"
+            "    Set-Item -Path function:Get-AttrCudaFileIdentity -Value {\n"
+            "        param([string]$Path)\n"
+            "        if ($Path -eq $global:AttrCudaTestExpectedLinkPath) {\n"
+            "            [pscustomobject]@{ VolumeSerialNumber = 1; FileIndexHigh = 999; FileIndexLow = 999; NumberOfLinks = 2 }\n"
+            "        } else {\n"
+            "            [pscustomobject]@{ VolumeSerialNumber = 1; FileIndexHigh = 1; FileIndexLow = 1; NumberOfLinks = 1 }\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "try { [void](New-AttrCudaOwnerFootageLink -Directory $directory -Index 0 -SourcePath $sourcePath); Write-Output 'NO_THROW' }\n"
+            "catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertIn("THREW OWNER_FOOTAGE_LINK_FAILED", proc.stdout)
+
+
+@requires_pwsh
 class SharedFootagePartVerifierEmbeddingTests(_PwshCase):
     """ATTR3-FOOTAGE-BIND-1 PR-B: Test-AttrCudaFootagePart (and the base64 decode it rides on)
     must be the SAME characters in both emitted jobs -- never two copies that can drift."""
