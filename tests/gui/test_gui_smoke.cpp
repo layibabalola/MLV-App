@@ -594,6 +594,7 @@ private slots:
     void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
     void mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAndNested();
     void mainWindowGpuPreviewPolicyRequiresWidgetViewportForAmazeTexturePresent();
+    void mainWindowGpuPreviewPolicyAllowsAmazeTexturePresentWithoutWidgetWhenTexNrEligible();
     void mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExplicitAndNested();
     void mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus();
     void mainWindowGpuPreviewPolicyLabelsVisibleScopeCpuFallback();
@@ -1014,6 +1015,45 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyRequiresWidgetViewportForAmazeTextu
     state.gpuWidgetViewportInstalled = true;
     QVERIFY(mainWindowAllowsGpuAmazeTexturePresentation(state));
     QVERIFY(mainWindowUsesGpuAmazeTexturePresentation(state));
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyAllowsAmazeTexturePresentWithoutWidgetWhenTexNrEligible()
+{
+    // CUDA-SCALE4-ZERO-PRESENT-1 round 2: the scale-1 recon texture-no-readback
+    // ("tex-nr") route presents through GpuDisplayWindow::
+    // presentGpuPlaybackReconAmazePostWbTextureIfActive, which DOES route through
+    // the GL window. Round 1's widget-viewport gate regressed this route by
+    // requiring a widget viewport unconditionally; the gate must instead admit
+    // window mode whenever the tex-nr route is itself eligible
+    // (mainWindowAllowsGpuPlaybackReconTexturePresentation), keeping the scale-1
+    // window decision byte-for-byte identical to the pre-round-1 behavior.
+    MainWindowGpuPreviewPolicyState state;
+    state.gpuViewportInstalled = true;
+    state.gpuWidgetViewportInstalled = false;
+    state.gpuPreviewProcessingBackendRequest = GpuPreviewProcessingBackendRequest::Gpu;
+    state.gpuPreviewProcessingCompatible = true;
+    state.renderThreadUsing16BitPreview = true;
+    state.renderThreadUsingGpuProcessingPreview = true;
+    state.gpuAmazeDebayerBackendRequest = GpuAmazeDebayerBackendRequest::Gpu;
+    state.gpuAmazeDebayerCompatible = true;
+    state.renderThreadUsingGpuAmazeDebayer = true;
+    state.gpuAmazeTexturePresentationEnvironmentRequested = true;
+    state.renderThreadUsingGpuAmazeTexturePresentation = true;
+    state.gpuPlaybackReconEnvironmentRequested = true;
+    state.gpuPlaybackReconTexturePresentationEnvironmentRequested = true;
+    state.gpuPlaybackReconTexturePresentationCompatible = true;
+
+    // Scale 1, window mode, tex-nr route eligible: allowed, matching pre-fix.
+    QVERIFY(mainWindowAllowsGpuPlaybackReconTexturePresentation(state));
+    QVERIFY(mainWindowAllowsGpuAmazeTexturePresentation(state));
+    QVERIFY(mainWindowUsesGpuAmazeTexturePresentation(state));
+
+    // Scale 4 (or any state where the tex-nr route is not eligible): the
+    // widget-viewport requirement from round 1 still applies.
+    state.gpuPlaybackReconTexturePresentationCompatible = false;
+    QVERIFY(!mainWindowAllowsGpuPlaybackReconTexturePresentation(state));
+    QVERIFY(!mainWindowAllowsGpuAmazeTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuAmazeTexturePresentation(state));
 }
 
 void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExplicitAndNested()
