@@ -44,7 +44,9 @@ param(
     # points -AgentShare at a fake local directory standing in for the share while leaving this
     # at a value the job template never actually dereferences in that test (the job is run
     # directly with -File, not through the real Bachelor agent).
-    [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$')]
+    # `~` is admitted because Windows temp roots carry 8.3 short names (RUNNER~1, OBABAL~1) and
+    # the behavioural tests point -AgentRootOnHost at one; it is inert everywhere this value is used.
+    [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
     [string]$AgentRootOnHost = 'C:\mlvtmp\mlv-agent',
 
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path,

@@ -162,7 +162,9 @@ class FootageStageJobTests(unittest.TestCase):
 
     # ---- calling New-Attr3FootageStageJob directly, never through the CLI ---------------------
 
-    def build(self, parts=None, clip_id: str | None = None) -> subprocess.CompletedProcess:
+    def build(
+        self, parts=None, clip_id: str | None = None, agent_root: Path | None = None
+    ) -> subprocess.CompletedProcess:
         payload = self.parts_payload if parts is None else parts
         parts_json_path = self.tmp / f"parts-{id(payload)}.json"
         parts_json_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -170,7 +172,7 @@ class FootageStageJobTests(unittest.TestCase):
             f"Import-Module '{STAGE_MODULE}' -Force; "
             f"$parts = @(Get-Content -LiteralPath '{parts_json_path}' -Raw | ConvertFrom-Json); "
             f"New-Attr3FootageStageJob -ClipId '{clip_id or self.clip_id}' -Parts $parts "
-            f"-OutDir '{self.out}' -AgentRoot '{self.agent_root}'"
+            f"-OutDir '{self.out}' -AgentRoot '{agent_root or self.agent_root}'"
         )
         return _run(["-Command", script])
 
@@ -251,6 +253,23 @@ class FootageStageJobTests(unittest.TestCase):
         proc = self.build(parts=bad)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("ATTR3_STAGE_PART_PATH_INVALID", proc.stdout + proc.stderr)
+
+    def test_agent_root_with_an_8_3_short_name_segment_is_accepted(self) -> None:
+        # Windows temp roots carry 8.3 short names (RUNNER~1, OBABAL~1) -- this repo's own
+        # behavioural tests build -AgentRoot from tempfile.TemporaryDirectory, which lands under
+        # whatever TEMP the host has, short-named or not. -AgentRoot's own ValidatePattern must
+        # admit `~` or this whole suite is silently host-dependent on TEMP's shape (round 2).
+        short_name_root = self.tmp / "OBABAL~1" / "AppData" / "agent"
+        short_name_root.mkdir(parents=True)
+        target_dir = short_name_root / "spec" / "FIX-STAGE-SHORTNAME"
+        targets = [target_dir / "part0.raw", target_dir / "part1.raw"]
+        payload = [
+            {"index": i, "path": str(path), "length": len(content), "sha256": _sha256(content)}
+            for i, (path, content) in enumerate(zip(targets, self.content))
+        ]
+        proc = self.build(parts=payload, clip_id="FIX-STAGE-SHORTNAME", agent_root=short_name_root)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.job_path(proc)
 
     def test_module_never_embeds_a_bare_path_only_base64(self) -> None:
         proc = self.build()

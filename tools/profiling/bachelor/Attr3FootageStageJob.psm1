@@ -71,7 +71,9 @@ function New-Attr3FootageStageJob {
         [Parameter(Mandatory = $true)]
         [string]$OutDir,
 
-        [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$')]
+        # `~` is admitted because Windows temp roots carry 8.3 short names (RUNNER~1, OBABAL~1) and
+        # the behavioural tests point -AgentRoot at one; it is inert everywhere this value is used.
+        [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
         [string]$AgentRoot = 'C:\mlvtmp\mlv-agent'
     )
 
