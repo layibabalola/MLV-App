@@ -14,10 +14,20 @@
 # FOOTAGE (NA-4, docs/never-authorized.json): the job opens exactly ONE clip, the exact
 # canonical path passed as -ClipPath. There is NO id-to-file resolution anywhere; an
 # earlier resolver was ruled an NA-4 evasion (sol, PR #131 r2) and removed. NA-4 admits
-# a real clip only as the single path on the CLIP_OR_NONE line of the running lane's own
-# MLV_LANE_PROMPT, which the owner types by hand (agents cannot write it). Run this
-# generator INSIDE that owner-granted lane with -ClipPath equal to that line, so the hook
-# sees the path in the lane's tool input. A two-part clip's continuation part is opened
+# a real clip named in command text only as the single path on the CLIP_OR_NONE line of the
+# running lane's own MLV_LANE_PROMPT, which the owner types by hand (agents cannot write it).
+# The hook's frozen owner-consented table (NA4-OWNER-CONSENTED-FOOTAGE-1) admits NO path from
+# command text (round 6, NARROW); the route that card provides for consented footage is a
+# tracked, id-addressed consumer that verifies content against that table. That route is NOT
+# the only way a consented clip can be opened today: NA-4 exception (2) above still admits
+# the one CLIP_OR_NONE path, and nothing excludes a consented clip's own path from it, so a
+# consented clip named there is opened with no content check against the table and by no
+# id-addressed consumer. This generator is not yet
+# one, so it REFUSES every owner-clip id until card ATTR3-FOOTAGE-BIND-1 makes it id-only
+# (resolving via tools/gates/output-budget.json with a table-hash check) and wires
+# tools/gates/verify_consented_footage.py in (see the refusal below the fixture test). An
+# interpreter one-liner can still open any path; that residual is unchanged. A two-part
+# clip's continuation part is opened
 # by the application itself, never named by this code. The owner's consent record
 # (receipts/owner-footage-consent-20260916.json and its -correction.json) is evidence of
 # consent, never an authorization. Adjudication:
@@ -77,6 +87,7 @@
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
 #       -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> `
 #       -ClipId M16-1243 -ClipPath <the lane's CLIP_OR_NONE path> -OutFile <path>\<jobId>.job.ps1
+# (an owner-clip -ClipId is refused until ATTR3-FOOTAGE-BIND-1; see FOOTAGE above)
 # Usage (fixture rehearsal, no -ClipPath):
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
 #       -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> -ClipId tiny_dual_iso `
@@ -240,6 +251,15 @@ $reconName = "igpu_recon_cuda-playback-attr-3-cuda-$shortSha.dll"
 $FixtureClipIds = @('tiny_dual_iso', 'large_dual_iso')
 $isFixtureRehearsal = $FixtureClipIds -ccontains $ClipId
 $fixtureRehearsalLiteral = if ($isFixtureRehearsal) { '$true' } else { '$false' }
+
+# NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (B), kept at round 6: FAIL CLOSED until this route is
+# id-only and content-bound. NA-4 admits no consented path from command text, and nothing on
+# this route yet checks the bytes against the frozen table with
+# tools/gates/verify_consented_footage.py, so an owner-clip id is refused
+# outright (no override switch) until card ATTR3-FOOTAGE-BIND-1 wires that verifier in.
+if (-not $isFixtureRehearsal) {
+    throw "REFUSED: owner-clip id '$ClipId' emits no job until card ATTR3-FOOTAGE-BIND-1 wires tools/gates/verify_consented_footage.py into this route; only the fixture ids 'tiny_dual_iso' and 'large_dual_iso' are emitted today."
+}
 
 # ATTR3-FIXTURE-STAGE-1. The compound suffix the two tracked fixtures carry is never spelled
 # as one literal token anywhere in this file: a token ending in it trips this repository's own

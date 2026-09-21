@@ -577,6 +577,59 @@ class AttributionJobFixtureRehearsalTests(unittest.TestCase):
         self.assertIn("exit $verdict.exitCode", self.text)
 
 
+class AttributionJobOwnerClipRefusalTests(unittest.TestCase):
+    """NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (B): owner-clip ids fail closed until content
+    binding (card ATTR3-FOOTAGE-BIND-1) is wired; the fixture arm is untouched."""
+
+    def setUp(self) -> None:
+        self.text = _read(ATTRIBUTION_JOB)
+
+    def _generate(self, clip_id: str, out_file: Path) -> subprocess.CompletedProcess:
+        if PWSH is None:
+            self.skipTest("pwsh is not on PATH")
+        head = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+        # ATTR3-FIXTURE-STAGE-1 made -FixtureSha256 mandatory for a fixture id.
+        fixture_sha = ["-FixtureSha256", "b" * 64] if clip_id in ("tiny_dual_iso", "large_dual_iso") else []
+        return subprocess.run(
+            [
+                PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(ATTRIBUTION_JOB),
+                "-SourceCommit", head, "-BuildManifestSha256", "0" * 64,
+                "-ClipId", clip_id, "-ClipPath", "C:\\synthetic-cache\\" + clip_id,
+                *fixture_sha,
+                "-OutFile", str(out_file),
+            ],
+            capture_output=True, text=True,
+        )
+
+    def test_the_refusal_names_the_card_and_precedes_the_write(self) -> None:
+        refusal = self.text.index("if (-not $isFixtureRehearsal) {")
+        self.assertIn("ATTR3-FOOTAGE-BIND-1", self.text[refusal : refusal + 400])
+        self.assertLess(refusal, self.text.index("[IO.File]::WriteAllText($OutFile"))
+        self.assertNotIn("ContentVerifiedBy", self.text)  # unconditional: no override switch
+
+    def test_an_owner_clip_id_emits_nothing(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_file = Path(tmp) / "owner.job.ps1"
+            proc = self._generate("M16-1243", out_file)
+            self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("ATTR3-FOOTAGE-BIND-1", proc.stdout + proc.stderr)
+            self.assertFalse(out_file.exists())
+
+    def test_a_fixture_id_is_still_emitted(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_file = Path(tmp) / "fixture.job.ps1"
+            proc = self._generate("tiny_dual_iso", out_file)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertTrue(out_file.exists())
+            self.assertIn("$FixtureRehearsal = $true", out_file.read_text(encoding="utf-8"))
+
+
 class RetiredCompileJobTests(unittest.TestCase):
     """The old route must refuse, and say where to go instead."""
 
