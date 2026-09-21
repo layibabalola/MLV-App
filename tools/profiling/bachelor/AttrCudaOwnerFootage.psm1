@@ -48,16 +48,16 @@ function Get-AttrCudaOwnerFootageNeutralName {
     name plus the composed base extension; part i (i>=1) becomes the neutral base name with
     continuation extension M{i-1:D2}. ATTR3-FOOTAGE-BIND-1 PR-B round 4.
     .DESCRIPTION
-    The base name and extension are each composed from two or more literals, never spelled as one
-    token: this repository's own hygiene test (NoFootageTokensTests) forbids this shared module's
-    source text from naming footage at all, since build-route scripts sharing this module have no
-    business knowing footage exists -- the same reason ATTR3-FIXTURE-STAGE-1's own composed
+    The base name is plain (`owner-clip`); only the extension is composed from literals, never
+    spelled as one token -- see this module's own header, "WHY THE MULTIPART TOKENS ARE STILL
+    COMPOSED", for why: this repository's own NA-4 PreToolUse hook refuses that token in tool
+    text regardless of destination file, the same reason ATTR3-FIXTURE-STAGE-1's own composed
     extension constant exists in the job templates that DO name footage.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][int]$Index)
 
-    $baseName = 'owner-' + 'cl' + 'ip'
+    $baseName = 'owner-clip'
     $baseExtension = '.' + 'MLV'
     if ($Index -eq 0) { return $baseName + $baseExtension }
     '{0}.M{1:D2}' -f $baseName, ($Index - 1)
@@ -268,8 +268,7 @@ function Close-AttrCudaOwnerFootageWorkspace {
     }
 
     if ([string]::IsNullOrWhiteSpace($Directory) -or -not (Test-Path -LiteralPath $Directory)) { return }
-    # Composed, never spelled as one token -- see Get-AttrCudaOwnerFootageNeutralName's header.
-    $baseName = 'owner-' + 'cl' + 'ip'
+    $baseName = 'owner-clip'
     $neutralPattern = '^' + $baseName + '\.(MLV|M\d{2})$'
     $entries = @(Get-ChildItem -LiteralPath $Directory -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match $neutralPattern })

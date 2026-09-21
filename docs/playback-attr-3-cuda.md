@@ -179,12 +179,19 @@ parsed field is already a trusted field -- and then requires its `sourceCommit` 
 `pendingSymbolPresence` to be a real boolean. Both hashes land in `evidence-manifest.json` under
 `buildManifest`.
 
-On Bachelor the emitted job re-verifies each resolved part against the live filesystem --
-exists, readable, length, and sha256 (case-insensitive) -- through the shared
-`Test-AttrCudaFootagePart` verifier, and opens exactly the decoded first part's path, byte-equal
-to what was baked in and never composed from pieces. Any non-`PASS` part fails closed at
-`OWNER_FOOTAGE_NOT_VERIFIED` (exit 19), reporting only the part's index and status, never a
-path, before PresentMon starts, before deploy, and before the smoke child. (The fixture route in
+On Bachelor the emitted job re-verifies each resolved part against the live filesystem, AT ITS
+OWN RESOLVER PATH -- exists, readable, length, and sha256 (case-insensitive) -- through the
+shared `Test-AttrCudaFootagePart` verifier. Once every part passes, the job builds a PRIVATE,
+neutrally-named directory under its own work tree (one hard link per verified part, contiguous,
+never spelled from the caller's real names) and re-verifies each link's identity and content
+against its source before opening anything: playback opens only that private link's part 0
+(neutral base name `owner-clip`), never the owner's real path. Nothing this job publishes --
+stdout, `summary.json`, `evidence-manifest.json`, or any other artifact -- ever names a source
+path; every reader-facing output carries only the part's index and status. Any non-`PASS` part,
+or a failure creating/opening/re-verifying a private link, fails closed (`OWNER_FOOTAGE_NOT_VERIFIED`
+exit 19, `OWNER_FOOTAGE_LINK_CROSS_VOLUME` exit 21, or `OWNER_FOOTAGE_LINK_FAILED` exit 22),
+closing whatever handles were already held and removing whatever private links were already
+created, before PresentMon starts, before deploy, and before the smoke child. (The fixture route in
 section 4b instead requires the clip path to sit directly in the agent cache, name that clip id,
 and exist, then hashes it against `-FixtureSha256`, failing closed at
 `FIXTURE_CONTENT_MISMATCH`, exit 17, on a mismatch.) The job also verifies all three package
