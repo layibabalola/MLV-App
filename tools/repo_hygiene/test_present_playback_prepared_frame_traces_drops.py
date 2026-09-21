@@ -30,6 +30,18 @@ marker can still be identified inside its QStringLiteral. The
 `draw_frame_ready.present_nothing` exit specifically must also have
 `m_presentNothingDropCount.fetch_add(` directly in its own block -- a trace
 without the counter is no longer sufficient for that exit.
+
+Round 5 (sol r4 minor): round 4's `direct_text` was built from the UNMASKED
+`body`, so a `logInteractionEvent(` sitting only inside a `//`/`/* */`
+comment, or a `m_presentNothingDropCount.fetch_add(` sitting only inside a
+string/char literal, still satisfied the check. Each return now gets two
+views of its own direct block: `direct_text` (comments blanked, string/char
+*contents* left intact) and `direct_code` (comments blanked AND string/char
+contents also blanked -- the CODE-ONLY view). `traced` and `counted` are
+matched against `direct_code`, so a token that exists only inside a comment
+or a string literal no longer counts. `is_present_nothing` is matched
+against `direct_text`, since the `draw_frame_ready.present_nothing` marker
+is itself a string literal and must stay visible for that match to work.
 """
 from pathlib import Path
 import re
@@ -119,6 +131,44 @@ def _mask_comments_and_string_braces(text: str) -> str:
     return "".join(out)
 
 
+def _mask_all_literals(text: str) -> str:
+    """Same-length CODE-ONLY view of *text*: comment bodies blanked (via
+    `_mask_comments_and_string_braces`) AND the full contents of string/char
+    literals also blanked, leaving only the quote characters and newlines
+    behind. Unlike `_mask_comments_and_string_braces`, which leaves string
+    contents intact so the `draw_frame_ready.present_nothing` marker stays
+    visible, this view exists so a token (e.g. `logInteractionEvent(`) that
+    appears only inside a string or char literal cannot match against it.
+    """
+    out = list(_mask_comments_and_string_braces(text))
+    length = len(text)
+    index = 0
+    state = None  # None | "string" | "char"
+    while index < length:
+        char = text[index]
+        if state is None:
+            if char == '"':
+                state = "string"
+            elif char == "'":
+                state = "char"
+            index += 1
+            continue
+        closing = '"' if state == "string" else "'"
+        if char == "\\" and index + 1 < length:
+            if text[index + 1] != "\n":
+                out[index + 1] = " "
+            index += 2
+            continue
+        if char == closing:
+            state = None
+            index += 1
+            continue
+        if char != "\n":
+            out[index] = " "
+        index += 1
+    return "".join(out)
+
+
 def _extract_function_body(source: str, function_name: str) -> str:
     start_match = re.search(
         r"void MainWindow::" + re.escape(function_name) + r"\s*\([^)]*\)\s*\n\{\n",
@@ -145,15 +195,20 @@ def _extract_function_body(source: str, function_name: str) -> str:
 
 
 def _find_returns_with_context(body: str):
-    """Return a list of {"line", "direct_text"} for each `return;` in *body*.
+    """Return a list of {"line", "direct_text", "direct_code"} for each
+    `return;` in *body*.
 
-    `direct_text` is the concatenation of text written DIRECTLY in the
-    return's innermost enclosing block -- i.e. it excludes any nested
-    `{...}` block that opens and closes before the return is reached, no
-    matter where that nested block sits relative to other direct-level
-    statements in the same enclosing block.
+    Both views cover text written DIRECTLY in the return's innermost
+    enclosing block -- i.e. they exclude any nested `{...}` block that opens
+    and closes before the return is reached, no matter where that nested
+    block sits relative to other direct-level statements in the same
+    enclosing block. `direct_text` has comments blanked but string/char
+    contents left intact (so the present_nothing marker stays visible).
+    `direct_code` additionally has string/char contents blanked -- the
+    CODE-ONLY view, so a token sitting only inside a literal cannot match.
     """
     masked = _mask_comments_and_string_braces(body)
+    code_masked = _mask_all_literals(body)
     frame_starts = [0]
     frame_segments = [[]]
     results = []
@@ -178,19 +233,28 @@ def _find_returns_with_context(body: str):
         match = RETURN_PATTERN.match(masked, index)
         if match:
             segments = frame_segments[-1] + [(frame_starts[-1], match.start())]
-            direct_text = "".join(body[s:e] for s, e in segments)
+            direct_text = "".join(masked[s:e] for s, e in segments)
+            direct_code = "".join(code_masked[s:e] for s, e in segments)
             line_number = body.count("\n", 0, match.start()) + 1
-            results.append({"line": line_number, "direct_text": direct_text})
+            results.append(
+                {
+                    "line": line_number,
+                    "direct_text": direct_text,
+                    "direct_code": direct_code,
+                }
+            )
             index = match.end()
             continue
         index += 1
     return results
 
 
-def _classify_return(direct_text: str):
-    traced = TRACE_CALL in direct_text
+def _classify_return(entry):
+    direct_text = entry["direct_text"]
+    direct_code = entry["direct_code"]
+    traced = TRACE_CALL in direct_code
     is_present_nothing = PRESENT_NOTHING_MARKER in direct_text
-    counted = DROP_COUNTER_CALL in direct_text
+    counted = DROP_COUNTER_CALL in direct_code
     ok = traced and (not is_present_nothing or counted)
     return ok, traced, is_present_nothing, counted
 
@@ -201,19 +265,27 @@ def _make_sample_body(
     trace_in_own_block: bool = True,
     include_counter: bool = True,
     extra_untraced_return: bool = False,
+    trace_only_in_comment: bool = False,
+    counter_only_in_string_literal: bool = False,
 ) -> str:
     """Synthetic stand-in for presentPlaybackPreparedFrame's present_nothing
     exit, shaped to exercise the tripwire in isolation from the rest of the
     real function. Used only in-memory by the mutation tests below -- never
     written to disk.
     """
-    own_log = (
-        "        logInteractionEvent(\n"
-        '            QStringLiteral("draw_frame_ready.present_nothing"),\n'
-        '            QStringLiteral("serial=%1").arg( task.requestSerial ) );\n'
-        if trace_in_own_block
-        else ""
-    )
+    if trace_only_in_comment:
+        own_log = (
+            "        // logInteractionEvent( "
+            'QStringLiteral("draw_frame_ready.present_nothing") );\n'
+        )
+    elif trace_in_own_block:
+        own_log = (
+            "        logInteractionEvent(\n"
+            '            QStringLiteral("draw_frame_ready.present_nothing"),\n'
+            '            QStringLiteral("serial=%1").arg( task.requestSerial ) );\n'
+        )
+    else:
+        own_log = ""
 
     sibling_block = (
         "        if( diagnosticsEnabled )\n"
@@ -226,11 +298,17 @@ def _make_sample_body(
         else ""
     )
 
-    counter = (
-        "        m_presentNothingDropCount.fetch_add( 1, std::memory_order_acq_rel );\n"
-        if include_counter
-        else ""
-    )
+    if counter_only_in_string_literal:
+        counter = (
+            "        QStringLiteral( \"debug note: would call "
+            'm_presentNothingDropCount.fetch_add( 1 )" );\n'
+        )
+    else:
+        counter = (
+            "        m_presentNothingDropCount.fetch_add( 1, std::memory_order_acq_rel );\n"
+            if include_counter
+            else ""
+        )
 
     body = (
         "    if( !framePresentedByViewport && displayImage.isNull() )\n"
@@ -259,7 +337,7 @@ class PresentPlaybackPreparedFrameTracesDropsTests(unittest.TestCase):
         untraced_returns = []
         uncounted_present_nothing_returns = []
         for entry in _find_returns_with_context(body):
-            ok, traced, is_present_nothing, counted = _classify_return(entry["direct_text"])
+            ok, traced, is_present_nothing, counted = _classify_return(entry)
             if not traced:
                 untraced_returns.append(entry["line"])
             elif is_present_nothing and not counted:
@@ -306,7 +384,7 @@ class TripwireMutationTests(unittest.TestCase):
         untraced = []
         uncounted = []
         for entry in _find_returns_with_context(body):
-            ok, traced, is_present_nothing, counted = _classify_return(entry["direct_text"])
+            ok, traced, is_present_nothing, counted = _classify_return(entry)
             if not traced:
                 untraced.append(entry["line"])
             elif is_present_nothing and not counted:
@@ -349,6 +427,28 @@ class TripwireMutationTests(unittest.TestCase):
             untraced,
             "an inline `if( x ) return;` with no trace in its own block must "
             "be flagged",
+        )
+
+    def test_trace_only_in_comment_is_rejected(self):
+        body = _make_sample_body(trace_only_in_comment=True)
+        untraced, uncounted = self._untraced_and_uncounted(body)
+        self.assertNotEqual(
+            [],
+            untraced,
+            "a logInteractionEvent(...) token sitting only inside a `//` "
+            "comment in the return's own block must not count as a trace",
+        )
+
+    def test_counter_only_in_string_literal_is_rejected(self):
+        body = _make_sample_body(counter_only_in_string_literal=True)
+        untraced, uncounted = self._untraced_and_uncounted(body)
+        self.assertEqual([], untraced)
+        self.assertNotEqual(
+            [],
+            uncounted,
+            "an m_presentNothingDropCount.fetch_add(...) token sitting only "
+            "inside a string literal must not satisfy the drop-counter "
+            "requirement",
         )
 
 
