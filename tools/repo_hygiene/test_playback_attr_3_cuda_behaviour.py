@@ -1170,6 +1170,159 @@ class ClosureScanTests(_PwshCase):
 
 
 @requires_pwsh
+class ScriptFileLiteralReferenceScanTests(_PwshCase):
+    """Get-AttrCudaScriptFileLiteralReferences: the fail-closed, any-quoting-form scanner
+    (ATTR3-SMOKE-RUNNER-DEPS-1, sol PR #144 major 1) -- as opposed to
+    Get-AttrCudaScriptRootDependencies, which recognizes only the one $PSScriptRoot/Join-Path
+    shape that actually gets staged."""
+
+    def _names(self, text: str) -> list[str]:
+        proc = self.run_with_module(
+            "$text = @'\n" + text + "\n'@\n"
+            "Get-AttrCudaScriptFileLiteralReferences -ScriptText $text | "
+            "ForEach-Object { Write-Output \"REF=$_\" }\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return [line.split("=", 1)[1] for line in proc.stdout.splitlines() if line.startswith("REF=")]
+
+    def test_finds_single_quoted_join_path_form(self) -> None:
+        self.assertEqual(
+            self._names(". (Join-Path $PSScriptRoot 'a.ps1')\n"),
+            ["a.ps1"],
+        )
+
+    def test_finds_double_quoted_join_path_form_with_a_different_variable(self) -> None:
+        # The exact concrete omission this scanner exists to close: sol's cited
+        # run-release-gui-smoke.ps1:1904 uses $root (not $PSScriptRoot), double-quoted, with an
+        # embedded directory -- the old Get-AttrCudaScriptRootDependencies regex missed it.
+        self.assertEqual(
+            self._names('$detectorScript = Join-Path $root "tools/profiling/detect-playback-artifacts.ps1"\n'),
+            ["tools/profiling/detect-playback-artifacts.ps1"],
+        )
+
+    def test_finds_an_interpolated_double_quoted_dot_source(self) -> None:
+        # fable minor: a load spelled with double-quoted $PSScriptRoot interpolation instead of
+        # the Join-Path shape -- invisible to Get-AttrCudaScriptRootDependencies, visible here.
+        self.assertEqual(
+            self._names('. "$PSScriptRoot\\new-dep.ps1"\n'),
+            ['$PSScriptRoot\\new-dep.ps1'],
+        )
+
+    def test_ignores_strings_with_no_matching_extension(self) -> None:
+        self.assertEqual(
+            self._names("$x = 'plain string'\nWrite-Output \"no extension here\"\n"),
+            [],
+        )
+
+    def test_finds_a_py_reference_too(self) -> None:
+        self.assertEqual(self._names("$x = 'tools/gates/verify_consented_footage.py'\n"), [
+            "tools/gates/verify_consented_footage.py"
+        ])
+
+    def test_not_deduplicated_unlike_the_dependency_scanner(self) -> None:
+        text = "'a.ps1'\n'a.ps1'\n"
+        self.assertEqual(self._names(text), ["a.ps1", "a.ps1"])
+
+
+@requires_pwsh
+@requires_git
+class ClosureScanFailsClosedTests(_PwshCase):
+    """Resolve-AttrCudaSmokeRunnerClosure refuses an unclassified script-file reference outright
+    (ATTR3-SMOKE-RUNNER-DEPS-1, sol PR #144 major 1) -- the fail-closed behaviour that makes the
+    exclusion list meaningful instead of merely descriptive."""
+
+    def _repo_with_unclassified_reference(self, path: Path) -> str:
+        """A one-file throwaway repo whose runner references a sibling in a form the dependency
+        scanner cannot see (double-quoted, a variable other than $PSScriptRoot) and which is NOT
+        on the exclusion list -- the scenario the review calls a future dependency that "escapes
+        both silently" if the fail-closed check is missing."""
+        path.mkdir(parents=True, exist_ok=True)
+        _git_run(["init", "-q", "-b", "main"], path)
+        _git_run(["config", "commit.gpgsign", "false"], path)
+        _git_run(["config", "user.email", "lane@example.invalid"], path)
+        _git_run(["config", "user.name", "attr3 fail-closed fixture"], path)
+        (path / "tools" / "profiling").mkdir(parents=True)
+        (path / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(
+            "# fixture stand-in with an UNCLASSIFIED reference\n"
+            "$other = Join-Path $notPSScriptRoot \"unclassified-dep.ps1\"\n",
+            encoding="utf-8",
+        )
+        _git_run(["add", "-A"], path)
+        _git_run(["commit", "-q", "-m", "fixture"], path)
+        return _git_run(["rev-parse", "HEAD"], path)
+
+    def test_an_unclassified_reference_makes_the_generator_refuse(self) -> None:
+        repo = self.tmp / "repo"
+        sha = self._repo_with_unclassified_reference(repo)
+        proc = self.run_with_module(
+            _guard(
+                f"Resolve-AttrCudaSmokeRunnerClosure -RepoRoot '{repo}' -Commit '{sha}' "
+                "-RepoRelativePath 'tools/profiling/run-release-gui-smoke.ps1'"
+            )
+        )
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+        self.assertIn("unclassified-dep.ps1", proc.stdout)
+
+    def test_the_real_runners_own_closure_resolves_cleanly_against_the_actual_repo(self) -> None:
+        """The production exclusion list (next to Get-AttrCudaScriptFileLiteralReferences in
+        AttrCudaArtifacts.psm1) must actually classify the real
+        tools/profiling/detect-playback-artifacts.ps1 reference in the real, current
+        run-release-gui-smoke.ps1 -- proving the fail-closed check does not itself break the
+        production route it was added to protect."""
+        head = _git_run(["rev-parse", "HEAD"], ROOT)
+        proc = self.run_with_module(
+            f"$closure = @(Resolve-AttrCudaSmokeRunnerClosure -RepoRoot '{ROOT}' "
+            f"-Commit '{head}' -RepoRelativePath 'tools/profiling/run-release-gui-smoke.ps1')\n"
+            "$closure | ForEach-Object { Write-Output \"NAME=$($_.name)\" }\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        names = [line.split("=", 1)[1] for line in proc.stdout.splitlines() if line.startswith("NAME=")]
+        self.assertEqual(
+            set(names),
+            {
+                "run-release-gui-smoke.ps1",
+                "gui-smoke-screenshot-provenance.ps1",
+                "gui-smoke-process-boundary.psm1",
+                "provenance-stamp.ps1",
+            },
+        )
+
+    def test_an_exclusion_is_matched_on_the_exact_repo_relative_path_not_basename_alone(self) -> None:
+        """The SAME literal text ('detect-playback-artifacts.ps1' via Join-Path $root) that is
+        excluded for run-release-gui-smoke.ps1 must still be refused when it appears in a
+        DIFFERENT file -- the exclusion list is keyed on (repoRelativePath, literal), never on
+        the literal text alone, so it can never silently widen to cover an unrelated file."""
+        repo = self.tmp / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        _git_run(["init", "-q", "-b", "main"], repo)
+        _git_run(["config", "commit.gpgsign", "false"], repo)
+        _git_run(["config", "user.email", "lane@example.invalid"], repo)
+        _git_run(["config", "user.name", "attr3 fail-closed fixture"], repo)
+        (repo / "tools" / "profiling").mkdir(parents=True)
+        # The root runner is clean (a real $PSScriptRoot/Join-Path load, correctly staged); the
+        # UNCLASSIFIED reference sits in the SIBLING instead, at a different repoRelativePath
+        # than the real exclusion entry names.
+        (repo / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(
+            ". (Join-Path $PSScriptRoot 'sibling.ps1')\n",
+            encoding="utf-8",
+        )
+        (repo / "tools" / "profiling" / "sibling.ps1").write_text(
+            "$other = Join-Path $root \"tools/profiling/detect-playback-artifacts.ps1\"\n",
+            encoding="utf-8",
+        )
+        _git_run(["add", "-A"], repo)
+        _git_run(["commit", "-q", "-m", "fixture"], repo)
+        sha = _git_run(["rev-parse", "HEAD"], repo)
+        proc = self.run_with_module(
+            _guard(
+                f"Resolve-AttrCudaSmokeRunnerClosure -RepoRoot '{repo}' -Commit '{sha}' "
+                "-RepoRelativePath 'tools/profiling/run-release-gui-smoke.ps1'"
+            )
+        )
+        self.assert_throws(proc, "ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE")
+
+
+@requires_pwsh
 @requires_git
 class SmokeRunnerClosureResolutionTests(_PwshCase):
     """Resolve-AttrCudaSmokeRunnerClosure against the shared fixture repo, including recursion."""
@@ -1247,6 +1400,10 @@ class SmokeRunnerStaleRefusalTests(_PwshCase):
         script = self.tmp / "pin-check-probe.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
+            # ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): the pin check block now also
+            # calls Test-AttrCudaPathIsReparsePoint (module-embedded in the real generator);
+            # imported here so the sliced-out block resolves it the same way the emitted job does.
+            f"Import-Module '{MODULE}' -Force\n"
             f"$Cache = '{cache}'\n"
             f"$SmokeRunnerClosureDirName = '{closure_dir_name}'\n"
             f"$SmokeRunnerClosure = {self._closure_literal(closure)}\n"
@@ -1328,6 +1485,35 @@ class SmokeRunnerStaleRefusalTests(_PwshCase):
         combined = proc.stdout + proc.stderr
         self.assertNotIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
         self.assertIn("RESULT=NO_REFUSAL", proc.stdout, combined)
+
+    def test_a_reparse_point_closure_directory_is_refused_even_when_its_target_has_matching_bytes(self) -> None:
+        """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): Test-Path/Get-FileHash resolve
+        THROUGH a reparse point, so without an explicit check a junction whose TARGET happens to
+        carry the pinned bytes would pass every existing check. Refused before the hash is ever
+        read."""
+        cache = self.tmp / "cache"
+        cache.mkdir()
+        dir_name = "smoke-runner-deadbeefdeadbeef"
+        real_dir = self.tmp / "real-target"
+        real_dir.mkdir(parents=True)
+        content = b"the real, current, tracked runner bytes"
+        (real_dir / "run-release-gui-smoke.ps1").write_bytes(content)
+        junction_path = cache / dir_name
+        junction = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType Junction -Path '{junction_path}' -Target '{real_dir}'"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(junction.returncode, 0, junction.stdout + junction.stderr)
+        closure = [("run-release-gui-smoke.ps1", hashlib.sha256(content).hexdigest())]
+
+        proc = self._run_pin_check(cache=cache, closure_dir_name=dir_name, closure=closure)
+
+        combined = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, combined)
+        self.assertIn("ATTRCUDA_SMOKE_RUNNER_STALE", combined, combined)
+        self.assertIn("is a reparse point", combined, combined)
+        self.assertNotIn("RESULT=NO_REFUSAL", proc.stdout)
 
 
 @requires_pwsh
@@ -1541,6 +1727,52 @@ class SmokeRunnerStageJobTests(_PwshCase):
         self.assertEqual(second_run.returncode, 0, second_run.stdout + second_run.stderr)
         self.assertIn("RESULT=SMOKE_RUNNER_STAGE_OK ALREADY=1", second_run.stdout)
 
+    def test_an_extra_file_in_the_directory_is_not_already_staged(self) -> None:
+        """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): every pinned file present and
+        correct, PLUS one extra file, must NOT count as already-staged -- "already staged" means
+        the directory is EXACTLY the expected closure, no extra entries."""
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+
+        first_run = _run_job(Path(payload["jobFile"]))
+        self.assertEqual(first_run.returncode, 0, first_run.stdout + first_run.stderr)
+
+        cache_dir = self.agent / "cache" / payload["cacheDirName"]
+        (cache_dir / "unexpected-extra-file.txt").write_bytes(b"not part of the closure")
+
+        second_run = _run_job(Path(payload["jobFile"]))
+
+        self.assertEqual(second_run.returncode, 21, second_run.stdout + second_run.stderr)
+        self.assertIn("DIFFERENT content", second_run.stdout + second_run.stderr)
+
+    def test_a_reparse_point_at_the_closure_directory_is_not_already_staged(self) -> None:
+        """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): a junction whose target is a
+        byte-identical mirror of the closure must still fail closed -- "already staged" refuses
+        a link at the directory itself, not just wrong bytes."""
+        proc = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)[-1]
+
+        first_run = _run_job(Path(payload["jobFile"]))
+        self.assertEqual(first_run.returncode, 0, first_run.stdout + first_run.stderr)
+
+        cache_dir = self.agent / "cache" / payload["cacheDirName"]
+        mirror_dir = self.tmp / "mirror-of-cache-dir"
+        shutil.copytree(cache_dir, mirror_dir)
+        shutil.rmtree(cache_dir)
+        junction = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType Junction -Path '{cache_dir}' -Target '{mirror_dir}'"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(junction.returncode, 0, junction.stdout + junction.stderr)
+
+        second_run = _run_job(Path(payload["jobFile"]))
+
+        self.assertEqual(second_run.returncode, 21, second_run.stdout + second_run.stderr)
+        self.assertIn("DIFFERENT content", second_run.stdout + second_run.stderr)
+
     def test_verify_only_stops_before_anything_is_written(self) -> None:
         proc = self._generate()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -1551,6 +1783,106 @@ class SmokeRunnerStageJobTests(_PwshCase):
         self.assertEqual(run_proc.returncode, 0, run_proc.stdout + run_proc.stderr)
         self.assertIn("RESULT=VERIFY_ONLY_OK", run_proc.stdout)
         self.assertFalse((self.agent / "cache").exists(), "-VerifyOnly must not create the cache")
+
+
+@requires_pwsh
+class SmokeRunFailedPresentMonCleanupTests(_PwshCase):
+    """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3), EXECUTED rather than merely asserted as
+    text ordering: PresentMon must actually be stopped -- confirmed exited by re-reading the
+    process afterward, never assumed from "no exception" -- both when the smoke child returns an
+    ordinary nonzero exit and when STARTING it raises a terminating exception (the previous
+    ordering fix only covered a normal child return). The PresentMon stand-in is a REAL
+    background process, not a fake object, so Stop-PresentMonCapture's Kill()/WaitForExit() do
+    real work; only Start-PresentMonCapture is swapped out, so the launcher and the boundary
+    condition (JobId, artifacts) never need a real cache, build manifest or GPU.
+    """
+
+    def _presentmon_functions(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start = text.index("function Start-PresentMonCapture(")
+        end = text.index("\nfunction Get-FrameRows(", start)
+        return text[start:end]
+
+    def _failure_block(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start_marker = "$presentMonProc = Start-PresentMonCapture $presentMonPath"
+        end_marker = "\n$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc"
+        start = text.index(start_marker)
+        end = text.index(end_marker, start)
+        return text[start:end]
+
+    def _run(self, *, cmd: str, program_files_has_pwsh: bool) -> tuple[subprocess.CompletedProcess, dict]:
+        pub = self.tmp / "pub"
+        pub.mkdir()
+        leg_out = self.tmp / "legOut"
+        leg_out.mkdir()
+        result_path = leg_out / "result.json"  # never created: every scenario here is a failure
+        real_pwsh_dir = str(Path(PWSH).resolve().parent)
+        stub_root = self.tmp / "pf-stub"
+        cmd_literal = "'" + cmd.replace("'", "''") + "'"
+        junction_line = (
+            f"New-Item -ItemType Junction -Path (Join-Path $stubRoot 'PowerShell\\7') "
+            f"-Target '{real_pwsh_dir}' | Out-Null\n"
+            if program_files_has_pwsh else ""
+        )
+        script = self.tmp / "probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"$stubRoot = '{stub_root}'\n"
+            "New-Item -ItemType Directory -Path (Join-Path $stubRoot 'PowerShell') -Force | Out-Null\n"
+            + junction_line
+            + "$env:ProgramFiles = $stubRoot\n"
+            f"$cmd = {cmd_literal}\n"
+            f"$legOut = '{leg_out}'\n"
+            f"$resultPath = '{result_path}'\n"
+            f"$presentMonPath = '{self.tmp / 'presentmon.csv'}'\n"
+            "$FixtureRehearsal = $true\n"
+            "$SourceCommit = ('1' * 40)\n"
+            "$ClipId = 'tiny_dual_iso'\n"
+            f"$Pub = '{pub}'\n"
+            "function Save-Json($Object, [string]$Path) {\n"
+            "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
+            "}\n"
+            + self._presentmon_functions() + "\n"
+            # Swaps out only the launcher: a real PresentMon binary and ETW rights are not
+            # available in this test environment, but Stop-PresentMonCapture (under test) must
+            # act on a REAL child process, not a fake object, to prove it truly terminates one.
+            "function Start-PresentMonCapture([string]$CsvPath) {\n"
+            "    Start-Process -FilePath 'powershell.exe' "
+            "-ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120') "
+            "-PassThru -WindowStyle Hidden\n"
+            "}\n"
+            + self._failure_block() + "\n"
+            "Write-Output 'RESULT=NO_FAILURE_BRANCH_TAKEN'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        summary_path = pub / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+        return proc, summary
+
+    def test_an_ordinary_nonzero_smoke_exit_stops_a_real_presentmon_process(self) -> None:
+        proc, summary = self._run(cmd="exit 7", program_files_has_pwsh=True)
+        self.assertEqual(proc.returncode, 18, proc.stdout + proc.stderr)
+        self.assertIn("RESULT=SMOKE_RUN_FAILED", proc.stdout)
+        self.assertEqual(summary.get("smokeExitCode"), 7)
+        self.assertIsNone(summary.get("smokeLaunchExceptionType"))
+        self.assertIs(summary.get("presentMonConfirmedExited"), True, summary)
+        self.assertIsNone(summary.get("presentMonKillError"))
+        self.assertIsNone(summary.get("presentMonWaitError"))
+
+    def test_a_launch_exception_also_stops_a_real_presentmon_process_and_is_captured(self) -> None:
+        # ProgramFiles points at a directory with no PowerShell\7\pwsh.exe at all, so the
+        # production launch line itself throws CommandNotFoundException before $smokeRc is ever
+        # set -- the exact bypass sol's major 3 describes.
+        proc, summary = self._run(cmd="exit 0", program_files_has_pwsh=False)
+        self.assertEqual(proc.returncode, 18, proc.stdout + proc.stderr)
+        self.assertIn("RESULT=SMOKE_RUN_FAILED", proc.stdout)
+        self.assertIsNone(summary.get("smokeExitCode"))
+        self.assertIsNotNone(summary.get("smokeLaunchExceptionType"))
+        self.assertIn("CommandNotFoundException", summary["smokeLaunchExceptionType"])
+        self.assertIs(summary.get("presentMonConfirmedExited"), True, summary)
 
 
 @requires_git
@@ -2064,12 +2396,27 @@ class EmbeddedFunctionContractTests(_PwshCase):
             "Remove-AttrCudaPartialFile",
             "Remove-AttrCudaTree",
         ),
+        ROOT / "tools" / "profiling" / "bachelor" / "attr3-stage-smoke-runner-job.ps1": (
+            "Assert-AttrCudaSafeArtifactName",
+            "Assert-AttrCudaDirectChild",
+            "Assert-AttrCudaNoLinkBelowRoot",
+            "Assert-AttrCudaWritableFileSlot",
+            "Assert-AttrCudaNonOverwritingFileSlot",
+            "Test-AttrCudaPathIsReparsePoint",
+            "Read-AttrCudaBase64Payload",
+            "Publish-AttrCudaBytes",
+            "Publish-AttrCudaText",
+            "Publish-AttrCudaDirectoryMoveNonOverwriting",
+            "New-AttrCudaDirectory",
+            "Remove-AttrCudaTree",
+        ),
         ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1": (
             "Assert-AttrCudaBuildManifest",
             "Resolve-AttrCudaSmokeRunLog",
             "Get-AttrCudaLastEligibilityLine",
             "Get-AttrCudaEligibilityVerdict",
             "Assert-AttrCudaWritableFileSlot",
+            "Test-AttrCudaPathIsReparsePoint",
             "Publish-AttrCudaText",
             "Publish-AttrCudaFileCopy",
             "Publish-AttrCudaFileMove",

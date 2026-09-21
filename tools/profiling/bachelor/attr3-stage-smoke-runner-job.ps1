@@ -230,7 +230,23 @@ try {
 $StepLog['closureDecode'] = 0
 
 function Test-AttrCudaClosureDirectoryMatches([string]$Dir) {
+    # ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): "already staged" must mean the directory
+    # is EXACTLY the expected closure -- no extra entries, no reparse point at the directory or
+    # at any member, every member byte-identical -- never merely "a superset that happens to
+    # contain the right names with the right hashes".
     if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return $false }
+    if (Test-AttrCudaPathIsReparsePoint -Path $Dir) { return $false }
+    $actualEntries = @(Get-ChildItem -LiteralPath $Dir -Force)
+    if ($actualEntries.Count -ne $ClosureEntries.Count) { return $false }
+    # A plain array + -contains (not a HashSet): the template lint (attr3_publish_write_scan.ps1
+    # R4) only allowlists specific .NET static members/instance methods by name, and this closure
+    # is small (a handful of files), so an O(n) membership test costs nothing here.
+    $expectedNames = @($ClosureEntries | ForEach-Object { $_.name })
+    foreach ($actual in $actualEntries) {
+        if ($expectedNames -notcontains $actual.Name) { return $false }
+        if ($actual.PSIsContainer) { return $false }
+        if (Test-AttrCudaPathIsReparsePoint -Path $actual.FullName) { return $false }
+    }
     foreach ($entry in $ClosureEntries) {
         $path = Join-Path $Dir $entry.name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
@@ -317,6 +333,7 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Assert-AttrCudaNoLinkBelowRoot',
     'Assert-AttrCudaWritableFileSlot',
     'Assert-AttrCudaNonOverwritingFileSlot',
+    'Test-AttrCudaPathIsReparsePoint',
     'Read-AttrCudaBase64Payload',
     'Publish-AttrCudaBytes',
     'Publish-AttrCudaText',

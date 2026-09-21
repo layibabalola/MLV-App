@@ -470,9 +470,10 @@ class SmokeRunFailedBeforePresentMonTests(unittest.TestCase):
         self.text = _read(ATTRIBUTION_JOB)
 
     def test_smoke_outcome_is_checked_before_waiting_on_presentmon(self) -> None:
-        smoke_launch = self.text.index("$smokeRc = $LASTEXITCODE")
+        smoke_launch = self.text.index("$smokeLaunchException = $null")
         check = self.text.index(
-            "if ($smokeRc -ne 0 -or -not (Test-Path -LiteralPath $resultPath)) {"
+            "if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not "
+            "(Test-Path -LiteralPath $resultPath)) {"
         )
         wait = self.text.index("$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc")
         self.assertLess(smoke_launch, check)
@@ -480,7 +481,8 @@ class SmokeRunFailedBeforePresentMonTests(unittest.TestCase):
 
     def test_presentmon_is_stopped_not_waited_out_on_a_smoke_failure(self) -> None:
         check = self.text.index(
-            "if ($smokeRc -ne 0 -or -not (Test-Path -LiteralPath $resultPath)) {"
+            "if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not "
+            "(Test-Path -LiteralPath $resultPath)) {"
         )
         stop = self.text.index("Stop-PresentMonCapture", check)
         wait = self.text.index("$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc")
@@ -498,6 +500,80 @@ class SmokeRunFailedBeforePresentMonTests(unittest.TestCase):
         failed = self.text.index("RESULT=SMOKE_RUN_FAILED")
         timeout_fn = self.text.index("function Wait-PresentMonCapture")
         self.assertLess(timeout_fn, failed, "PRESENTMON_TIMEOUT's own function is defined earlier in the file")
+
+    def test_a_launch_exception_is_caught_and_mapped_to_smoke_run_failed(self) -> None:
+        # sol, PR #144 major 3: a terminating exception starting the nested pwsh used to skip
+        # $smokeRc and the whole SMOKE_RUN_FAILED branch, bypassing PresentMon cleanup entirely.
+        launch = self.text.index("& \"$env:ProgramFiles\\PowerShell\\7\\pwsh.exe\"")
+        try_start = self.text.rindex("try {", 0, launch)
+        catch_start = self.text.index("} catch {", launch)
+        exception_capture = self.text.index("$smokeLaunchException = $_", catch_start)
+        check = self.text.index(
+            "if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not "
+            "(Test-Path -LiteralPath $resultPath)) {"
+        )
+        self.assertLess(try_start, launch)
+        self.assertLess(launch, catch_start)
+        self.assertLess(catch_start, exception_capture)
+        self.assertLess(exception_capture, check)
+
+    def test_smoke_run_failed_records_the_capped_exception_type_and_presentmon_stop_outcome(self) -> None:
+        self.assertIn("smokeLaunchExceptionType", self.text)
+        self.assertIn("smokeLaunchExceptionMessage", self.text)
+        self.assertIn("presentMonConfirmedExited", self.text)
+        self.assertIn("presentMonKillError", self.text)
+        self.assertIn("presentMonWaitError", self.text)
+        self.assertIn("$MaxSmokeLaunchExceptionChars = 500", self.text)
+
+
+class StopPresentMonCaptureReportsFailuresTests(unittest.TestCase):
+    """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3): Kill()/WaitForExit() failures must be
+    reported, not swallowed by an empty catch block, and confirmedExited must be read from the
+    process afterward rather than assumed from "no exception"."""
+
+    def setUp(self) -> None:
+        self.text = _read(ATTRIBUTION_JOB)
+
+    def test_no_empty_catch_blocks_remain_in_the_stop_function(self) -> None:
+        start = self.text.index("function Stop-PresentMonCapture(")
+        end = self.text.index("\nfunction Get-FrameRows(", start)
+        body = self.text[start:end]
+        self.assertNotIn("catch { }", body)
+        self.assertIn("$killError = $_.Exception.Message", body)
+        self.assertIn("$waitError = ", body)
+
+    def test_returns_a_status_object_not_void(self) -> None:
+        start = self.text.index("function Stop-PresentMonCapture(")
+        end = self.text.index("\nfunction Get-FrameRows(", start)
+        body = self.text[start:end]
+        self.assertIn("confirmedExited = [bool]$Proc.HasExited", body)
+        self.assertIn("killError = $killError", body)
+        self.assertIn("waitError = $waitError", body)
+
+
+class Attr3JobNeverActivatesExcludedDependencyTests(unittest.TestCase):
+    """ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 1): the closure-scan exclusion for
+    tools/profiling/detect-playback-artifacts.ps1 (kept next to
+    Get-AttrCudaScriptFileLiteralReferences in AttrCudaArtifacts.psm1) is sound only as long as
+    the ATTR-3 attribution job never passes -DetectPlaybackArtifacts -- the one switch that
+    would make run-release-gui-smoke.ps1 actually execute that reference. Required test (per the
+    review): if this job ever starts passing that switch, this test must fail before the
+    exclusion becomes unsound in production.
+    """
+
+    def setUp(self) -> None:
+        self.text = _read(ATTRIBUTION_JOB)
+
+    def test_the_emitted_smoke_command_never_passes_detectplaybackartifacts(self) -> None:
+        cmd_start = self.text.index('$cmd = "& $(ConvertTo-PsSingleQuoted $smoke)')
+        cmd_end = self.text.index('\n', cmd_start)
+        cmd_line = self.text[cmd_start:cmd_end]
+        self.assertNotIn("-DetectPlaybackArtifacts", cmd_line)
+
+    def test_no_other_reference_to_the_switch_exists_in_the_generator(self) -> None:
+        # Belt and suspenders: the flag must not appear anywhere else in the generator either
+        # (e.g. a second, less obvious invocation site added later).
+        self.assertNotIn("-DetectPlaybackArtifacts", self.text)
 
 
 class AttributionJobFixtureRehearsalTests(unittest.TestCase):

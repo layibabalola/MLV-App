@@ -197,6 +197,7 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Get-AttrCudaLastEligibilityLine',
     'Get-AttrCudaEligibilityVerdict',
     'Assert-AttrCudaWritableFileSlot',
+    'Test-AttrCudaPathIsReparsePoint',
     'Publish-AttrCudaText',
     'Publish-AttrCudaFileCopy',
     'Publish-AttrCudaFileMove',
@@ -445,9 +446,27 @@ function Stop-PresentMonCapture($Proc, [int]$TimeoutSeconds = 10) {
     # ATTR3-SMOKE-RUNNER-DEPS-1 (D): used only when the smoke run itself is already known to have
     # failed -- PresentMon is stopped, never waited out, so a smoke-side failure is reported as
     # SMOKE_RUN_FAILED and not mis-diagnosed as PRESENTMON_TIMEOUT.
+    # ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3): the empty catch blocks used to swallow a
+    # Kill() or WaitForExit() failure outright, so a PresentMon that survived the kill left no
+    # trace anywhere. Both are now captured and returned -- confirmedExited is read from $Proc
+    # itself AFTER the attempt, never assumed from "Kill() didn't throw" -- so the caller can
+    # report a stop that did not actually confirm exit instead of silently trusting it.
+    $killError = $null
+    $waitError = $null
     if (-not $Proc.HasExited) {
-        try { $Proc.Kill() } catch { }
-        try { [void]$Proc.WaitForExit($TimeoutSeconds * 1000) } catch { }
+        try { $Proc.Kill() } catch { $killError = $_.Exception.Message }
+        try {
+            if (-not $Proc.WaitForExit($TimeoutSeconds * 1000)) {
+                $waitError = "did not exit within $TimeoutSeconds s after Kill()"
+            }
+        } catch {
+            $waitError = $_.Exception.Message
+        }
+    }
+    [pscustomobject]@{
+        confirmedExited = [bool]$Proc.HasExited
+        killError = $killError
+        waitError = $waitError
     }
 }
 
@@ -561,10 +580,20 @@ $smokeRunnerClosureDir = Join-Path $Cache $SmokeRunnerClosureDirName
 if (-not (Test-Path -LiteralPath $smokeRunnerClosureDir -PathType Container)) {
     throw "ATTRCUDA_SMOKE_RUNNER_STALE cache is missing closure directory $SmokeRunnerClosureDirName"
 }
+# ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2): Test-Path/Get-FileHash both resolve THROUGH a
+# reparse point to its target, so a link at the closure directory (or at one of its members)
+# could satisfy every check below while the bytes actually launched come from outside the staged,
+# verified directory. Refused before a single hash is trusted.
+if (Test-AttrCudaPathIsReparsePoint -Path $smokeRunnerClosureDir) {
+    throw "ATTRCUDA_SMOKE_RUNNER_STALE cache closure directory $SmokeRunnerClosureDirName is a reparse point"
+}
 foreach ($closureEntry in $SmokeRunnerClosure) {
     $closureEntryPath = Join-Path $smokeRunnerClosureDir $closureEntry.name
     if (-not (Test-Path -LiteralPath $closureEntryPath -PathType Leaf)) {
         throw "ATTRCUDA_SMOKE_RUNNER_STALE cache $SmokeRunnerClosureDirName is missing $($closureEntry.name)"
+    }
+    if (Test-AttrCudaPathIsReparsePoint -Path $closureEntryPath) {
+        throw "ATTRCUDA_SMOKE_RUNNER_STALE cache $SmokeRunnerClosureDirName/$($closureEntry.name) is a reparse point"
     }
     $closureEntryActualSha = Get-Sha $closureEntryPath
     if ($closureEntryActualSha -ne $closureEntry.sha256.ToUpperInvariant()) {
@@ -694,8 +723,20 @@ $envList = "'" + ($envs -join "','") + "'"
 function ConvertTo-PsSingleQuoted([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
 $cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted $exePath) -Input $(ConvertTo-PsSingleQuoted $clipPath) -Output $(ConvertTo-PsSingleQuoted $resultPath) -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor 4 -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
 $presentMonProc = Start-PresentMonCapture $presentMonPath
-& "$env:ProgramFiles\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $cmd 1> (Join-Path $legOut 'smoke-stdout.txt') 2> (Join-Path $legOut 'smoke-stderr.txt')
-$smokeRc = $LASTEXITCODE
+# ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3): the smoke-failure ordering fix only covered a
+# NORMAL child return -- a terminating exception while starting or running the nested pwsh (the
+# executable missing, launch redirection throwing under ErrorActionPreference Stop) used to skip
+# $smokeRc and the whole SMOKE_RUN_FAILED branch below, bypassing PresentMon cleanup entirely.
+# Caught here instead, so every path -- normal failure, normal success, or a launch exception --
+# reaches the same Stop-PresentMonCapture call before this job decides anything else.
+$smokeRc = $null
+$smokeLaunchException = $null
+try {
+    & "$env:ProgramFiles\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $cmd 1> (Join-Path $legOut 'smoke-stdout.txt') 2> (Join-Path $legOut 'smoke-stderr.txt')
+    $smokeRc = $LASTEXITCODE
+} catch {
+    $smokeLaunchException = $_
+}
 
 # ATTR3-SMOKE-RUNNER-DEPS-1 (D, round 1 BLOCKER): the smoke run's own outcome is checked BEFORE
 # PresentMon is waited on. The previous order waited up to 35s for PresentMon to exit even when
@@ -705,8 +746,8 @@ $smokeRc = $LASTEXITCODE
 # PresentMon is stopped (never waited out) the moment the smoke run is known to have failed;
 # PRESENTMON_TIMEOUT is reserved for the one case it actually means: the smoke run succeeded and
 # PresentMon still would not exit.
-if ($smokeRc -ne 0 -or -not (Test-Path -LiteralPath $resultPath)) {
-    Stop-PresentMonCapture -Proc $presentMonProc
+if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not (Test-Path -LiteralPath $resultPath)) {
+    $presentMonStop = Stop-PresentMonCapture -Proc $presentMonProc
     $smokeStderrPath = Join-Path $legOut 'smoke-stderr.txt'
     $smokeStderrTail = ''
     if (Test-Path -LiteralPath $smokeStderrPath) {
@@ -717,15 +758,40 @@ if ($smokeRc -ne 0 -or -not (Test-Path -LiteralPath $resultPath)) {
     if ($smokeStderrTail.Length -gt $MaxSmokeStderrTailChars) {
         $smokeStderrTail = $smokeStderrTail.Substring($smokeStderrTail.Length - $MaxSmokeStderrTailChars)
     }
+    # Capped the same way as the stderr tail above: an exception TYPE name is normally short, but
+    # this is untrusted-shaped data (a .NET type name from whatever failed to launch) and gets the
+    # same defensive cap before it is written into an artifact.
+    # CategoryInfo.Reason (never .Exception.GetType()): PowerShell's own ErrorRecord machinery
+    # already stamps the short exception type name there when an ErrorRecord is built from a
+    # thrown exception, so the type name is read as a plain property instead of an instance
+    # method call -- the attr3_publish_write_scan.ps1 R4 lint does not allowlist .GetType().
+    $MaxSmokeLaunchExceptionChars = 500
+    $smokeLaunchExceptionType = $null
+    $smokeLaunchExceptionMessage = $null
+    if ($null -ne $smokeLaunchException) {
+        $smokeLaunchExceptionType = [string]$smokeLaunchException.CategoryInfo.Reason
+        if ($smokeLaunchExceptionType.Length -gt $MaxSmokeLaunchExceptionChars) {
+            $smokeLaunchExceptionType = $smokeLaunchExceptionType.Substring(0, $MaxSmokeLaunchExceptionChars)
+        }
+        $smokeLaunchExceptionMessage = [string]$smokeLaunchException.Exception.Message
+        if ($smokeLaunchExceptionMessage.Length -gt $MaxSmokeLaunchExceptionChars) {
+            $smokeLaunchExceptionMessage = $smokeLaunchExceptionMessage.Substring(0, $MaxSmokeLaunchExceptionChars)
+        }
+    }
     $smokeFailure = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='SMOKE_RUN_FAILED'
         fixtureRehearsal=$FixtureRehearsal
         smokeExitCode=$smokeRc; smokeResultPresent=(Test-Path -LiteralPath $resultPath)
         smokeStderrTail=$smokeStderrTail
+        smokeLaunchExceptionType=$smokeLaunchExceptionType
+        smokeLaunchExceptionMessage=$smokeLaunchExceptionMessage
+        presentMonConfirmedExited=$presentMonStop.confirmedExited
+        presentMonKillError=$presentMonStop.killError
+        presentMonWaitError=$presentMonStop.waitError
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $smokeFailure (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=SMOKE_RUN_FAILED EXIT=$smokeRc ARTIFACTS=$Pub"
+    Write-Output "RESULT=SMOKE_RUN_FAILED EXIT=$smokeRc EXCEPTION=$smokeLaunchExceptionType PRESENTMON_EXITED=$($presentMonStop.confirmedExited) ARTIFACTS=$Pub"
     exit 18
 }
 

@@ -479,6 +479,99 @@ function Get-AttrCudaScriptRootDependencies {
     return @($names)
 }
 
+function Get-AttrCudaScriptFileLiteralReferences {
+    <#
+    .SYNOPSIS
+    Find every string literal in PowerShell source that names a .ps1/.psm1/.psd1/.py file, in
+    ANY quoting or Join-Path form -- by parsing the AST, not a regex.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 1). Get-AttrCudaScriptRootDependencies
+    recognizes exactly one syntactic shape and therefore missed a real, concrete reference:
+    tools/profiling/run-release-gui-smoke.ps1's own
+    `Join-Path $root "tools/profiling/detect-playback-artifacts.ps1"` (a different variable than
+    $PSScriptRoot, double-quoted, with an embedded directory) -- silently shipping an incomplete
+    closure whenever that reference is live. This scanner is the fail-closed counterpart: it
+    finds every candidate, mechanically, so the caller can REFUSE anything it cannot classify
+    instead of trusting the narrow shape alone.
+    Parses with the PowerShell language parser and inspects every StringConstantExpressionAst
+    (covers single-quoted, double-quoted-with-no-interpolation, and bare-word literals alike) and
+    every ExpandableStringExpressionAst (double-quoted WITH interpolation, e.g.
+    "$PSScriptRoot\x.ps1") -- both expose a `.Value` that is the literal source text, `$var`
+    references included verbatim rather than evaluated, which is exactly what is needed: a
+    variable segment cannot itself name a fixed file, so judging the string on its own literal
+    text (extension included) is sufficient and requires no evaluation.
+    Returns the raw literal text of every string whose value ends (case-insensitively) in .ps1,
+    .psm1, .psd1 or .py, in source order, not deduplicated. Deliberately broader than "a load
+    that will execute": a reference gated behind a switch the caller does not pass is still
+    returned here -- classification (closure member, explicitly excluded, or an unclassified
+    refusal) is the caller's job, never this scanner's.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$ScriptText
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($ScriptText, [ref]$tokens, [ref]$parseErrors)
+    $extensionPattern = '(?i)\.(ps1|psm1|psd1|py)$'
+    $found = [System.Collections.Generic.List[string]]::new()
+    $stringAsts = $ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+        $node -is [System.Management.Automation.Language.ExpandableStringExpressionAst]
+    }, $true)
+    foreach ($node in $stringAsts) {
+        $value = [string]$node.Value
+        if ($value -match $extensionPattern) { [void]$found.Add($value) }
+    }
+    return @($found)
+}
+
+# ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 1). The explicit, reasoned exclusion list kept
+# NEXT TO the scanner it qualifies, per the review requirement: every script-file literal
+# Get-AttrCudaScriptFileLiteralReferences finds in a closure member must be either a resolved
+# $PSScriptRoot dependency (staged) or listed here with a reason, or Resolve-AttrCudaSmokeRunnerClosure
+# refuses outright. Matched on the EXACT (repoRelativePath, literal) pair, never on basename
+# alone, so an exclusion never silently widens to cover an unrelated file that happens to share a
+# name.
+$script:AttrCudaClosureScanExclusions = @(
+    [pscustomobject]@{
+        repoRelativePath = 'tools/profiling/run-release-gui-smoke.ps1'
+        literal = 'tools/profiling/detect-playback-artifacts.ps1'
+        reason = 'Resolved via Join-Path $root (the -RepoRoot parameter), not $PSScriptRoot, and ' +
+            'only reached under -DetectPlaybackArtifacts. The ATTR-3 attribution job ' +
+            '(playback-attr-3-cuda-job.ps1) never passes that switch in its emitted smoke ' +
+            'invocation -- test_the_attr3_job_never_passes_detectplaybackartifacts asserts this -- ' +
+            'and the runner itself Test-Path-guards the call, falling back to verdict="no-data" ' +
+            'if the file is ever missing. Dormant for this route by construction, not by luck.'
+    }
+)
+
+function Test-AttrCudaClosureScanExclusionMatch {
+    <#
+    .SYNOPSIS
+    True if a (repoRelativePath, literal) pair is on the explicit exclusion list above.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRelativePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Literal
+    )
+
+    foreach ($exclusion in $script:AttrCudaClosureScanExclusions) {
+        if ($exclusion.repoRelativePath -eq $RepoRelativePath -and $exclusion.literal -eq $Literal) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Resolve-AttrCudaSmokeRunnerClosure {
     <#
     .SYNOPSIS
@@ -494,8 +587,13 @@ function Resolve-AttrCudaSmokeRunnerClosure {
     can resolve nowhere else at runtime. Returns an ordered list of [pscustomobject]@{ name;
     repoRelativePath; blobId; sha256 }, the root script first, then each further dependency in
     first-discovered (breadth-first) order, never duplicated.
+    FAIL CLOSED (sol, PR #144 major 1): every closure member's text is also scanned with the
+    broader Get-AttrCudaScriptFileLiteralReferences. Any script-file literal that is neither one
+    of the dependencies just discovered in that same file nor on the exclusion list above throws
+    ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE -- a reference this scan cannot prove dormant is never
+    silently skipped, whether or not the switch that would activate it is ever passed today.
     Throws ATTRCUDA_BLOB_UNRESOLVED (from Resolve-AttrCudaCommittedBlobId) if a referenced
-    sibling is not a committed blob at -Commit.
+    sibling is not a committed blob at -Commit, or ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE (above).
     #>
     [CmdletBinding()]
     param(
@@ -541,6 +639,15 @@ function Resolve-AttrCudaSmokeRunnerClosure {
         foreach ($dependencyName in (Get-AttrCudaScriptRootDependencies -ScriptText $text)) {
             if ($seen.Add($dependencyName)) { [void]$queue.Enqueue($dependencyName) }
         }
+        foreach ($literal in (Get-AttrCudaScriptFileLiteralReferences -ScriptText $text)) {
+            $literalBasename = [IO.Path]::GetFileName($literal)
+            if ($seen.Contains($literalBasename)) { continue }
+            if (Test-AttrCudaClosureScanExclusionMatch -RepoRelativePath $relativePath -Literal $literal) { continue }
+            throw ("ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE ${relativePath}: references '$literal', which is " +
+                "neither a resolved `$PSScriptRoot dependency nor on the exclusion list next to " +
+                "Get-AttrCudaScriptFileLiteralReferences in AttrCudaArtifacts.psm1 -- classify it (stage it or " +
+                "add a reasoned exclusion) before this closure can be trusted")
+        }
     }
     return @($closure)
 }
@@ -555,6 +662,11 @@ function Get-AttrCudaClosureDigestHex {
     newline -- so any two generators that resolve the SAME closure at the SAME commit derive
     the SAME digest regardless of discovery order, and the published cache directory name
     (`smoke-runner-<digest16>`) is a pure function of the closure's content.
+    Sorted with [StringComparer]::Ordinal (fable minor, PR #144 round 3, carried forward from
+    round 2's culture-aware Sort-Object): the digest is a cross-host content address and must
+    not depend on the sorting host's culture, even though the 64-hex sha256 prefix makes an
+    actual ordinal/culture divergence practically impossible here. The Python test's sorted()
+    is ordinal, so this makes the two definitions exact rather than merely agreeing in practice.
     #>
     [CmdletBinding()]
     param(
@@ -562,7 +674,8 @@ function Get-AttrCudaClosureDigestHex {
         [object[]]$Closure
     )
 
-    $lines = @($Closure | ForEach-Object { "$($_.sha256)  $($_.name)" }) | Sort-Object
+    $lines = [string[]]@($Closure | ForEach-Object { "$($_.sha256)  $($_.name)" })
+    [Array]::Sort($lines, [StringComparer]::Ordinal)
     $joined = ($lines -join "`n") + "`n"
     $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
     $stream = [IO.MemoryStream]::new($bytes)
@@ -571,6 +684,26 @@ function Get-AttrCudaClosureDigestHex {
     } finally {
         $stream.Dispose()
     }
+}
+
+function Test-AttrCudaPathIsReparsePoint {
+    <#
+    .SYNOPSIS
+    True if Path exists and is a reparse point (symlink, junction or mount point); false if it
+    is a plain file/directory or does not exist at all.
+    .DESCRIPTION
+    ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 2). Test-Path and Get-FileHash both resolve
+    THROUGH a reparse point to whatever it targets, so a hash-pin check that only ever calls
+    those two can be satisfied by a link whose TARGET -- not the staged, verified directory --
+    happens to carry the pinned bytes. Every closure directory and every member is checked with
+    this, before its content is trusted, so a link is refused rather than silently followed.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return $false }
+    return (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
 }
 
 function Assert-AttrCudaWritableFileSlot {
@@ -1157,9 +1290,12 @@ Export-ModuleMember -Function `
     Resolve-AttrCudaCommittedBlobId, `
     Save-AttrCudaCommittedBlobBytes, `
     Get-AttrCudaScriptRootDependencies, `
+    Get-AttrCudaScriptFileLiteralReferences, `
+    Test-AttrCudaClosureScanExclusionMatch, `
     Resolve-AttrCudaSmokeRunnerClosure, `
     Get-AttrCudaClosureDigestHex, `
     Assert-AttrCudaWritableFileSlot, `
+    Test-AttrCudaPathIsReparsePoint, `
     Assert-AttrCudaNonOverwritingFileSlot, `
     Read-AttrCudaBase64Payload, `
     Publish-AttrCudaBytes, `
