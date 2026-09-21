@@ -12,6 +12,24 @@ Round 3: the trace requirement is scoped to the nearest enclosing brace block
 block can no longer satisfy a `return;` it doesn't actually cover. The
 `return;` scan matches the token anywhere in the body -- including inline
 `if( x ) return;` -- not just a whole line containing only `return;`.
+
+Round 4 (sol r3 minor): round 3's "same enclosing block" check actually
+scanned body[block_start:return_start] -- the ENTIRE text from the block's
+opening brace to the return, which still includes any nested sibling block
+that opened and closed earlier in that same span. A trace call sitting in an
+earlier `if( x ) { logInteractionEvent(...); }` sibling therefore satisfied a
+later, unrelated `return;` in the outer block, even though that trace does
+not cover the return's actual code path. The scan is now restricted to text
+written DIRECTLY at the return's own brace depth -- text inside any nested
+`{...}` that closes before the return is excluded, whether that nested block
+sits before or after other direct-level statements. Comments and (for brace
+counting only) braces inside string/char literals are masked out first so
+they cannot distort depth tracking or produce phantom matches; string
+contents are otherwise left intact so the `draw_frame_ready.present_nothing`
+marker can still be identified inside its QStringLiteral. The
+`draw_frame_ready.present_nothing` exit specifically must also have
+`m_presentNothingDropCount.fetch_add(` directly in its own block -- a trace
+without the counter is no longer sufficient for that exit.
 """
 from pathlib import Path
 import re
@@ -24,6 +42,81 @@ MAIN_WINDOW_CPP = ROOT / "platform/qt/MainWindow.cpp"
 FUNCTION_NAME = "presentPlaybackPreparedFrame"
 
 RETURN_PATTERN = re.compile(r"\breturn\s*;")
+TRACE_CALL = "logInteractionEvent("
+DROP_COUNTER_CALL = "m_presentNothingDropCount.fetch_add("
+PRESENT_NOTHING_MARKER = "draw_frame_ready.present_nothing"
+
+
+def _mask_comments_and_string_braces(text: str) -> str:
+    """Same-length copy of *text* with comment bodies blanked and braces
+    inside string/char literals blanked, so neither can distort brace-depth
+    tracking or produce phantom `return;` / `logInteractionEvent(` matches.
+    Newlines are preserved everywhere so line numbers stay accurate. All
+    other string-literal content (e.g. the present_nothing marker text) is
+    left intact.
+    """
+    out = list(text)
+    length = len(text)
+    index = 0
+    state = None  # None | "line_comment" | "block_comment" | "string" | "char"
+    while index < length:
+        char = text[index]
+        if state is None:
+            if char == "/" and index + 1 < length and text[index + 1] == "/":
+                out[index] = " "
+                out[index + 1] = " "
+                state = "line_comment"
+                index += 2
+                continue
+            if char == "/" and index + 1 < length and text[index + 1] == "*":
+                out[index] = " "
+                out[index + 1] = " "
+                state = "block_comment"
+                index += 2
+                continue
+            if char == '"':
+                state = "string"
+                index += 1
+                continue
+            if char == "'":
+                state = "char"
+                index += 1
+                continue
+            index += 1
+            continue
+        if state == "line_comment":
+            if char == "\n":
+                state = None
+            else:
+                out[index] = " "
+            index += 1
+            continue
+        if state == "block_comment":
+            if char == "*" and index + 1 < length and text[index + 1] == "/":
+                out[index] = " "
+                out[index + 1] = " "
+                state = None
+                index += 2
+                continue
+            if char != "\n":
+                out[index] = " "
+            index += 1
+            continue
+        # state in ("string", "char")
+        closing = '"' if state == "string" else "'"
+        if char == "\\" and index + 1 < length:
+            if text[index + 1] in "{}":
+                out[index + 1] = " "
+            index += 2
+            continue
+        if char in "{}":
+            out[index] = " "
+            index += 1
+            continue
+        if char == closing:
+            state = None
+        index += 1
+    return "".join(out)
 
 
 def _extract_function_body(source: str, function_name: str) -> str:
@@ -33,12 +126,13 @@ def _extract_function_body(source: str, function_name: str) -> str:
     )
     assert start_match is not None, f"could not locate {function_name} definition"
 
+    masked_source = _mask_comments_and_string_braces(source)
     body_start = start_match.end()
     depth = 1
     index = body_start
     while depth > 0:
-        next_open = source.find("{", index)
-        next_close = source.find("}", index)
+        next_open = masked_source.find("{", index)
+        next_close = masked_source.find("}", index)
         assert next_close != -1, f"unterminated body for {function_name}"
         if next_open != -1 and next_open < next_close:
             depth += 1
@@ -50,35 +144,111 @@ def _extract_function_body(source: str, function_name: str) -> str:
     return source[body_start:body_end]
 
 
-def _find_returns_with_enclosing_block(body: str):
-    """Return a list of (return_start_index, enclosing_block_start_index).
+def _find_returns_with_context(body: str):
+    """Return a list of {"line", "direct_text"} for each `return;` in *body*.
 
-    The enclosing block is the nearest unclosed `{` at the point the
-    `return;` token is encountered -- i.e. the innermost brace scope the
-    return statement actually executes in, whether it sits alone on its own
-    line or inline after an `if( ... )`.
+    `direct_text` is the concatenation of text written DIRECTLY in the
+    return's innermost enclosing block -- i.e. it excludes any nested
+    `{...}` block that opens and closes before the return is reached, no
+    matter where that nested block sits relative to other direct-level
+    statements in the same enclosing block.
     """
-    stack = [0]
+    masked = _mask_comments_and_string_braces(body)
+    frame_starts = [0]
+    frame_segments = [[]]
     results = []
     index = 0
-    length = len(body)
+    length = len(masked)
     while index < length:
-        char = body[index]
+        char = masked[index]
         if char == "{":
-            stack.append(index + 1)
+            frame_segments[-1].append((frame_starts[-1], index))
+            frame_starts.append(index + 1)
+            frame_segments.append([])
             index += 1
-        elif char == "}":
-            if len(stack) > 1:
-                stack.pop()
+            continue
+        if char == "}":
+            if len(frame_starts) > 1:
+                frame_segments[-1].append((frame_starts[-1], index))
+                frame_starts.pop()
+                frame_segments.pop()
+                frame_starts[-1] = index + 1
             index += 1
-        else:
-            match = RETURN_PATTERN.match(body, index)
-            if match:
-                results.append((match.start(), stack[-1]))
-                index = match.end()
-            else:
-                index += 1
+            continue
+        match = RETURN_PATTERN.match(masked, index)
+        if match:
+            segments = frame_segments[-1] + [(frame_starts[-1], match.start())]
+            direct_text = "".join(body[s:e] for s, e in segments)
+            line_number = body.count("\n", 0, match.start()) + 1
+            results.append({"line": line_number, "direct_text": direct_text})
+            index = match.end()
+            continue
+        index += 1
     return results
+
+
+def _classify_return(direct_text: str):
+    traced = TRACE_CALL in direct_text
+    is_present_nothing = PRESENT_NOTHING_MARKER in direct_text
+    counted = DROP_COUNTER_CALL in direct_text
+    ok = traced and (not is_present_nothing or counted)
+    return ok, traced, is_present_nothing, counted
+
+
+def _make_sample_body(
+    *,
+    trace_in_sibling: bool = False,
+    trace_in_own_block: bool = True,
+    include_counter: bool = True,
+    extra_untraced_return: bool = False,
+) -> str:
+    """Synthetic stand-in for presentPlaybackPreparedFrame's present_nothing
+    exit, shaped to exercise the tripwire in isolation from the rest of the
+    real function. Used only in-memory by the mutation tests below -- never
+    written to disk.
+    """
+    own_log = (
+        "        logInteractionEvent(\n"
+        '            QStringLiteral("draw_frame_ready.present_nothing"),\n'
+        '            QStringLiteral("serial=%1").arg( task.requestSerial ) );\n'
+        if trace_in_own_block
+        else ""
+    )
+
+    sibling_block = (
+        "        if( diagnosticsEnabled )\n"
+        "        {\n"
+        "            logInteractionEvent(\n"
+        '                QStringLiteral("draw_frame_ready.present_nothing"),\n'
+        '                QStringLiteral("serial=%1").arg( task.requestSerial ) );\n'
+        "        }\n"
+        if trace_in_sibling
+        else ""
+    )
+
+    counter = (
+        "        m_presentNothingDropCount.fetch_add( 1, std::memory_order_acq_rel );\n"
+        if include_counter
+        else ""
+    )
+
+    body = (
+        "    if( !framePresentedByViewport && displayImage.isNull() )\n"
+        "    {\n"
+        + counter
+        + sibling_block
+        + own_log
+        + "        if( m_pRenderThread )\n"
+        "            m_pRenderThread->releasePresentedFrameForRequestSerial( task.requestSerial );\n"
+        "        return;\n"
+        "    }\n\n"
+    )
+
+    if extra_untraced_return:
+        body += "    if( someOtherEarlyOutCondition )\n        return;\n\n"
+
+    body += "    presentActualFrame( displayImage );\n"
+    return body
 
 
 class PresentPlaybackPreparedFrameTracesDropsTests(unittest.TestCase):
@@ -87,20 +257,31 @@ class PresentPlaybackPreparedFrameTracesDropsTests(unittest.TestCase):
         body = _extract_function_body(source, FUNCTION_NAME)
 
         untraced_returns = []
-        for return_start, block_start in _find_returns_with_enclosing_block(body):
-            preceding_in_block = body[block_start:return_start]
-            if "logInteractionEvent(" not in preceding_in_block:
-                # 1-indexed line within the function body, for a readable message.
-                line_number = body.count("\n", 0, return_start) + 1
-                untraced_returns.append(line_number)
+        uncounted_present_nothing_returns = []
+        for entry in _find_returns_with_context(body):
+            ok, traced, is_present_nothing, counted = _classify_return(entry["direct_text"])
+            if not traced:
+                untraced_returns.append(entry["line"])
+            elif is_present_nothing and not counted:
+                uncounted_present_nothing_returns.append(entry["line"])
 
         self.assertEqual(
             [],
             untraced_returns,
             f"{FUNCTION_NAME} has `return;` statement(s) at body line(s) "
             f"{untraced_returns} with no logInteractionEvent(...) call earlier "
-            "in the same enclosing block -- a dropped frame must never be "
-            "silent.",
+            "directly in the same enclosing block (a call inside an earlier "
+            "nested sibling block does not count) -- a dropped frame must "
+            "never be silent.",
+        )
+        self.assertEqual(
+            [],
+            uncounted_present_nothing_returns,
+            f"{FUNCTION_NAME} has draw_frame_ready.present_nothing `return;` "
+            f"statement(s) at body line(s) {uncounted_present_nothing_returns} "
+            "with no m_presentNothingDropCount.fetch_add(...) call directly in "
+            "the same enclosing block -- the drop counter must stay in lockstep "
+            "with the trace.",
         )
 
     def test_function_has_at_least_one_return_to_guard(self):
@@ -112,6 +293,62 @@ class PresentPlaybackPreparedFrameTracesDropsTests(unittest.TestCase):
             RETURN_PATTERN.search(body),
             f"{FUNCTION_NAME} no longer contains a `return;` -- "
             "re-check whether this tripwire is still needed.",
+        )
+
+
+class TripwireMutationTests(unittest.TestCase):
+    """In-memory mutations of a synthetic present_nothing exit, proving the
+    tripwire logic itself (not just the current MainWindow.cpp contents)
+    rejects the sol r3 false-positive and the missing-counter gap.
+    """
+
+    def _untraced_and_uncounted(self, body):
+        untraced = []
+        uncounted = []
+        for entry in _find_returns_with_context(body):
+            ok, traced, is_present_nothing, counted = _classify_return(entry["direct_text"])
+            if not traced:
+                untraced.append(entry["line"])
+            elif is_present_nothing and not counted:
+                uncounted.append(entry["line"])
+        return untraced, uncounted
+
+    def test_real_shaped_sample_passes(self):
+        body = _make_sample_body()
+        untraced, uncounted = self._untraced_and_uncounted(body)
+        self.assertEqual([], untraced)
+        self.assertEqual([], uncounted)
+
+    def test_trace_in_earlier_nested_sibling_block_is_rejected(self):
+        body = _make_sample_body(trace_in_sibling=True, trace_in_own_block=False)
+        untraced, uncounted = self._untraced_and_uncounted(body)
+        self.assertNotEqual(
+            [],
+            untraced,
+            "a logInteractionEvent(...) call sitting only in an earlier nested "
+            "sibling block must not satisfy a return in the outer block",
+        )
+
+    def test_missing_drop_counter_is_rejected(self):
+        body = _make_sample_body(include_counter=False)
+        untraced, uncounted = self._untraced_and_uncounted(body)
+        self.assertEqual([], untraced)
+        self.assertNotEqual(
+            [],
+            uncounted,
+            "a draw_frame_ready.present_nothing exit missing "
+            "m_presentNothingDropCount.fetch_add(...) must be flagged even "
+            "when it is traced",
+        )
+
+    def test_untraced_conditional_return_is_rejected(self):
+        body = _make_sample_body(extra_untraced_return=True)
+        untraced, uncounted = self._untraced_and_uncounted(body)
+        self.assertNotEqual(
+            [],
+            untraced,
+            "an inline `if( x ) return;` with no trace in its own block must "
+            "be flagged",
         )
 
 
