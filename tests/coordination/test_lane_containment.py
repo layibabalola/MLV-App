@@ -101,6 +101,20 @@ $me=Get-Process -Id $PID
 $args|ConvertTo-Json|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_ARGS
 $env:CLAUDE_CODE_EFFORT_LEVEL|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_EFFORT
 $env:CLAUDE_CODE_DISABLE_BACKGROUND_TASKS|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_BGTASKS
+# LANE-NO-BACKGROUND-END-TURN-1 round 2: simulate a lane that edits a tracked file WITHOUT
+# committing (env-gated no-op for every other test).
+if($env:MLV_FIXTURE_DIRTY_TRACKED_PATH){
+  'lane-edit-uncommitted'|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_DIRTY_TRACKED_PATH
+}
+# Simulate a lane that commits its edit (HEAD moves) and then leaves a further,
+# still-uncommitted edit behind on top of that commit.
+if($env:MLV_FIXTURE_COMMIT_TRACKED_PATH){
+  $repoDir=Split-Path $env:MLV_FIXTURE_COMMIT_TRACKED_PATH -Parent
+  'lane-edit-committed'|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_COMMIT_TRACKED_PATH
+  git -C $repoDir add -A | Out-Null
+  git -C $repoDir commit -q -m 'fixture lane commit' | Out-Null
+  'leftover-dirty-after-commit'|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_COMMIT_TRACKED_PATH
+}
 if($env:MLV_FIXTURE_MODE -ne 'normal'){
   $g=Start-Process pwsh.exe -ArgumentList @('-NoProfile','-NonInteractive','-File',$env:MLV_FIXTURE_GRAND_SCRIPT) -WindowStyle Hidden -PassThru
   while(-not(Test-Path $env:MLV_FIXTURE_GRAND)){Start-Sleep -Milliseconds 20}
@@ -166,8 +180,13 @@ def test_read_only_argv_json_stdin_and_tool_denial(fixture_tree):
     assert q["outputBytes"]>0 and q["spend"]["costUsd"]==0
     assert q["effort"]=="low"
     assert (fixture_tree["root"]/"effort.txt").read_text(encoding="utf-8-sig").strip()=="low"
-    assert (fixture_tree["root"]/"bgtasks.txt").read_text(encoding="utf-8-sig").strip()=="1"
-    assert q["authority"]["backgroundTasks"]=="disabled"
+    # LANE-NO-BACKGROUND-END-TURN-1 round 2 (hub ruling): NA-3 prohibits assigning ANY
+    # CLAUDE_CODE_* variable, so the round-1 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS child-env
+    # flag was removed rather than narrowed. Assert it never reaches the child and never
+    # reappears in the receipt -- a regression here would silently reintroduce NA-3-prohibited
+    # behavior.
+    assert (fixture_tree["root"]/"bgtasks.txt").read_text(encoding="utf-8-sig").strip()==""
+    assert "backgroundTasks" not in q["authority"]
 
 
 def test_timeout_kills_owned_child_and_grandchild(fixture_tree):
@@ -215,12 +234,29 @@ def test_editing_argv_preserves_allowlist_and_denies_nested_tools(fixture_tree):
     assert "--append-system-prompt" not in argv
     q=json.loads(receipt.read_text(encoding="utf-8"))
     assert q["authority"]["disallowedTools"]==DISALLOWED_TOOLS_TOKEN.split(",")
-    assert q["authority"]["backgroundTasks"]=="disabled"
+    assert "backgroundTasks" not in q["authority"]
+    assert (fixture_tree["root"]/"bgtasks.txt").read_text(encoding="utf-8-sig").strip()==""
 
 
-@pytest.mark.parametrize("bad",["Agent"," task ","Read, AGENT ,Write","Read,Task"])
+# LANE-NO-BACKGROUND-END-TURN-1 round 2 (sol minor 4 / fable minor 1): the pre-reservation
+# rejection must cover every entry in DISALLOWED_TOOLS_TOKEN, not only Agent/Task -- round 1
+# checked the deny-list argv/receipt but never exercised the guard against the five newer
+# tools, so a drift between the guard and the deny list (exactly what sol found) went untested.
+@pytest.mark.parametrize("bad",["Agent"," task ","Read, AGENT ,Write","Read,Task",
+    "Monitor","Read,ScheduleWakeup","CronCreate,Write","Read,CronDelete,Write"," remotetrigger "])
 def test_editing_explicit_nested_tool_is_rejected_before_reservation(fixture_tree,bad):
     cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools=bad)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=10)
+    assert r.returncode!=0 and "nested-agent-tool-forbidden" in r.stderr
+    assert not receipt.exists() and not (fixture_tree["root"]/"child.json").exists()
+
+
+@pytest.mark.parametrize("tool",DISALLOWED_TOOLS_TOKEN.split(","))
+def test_every_disallowed_tool_is_individually_rejected_from_an_editing_allowlist(fixture_tree,tool):
+    # Same guard, exercised one denied tool at a time (as opposed to the mixed-case/whitespace
+    # variants above) so a future partial fix -- e.g. one that catches Agent/Task/Monitor but
+    # misses a later addition to the deny list -- fails exactly the case it broke.
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools=f"Read,{tool}")
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=10)
     assert r.returncode!=0 and "nested-agent-tool-forbidden" in r.stderr
     assert not receipt.exists() and not (fixture_tree["root"]/"child.json").exists()
@@ -605,15 +641,18 @@ def _seed_git_repo(root):
     _git(root,"commit","-q","-m","seed")
 
 
-# LANE-NO-BACKGROUND-END-TURN-1: the fake claude in fixture_tree always answers a clean
-# success envelope (mode "normal") without touching the tree -- exactly the shape of a
-# headless lane that announced "I'll resume when the background job completes" and left
-# nothing behind. A HEAD-unchanged, tracked-dirty worktree must override that envelope.
-def test_dirty_tracked_worktree_with_no_commit_is_ended_incomplete(fixture_tree):
+# LANE-NO-BACKGROUND-END-TURN-1 round 2 (sol major 1 / fable minor 3): the check is now
+# gated to -AllowEdits Claude lanes, and it fires only on tracked dirt the LANE ITSELF
+# introduces during its run -- compared against a snapshot taken before the child ever
+# starts -- never on dirt that merely pre-exists the worktree. The fixture's fake child
+# writes to MLV_FIXTURE_DIRTY_TRACKED_PATH mid-run, without committing, simulating exactly
+# the "I'll resume when the background job completes" shape this check exists to catch:
+# HEAD never moves and the edit is never committed.
+def test_dirty_tracked_worktree_introduced_by_editing_lane_is_ended_incomplete(fixture_tree):
     root=fixture_tree["root"]
     _seed_git_repo(root)
-    (root/"tracked.txt").write_text("dirty-but-uncommitted\n",encoding="ascii")
-    cmd,env,receipt=prepare(fixture_tree,"normal")
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
+    env["MLV_FIXTURE_DIRTY_TRACKED_PATH"]=str(root/"tracked.txt")
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
     assert r.returncode==0,(r.stdout,r.stderr)
     q=json.loads(receipt.read_text(encoding="utf-8"))
@@ -626,7 +665,7 @@ def test_untracked_only_dirt_does_not_trigger_dirty_no_commit(fixture_tree):
     root=fixture_tree["root"]
     _seed_git_repo(root)
     (root/"scratch.log").write_text("untracked scratch output\n",encoding="ascii")
-    cmd,env,receipt=prepare(fixture_tree,"normal")
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
     assert r.returncode==0,(r.stdout,r.stderr)
     q=json.loads(receipt.read_text(encoding="utf-8"))
@@ -635,14 +674,79 @@ def test_untracked_only_dirt_does_not_trigger_dirty_no_commit(fixture_tree):
 
 
 def test_clean_git_worktree_is_still_marked_complete(fixture_tree):
-    # The new check must not misfire on the common healthy case: a git worktree
-    # with nothing dirty at all.
+    # The check must not misfire on the common healthy case: a git worktree with nothing
+    # dirty at all, exercised through an editing lane so the gated code path actually runs.
     root=fixture_tree["root"]
     _seed_git_repo(root)
-    cmd,env,receipt=prepare(fixture_tree,"normal")
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
     assert r.returncode==0,(r.stdout,r.stderr)
     q=json.loads(receipt.read_text(encoding="utf-8"))
     assert q["state"]=="complete" and q["complete"] is True
     assert q["workEvidence"]["reason"]!="dirty-worktree-no-commit"
     assert q["failure"] is None
+
+
+def test_pre_existing_tracked_dirt_unchanged_by_editing_lane_stays_complete(fixture_tree):
+    # Producer brief round 2, required case: dirt that existed BEFORE the lane ever ran, and
+    # that the lane's own run leaves byte-for-byte unchanged, must never flip a receipt -- only
+    # dirt the lane itself introduces counts. The fixture's fake child touches nothing here (no
+    # MLV_FIXTURE_DIRTY_TRACKED_PATH), so the pre-existing modification survives unchanged.
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    (root/"tracked.txt").write_text("dirty-before-the-lane-ever-ran\n",encoding="ascii")
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"] is True
+    assert q["workEvidence"]["reason"]!="dirty-worktree-no-commit"
+
+
+def test_committed_work_with_leftover_tracked_dirt_stays_complete(fixture_tree):
+    # Producer brief round 2, required case: pins the HEAD guard. The fixture's fake child
+    # commits its edit (moving HEAD away from BaseSha) and then leaves a further,
+    # still-uncommitted edit on top -- a regression that dropped the `headAfter -eq $BaseSha`
+    # condition would misclassify this as dirty-worktree-no-commit (fable minor 4 / sol minor 3:
+    # no prior test pinned this suppression direction).
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
+    env["MLV_FIXTURE_COMMIT_TRACKED_PATH"]=str(root/"tracked.txt")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"] is True
+    assert q["workEvidence"]["reason"]!="dirty-worktree-no-commit"
+
+
+def test_codex_lane_with_dirty_tracked_worktree_is_never_ended_incomplete_by_this_rule(fixture_tree):
+    # Producer brief round 2, required case: the override is a Claude-only, -AllowEdits-only
+    # concept ($InitialTrackedDirt is captured only when engine=='claude' and $AllowEdits) -- a
+    # codex lane must never be forced into ended-incomplete by it, no matter how dirty the
+    # tracked worktree is.
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    (root/"tracked.txt").write_text("dirty-tracked-file\n",encoding="ascii")
+    cmd,env,receipt=prepare(fixture_tree,"normal",lane="sol")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"] is True
+    assert q["workEvidence"]["reason"]!="dirty-worktree-no-commit"
+
+
+def test_read_only_claude_lane_with_dirty_tracked_worktree_is_never_ended_incomplete_by_this_rule(fixture_tree):
+    # Producer brief round 2, required case: a read-only Claude lane can never move HEAD by
+    # construction, so without the -AllowEdits gate this degenerated into "was the surrounding
+    # checkout dirty" -- a fact outside a review lane's control (sol major 1 / fable minor 3:
+    # the round-1 positive test for this check actually used a read-only lane).
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    (root/"tracked.txt").write_text("dirty-but-uncommitted\n",encoding="ascii")
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"] is True
+    assert q["workEvidence"]["reason"]!="dirty-worktree-no-commit"

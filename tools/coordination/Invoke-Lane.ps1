@@ -137,6 +137,15 @@ $LANES = @{
 $CLAUDE_EXE = Join-Path $env:APPDATA 'npm\claude.cmd'
 $CODEX_EXE  = Join-Path $env:APPDATA 'npm\codex.cmd'
 
+# Every tool that either fans out to another agent (Agent, Task) or promises a LATER turn a
+# headless lane cannot receive (Monitor, ScheduleWakeup, CronCreate, CronDelete, RemoteTrigger).
+# ONE constant feeds the pre-reservation allowlist rejection, the --disallowedTools argv, and
+# the receipt's authority.disallowedTools, so the enforcement points cannot drift apart the way
+# sol PR #150 round 1 found them (rejection checked only Agent/Task while the deny list covered
+# all seven).
+$DENIED_TOOLS_DISPLAY = @('Agent', 'Task', 'Monitor', 'ScheduleWakeup', 'CronCreate', 'CronDelete', 'RemoteTrigger')
+$DENIED_TOOLS = @($DENIED_TOOLS_DISPLAY | ForEach-Object { $_.ToLowerInvariant() })
+
 function Get-Sha256([string]$Text) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -258,13 +267,16 @@ if ($AllowEdits -and $LANES[$Lane].engine -eq 'codex') {
 if ($AllowEdits -and ([string]::IsNullOrWhiteSpace($AllowedTools) -or $AllowedTools -eq 'ALL')) {
     throw "allowlist-required: -AllowEdits requires -AllowedTools <comma-separated list>; 'ALL' is never granted"
 }
-# Nested agent dispatch is forbidden even when embedded in a caller-supplied editing
-# allowlist. Normalize comma tokens for the decision; preserve the original argv text.
+# Nested agent dispatch and every background-promise tool are forbidden even when embedded in a
+# caller-supplied editing allowlist. Checked against the SAME $DENIED_TOOLS list the
+# --disallowedTools argv is built from below, not a re-enumerated Agent/Task pair -- sol PR #150
+# round 1 found the two lists had drifted (rejection: Agent/Task only; deny list: seven tools).
+# Normalize comma tokens for the decision; preserve the original argv text.
 if ($AllowEdits) {
     $forbiddenTools = @($AllowedTools -split ',' | ForEach-Object { $_.Trim().ToLowerInvariant() } |
-        Where-Object { $_ -eq 'agent' -or $_ -eq 'task' })
+        Where-Object { $DENIED_TOOLS -contains $_ })
     if ($forbiddenTools.Count -gt 0) {
-        throw "nested-agent-tool-forbidden: -AllowedTools cannot contain Agent or Task"
+        throw "nested-agent-tool-forbidden: -AllowedTools cannot contain $($forbiddenTools -join ', ')"
     }
 }
 # MLV_BOARD_ROOT: only a test sets it (a tmp-dir board fixture); the default is the
@@ -303,6 +315,18 @@ $BaseSha = try {
     (& git -C $WorkDir rev-parse HEAD 2>$null | Select-Object -First 1)
 } catch { $null }
 if ([string]::IsNullOrWhiteSpace($BaseSha)) { $BaseSha = $null }
+# LANE-NO-BACKGROUND-END-TURN-1 round 2 (sol major 1 / fable minor 3): the dirty-no-commit
+# override below applies ONLY to editing Claude lanes, and only to tracked dirt the LANE
+# ITSELF introduced. Snapshot the tracked (non-'??') porcelain lines HERE, before the child
+# ever starts, so pre-existing dirt in a shared or already-dirty worktree can never be
+# mistaken for work the lane left behind. Nothing between here and process launch touches
+# $WorkDir's tracked files (settings.json and the prompt file are written under $RunDir /
+# the board root, not $WorkDir), so this snapshot is equivalent to "immediately before launch".
+$InitialTrackedDirt = $null
+if ($AllowEdits -and $LANES[$Lane].engine -eq 'claude' -and $BaseSha) {
+    $initialStatusLines = try { @(& git -C $WorkDir status --porcelain 2>$null) } catch { @() }
+    $InitialTrackedDirt = @($initialStatusLines | Where-Object { $_ -and -not $_.StartsWith('??') })
+}
 
 if (-not $RunDir) {
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
@@ -512,8 +536,9 @@ if ($cfg.engine -eq 'claude') {
     # a headless lane gets no later turn, so the work sat uncommitted with no receipt.
     # Monitor/ScheduleWakeup/CronCreate/CronDelete/RemoteTrigger all promise a callback
     # this process cannot receive. One comma-separated token avoids the same variadic
-    # swallowing hazard as allowedTools.
-    $argv += @('--disallowedTools', 'Agent,Task,Monitor,ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger')
+    # swallowing hazard as allowedTools. Built from $DENIED_TOOLS_DISPLAY, the same list the
+    # pre-reservation rejection above checks against.
+    $argv += @('--disallowedTools', ($DENIED_TOOLS_DISPLAY -join ','))
     # PROMPT GOES VIA STDIN, NOT AS A POSITIONAL ARGUMENT. Several claude flags
     # (--allowedTools, --add-dir) are VARIADIC and keep consuming every following
     # token that does not start with '-', so a trailing positional prompt is
@@ -532,8 +557,7 @@ if ($cfg.engine -eq 'claude') {
         maxTurns       = if ($MaxTurns -gt 0) { $MaxTurns } else { 'unset' }
         bulkReads      = if ($AllowBulkReads) { 'ALLOWED' } else { 'DENIED' }
         denyRules      = if ($AllowBulkReads) { @() } else { $denyRules }
-        disallowedTools = @('Agent', 'Task', 'Monitor', 'ScheduleWakeup', 'CronCreate', 'CronDelete', 'RemoteTrigger')
-        backgroundTasks = 'disabled'
+        disallowedTools = $DENIED_TOOLS_DISPLAY
         capabilityNotice = if ($AllowEdits) { $null } else { $capabilityNotice }
     }
 } else {
@@ -590,14 +614,12 @@ $psi.CreateNoWindow         = $true
 if ($cfg.engine -eq 'claude' -and $cfg.effort) {
     $psi.Environment['CLAUDE_CODE_EFFORT_LEVEL'] = $cfg.effort
 }
-# LANE-NO-BACKGROUND-END-TURN-1: belt-and-braces alongside the --disallowedTools deny
-# list above. Verified present in the installed CLI binary
-# (@anthropic-ai/claude-code-win32-x64/claude.exe) via `claude --help` plus a string
-# scan of the binary; --help does not document it, so this env var itself is the
-# verification, not the help text.
-if ($cfg.engine -eq 'claude') {
-    $psi.Environment['CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'] = '1'
-}
+# LANE-NO-BACKGROUND-END-TURN-1 round 2 (hub ruling): a CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
+# child-environment flag was here through round 1. docs/never-authorized.json NA-3 prohibits
+# assigning ANY CLAUDE_CODE_* variable, and widening that rule is an authority change the hub
+# will not make -- so the flag is removed entirely, not narrowed. Containment of background
+# work now rests on the --disallowedTools deny list above, the dirty-no-commit receipt check
+# below, and the brief-level prohibition on background work; see docs/lane-containment.md.
 # Per-run lane scratch under an MLV-owned root instead of the shared %TEMP%.
 $scratchDir = $null
 if ($ScratchRoot) {
@@ -951,17 +973,29 @@ try {
 }
 # LANE-NO-BACKGROUND-END-TURN-1: a success envelope is not positive evidence of work if the
 # tree never moved. HEAD still equal to the sha this lane started from, with tracked files
-# left dirty, is exactly what "I'll resume when the background job completes" leaves behind
-# on a headless lane that has no later turn to make good on that promise -- so it overrides
-# whatever the envelope claims. Untracked-only dirt (scratch files, logs) does not count.
-if ($BaseSha) {
+# left dirty BY THIS LANE, is exactly what "I'll resume when the background job completes"
+# leaves behind on a headless lane that has no later turn to make good on that promise -- so
+# it overrides whatever the envelope claims. Untracked-only dirt (scratch files, logs) does
+# not count.
+# Round 2 (sol major 1 / fable minor 3): gated to editing Claude lanes only, and compared
+# against $InitialTrackedDirt so PRE-EXISTING tracked dirt never flips a receipt. A read-only
+# lane can never move HEAD by construction, so without this gate the check degenerated to
+# "was the surrounding checkout dirty" -- a fact outside a review lane's control. A codex
+# lane never sets $InitialTrackedDirt (claude-only capture above) and is likewise excluded.
+if ($AllowEdits -and $cfg.engine -eq 'claude' -and $BaseSha) {
     $headAfter = try { (& git -C $WorkDir rev-parse HEAD 2>$null | Select-Object -First 1) } catch { $null }
     if ($headAfter -eq $BaseSha) {
         $statusLines = try { @(& git -C $WorkDir status --porcelain 2>$null) } catch { @() }
-        $trackedDirty = @($statusLines | Where-Object { $_ -and -not $_.StartsWith('??') })
-        if ($trackedDirty.Count -gt 0) {
+        $trackedDirtyAfter = @($statusLines | Where-Object { $_ -and -not $_.StartsWith('??') })
+        # New or changed lines only -- a porcelain line that changed status code (e.g. ' M' to
+        # 'M ') for the SAME pre-existing file still counts as the lane touching it.
+        $introducedDirt = @($trackedDirtyAfter | Where-Object { $InitialTrackedDirt -notcontains $_ })
+        if ($introducedDirt.Count -gt 0) {
             $workEvidence.workCompleted = $false
-            $workEvidence.reason = 'dirty-worktree-no-commit'
+            # Preserve any existing reason (e.g. a subtype-* classification from a partially
+            # successful envelope) by appending rather than overwriting it -- sol/fable round 1
+            # noted an unconditional overwrite can mask the original failure reason.
+            $workEvidence.reason = if ($workEvidence.reason) { "$($workEvidence.reason) | dirty-worktree-no-commit" } else { 'dirty-worktree-no-commit' }
         }
     }
 }
