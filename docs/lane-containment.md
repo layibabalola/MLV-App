@@ -115,6 +115,31 @@ self-test runs its form through `bash -c`. Only "neither Git Bash nor
 PowerShell resolves" refuses the launch now (`background-gate-shell-not-found`,
 naming both attempted resolutions).
 
+**Round 11 (sol major / fable minor 1): a RESOLVED shell is not the same as a
+USABLE one -- selection now falls back on self-test failure, not only on
+resolution failure.** Round 10 committed to Git Bash the instant
+`Resolve-LaneExecutable` returned a hit, by file existence alone -- so on a host
+with the WSL feature enabled but no Git for Windows, the System32 WSL launcher
+stub also "resolves" (it is a real file on `PATH`), the self-test then fails,
+and round 10 refused the whole launch without ever trying the PowerShell
+fallback sitting right there: the exact "stricter than the product" outage
+round 10 set out to remove, surviving in this one sub-case. There is no
+separate classification step -- the self-test already proves whether a
+candidate can run this hook's exact command form, so it now runs per candidate,
+in preference order (bash, then PowerShell), moving to the next on ANY
+self-test failure and refusing only once every resolved candidate has failed.
+**Round 11 (sol minor / fable minor 2): exit 2 alone is no longer sufficient
+proof.** The hook's own fail-closed empty-stdin path also exits 2, and Python
+itself exits 2 for a missing or misquoted script path -- so a registration-only
+regression of either shape could pass a bare exit-2 self-test while every
+matched call was then over-blocked for the wrong reason. The self-test now also
+requires the hook's own deny-reason text (`"headless lane"`) in the captured
+output, and adds a positive control: the same registered command string run
+against a non-background payload must be ALLOWED (exit 0) before the candidate
+is trusted -- a subject and a control that differ is what proves the gate
+discriminates, not exit 2 in isolation. Both checks apply per candidate in the
+fallback loop above.
+
 **Round 9: both the interpreter and the shell are RESOLVED at runtime, never
 pinned.** The dev-machine-only pins broke hosted CI: the real job log (run
 35758428267, job 106850299120, 2026-09-22) shows Git Bash ran fine on the

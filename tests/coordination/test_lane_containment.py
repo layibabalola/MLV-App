@@ -471,6 +471,12 @@ def test_launch_refuses_when_registered_command_has_a_bad_interpreter_path_even_
         broken = "$hookCommand = ('\"{0}-does-not-exist\" \"{1}\"' -f $PYTHON_EXE, $hookCopyPath)"
         return text.replace(needle, broken)
     cmd,env,receipt=prepare(fixture_tree,"normal",mutation=break_registered_command_only)
+    # Round 11: shell selection now falls back to PowerShell on a bash self-test failure (the
+    # WSL-stub fix), so a broken BASH command string alone would no longer refuse the launch --
+    # it would just fall through to a working PowerShell candidate and succeed. Force PowerShell
+    # unresolvable too so the bash break is the thing that actually decides the outcome, and the
+    # attempts list still names the underlying exit-127 interpreter failure.
+    env["MLV_LANE_POWERSHELL_EXE"]=str(fixture_tree["root"]/"nonexistent-powershell.exe")
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
     assert r.returncode!=0,(r.stdout,r.stderr)
     assert not (fixture_tree["root"]/"child.json").exists()
@@ -519,16 +525,41 @@ def test_launch_refuses_when_registered_command_has_a_bad_interpreter_path_even_
 # itself would still fail closed on the shell axis; no supported Windows configuration lacks it,
 # so this is not exercised by a skip-free test the way the four tests below exercise their own
 # specific override tiers.
+# Round 11 (sol major / fable minor 1): file existence alone is the SAME misclassification
+# Resolve-LaneExecutable used to make -- the Windows-shipped WSL bash.exe launcher stub is a
+# real file that `shutil.which("bash")` and `Path(...).is_file()` both happily report, but with
+# no WSL distribution installed it exits 1 without ever running anything, and even with one
+# installed it is not the POSIX shell this hook's command form expects. Invoke-Lane.ps1's own
+# shell selection no longer trusts existence either (round 11) -- it classifies a candidate by
+# actually self-testing it. This helper does the same: a candidate is "real Git Bash" only if it
+# runs lane-no-background.py's own deny protocol correctly, never merely because a file sits at
+# that path.
+def _bash_candidate_runs_the_hook(bash_exe):
+    command = '"{0}" "{1}"'.format(sys.executable, LANE_NO_BACKGROUND_SCRIPT)
+    try:
+        r = subprocess.run(
+            [bash_exe, "-c", command],
+            input='{"tool_name":"Bash","tool_input":{"command":"echo x","run_in_background":true}}',
+            text=True, capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 2 and "headless lane" in (r.stdout + r.stderr)
+
+
 def _find_real_git_bash():
+    candidates = []
     found = shutil.which("bash")
     if found and Path(found).is_file():
-        return found
+        candidates.append(found)
     for candidate in (
         r"C:\Program Files\Git\bin\bash.exe",
         r"C:\Program Files\Git\usr\bin\bash.exe",
         r"C:\Program Files (x86)\Git\bin\bash.exe",
     ):
-        if Path(candidate).is_file():
+        if Path(candidate).is_file() and candidate not in candidates:
+            candidates.append(candidate)
+    for candidate in candidates:
+        if _bash_candidate_runs_the_hook(candidate):
             return candidate
     return None
 
@@ -574,6 +605,64 @@ def test_launch_falls_back_to_powershell_when_git_bash_override_is_unresolvable(
     # round's summary.md).
     assert hook_entry["command"].startswith('& "')
     assert hook_entry["command"].endswith('; exit $LASTEXITCODE')
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 11 (sol major / fable minor 1): round 10's fallback only
+# fired when Git Bash did not RESOLVE at all -- it never fired when Git Bash resolved to
+# something that then FAILED its self-test, which is exactly the WSL-stub host shape (the stub
+# exists on PATH, so it resolves; it just cannot run this hook's command form). Simulate that
+# shape deterministically, without depending on WSL actually being installed on whatever host
+# runs this suite: point MLV_GIT_BASH at a real, launchable binary that is not a POSIX shell (a
+# cmd.exe copy -- same decoy binary test_resolve_prefers_known_location_over_path_when_both_
+# resolve uses elsewhere in this file). Measured directly: `cmd.exe -c "<hookCommand>"` with the
+# self-test payload piped to stdin treats stdin as an interactive command stream and exits 0, never
+# 2 -- a real, distinct self-test failure, not a launch exception. Shell selection must fall
+# through to PowerShell rather than refusing the launch outright.
+def test_launch_falls_back_to_powershell_when_resolved_bash_candidate_fails_its_selftest(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    fake_bash=fixture_tree["root"]/"fake-stub-bash.exe"
+    fake_bash.write_bytes(Path(os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe")).read_bytes())
+    env["MLV_GIT_BASH"]=str(fake_bash)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"]
+    assert q["authority"]["backgroundGateShellKind"]=="powershell"
+    assert q["authority"]["backgroundGateShellSource"]!="override:MLV_GIT_BASH"
+    settings=json.loads(settings_path_for(receipt).read_text(encoding="utf-8-sig"))
+    hook_entry=settings["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook_entry["shell"]=="powershell"
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 11 (sol minor / fable minor 2): round 10's self-test
+# treated any exit 2 as proof of a genuine deny, which a misregistered (missing/misquoted) hook
+# copy path can also produce -- Python itself exits 2 for "can't open file". A registration-only
+# regression of this shape must now FAIL the self-test rather than pass it. Break the hook COPY
+# path baked into $hookCommand (not $PYTHON_EXE, which round 8's sibling test already covers) so
+# the interpreter is real and correct but the script argument is not.
+def test_launch_refuses_when_registered_hook_copy_path_does_not_exist(fixture_tree):
+    def break_hook_copy_path(text):
+        needle = "$hookCommand = ('\"{0}\" \"{1}\"' -f $PYTHON_EXE, $hookCopyPath)"
+        assert needle in text, "Invoke-Lane.ps1's $hookCommand builder line changed shape; update this fixture's mutation to match"
+        broken = "$hookCommand = ('\"{0}\" \"{1}-does-not-exist\"' -f $PYTHON_EXE, $hookCopyPath)"
+        return text.replace(needle, broken)
+    cmd,env,receipt=prepare(fixture_tree,"normal",mutation=break_hook_copy_path)
+    # Same reasoning as the sibling bad-interpreter-path test: force PowerShell unresolvable so
+    # the broken bash command string is what decides the outcome, not an available fallback.
+    env["MLV_LANE_POWERSHELL_EXE"]=str(fixture_tree["root"]/"nonexistent-powershell.exe")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode!=0,(r.stdout,r.stderr)
+    assert not (fixture_tree["root"]/"child.json").exists()
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="failed"
+    assert not q["complete"]
+    assert q["failure"].startswith("background-gate-selftest-failed")
+    # Python's own "can't open file" exit is 2 -- the SAME exit code the hook's own fail-closed
+    # empty-stdin path uses. A round-10-shaped self-test (exit-2-only) would have PASSED this
+    # mutation despite the hook never running. Proof it never ran: Python's own missing-file
+    # message is what's captured, not the hook's DENY_REASON text.
+    assert "No such file or directory" in q["failure"]
+    assert "a headless lane has no later turn" not in q["failure"]
 
 
 def test_launch_refuses_when_neither_git_bash_nor_powershell_resolve(fixture_tree):

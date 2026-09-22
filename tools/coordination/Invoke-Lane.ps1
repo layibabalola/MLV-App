@@ -788,37 +788,27 @@ if ($cfg.engine -eq 'claude') {
     # whenever Git Bash is absent, as round 9 did, is STRICTER than the product itself and is a
     # self-inflicted outage on any host without Git Bash but with PowerShell (i.e. every Windows
     # host). Only "neither shell resolved" remains fail-closed.
+    #
+    # Round 11 (sol major / fable minor 1): round 10 trusted `Resolve-LaneExecutable`'s file-
+    # existence hit for Git Bash and committed to `bash` before ever self-testing it -- so on a
+    # host with the WSL feature enabled but no Git for Windows, the System32 WSL launcher STUB
+    # (which also "exists" on PATH, per the comment above `Resolve-LaneExecutable`) was selected,
+    # its self-test failed, and the launch was refused WITHOUT EVER TRYING the PowerShell fallback
+    # sitting right there -- exactly the "stricter than the product" outage round 10 set out to
+    # remove, surviving in this one sub-case. There is no separate classification step: the self-
+    # test below already proves whether a candidate is a usable POSIX/PowerShell for this hook's
+    # exact command form, so classification and self-test are the SAME check, run per candidate,
+    # in preference order (bash, then PowerShell). Selection now moves to the next candidate on
+    # ANY self-test failure and refuses only when every resolved candidate has failed.
+    $backgroundGateCandidates = @()
     if ($GIT_BASH_EXE) {
-        $backgroundGateShellKind = 'bash'
-        $backgroundGateShellExe = $GIT_BASH_EXE
-        $backgroundGateShellResolution = $GIT_BASH_EXE_RESOLUTION
-    } elseif ($POWERSHELL_EXE) {
-        $backgroundGateShellKind = 'powershell'
-        $backgroundGateShellExe = $POWERSHELL_EXE
-        $backgroundGateShellResolution = $POWERSHELL_EXE_RESOLUTION
-    } else {
-        throw "background-gate-shell-not-found: no Git Bash resolved ($($GIT_BASH_EXE_RESOLUTION.Source)) and no PowerShell resolved ($($POWERSHELL_EXE_RESOLUTION.Source)); an unrunnable hook command denies nothing, so the launch is refused rather than registering a hook whose self-test can never run."
+        $backgroundGateCandidates += [pscustomobject]@{ Kind = 'bash'; Exe = $GIT_BASH_EXE; Resolution = $GIT_BASH_EXE_RESOLUTION }
     }
-    # Round 8 (sol major 1) / round 10: the command STRING is built exactly ONCE per resolved
-    # shell kind, here -- both the --settings hook entry below and the self-test use this same
-    # variable, so there is no way for the string the self-test proves and the string actually
-    # registered to drift apart.
-    if ($backgroundGateShellKind -eq 'bash') {
-        $hookCommand = ('"{0}" "{1}"' -f $PYTHON_EXE, $hookCopyPath)
-    } else {
-        # Round 10: measured directly on this dev machine (full transcript in this round's
-        # summary.md). Two PowerShell-specific hazards, both load-bearing, not stylistic:
-        # (1) `powershell.exe -Command '"<path>" "<arg>"'` is a PARSE ERROR ("Unexpected token")
-        # without a leading call operator `&` -- unlike `bash -c`, PowerShell does not implicitly
-        # invoke a bare quoted string as a command. (2) even WITH `&`, a NESTED
-        # `powershell.exe -Command "& exe args"` does NOT propagate the invoked process's non-zero
-        # exit code as its OWN exit code by default -- measured: the hook's real exit 2 collapsed
-        # to exit 1 from the outer powershell.exe, with no `; exit $LASTEXITCODE` suffix. Per the
-        # vendor hooks reference's own exit-code table, exit 1 (without a blocking JSON decision)
-        # is a NON-BLOCKING error for PreToolUse -- the tool call PROCEEDS -- so a PowerShell-form
-        # command missing this suffix would silently fail OPEN in exactly the one case this
-        # fallback exists to cover.
-        $hookCommand = ('& "{0}" "{1}"; exit $LASTEXITCODE' -f $PYTHON_EXE, $hookCopyPath)
+    if ($POWERSHELL_EXE) {
+        $backgroundGateCandidates += [pscustomobject]@{ Kind = 'powershell'; Exe = $POWERSHELL_EXE; Resolution = $POWERSHELL_EXE_RESOLUTION }
+    }
+    if ($backgroundGateCandidates.Count -eq 0) {
+        throw "background-gate-shell-not-found: no Git Bash resolved ($($GIT_BASH_EXE_RESOLUTION.Source)) and no PowerShell resolved ($($POWERSHELL_EXE_RESOLUTION.Source)); an unrunnable hook command denies nothing, so the launch is refused rather than registering a hook whose self-test can never run."
     }
     # Round 7 (sol major 2): a missing or wrong-path interpreter cannot be detected FROM INSIDE
     # the hook -- Claude Code treats a failed hook COMMAND as a non-blocking error and the tool
@@ -828,29 +818,96 @@ if ($cfg.engine -eq 'claude') {
     # background.py's own protocol). A launch whose self-test does not pass never starts the
     # provider -- the throw below is caught by this script's own top-level try/catch, which
     # still writes a well-formed 'failed' receipt naming this exact reason.
-    # Round 8 (sol major 1) / round 10: "the exact registered command" means invoking $hookCommand
-    # through the SAME shell that will actually run it -- Git Bash when resolved, PowerShell
-    # ($backgroundGateShellExe above) only as the fallback -- never a direct call against the
-    # interpreter and script as two separate, decomposed argv tokens. Round 7's
-    # `& $PYTHON_EXE $hookCopyPath` tested only that the interpreter and script individually
-    # behave; it could not catch a broken COMMAND STRING (bad quoting, a wrong path baked into
-    # $hookCommand alone) the way running that exact string through the real shell can -- and a
-    # broken registered string, passing self-test only because the self-test never actually ran
-    # the registered string, is exactly the failure mode a launch self-test exists to rule out.
-    $backgroundGateSelfTestPayload = '{"tool_name":"Bash","tool_input":{"command":"echo x","run_in_background":true}}'
-    try {
-        if ($backgroundGateShellKind -eq 'bash') {
-            $selfTestOutput = $backgroundGateSelfTestPayload | & $backgroundGateShellExe -c $hookCommand 2>&1
+    #
+    # Round 11 (sol minor / fable minor 2): exit 2 ALONE is not proof the hook ran and denied
+    # THIS payload -- lane-no-background.py's own fail-closed empty-stdin path also exits 2, and
+    # Python itself exits 2 when the registered script path is missing or misquoted (it prints
+    # its own "can't open file" message and nothing the hook would ever say). A registration-only
+    # path/quoting regression could therefore pass a bare exit-2 check while every matched call is
+    # then over-blocked for the WRONG reason. The hook's own DENY_REASON text ("headless lane: ...
+    # a headless lane has no later turn") only ever reaches stdout/stderr on the genuine
+    # `run_in_background: true` branch -- neither fail-closed-input path nor a Python launch
+    # failure prints it -- so requiring it in the captured self-test output is a positive proof
+    # the DENY branch itself ran, not merely that something upstream returned 2.
+    $backgroundGateExpectedDenySubstring = 'headless lane'
+    $backgroundGateSelfTestDenyPayload = '{"tool_name":"Bash","tool_input":{"command":"echo x","run_in_background":true}}'
+    # Round 11 (sol minor / fable minor 2): a deny-only self-test cannot distinguish "the gate
+    # discriminates on run_in_background" from "this shell/path always exits 2 no matter what" --
+    # a subject and a control that differ is the only thing that proves discrimination. Run the
+    # SAME registered command string against a non-background payload and require it to be
+    # ALLOWED (exit 0) before trusting the deny result above.
+    $backgroundGateSelfTestAllowPayload = '{"tool_name":"Bash","tool_input":{"command":"echo x","run_in_background":false}}'
+    $backgroundGateAttempts = @()
+    $backgroundGateSelected = $null
+    foreach ($candidate in $backgroundGateCandidates) {
+        # Round 8 (sol major 1) / round 10: the command STRING is built exactly ONCE per
+        # candidate shell kind -- both the --settings hook entry below and the self-test use
+        # this same variable, so there is no way for the string the self-test proves and the
+        # string actually registered to drift apart.
+        if ($candidate.Kind -eq 'bash') {
+            $hookCommand = ('"{0}" "{1}"' -f $PYTHON_EXE, $hookCopyPath)
         } else {
-            $selfTestOutput = $backgroundGateSelfTestPayload | & $backgroundGateShellExe -Command $hookCommand 2>&1
+            # Round 10: measured directly on this dev machine (full transcript in this round's
+            # summary.md). Two PowerShell-specific hazards, both load-bearing, not stylistic:
+            # (1) `powershell.exe -Command '"<path>" "<arg>"'` is a PARSE ERROR ("Unexpected token")
+            # without a leading call operator `&` -- unlike `bash -c`, PowerShell does not implicitly
+            # invoke a bare quoted string as a command. (2) even WITH `&`, a NESTED
+            # `powershell.exe -Command "& exe args"` does NOT propagate the invoked process's non-zero
+            # exit code as its OWN exit code by default -- measured: the hook's real exit 2 collapsed
+            # to exit 1 from the outer powershell.exe, with no `; exit $LASTEXITCODE` suffix. Per the
+            # vendor hooks reference's own exit-code table, exit 1 (without a blocking JSON decision)
+            # is a NON-BLOCKING error for PreToolUse -- the tool call PROCEEDS -- so a PowerShell-form
+            # command missing this suffix would silently fail OPEN in exactly the one case this
+            # fallback exists to cover.
+            $hookCommand = ('& "{0}" "{1}"; exit $LASTEXITCODE' -f $PYTHON_EXE, $hookCopyPath)
         }
-        $selfTestExit = $LASTEXITCODE
-    } catch {
-        throw "background-gate-selftest-failed: interpreter invocation threw: $($_.Exception.Message)"
+        # Round 8 (sol major 1) / round 10: "the exact registered command" means invoking
+        # $hookCommand through the SAME shell that will actually run it -- never a direct call
+        # against the interpreter and script as two separate, decomposed argv tokens. Round 7's
+        # `& $PYTHON_EXE $hookCopyPath` tested only that the interpreter and script individually
+        # behave; it could not catch a broken COMMAND STRING (bad quoting, a wrong path baked into
+        # $hookCommand alone, or -- round 11 -- a candidate shell that is not what it claims to be,
+        # like the WSL stub) the way running that exact string through the real candidate can.
+        try {
+            if ($candidate.Kind -eq 'bash') {
+                $denyOutput = $backgroundGateSelfTestDenyPayload | & $candidate.Exe -c $hookCommand 2>&1
+            } else {
+                $denyOutput = $backgroundGateSelfTestDenyPayload | & $candidate.Exe -Command $hookCommand 2>&1
+            }
+            $denyExit = $LASTEXITCODE
+        } catch {
+            $backgroundGateAttempts += "$($candidate.Kind) ($($candidate.Resolution.Source)): interpreter invocation threw: $($_.Exception.Message)"
+            continue
+        }
+        $denyOutputText = ($denyOutput -join ' | ')
+        if ($denyExit -ne 2 -or $denyOutputText -notlike "*$backgroundGateExpectedDenySubstring*") {
+            $backgroundGateAttempts += "$($candidate.Kind) ($($candidate.Resolution.Source)): expected exit 2 with a deny reason containing '$backgroundGateExpectedDenySubstring' from the exact registered command string, got exit $denyExit; output: $denyOutputText"
+            continue
+        }
+        try {
+            if ($candidate.Kind -eq 'bash') {
+                $allowOutput = $backgroundGateSelfTestAllowPayload | & $candidate.Exe -c $hookCommand 2>&1
+            } else {
+                $allowOutput = $backgroundGateSelfTestAllowPayload | & $candidate.Exe -Command $hookCommand 2>&1
+            }
+            $allowExit = $LASTEXITCODE
+        } catch {
+            $backgroundGateAttempts += "$($candidate.Kind) ($($candidate.Resolution.Source)): positive-control invocation threw: $($_.Exception.Message)"
+            continue
+        }
+        if ($allowExit -ne 0) {
+            $backgroundGateAttempts += "$($candidate.Kind) ($($candidate.Resolution.Source)): positive control failed -- a non-background payload through the same registered command string was expected to be ALLOWED (exit 0) but got exit $allowExit; output: $($allowOutput -join ' | '); a self-test that cannot show BOTH a deny and an allow does not prove the gate discriminates"
+            continue
+        }
+        $backgroundGateSelected = $candidate
+        break
     }
-    if ($selfTestExit -ne 2) {
-        throw "background-gate-selftest-failed: expected exit 2 (deny) from the exact registered command string run through $backgroundGateShellKind (the shell this launch registers via the settings 'shell' field), got exit $selfTestExit; output: $($selfTestOutput -join ' | ')"
+    if (-not $backgroundGateSelected) {
+        throw "background-gate-selftest-failed: no resolved shell proved both the deny and the positive control through the exact registered command string; attempts: $($backgroundGateAttempts -join ' ;; ')"
     }
+    $backgroundGateShellKind = $backgroundGateSelected.Kind
+    $backgroundGateShellExe = $backgroundGateSelected.Exe
+    $backgroundGateShellResolution = $backgroundGateSelected.Resolution
     # Matcher covers BOTH shell tools carrying `run_in_background` (round 7, sol major 1 /
     # fable major): PowerShell has the same parameter Bash does, and the sanctioned editing
     # dispatch (docs/Start-EditingLane.ps1) grants PowerShell to every editing lane. The
