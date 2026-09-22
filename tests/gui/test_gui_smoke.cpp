@@ -2,6 +2,7 @@
 #include "../../platform/qt/DualIsoPlaybackPolicy.h"
 #include "../../platform/qt/DualIsoPatternMapping.h"
 #include "../../platform/qt/GpuDisplayViewport.h"
+#include "../../platform/qt/GpuDisplayWindow.h"
 #include "../../platform/qt/GpuPreviewProcessing.h"
 #include "../../platform/qt/Histogram.h"
 #include "../../platform/qt/MainWindowGpuPreviewPolicy.h"
@@ -29,6 +30,8 @@
 #include <QScopeGuard>
 #include <QScreen>
 #include <QScrollBar>
+#include <QVBoxLayout>
+#include <QWidget>
 #include <QtTest/QtTest>
 
 #include <cmath>
@@ -39,6 +42,39 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
+
+// MLV_REQUIRE_GL_TESTS=1 turns an offscreen-platform skip into a hard failure, for the GL
+// window capture/race tests that must not silently skip on a run that is supposed to have
+// a real, creatable OpenGL context (a hosted pilot on real hardware). Must NOT be set in
+// the offscreen CI job -- it has no creatable GL context and skipping there is correct.
+// A plain macro (not a helper function): the skip/fail primitives below both return from
+// the calling test function itself, which a helper function could not do on its behalf.
+#define MLV_SKIP_OR_FAIL_IF_OFFSCREEN(reason) \
+    do { \
+        if (QGuiApplication::platformName() == QStringLiteral("offscreen")) { \
+            if (qEnvironmentVariable("MLV_REQUIRE_GL_TESTS") == QStringLiteral("1")) { \
+                QTest::qFail(reason, __FILE__, __LINE__); \
+                return; \
+            } \
+            QTest::qSkip(reason, __FILE__, __LINE__); \
+            return; \
+        } \
+    } while (0)
+
+// A framebuffer-capture attempt can still fail at runtime on a platform that DID create a
+// GL context (so MLV_SKIP_OR_FAIL_IF_OFFSCREEN above already passed) -- e.g. a transient
+// readback error. Under MLV_REQUIRE_GL_TESTS=1 (a hosted pilot on real hardware that is
+// supposed to have a working GL capture path) that must be a hard failure too, not a silent
+// skip that could mask a real regression.
+#define MLV_SKIP_OR_FAIL_IF_READBACK_FAILED(reason) \
+    do { \
+        if (qEnvironmentVariable("MLV_REQUIRE_GL_TESTS") == QStringLiteral("1")) { \
+            QTest::qFail(reason, __FILE__, __LINE__); \
+            return; \
+        } \
+        QTest::qSkip(reason, __FILE__, __LINE__); \
+        return; \
+    } while (0)
 
 namespace {
 
@@ -589,6 +625,10 @@ private slots:
     void gpuViewportKeepsNativeSceneRectForTexturePresentationGeometry();
     void gpuViewportPresentsRgb888PatternExactly();
     void gpuViewportPresentsRgb16PatternExactly();
+    void gpuDisplayWindowFramebufferReadbackFailsWithoutActiveWindow();
+    void gpuDisplayWindowGrabsPresentedFramebufferReadback();
+    void gpuDisplayWindowCapturePresentsPendingFrameAsRealPaint();
+    void gpuDisplayWindowCaptureIgnoresFailedReconTextureSubmit();
     void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
@@ -1775,6 +1815,297 @@ void GuiSmokeTest::gpuViewportPresentsRgb16PatternExactly()
 
     GpuDisplayViewport::clearPresentedImage(view.get(), item);
     qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuDisplayWindowFramebufferReadbackFailsWithoutActiveWindow()
+{
+    QVERIFY(!GpuDisplayWindow::isActive());
+
+    QImage grabbed;
+    QString reason;
+    QVERIFY(!GpuDisplayWindow::grabPresentedFramebufferIfActive(&grabbed, &reason));
+    QVERIFY(grabbed.isNull());
+    QVERIFY(!reason.isEmpty());
+}
+
+void GuiSmokeTest::gpuDisplayWindowGrabsPresentedFramebufferReadback()
+{
+    MLV_SKIP_OR_FAIL_IF_OFFSCREEN("GL window framebuffer readback needs a platform plugin that can create an OpenGL context");
+
+    qputenv(GpuDisplayWindow::environmentVariableName(), QByteArrayLiteral("1"));
+
+    auto host = std::make_unique<QWidget>();
+    auto *layout = new QVBoxLayout(host.get());
+    auto *view = new QGraphicsView(host.get());
+    layout->addWidget(view);
+    host->resize(64, 64);
+
+    QVERIFY(GpuDisplayWindow::installInPreview(view));
+    host->show();
+    QApplication::processEvents();
+    static_cast<void>(QTest::qWaitForWindowExposed(host.get()));
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage submitted(32, 32, QImage::Format_RGB888);
+    submitted.fill(qRgb(10, 200, 30));
+    QVERIFY(GpuDisplayWindow::presentImageIfActive(submitted));
+
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage grabbed;
+    QString reason;
+    const bool ok = GpuDisplayWindow::grabPresentedFramebufferIfActive(&grabbed, &reason);
+    if (!ok || grabbed.isNull()) {
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("OpenGL framebuffer capture is unavailable in this environment");
+    }
+    QVERIFY(reason.isEmpty());
+    QVERIFY(grabbed.width() > 0);
+    QVERIFY(grabbed.height() > 0);
+
+    const QColor center(grabbed.pixel(grabbed.width() / 2, grabbed.height() / 2));
+    QVERIFY2(center.green() > 150 && center.red() < 80 && center.blue() < 80,
+             qPrintable(QStringLiteral("Expected the GL window readback to show the presented frame; "
+                                        "center pixel was rgb(%1,%2,%3)")
+                        .arg(center.red()).arg(center.green()).arg(center.blue())));
+
+    host.reset();
+    QVERIFY(!GpuDisplayWindow::isActive());
+    qunsetenv(GpuDisplayWindow::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuDisplayWindowCapturePresentsPendingFrameAsRealPaint()
+{
+    MLV_SKIP_OR_FAIL_IF_OFFSCREEN("GL window framebuffer readback needs a platform plugin that can create an OpenGL context");
+
+    qputenv(GpuDisplayWindow::environmentVariableName(), QByteArrayLiteral("1"));
+
+    auto host = std::make_unique<QWidget>();
+    auto *layout = new QVBoxLayout(host.get());
+    auto *view = new QGraphicsView(host.get());
+    layout->addWidget(view);
+    host->resize(64, 64);
+
+    QVERIFY(GpuDisplayWindow::installInPreview(view));
+    host->show();
+    QApplication::processEvents();
+    static_cast<void>(QTest::qWaitForWindowExposed(host.get()));
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    // Present frame A and let its real paint event actually run.
+    QImage frameA(32, 32, QImage::Format_RGB888);
+    frameA.fill(qRgb(10, 200, 30));   // green
+    const quint64 serialA = 111;
+    QVERIFY(GpuDisplayWindow::presentImageIfActive(frameA, QSize(), serialA));
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage grabbedA;
+    QString reasonA;
+    quint64 capturedSerialA = 0;
+    bool capturedSerialValidA = false;
+    const bool okA = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedA, &reasonA, &capturedSerialA, &capturedSerialValidA);
+    if (!okA || grabbedA.isNull()) {
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("OpenGL framebuffer capture is unavailable in this environment");
+    }
+    QVERIFY(capturedSerialValidA);
+    QCOMPARE(capturedSerialA, serialA);
+    {
+        const QColor center(grabbedA.pixel(grabbedA.width() / 2, grabbedA.height() / 2));
+        QVERIFY2(center.green() > 150 && center.red() < 80 && center.blue() < 80,
+                 qPrintable(QStringLiteral("Expected the initial capture to show frame A; center pixel was rgb(%1,%2,%3)")
+                            .arg(center.red()).arg(center.green()).arg(center.blue())));
+    }
+
+    // Submit frame B but deliberately do NOT pump the event loop before capturing -- its
+    // real Qt-driven paint event has not run yet. Round 5's capture-by-real-present design
+    // (PR147 round 4/5 review) means a capture is ITSELF a real, synchronous paintGL()+swap,
+    // so it promotes B exactly as a real paint would: the capture must show B, by both
+    // pixels and serial, one paint earlier than Qt's own event loop otherwise would have
+    // painted it. This deliberately supersedes the round-4 behavior (capture bound to the
+    // last Qt-driven paint, A) -- there is no more capture/paint race to close, because
+    // capture and paint are now the same synchronous call and can never disagree.
+    QImage frameB(32, 32, QImage::Format_RGB888);
+    frameB.fill(qRgb(200, 10, 30));   // red
+    const quint64 serialB = 222;
+    QVERIFY(GpuDisplayWindow::presentImageIfActive(frameB, QSize(), serialB));
+
+    QImage grabbedDuring;
+    QString reasonDuring;
+    quint64 capturedSerialDuring = 0;
+    bool capturedSerialValidDuring = false;
+    const bool okDuring = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedDuring, &reasonDuring, &capturedSerialDuring, &capturedSerialValidDuring);
+    QVERIFY(okDuring);
+    QVERIFY(!grabbedDuring.isNull());
+    QVERIFY(capturedSerialValidDuring);
+    QCOMPARE(capturedSerialDuring, serialB);
+    {
+        const QColor center(grabbedDuring.pixel(grabbedDuring.width() / 2, grabbedDuring.height() / 2));
+        QVERIFY2(center.red() > 150 && center.green() < 80 && center.blue() < 80,
+                 qPrintable(QStringLiteral("Expected a capture taken before frame B's Qt-driven paint event to "
+                                            "already show frame B (capture is itself a real paint+swap); center "
+                                            "pixel was rgb(%1,%2,%3)")
+                            .arg(center.red()).arg(center.green()).arg(center.blue())));
+    }
+
+    // A second, immediately-repeated capture with nothing new submitted must be stable --
+    // idempotent, not a further one-paint-early promotion of anything.
+    QImage grabbedDuringAgain;
+    QString reasonDuringAgain;
+    quint64 capturedSerialDuringAgain = 0;
+    bool capturedSerialValidDuringAgain = false;
+    const bool okDuringAgain = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedDuringAgain, &reasonDuringAgain, &capturedSerialDuringAgain, &capturedSerialValidDuringAgain);
+    QVERIFY(okDuringAgain);
+    QVERIFY(capturedSerialValidDuringAgain);
+    QCOMPARE(capturedSerialDuringAgain, serialB);
+
+    // Now let Qt's own paint-event cycle actually run, and confirm it settles on the SAME
+    // content the capture above already forced -- no divergence between a capture-triggered
+    // present and the window's own subsequent normal paint.
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage grabbedB;
+    QString reasonB;
+    quint64 capturedSerialB = 0;
+    bool capturedSerialValidB = false;
+    const bool okB = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedB, &reasonB, &capturedSerialB, &capturedSerialValidB);
+    QVERIFY(okB);
+    QVERIFY(!grabbedB.isNull());
+    QVERIFY(capturedSerialValidB);
+    QCOMPARE(capturedSerialB, serialB);
+    {
+        const QColor center(grabbedB.pixel(grabbedB.width() / 2, grabbedB.height() / 2));
+        QVERIFY2(center.red() > 150 && center.green() < 80 && center.blue() < 80,
+                 qPrintable(QStringLiteral("Expected the capture after frame B's real paint to still show frame B; "
+                                            "center pixel was rgb(%1,%2,%3)")
+                            .arg(center.red()).arg(center.green()).arg(center.blue())));
+    }
+
+    host.reset();
+    QVERIFY(!GpuDisplayWindow::isActive());
+    qunsetenv(GpuDisplayWindow::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuDisplayWindowCaptureIgnoresFailedReconTextureSubmit()
+{
+    // This test binary always stubs the CUDA/AMaZE GPU-recon backend to fail
+    // (tests/gui/raw_processing_gpu_preview_stubs.cpp: llrpGpuPlaybackReconRunGlTexture and
+    // llrpGpuPlaybackReconRunDeviceBayer16 both unconditionally report failure), so a
+    // SUCCESSFUL GPU-recon texture present cannot be exercised here on any platform. What
+    // this test instead proves is the concrete regression PR147 round 4/5 review flagged
+    // for the texture route: a FAILED recon submit attempt (which threads a presentation
+    // serial the same way a successful one now does -- see
+    // GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture) must never corrupt
+    // the previously-presented frame's identity, and must never leave a stale-but-"valid"
+    // serial bound to content that never actually presented.
+    MLV_SKIP_OR_FAIL_IF_OFFSCREEN("GL window framebuffer readback needs a platform plugin that can create an OpenGL context");
+
+    qputenv(GpuDisplayWindow::environmentVariableName(), QByteArrayLiteral("1"));
+
+    auto host = std::make_unique<QWidget>();
+    auto *layout = new QVBoxLayout(host.get());
+    auto *view = new QGraphicsView(host.get());
+    layout->addWidget(view);
+    host->resize(64, 64);
+
+    QVERIFY(GpuDisplayWindow::installInPreview(view));
+    host->show();
+    QApplication::processEvents();
+    static_cast<void>(QTest::qWaitForWindowExposed(host.get()));
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    // Present frame A (QImage route) and let its real paint event run.
+    QImage frameA(32, 32, QImage::Format_RGB888);
+    frameA.fill(qRgb(10, 200, 30));   // green
+    const quint64 serialA = 111;
+    QVERIFY(GpuDisplayWindow::presentImageIfActive(frameA, QSize(), serialA));
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage grabbedA;
+    QString reasonA;
+    quint64 capturedSerialA = 0;
+    bool capturedSerialValidA = false;
+    const bool okA = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedA, &reasonA, &capturedSerialA, &capturedSerialValidA);
+    if (!okA || grabbedA.isNull()) {
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("OpenGL framebuffer capture is unavailable in this environment");
+    }
+    QVERIFY(capturedSerialValidA);
+    QCOMPARE(capturedSerialA, serialA);
+
+    // Attempt a GPU-recon texture-route submit with a DIFFERENT serial. The stub backend
+    // guarantees this fails -- assert that explicitly, so this test cannot silently pass
+    // because the attempt happened to succeed against a real backend elsewhere.
+    const uint16_t rawInput[] = { 1024, 2048, 3072, 4096 };
+    llrpGpuPlaybackReconState_t reconState;
+    memset(&reconState, 0, sizeof(reconState));
+    reconState.valid = 1;
+    reconState.width = 2;
+    reconState.height = 2;
+    const double wbMultipliers[3] = { 1.0, 1.0, 1.0 };
+    QString reconReason;
+    llrpGpuPlaybackReconTiming_t reconTiming;
+    memset(&reconTiming, 0, sizeof(reconTiming));
+    QString reconHandoffMode;
+    const quint64 serialRecon = 222;
+    const bool reconPresented =
+        GpuDisplayWindow::presentGpuPlaybackReconAmazePostWbTextureIfActive(
+            rawInput, 4, &reconState, 0, wbMultipliers,
+            &reconReason, &reconTiming, &reconHandoffMode,
+            false, nullptr, 0, 0, 0, 0, serialRecon);
+    QVERIFY(!reconPresented);
+    QVERIFY(!reconReason.isEmpty());
+
+    // The failed submit must leave the previously-presented frame A completely intact --
+    // never a stale-but-valid serial bound to content that never actually presented, and
+    // never a corrupted/blank capture.
+    QImage grabbedAfterFailedRecon;
+    QString reasonAfterFailedRecon;
+    quint64 capturedSerialAfterFailedRecon = 0;
+    bool capturedSerialValidAfterFailedRecon = false;
+    const bool okAfterFailedRecon = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedAfterFailedRecon, &reasonAfterFailedRecon,
+        &capturedSerialAfterFailedRecon, &capturedSerialValidAfterFailedRecon);
+    QVERIFY(okAfterFailedRecon);
+    QVERIFY(!grabbedAfterFailedRecon.isNull());
+    QVERIFY(capturedSerialValidAfterFailedRecon);
+    QCOMPARE(capturedSerialAfterFailedRecon, serialA);
+    QVERIFY(capturedSerialAfterFailedRecon != serialRecon);
+    {
+        const QColor center(grabbedAfterFailedRecon.pixel(
+            grabbedAfterFailedRecon.width() / 2, grabbedAfterFailedRecon.height() / 2));
+        QVERIFY2(center.green() > 150 && center.red() < 80 && center.blue() < 80,
+                 qPrintable(QStringLiteral("Expected a capture after a FAILED recon texture submit to still show "
+                                            "frame A untouched; center pixel was rgb(%1,%2,%3)")
+                            .arg(center.red()).arg(center.green()).arg(center.blue())));
+    }
+
+    host.reset();
+    QVERIFY(!GpuDisplayWindow::isActive());
+    qunsetenv(GpuDisplayWindow::environmentVariableName());
 }
 
 void GuiSmokeTest::gpuViewportZebraProcessingMatchesCpuReference()

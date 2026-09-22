@@ -12,6 +12,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Get-ColorArtifactFailingVerdicts is the single source of truth for which
+# colorArtifactScan.verdict values fail a leg -- see gui-smoke-color-artifact-scan.ps1.
+# Sourcing it here (rather than hand-keeping a second copy) is what closes PR147 round 3's
+# gap: this comparator's own list used to omit capture-invalid and capture-too-dark, so an
+# A/B leg with an unusable or artifacted capture could still report PASS.
+. (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')
+
 function Read-SmokeJson {
     param([string]$Path)
 
@@ -764,7 +771,7 @@ foreach ($leg in @(
     if ([string]::IsNullOrWhiteSpace($colorVerdict)) {
         $failures += "$($leg.Name) smoke has no color-artifact verdict."
     }
-    elseif ($colorVerdict -in @("suspect-block-or-bar", "scan-error")) {
+    elseif ($colorVerdict -in (Get-ColorArtifactFailingVerdicts)) {
         $failures += "$($leg.Name) smoke color-artifact verdict is $colorVerdict."
     }
 }
