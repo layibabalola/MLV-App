@@ -34,6 +34,7 @@
 #include <QScrollBar>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QWindow>
 #include <QtTest/QtTest>
 
 #include <cmath>
@@ -649,6 +650,9 @@ private slots:
     void gpuViewportPreviewProcessingWithZebrasMatchesCpuReference();
     void gpuPreviewProcessingLutReadinessReflectsSignatureNotJustPointers();
     void gpuPreviewProcessingLutTextureSetFailsClosedOnMissingUploadAndContextLoss();
+    void gpuPreviewProcessingReconRefusalMatchesForBothPresentersOnInjectedUploadFailure();
+    void gpuViewportRefusesReconTextureDrawWhenLutReadinessIsFalse();
+    void gpuDisplayWindowRecoversRetainedQImageAfterContextLossTeardown();
     void gpuPreviewProcessingCpuReferenceCorrectsPostWbUndoGreenCast();
     void histogramRegressionMatchesGolden();
     void vectorScopeRegressionMatchesGolden();
@@ -2503,6 +2507,232 @@ void GuiSmokeTest::gpuPreviewProcessingLutTextureSetFailsClosedOnMissingUploadAn
 
     gpuPreviewProcessingDestroyLutTextureSet(set);
     context.doneCurrent();
+}
+
+void GuiSmokeTest::gpuPreviewProcessingReconRefusalMatchesForBothPresentersOnInjectedUploadFailure()
+{
+    // GPU-TEXNR-S1-DARK-GREEN-1 round 3 (sol major, tests_run gap): round 2's viewport
+    // paintGL() drew a GPU-recon/AMaZE texture through the shared shader's
+    // previewProcessingEnabled=0 branch whenever its LUT set was not ready, instead of
+    // refusing to present it -- the same fail-open shape GpuDisplayWindow::paintGL's
+    // reconRefused re-check already closed for the window route. This is a GPU-free test
+    // of the exact boolean formula both paintGL() functions now use --
+    // "presentingReconTexture && !gpuPreviewProcessingLutTextureSetReady(set, config)" --
+    // against an injected-upload-failure shape (signatureValid=false despite an otherwise
+    // usable config and mostly-populated pointers, exactly what
+    // gpuPreviewProcessingUpdateLutTextureSet leaves behind on a partial GL failure), so
+    // it fails if either presenter's refusal logic regresses or the two diverge.
+    const GpuPreviewProcessingConfig config = make_synthetic_preview_processing_config();
+
+    GpuPreviewProcessingLutTextureSet failedUploadSet;
+    failedUploadSet.levels = reinterpret_cast<QOpenGLTexture *>(0x1);
+    failedUploadSet.matrixR = reinterpret_cast<QOpenGLTexture *>(0x1);
+    failedUploadSet.matrixG = reinterpret_cast<QOpenGLTexture *>(0x1);
+    failedUploadSet.matrixB = reinterpret_cast<QOpenGLTexture *>(0x1);
+    failedUploadSet.gamma = reinterpret_cast<QOpenGLTexture *>(0x1);
+    failedUploadSet.signature = config.signature;
+    failedUploadSet.signatureValid = false;   // the shape an injected upload failure leaves behind
+
+    GpuPreviewProcessingLutTextureSet readySet = failedUploadSet;
+    readySet.signatureValid = true;
+
+    auto windowDecision = [](bool presentingReconTexture,
+                             const GpuPreviewProcessingLutTextureSet &set,
+                             const GpuPreviewProcessingConfig &cfg) -> bool
+    {
+        // GpuDisplayWindow::paintGL's reconRefused formula, verbatim.
+        const bool reconLutsReady = presentingReconTexture
+            && gpuPreviewProcessingLutTextureSetReady(set, cfg);
+        return presentingReconTexture && !reconLutsReady;
+    };
+    auto viewportDecision = [](bool presentingReconTexture,
+                               const GpuPreviewProcessingLutTextureSet &set,
+                               const GpuPreviewProcessingConfig &cfg) -> bool
+    {
+        // GpuDisplayViewport::paintGL's reconRefused formula, verbatim (round 3).
+        const bool reconLutsReady = presentingReconTexture
+            && gpuPreviewProcessingLutTextureSetReady(set, cfg);
+        return presentingReconTexture && !reconLutsReady;
+    };
+
+    // Presenting a recon/AMaZE texture with a failed upload: both presenters must refuse.
+    QVERIFY(windowDecision(true, failedUploadSet, config));
+    QVERIFY(viewportDecision(true, failedUploadSet, config));
+    QCOMPARE(windowDecision(true, failedUploadSet, config), viewportDecision(true, failedUploadSet, config));
+
+    // Presenting a recon/AMaZE texture with a successful upload: neither refuses.
+    QVERIFY(!windowDecision(true, readySet, config));
+    QVERIFY(!viewportDecision(true, readySet, config));
+
+    // NOT presenting a recon/AMaZE texture (e.g. the ordinary already-processed QImage
+    // route): neither presenter may refuse just because grading LUTs aren't ready --
+    // that content is already display-referred and correct on its own.
+    QVERIFY(!windowDecision(false, failedUploadSet, config));
+    QVERIFY(!viewportDecision(false, failedUploadSet, config));
+}
+
+void GuiSmokeTest::gpuViewportRefusesReconTextureDrawWhenLutReadinessIsFalse()
+{
+    // GPU-TEXNR-S1-DARK-GREEN-1 round 3 (sol major): exercises the REAL
+    // GpuDisplayViewport::paintGL() fail-closed re-check added this round, against a live
+    // GL context. This test binary's CUDA/AMaZE backend is stubbed to always fail (see
+    // gpuDisplayWindowCaptureIgnoresFailedReconTextureSubmit), so a successful recon
+    // texture submit can't be driven through the public present*() API here; instead
+    // (GuiSmokeTest is a friend of GpuDisplayViewport) this drives the viewport's private
+    // state directly into exactly the shape a successful recon handoff with a failed LUT
+    // upload leaves behind -- a real, currently-bound GL texture, the recon flag set, and
+    // an LUT set matching gpuPreviewProcessingDestroyLutTextureSet's post-failure shape --
+    // then calls the real paintGL() and asserts it refuses to present rather than drawing
+    // through the shared shader's previewProcessingEnabled=0 branch.
+    MLV_SKIP_OR_FAIL_IF_OFFSCREEN("GL viewport fail-closed draw check needs a platform plugin that can create an OpenGL context");
+
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+
+    QGraphicsScene scene;
+    QPixmap fallback_pixmap(4, 4);
+    fallback_pixmap.fill(Qt::black);
+    QGraphicsPixmapItem *item = scene.addPixmap(fallback_pixmap);
+    std::unique_ptr<QGraphicsView> view(make_presenter_view(scene, item, QSize(4, 4)));
+
+    QVERIFY(GpuDisplayViewport::installOn(view.get()));
+    view->show();
+    QApplication::processEvents();
+
+    // Seed a real GL program/texture via the ordinary image route first.
+    QImage seed(4, 4, QImage::Format_RGB888);
+    seed.fill(Qt::black);
+    QVERIFY(GpuDisplayViewport::presentImage(view.get(), item, seed));
+    const QImage seeded = crop_presented_frame(view.get(), item);
+    if (seeded.isNull()) {
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("OpenGL framebuffer capture is unavailable in this environment");
+    }
+    QVERIFY(GpuDisplayViewport::isTexturePresentationActive(view.get()));
+
+    auto *viewport = qobject_cast<GpuDisplayViewport *>(view->viewport());
+    QVERIFY(viewport);
+    viewport->makeCurrent();
+    viewport->destroyProcessingTextures();   // leaves m_lutSet exactly as a failed upload would
+    viewport->m_presentationOptions.previewProcessing = make_synthetic_preview_processing_config();
+    viewport->m_pendingTextureFromGpuRecon = true;
+    viewport->m_pendingTextureFromGpuAmaze = false;
+    viewport->m_textureDirty = false;           // the (real) texture is already "uploaded"
+    viewport->m_processingTexturesDirty = false; // don't let updateTextureIfNeeded rebuild m_lutSet back to ready
+    viewport->doneCurrent();
+
+    viewport->update();
+    QApplication::processEvents();
+    viewport->repaint();
+    QApplication::processEvents();
+
+    QVERIFY2(!GpuDisplayViewport::isTexturePresentationActive(view.get()),
+             "Expected paintGL() to refuse presenting a GPU-recon texture with an unready LUT set "
+             "rather than drawing it through the shared shader's previewProcessingEnabled=0 branch.");
+
+    GpuDisplayViewport::clearPresentedImage(view.get(), item);
+    qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuDisplayWindowRecoversRetainedQImageAfterContextLossTeardown()
+{
+    // GPU-TEXNR-S1-DARK-GREEN-1 round 3 (sol minor 1 / fable evidence gap): round 2's
+    // context-loss coverage
+    // (gpuPreviewProcessingLutTextureSetFailsClosedOnMissingUploadAndContextLoss) only
+    // simulated cleanupGLResources()'s EFFECT by calling the free LUT-set functions
+    // directly; it never called the real presenter teardown function, so it could not
+    // catch either fix this round closes: (1) cleanupGLResources() must makeCurrent()
+    // before deleting GL wrappers, and (2) it must re-arm m_textureDirty for a retained
+    // QImage so the next paint re-uploads instead of presenting blank. This test presents
+    // a real frame, then calls the REAL GpuDisplayWindow::cleanupGLResources() directly
+    // (GuiSmokeTest is now a friend) -- exactly what the QOpenGLContext::aboutToBeDestroyed
+    // handler does on a genuine context recreation -- and asserts the SAME frame
+    // reappears on the next real paint with NO resubmission.
+    MLV_SKIP_OR_FAIL_IF_OFFSCREEN("GL window context-loss recovery needs a platform plugin that can create an OpenGL context");
+
+    qputenv(GpuDisplayWindow::environmentVariableName(), QByteArrayLiteral("1"));
+
+    auto host = std::make_unique<QWidget>();
+    auto *layout = new QVBoxLayout(host.get());
+    auto *view = new QGraphicsView(host.get());
+    layout->addWidget(view);
+    host->resize(64, 64);
+
+    QVERIFY(GpuDisplayWindow::installInPreview(view));
+    host->show();
+    QApplication::processEvents();
+    static_cast<void>(QTest::qWaitForWindowExposed(host.get()));
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage frameA(32, 32, QImage::Format_RGB888);
+    frameA.fill(qRgb(10, 200, 30));   // green
+    const quint64 serialA = 4242;
+    QVERIFY(GpuDisplayWindow::presentImageIfActive(frameA, QSize(), serialA));
+    for (int i = 0; i < 20; ++i) {
+        QApplication::processEvents();
+        QTest::qWait(10);
+    }
+
+    QImage grabbedBefore;
+    QString reasonBefore;
+    quint64 serialBefore = 0;
+    bool serialValidBefore = false;
+    const bool okBefore = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedBefore, &reasonBefore, &serialBefore, &serialValidBefore);
+    if (!okBefore || grabbedBefore.isNull()) {
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("OpenGL framebuffer capture is unavailable in this environment");
+    }
+    QVERIFY(serialValidBefore);
+    QCOMPARE(serialBefore, serialA);
+
+    GpuDisplayWindow *win = nullptr;
+    for (QWindow *w : QGuiApplication::allWindows()) {
+        if (GpuDisplayWindow *candidate = qobject_cast<GpuDisplayWindow *>(w)) {
+            win = candidate;
+            break;
+        }
+    }
+    if (!win) {
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("Could not locate the active GpuDisplayWindow's native window in this environment");
+    }
+
+    // The real teardown the aboutToBeDestroyed handler runs on a genuine context
+    // recreation -- destroys the GL texture/programs/LUT set, and (this round's fix)
+    // re-arms m_textureDirty because m_pendingImage (frame A) is still retained.
+    win->makeCurrent();
+    win->cleanupGLResources();
+    win->doneCurrent();
+    QVERIFY2(!win->m_pendingImage.isNull(),
+             "Test setup expected frame A to still be retained in m_pendingImage after teardown");
+    QVERIFY2(win->m_textureDirty,
+             "Expected cleanupGLResources() to re-arm m_textureDirty for the retained QImage");
+
+    // No resubmission here -- the next real paint alone must recover frame A.
+    QImage grabbedAfter;
+    QString reasonAfter;
+    quint64 serialAfter = 0;
+    bool serialValidAfter = false;
+    const bool okAfter = GpuDisplayWindow::grabPresentedFramebufferIfActive(
+        &grabbedAfter, &reasonAfter, &serialAfter, &serialValidAfter);
+    if (!okAfter || grabbedAfter.isNull()) {
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("OpenGL framebuffer capture is unavailable after teardown in this environment");
+    }
+    QVERIFY2(serialValidAfter && serialAfter == serialA,
+             qPrintable(QStringLiteral("Expected frame A's presentation serial to survive teardown without "
+                                        "resubmission; serialValid=%1 serial=%2")
+                        .arg(serialValidAfter).arg(serialAfter)));
+    {
+        const QColor center(grabbedAfter.pixel(grabbedAfter.width() / 2, grabbedAfter.height() / 2));
+        QVERIFY2(center.red() > 150 && center.green() < 80 && center.blue() < 80,
+                 qPrintable(QStringLiteral("Expected frame A to reappear after context-loss teardown with no "
+                                            "resubmission; center pixel was rgb(%1,%2,%3)")
+                            .arg(center.red()).arg(center.green()).arg(center.blue())));
+    }
+
+    host.reset();
+    QVERIFY(!GpuDisplayWindow::isActive());
+    qunsetenv(GpuDisplayWindow::environmentVariableName());
 }
 
 void GuiSmokeTest::gpuPreviewProcessingCpuReferenceCorrectsPostWbUndoGreenCast()

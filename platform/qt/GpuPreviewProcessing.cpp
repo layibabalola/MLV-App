@@ -2130,11 +2130,32 @@ void gpuPreviewProcessingUpdateLutTextureSet(GpuPreviewProcessingLutTextureSet &
         return;
     }
 
+    // FAIL CLOSED (GPU-TEXNR-S1-DARK-GREEN-1 round 3): setData() is void, so a failed
+    // upload (e.g. a driver rejecting the transfer on an otherwise-created texture) was
+    // previously indistinguishable from a successful one -- signatureValid was stamped
+    // regardless. Drain any pre-existing GL error first so a stale error from unrelated
+    // prior work is never misattributed to these uploads, then check once after all five
+    // -- any error found leaves signatureValid false (destroying the whole set, same as
+    // an allocation failure above) rather than presenting with corrupt LUT content.
+    QOpenGLContext * currentContext = QOpenGLContext::currentContext();
+    QOpenGLFunctions * gl = currentContext ? currentContext->functions() : nullptr;
+    if ( gl )
+    {
+        while ( gl->glGetError() != GL_NO_ERROR ) {}
+    }
+
     set.levels->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, levelsBytes.constData());
     set.matrixR->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, matrixRBytes.constData());
     set.matrixG->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, matrixGBytes.constData());
     set.matrixB->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, matrixBBytes.constData());
     set.gamma->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gammaBytes.constData());
+
+    const GLenum uploadError = gl ? gl->glGetError() : GL_NO_ERROR;
+    if ( !gl || uploadError != GL_NO_ERROR )
+    {
+        gpuPreviewProcessingDestroyLutTextureSet(set);
+        return;
+    }
 
     set.signature = config.signature;
     set.signatureValid = true;

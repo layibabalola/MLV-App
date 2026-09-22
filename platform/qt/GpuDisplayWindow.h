@@ -143,6 +143,7 @@ protected:
     void paintGL() override;
 
 private:
+    friend class GuiSmokeTest; // Exercise real context-loss teardown/rebuild without requiring the OS to recreate the platform window.
     void ensureProgram(void);
     void ensurePreviewProcessingProgram(void);
     void updateTextureIfNeeded(void);

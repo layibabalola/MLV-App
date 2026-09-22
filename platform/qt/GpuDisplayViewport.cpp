@@ -1000,7 +1000,24 @@ void GpuDisplayViewport::paintGL()
     glClear(GL_COLOR_BUFFER_BIT);
 
     updateTextureIfNeeded();
-    if ( !m_texture || !m_program || !m_view )
+
+    // FAIL CLOSED (GPU-TEXNR-S1-DARK-GREEN-1 round 3, sol major): a GPU-recon/AMaZE
+    // texture is the post-WB-undo linear camera RGB output, not display-referred -- it
+    // must never be drawn with preview processing unavailable, which the shared shader's
+    // previewProcessingEnabled=0 branch would otherwise render as a passthrough-equivalent
+    // (the dark/green-cast regression this fix line exists to close). The submit-time gate
+    // in setPresentedGpuPlaybackReconAmazePostWbTexture() already refuses to accept such a
+    // texture when its LUTs are not usable, but that is re-checked here rather than
+    // trusted -- mirrors GpuDisplayWindow::paintGL's reconRefused re-check -- so a texture
+    // that somehow reached this point with its LUTs torn down (e.g. destroyTexture()
+    // racing a paint, or updateTextureIfNeeded()'s own re-upload attempt above failing)
+    // is refused rather than ever shown through the in-shader disable.
+    const bool presentingReconTexture = m_pendingTextureFromGpuRecon || m_pendingTextureFromGpuAmaze;
+    const bool reconLutsReady = presentingReconTexture
+        && gpuPreviewProcessingLutTextureSetReady(m_lutSet, m_presentationOptions.previewProcessing);
+    const bool reconRefused = presentingReconTexture && !reconLutsReady;
+
+    if ( !m_texture || !m_program || !m_view || reconRefused )
     {
         m_texturePresentationActive = false;
         if ( viewportPresentDiagEnabled() )
@@ -1009,7 +1026,7 @@ void GpuDisplayViewport::paintGL()
                 << " hasPending=" << hasPendingFrame() << " imgNull=" << m_pendingImage.isNull()
                 << " bytesEmpty=" << m_pendingTextureBytes.isEmpty()
                 << " recon=" << m_pendingTextureFromGpuRecon << " amaze=" << m_pendingTextureFromGpuAmaze
-                << " dirty=" << m_textureDirty;
+                << " dirty=" << m_textureDirty << " reconRefused=" << reconRefused;
         return;
     }
 
@@ -1045,8 +1062,12 @@ void GpuDisplayViewport::paintGL()
     vertices[13] = vertices[9];
 
     m_program->bind();
-    const bool previewProcessingReady =
-        gpuPreviewProcessingLutTextureSetReady(m_lutSet, m_presentationOptions.previewProcessing);
+    // reconRefused above already proved reconLutsReady==true whenever presentingReconTexture
+    // is true (otherwise paintGL returned before reaching here) -- reuse it instead of
+    // re-evaluating the same predicate for that case.
+    const bool previewProcessingReady = presentingReconTexture
+        ? reconLutsReady
+        : gpuPreviewProcessingLutTextureSetReady(m_lutSet, m_presentationOptions.previewProcessing);
     m_program->setUniformValue("frameTexture", 0);
     GpuPreviewProcessingDisplayUniforms displayUniforms;
     displayUniforms.textureSize = QVector2D(static_cast<float>(pendingWidth()),
@@ -1473,6 +1494,22 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
 
     setPresentationOptions(options);
     updateProcessingTexturesIfNeeded();
+
+    // FAIL CLOSED (GPU-TEXNR-S1-DARK-GREEN-1 round 3, sol major): the options-usable
+    // check above only proves the LUT *source bytes* were big enough to attempt an
+    // upload -- it says nothing about whether updateProcessingTexturesIfNeeded() (via
+    // gpuPreviewProcessingUpdateLutTextureSet) actually got real GL textures created and
+    // uploaded. Re-check the SAME shared readiness predicate the window's equivalent
+    // submit path checks (GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture)
+    // and refuse here too, before any recon/AMaZE GL work runs, rather than letting a
+    // failed upload reach paintGL's draw-time re-check as the only backstop.
+    if ( !gpuPreviewProcessingLutTextureSetReady(m_lutSet, previewProcessing) )
+    {
+        if ( madeCurrent ) doneCurrent();
+        return fail(QStringLiteral(
+            "GPU playback recon AMaZE texture-present refused: LUT texture upload failed "
+            "for a linear post-WB-undo texture (trace=gpu_viewport_recon_lut_upload_failed)"));
+    }
 
     if ( !m_texture
       || m_texture->width() != width
