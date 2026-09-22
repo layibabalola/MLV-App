@@ -33,7 +33,17 @@
 
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
+# ATTR3-FOOTAGE-STAGE-1 round 3: see AttrCudaOwnerFootage.psm1's own header for why an
+# unconditional `-Force` reimport here is wrong whenever a caller already imported
+# AttrCudaArtifacts.psm1 globally first -- it strips the caller's existing global copy instead
+# of reusing it.
+if (-not (Get-Command -Name 'Assert-AttrCudaSafeArtifactName' -ErrorAction SilentlyContinue)) {
+    # ATTR3-FOOTAGE-STAGE-1 round 11: -Verbose:$false so this fallback import (unreachable from
+    # the production CLI, which always loads AttrCudaArtifacts.psm1 first) never depends on a
+    # caller's ambient $VerbosePreference either, the same defense-in-depth
+    # attr3-footage-stage.ps1's own four Import-Module calls now carry.
+    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop -Verbose:$false
+}
 
 function New-Attr3FootagePresenceJob {
     <#
@@ -51,11 +61,13 @@ function New-Attr3FootagePresenceJob {
     describing the emitted job otherwise.
     On Bachelor, the emitted job checks each part with every filesystem call wrapped in its own
     try/catch (round 4), reporting an honest per-part status -- PASS, NOT_FOUND, ACCESS_DENIED,
-    UNREADABLE, LENGTH_MISMATCH or SHA256_MISMATCH -- and an overall result of FOOTAGE_PRESENT
-    (exit 0), FOOTAGE_ABSENT (exit 1), FOOTAGE_MISMATCH (exit 2) or FOOTAGE_INDETERMINATE (exit
-    3); see the mapping documented above the overall-result block in the job template below for
-    the exact rule. No exception's own text ever reaches this job's output, since it can contain
-    the part's real path.
+    UNREADABLE, LENGTH_MISMATCH, SHA256_MISMATCH or TARGET_PATH_UNSAFE (round 4: the same
+    target-chain reparse-point check Attr3FootageStageJob.psm1's own emitted job applies, run
+    here before a single byte of the part is ever read) -- and an overall result of
+    FOOTAGE_PRESENT (exit 0), FOOTAGE_ABSENT (exit 1), FOOTAGE_MISMATCH (exit 2) or
+    FOOTAGE_INDETERMINATE (exit 3); see the mapping documented above the overall-result block in
+    the job template below for the exact rule. No exception's own text ever reaches this job's
+    output, since it can contain the part's real path.
     #>
     [CmdletBinding()]
     param(
@@ -112,8 +124,7 @@ function New-Attr3FootagePresenceJob {
     # `[...]`, unless coerced -- the emitted job always expects a JSON array.
     if ($partsForJob.Count -eq 1) { $partsJson = "[$partsJson]" }
 
-    # A stable, content-derived disambiguator for the job id -- not a security control (the
-    # resolver's cross-check is), just a dedup/audit key that changes when the baked content does.
+    # A content-derived audit key -- not a security control (the resolver's cross-check is).
     $canonicalPayload = ([ordered]@{ clipId = $ClipId; parts = $partsForJob }) | ConvertTo-Json -Compress -Depth 5
     $sha256Alg = [Security.Cryptography.SHA256]::Create()
     try {
@@ -124,19 +135,43 @@ function New-Attr3FootagePresenceJob {
         $sha256Alg.Dispose()
     }
 
-    $jobId = "attr3-footage-presence-$ClipId-$($sourceSha256.Substring(0, 12))"
+    # ATTR3-FOOTAGE-STAGE-1 round 3: a purely content-derived id meant a repeated presence check
+    # for the SAME clip and parts (e.g. a caller re-probing before every retry of a transfer)
+    # always submitted the SAME id, so a retained result receipt from an earlier probe refused
+    # every later one with UMRUN_JOBID_IN_USE -- indistinguishable, from the caller's side, from a
+    # submission failure. A fresh random component makes every call's id unique regardless of
+    # content; $sourceSha256 (still returned) remains the stable audit/dedup key.
+    $attemptNonce = [guid]::NewGuid().ToString('N').Substring(0, 10)
+    $jobId = "attr3-footage-presence-$ClipId-$($sourceSha256.Substring(0, 12))-$attemptNonce"
     [void](Assert-AttrCudaSafeArtifactName -Name "$jobId.job.ps1")
 
     # ATTR3-FOOTAGE-BIND-1 PR-B: Test-AttrCudaFootagePart is the ONE shared per-part content
     # verifier, also embedded (byte-identically) in playback-attr-3-cuda-job.ps1's owner-clip
     # content gate -- see that function's own header in AttrCudaArtifacts.psm1.
-    $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @('Read-AttrCudaBase64Payload', 'Test-AttrCudaFootagePart')
+    # ATTR3-FOOTAGE-STAGE-1 round 4 (astra 3): Assert-AttrCudaNoLinkBelowRoot is the SAME
+    # target-chain link check Attr3FootageStageJob.psm1's own emitted job applies to its target
+    # path -- embedded here too so this probe never hashes/reads a part through an unproven chain.
+    $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @('Read-AttrCudaBase64Payload', 'Test-AttrCudaFootagePart', 'Assert-AttrCudaNoLinkBelowRoot')
 
     # --- job body template (placeholders are substituted below; the body itself never touches
     #     this function's variables directly, so there is no accidental capture of this process's
     #     environment into the emitted script) -------------------------------------------------
     $template = @'
 $ErrorActionPreference = 'Stop'
+# ATTR3-FOOTAGE-STAGE-1 round 11 (astra major: inherited verbose diagnostics disclose full
+# paths). This probe runs on Bachelor under the submitting agent's OWN ambient preferences, not
+# this generator's -- pinned here, first, for the same reason and by the same mechanism as
+# attr3-footage-stage.ps1's own top-of-file pin and Attr3FootageStageJob.psm1's own template pin
+# (see either's own comment): every cmdlet and embedded function call below resolves these five
+# preference variables by scope lookup from this job's own top-level scope unless overridden
+# again, and the embedded verifiers below read real footage-path files before this probe ever
+# reports a PASS/NOT_FOUND/etc token, where an ambient Continue diagnostic stream is exactly what
+# could carry one of those paths out.
+$VerbosePreference = 'SilentlyContinue'
+$DebugPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
 $JobId = '__JOB_ID__'
 $ClipId = '__CLIP_ID__'
 $PartsJson = '__PARTS_JSON__'
@@ -147,6 +182,12 @@ function Say([string]$Message) { Write-Output "[$JobId] $Message" }
 __EMBEDDED_FUNCTIONS__
 # --- end embedded verifiers -------------------------------------------------------------------
 
+# ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary). Everything from here through this
+# job's own final `exit $exitCode` runs inside ONE try/catch: every per-part failure this probe
+# can anticipate already maps to a typed PART=/RESULT= token below, so this is the backstop for
+# anything it cannot -- a caught exception's own .Message is NEVER forwarded (it can carry a real
+# footage path), only the one fixed, path-free token in the catch at the bottom of this template.
+try {
 $RawParts = @($PartsJson | ConvertFrom-Json)
 $PartCount = $RawParts.Count
 
@@ -160,11 +201,28 @@ foreach ($rawPart in $RawParts) {
     $decoded = Read-AttrCudaBase64Payload -Base64 $rawPart.pathBase64
     $partPath = [Text.Encoding]::UTF8.GetString($decoded.bytes)
 
+    # ATTR3-FOOTAGE-STAGE-1 round 4 (astra 3, link checks on read paths): before this probe reads
+    # or hashes a single byte, prove every EXISTING ancestor of $partPath, down to and including
+    # $partPath itself, carries no reparse point -- the same target-chain check
+    # Attr3FootageStageJob.psm1's own emitted job applies to $targetPath before it reads it.
+    # Nothing here ever writes $_, $_.Exception or its .Message.
+    $driveRoot = [IO.Path]::GetPathRoot($partPath)
+    $pathSafe = $true
+    try {
+        [void](Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $driveRoot -Path $partPath)
+    } catch {
+        $pathSafe = $false
+    }
+
     # ATTR3-FOOTAGE-BIND-1 PR-B: the per-part content check is now the ONE shared function
     # Test-AttrCudaFootagePart (AttrCudaArtifacts.psm1), embedded verbatim -- never a
     # re-implementation. Nothing below ever writes $_, $_.Exception or its .Message; the function
     # itself returns only a fixed status TOKEN, never exception text.
-    $status = Test-AttrCudaFootagePart -Path $partPath -ExpectedLength ([int64]$rawPart.length) -ExpectedSha256 ([string]$rawPart.sha256)
+    $status = if ($pathSafe) {
+        Test-AttrCudaFootagePart -Path $partPath -ExpectedLength ([int64]$rawPart.length) -ExpectedSha256 ([string]$rawPart.sha256)
+    } else {
+        'TARGET_PATH_UNSAFE'
+    }
     Write-Output "PART=$($rawPart.index) STATUS=$status"
     $results.Add([ordered]@{
         index = $rawPart.index
@@ -187,7 +245,9 @@ foreach ($rawPart in $RawParts) {
 #                                 cannot honestly be called PRESENT, ABSENT or MISMATCH.
 $statuses = @($results | ForEach-Object { $_.status })
 $diffStatuses = @('LENGTH_MISMATCH', 'SHA256_MISMATCH')
-$uncertainStatuses = @('ACCESS_DENIED', 'UNREADABLE')
+# TARGET_PATH_UNSAFE (round 4) never observed a byte, honest or otherwise -- it belongs in the
+# same "could not tell" bucket as ACCESS_DENIED/UNREADABLE, never folded into ABSENT or MISMATCH.
+$uncertainStatuses = @('ACCESS_DENIED', 'UNREADABLE', 'TARGET_PATH_UNSAFE')
 if (($statuses | Where-Object { $_ -ne 'PASS' }).Count -eq 0) {
     $overall = 'FOOTAGE_PRESENT'; $exitCode = 0
 } elseif (($statuses | Where-Object { $_ -ne 'NOT_FOUND' }).Count -eq 0) {
@@ -211,6 +271,14 @@ Write-Output (([ordered]@{
     parts = $results
 }) | ConvertTo-Json -Compress -Depth 5)
 exit $exitCode
+} catch {
+    # ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary): a fixed, path-free token only --
+    # see the opening comment on this try block. Distinct exit code (4) from the ordinary
+    # FOOTAGE_PRESENT/ABSENT/MISMATCH/INDETERMINATE (0-3) so a caller can tell "every part got an
+    # honest status" from "this probe itself hit something it never anticipated" apart.
+    Write-Output "RESULT=FOOTAGE_PRESENCE_JOB_ERROR CLIP=$ClipId"
+    exit 4
+}
 '@
 
     # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): a single-pass substitution over the WHOLE
@@ -232,7 +300,9 @@ exit $exitCode
     $jobPath = Join-Path $OutDir "$jobId.job.ps1"
     [IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))
 
-    Write-Output "RESULT=FOOTAGE_PRESENCE_JOB_EMITTED CLIP=$ClipId PARTS=$($partsForJob.Count) SOURCE_SHA256=$sourceSha256 JOB=$jobPath"
+    # ATTR3-FOOTAGE-STAGE-1 round 3 (no path in any branch): JOB= now names the opaque job id,
+    # never the local job FILE path.
+    Write-Output "RESULT=FOOTAGE_PRESENCE_JOB_EMITTED CLIP=$ClipId PARTS=$($partsForJob.Count) SOURCE_SHA256=$sourceSha256 JOB=$jobId"
 
     [pscustomobject]@{
         jobFile = $jobPath
@@ -243,4 +313,56 @@ exit $exitCode
     }
 }
 
-Export-ModuleMember -Function New-Attr3FootagePresenceJob
+function Get-Attr3FootagePresentPartIndexes {
+    <#
+    .SYNOPSIS
+    Parse a footage-presence job's own stdout and return the part INDEXES it reported PASS for a
+    given -ClipId, as a sorted int array -- never anything else out of that text.
+    .DESCRIPTION
+    ATTR3-FOOTAGE-STAGE-1 round 4 (sol minor / astra 5: per-part resume). Split out of
+    attr3-footage-stage.ps1 so a test can exercise the parsing directly against fabricated stdout,
+    without driving the real CLI (whose only path to parts is the resolver -- see that script's
+    own header). Only the LAST line matching the presence job's own
+    mlvapp.attr3-footage-presence.v1 schema is trusted (a real job's stdout carries exactly one);
+    a clip id mismatch, a missing or malformed payload, or no matching line at all all return an
+    EMPTY set -- never a guess that could skip transferring a part that is not actually there.
+    ATTR3-FOOTAGE-STAGE-1 round 5 (hub-reproduced blocker, one clear return shape): every branch
+    returns a PLAIN array via `@(...)`, never the `,@(...)` unrolling-suppression idiom. The
+    production caller (attr3-footage-stage.ps1) always wraps this function's own call in its own
+    `@(...)` -- exactly like every test in this file already does -- and `@(Get-Foo)` already
+    forces array-ness (0, 1 or many elements alike) around whatever this function enumerates onto
+    the pipeline. Returning `,@(...)` here used to make this function itself ALSO emit a single
+    already-array-shaped object; the caller's own `@(...)` then wrapped THAT one object again,
+    producing a 1-element array whose lone element was an Object[] -- so `[int]$presentIndex` in
+    attr3-footage-stage.ps1's own foreach threw for zero, one AND many PASS indexes alike, every
+    time, outside any try/catch. One shape, no double-wrapping: this function returns a plain
+    array; callers that need array-ness from a possibly-empty/singleton result supply their own
+    `@(...)`, exactly once.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][AllowNull()][string]$Stdout,
+        [Parameter(Mandatory = $true)][string]$ClipId
+    )
+
+    $present = New-Object 'System.Collections.Generic.HashSet[int]'
+    if ([string]::IsNullOrEmpty($Stdout)) { return @() }
+
+    $lines = @($Stdout -split "`r?`n" | Where-Object { $_ })
+    $jsonLine = $lines | Where-Object { $_ -match '"schema"\s*:\s*"mlvapp\.attr3-footage-presence\.v1"' } | Select-Object -Last 1
+    if (-not $jsonLine) { return @() }
+
+    try {
+        $payload = $jsonLine | ConvertFrom-Json
+    } catch {
+        return @()
+    }
+    if ($payload.clipId -cne $ClipId) { return @() }
+
+    foreach ($part in @($payload.parts)) {
+        if ([string]$part.status -eq 'PASS') { [void]$present.Add([int]$part.index) }
+    }
+    return @($present | Sort-Object)
+}
+
+Export-ModuleMember -Function New-Attr3FootagePresenceJob, Get-Attr3FootagePresentPartIndexes

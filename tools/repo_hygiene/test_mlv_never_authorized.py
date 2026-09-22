@@ -7027,6 +7027,7 @@ _CLAIM_CARRIERS_PINNED = (
     "tools/gates/verify_consented_footage.py",
     "tools/hooks/mlv-never-authorized.py",
     "tools/profiling/bachelor/Attr3FootagePresenceJob.psm1",
+    "tools/profiling/bachelor/Attr3FootageStageJob.psm1",
     "tools/profiling/bachelor/attr3-footage-presence-job.ps1",
     "tools/profiling/bachelor/playback-attr-3-cuda-job.ps1",
     "tools/repo_hygiene/test_attr3_footage_presence_job.py",
