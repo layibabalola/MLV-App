@@ -1,4 +1,4 @@
-import hashlib, json, os, re, subprocess, sys, time
+import hashlib, json, os, re, shutil, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 
@@ -296,6 +296,13 @@ def test_editing_settings_json_also_wires_lane_no_background_hook(fixture_tree):
     q=json.loads(receipt.read_text(encoding="utf-8"))
     assert q["authority"]["backgroundGate"]=="denied-by-settings-hook"
     assert re.fullmatch(r"[0-9a-f]{64}", q["authority"]["backgroundHookSha256"])
+    # Round 9: the receipt records the RESOLVED interpreter/shell paths and where each came from
+    # (override/PATH/known-location) -- never a hardcoded pin -- so a receipt can be audited
+    # against what actually ran the gate on the host that produced it.
+    assert q["authority"]["backgroundGateInterpreterPath"]
+    assert q["authority"]["backgroundGateInterpreterSource"]
+    assert q["authority"]["backgroundGateShellPath"]
+    assert q["authority"]["backgroundGateShellSource"]
 
 
 def test_codex_lane_gets_no_settings_file_or_flag(fixture_tree):
@@ -458,14 +465,90 @@ def test_launch_refuses_when_registered_command_has_a_bad_interpreter_path_even_
     assert q["state"]=="failed"
     assert q["failure"].startswith("background-gate-selftest-failed")
     assert "127" in q["failure"]
-    # Sanity/documentation half of the requirement: a DIRECT call against the real interpreter
-    # and the actual reserved copy -- what round 7's self-test amounted to -- still succeeds
-    # (exit 2, the correct deny). Only the registered STRING was broken; the underlying
-    # interpreter-and-script pair the old self-test tested was never the thing that broke.
+    # Sanity/documentation half of the requirement -- fable round 8 nit (round 9): this does NOT
+    # call the reserved per-run copy the launcher actually registered; run_lane_no_background_json
+    # runs the repo SOURCE script (LANE_NO_BACKGROUND_SCRIPT) under `sys.executable` (this test
+    # process's own interpreter), not any copy the launcher reserved and not the launcher's
+    # resolved $PYTHON_EXE. That is deliberate, not a stand-in for the reserved copy: the two are
+    # byte-identical (test_hook_copy_is_reserved_in_run_dir_not_resolved_from_worktree and
+    # test_read_only_settings_json_wires_lane_no_background_hook already prove the copy matches
+    # the source), so this line is answering a narrower question than "does the registered command
+    # work" -- only "does the interpreter-and-script PAIR still deny correctly" -- which is the
+    # thing round 7's self-test tested and this mutation left untouched. Only the registered
+    # STRING was broken (a bad path baked into $hookCommand); this asserts the underlying pair was
+    # never the thing that broke.
     hook_copies=list((fixture_tree["root"]/"run").glob("*.lane-no-background.py"))
     assert len(hook_copies)==1
     direct=run_lane_no_background_json({"tool_name":"Bash","tool_input":{"command":"echo x","run_in_background":True}})
     assert direct.returncode==2,(direct.stdout,direct.stderr)
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 9: root cause of the hosted-CI break this round fixes was
+# NOT the pinned Git Bash path (it resolved and ran fine on the runner -- verified against the
+# real job log, run 35758428267 job 106850299120) but the pinned $PYTHON_EXE, a per-user absolute
+# path that exists only on the dev machine. Both are now resolved at runtime: an explicit
+# per-variable override env var, then PATH, then known install locations; unresolvable is a named,
+# fail-closed launch refusal. These four tests exercise both the resolvable and the unresolvable
+# path for each variable via the override, so the outcome is deterministic regardless of whether
+# the host running the suite happens to have Git Bash at a particular path -- required because
+# that is exactly the layout difference between the dev machine and the hosted runner that broke
+# this card.
+def _find_real_git_bash():
+    found = shutil.which("bash")
+    if found and Path(found).is_file():
+        return found
+    for candidate in (
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ):
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def test_launch_proceeds_when_git_bash_and_python_overrides_resolve(fixture_tree):
+    real_bash = _find_real_git_bash()
+    if not real_bash:
+        pytest.skip("no Git Bash found on this test host -- cannot exercise the resolvable-shell path")
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env["MLV_GIT_BASH"]=real_bash
+    env["MLV_LANE_PYTHON_EXE"]=sys.executable
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"]
+    assert q["authority"]["backgroundGateShellPath"]==real_bash
+    assert q["authority"]["backgroundGateShellSource"]=="override:MLV_GIT_BASH"
+    assert q["authority"]["backgroundGateInterpreterPath"]==sys.executable
+    assert q["authority"]["backgroundGateInterpreterSource"]=="override:MLV_LANE_PYTHON_EXE"
+
+
+def test_launch_refuses_when_git_bash_override_is_unresolvable(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
+    env["MLV_GIT_BASH"]=str(fixture_tree["root"]/"nonexistent-bash.exe")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode!=0,(r.stdout,r.stderr)
+    assert not (fixture_tree["root"]/"child.json").exists()
+    assert not (fixture_tree["root"]/"args.json").exists()
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="failed"
+    assert not q["complete"]
+    assert q["failure"].startswith("background-gate-shell-not-found")
+    assert "override:MLV_GIT_BASH" in q["failure"]
+
+
+def test_launch_refuses_when_python_override_is_unresolvable(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env["MLV_LANE_PYTHON_EXE"]=str(fixture_tree["root"]/"nonexistent-python.exe")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode!=0,(r.stdout,r.stderr)
+    assert not (fixture_tree["root"]/"child.json").exists()
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="failed"
+    assert not q["complete"]
+    assert q["failure"].startswith("background-gate-interpreter-not-found")
+    assert "override:MLV_LANE_PYTHON_EXE" in q["failure"]
 
 
 # LANE-NO-BACKGROUND-END-TURN-1 round 8 (sol minor): regression coverage for the post-run

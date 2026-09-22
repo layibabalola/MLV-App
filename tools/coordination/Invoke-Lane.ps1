@@ -137,27 +137,92 @@ $LANES = @{
 $CLAUDE_EXE = Join-Path $env:APPDATA 'npm\claude.cmd'
 $CODEX_EXE  = Join-Path $env:APPDATA 'npm\codex.cmd'
 
-# LANE-NO-BACKGROUND-END-TURN-1 round 6: the same per-user absolute Python interpreter
-# .claude/settings.json's own PreToolUse hook is pinned to (tools/hooks/mlv-never-authorized.py's
-# registration). Repeated here rather than resolved from PATH at runtime for the same reason that
-# registration gives for its own pin: a hook is (interpreter x script x registration), and a
-# portable-but-wrong command fails open silently -- proven cost, 2026-08-09.
-$PYTHON_EXE = 'C:/Users/obabalola/AppData/Local/Python/bin/python.exe'
-$LANE_NO_BACKGROUND_HOOK = Join-Path $PSScriptRoot 'lane-no-background.py'
+# LANE-NO-BACKGROUND-END-TURN-1 round 9: RESOLVED at runtime, not pinned. Round 6/8 pinned both
+# $PYTHON_EXE and $GIT_BASH_EXE to per-user absolute paths that exist only on THIS dev machine
+# (C:\Users\obabalola\...). Verified against the actual hosted-CI job log (run 35758428267, job
+# 106850299120, 2026-09-22): Git Bash resolved and ran FINE on the runner -- the self-test's exit
+# 127 was bash's own "No such file or directory" for $PYTHON_EXE, not for bash itself
+# ("/usr/bin/bash: line 1: C:/Users/obabalola/.../python.exe: No such file or directory"). Every
+# one of the ~26 Claude-lane fixture tests failed with this identical message, so pinning only the
+# shell (as literally requested) would leave hosted CI exactly as broken. Both are now resolved the
+# same way: an explicit per-variable override env var (deterministic -- for tests, and for an
+# operator ruling out a broken install), then a short list of KNOWN, verified install locations,
+# then PATH as a last resort. Resolution failure (nothing found anywhere) is fail-closed: the
+# launch is refused before ever registering a hook command that could not run (see the two
+# `if (-not ...)` checks below) -- an unrunnable hook command is a hook that denies nothing.
+#
+# Known-locations-before-PATH is a DELIBERATE deviation from "override, then PATH, then known
+# locations" (measured on this dev machine while building this round): `Get-Command bash.exe`
+# returns `C:\WINDOWS\system32\bash.exe` -- the Windows-shipped WSL LAUNCHER STUB -- before the
+# real `C:\Program Files\Git\bin\bash.exe`, because System32 sits ahead of Git's bin directory on
+# PATH. That stub is not Git Bash: with no WSL distribution installed it prints "Windows Subsystem
+# for Linux has no installed distributions" and exits 1, never running the hook script at all. The
+# self-test still catches this (self-test failure, launch refused -- fail-closed, not fail-open),
+# but it would have refused EVERY default, non-overridden Claude lane launch on any dev box with
+# the WSL feature enabled, which is exactly the "portable-but-wrong command" the original pinning
+# comment warned about. Known locations are curated, verified-correct absolute paths (this
+# project's own previously-pinned literals, first); PATH is inherently host-and-install-order
+# dependent and is checked only if nothing curated resolves. `python.exe` on PATH tested safe on
+# this host (resolves to a working interpreter, not a hung or Store-redirecting stub) but the same
+# host-dependent risk applies in principle, so both resolvers share this order for one uniform,
+# auditable rule rather than a special case per variable.
+#
+# A resolved-but-wrong command (from either PATH or a known location) is not the same silent-
+# fail-open risk the original pinning comment warned about (interpreter x script x registration; "a
+# portable-but-wrong command fails open silently -- proven cost, 2026-08-09"): that 2026-08-09
+# incident (a hook registered under a misspelled EVENT KEY, never invoked at all, undetected for
+# days) predates the launch self-test below, which now PROVES the exact resolved command denies
+# (exit 2) before any lane ever launches -- it catches a wrong-but-present interpreter or shell
+# exactly as it would catch a wrong path baked into the registered string, which is the whole
+# reason round 7/8 built it, and exactly what it did above when it hit the WSL stub.
+function Resolve-LaneExecutable {
+    param(
+        [Parameter(Mandatory = $true)][string]$OverrideEnvName,
+        [Parameter(Mandatory = $true)][string[]]$KnownLocations,
+        [Parameter(Mandatory = $true)][string[]]$PathCommandNames
+    )
+    $override = [Environment]::GetEnvironmentVariable($OverrideEnvName)
+    if ($override) {
+        # An explicit override is AUTHORITATIVE: it does not fall through to known locations or
+        # PATH even when the named path does not exist. A "force unresolvable" test (or an
+        # operator ruling out a specific broken install) would not be deterministic if a real
+        # known-location/PATH hit could silently rescue a deliberately-wrong override.
+        if (Test-Path -LiteralPath $override -PathType Leaf) {
+            return [pscustomobject]@{ Path = $override; Source = "override:$OverrideEnvName" }
+        }
+        return [pscustomobject]@{ Path = $null; Source = "override:$OverrideEnvName=$override (not found)" }
+    }
+    foreach ($loc in $KnownLocations) {
+        if (Test-Path -LiteralPath $loc -PathType Leaf) {
+            return [pscustomobject]@{ Path = $loc; Source = "known-location:$loc" }
+        }
+    }
+    foreach ($name in $PathCommandNames) {
+        $cmd = Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cmd -and (Test-Path -LiteralPath $cmd.Source -PathType Leaf)) {
+            return [pscustomobject]@{ Path = $cmd.Source; Source = "PATH:$name" }
+        }
+    }
+    return [pscustomobject]@{ Path = $null; Source = 'unresolved (checked override, known locations, PATH)' }
+}
 
-# Round 8 (sol major 1): pinned absolute for the same reason $PYTHON_EXE is -- a hook is
-# (interpreter x script x registration), and a portable-but-wrong shell fails open silently.
 # Claude Code's own docs state exactly which shell runs a shell-form `type: "command"` hook (one
 # without an `args` field, which is what this launcher registers) on Windows: "When Claude Code
 # runs a shell-form command hook ... it spawns `sh -c` on macOS and Linux, Git Bash on Windows, or
 # PowerShell when Git Bash isn't installed by default" (code.claude.com/docs/en/hooks-guide,
-# "Hook JSON has no effect" section, fetched 2026-09-22 -- full quote and fetch evidence in this
-# round's summary.md). Git Bash is installed on this host: tools/agent-bridge/core/win_process.py
-# (~line 165) already documents a Claude-Code-spawned process resolving to exactly
-# `C:\Program Files\Git\bin\..\usr\bin\bash.exe` from live process measurement, and this repo's
-# own Bash tool runs on Git Bash. So Git Bash -- not PowerShell -- is the shell a registered hook
-# command actually runs under here, and the self-test below must use the same one.
-$GIT_BASH_EXE = 'C:\Program Files\Git\bin\bash.exe'
+# "Hook JSON has no effect" section, fetched 2026-09-22 -- full quote and fetch evidence in round
+# 8's summary.md). So Git Bash -- not PowerShell -- is the shell a registered hook command
+# actually runs under here, and the self-test below must use the same one.
+$PYTHON_EXE_RESOLUTION = Resolve-LaneExecutable -OverrideEnvName 'MLV_LANE_PYTHON_EXE' `
+    -PathCommandNames @('python.exe', 'python3.exe') `
+    -KnownLocations @('C:/Users/obabalola/AppData/Local/Python/bin/python.exe')
+$PYTHON_EXE = $PYTHON_EXE_RESOLUTION.Path
+$LANE_NO_BACKGROUND_HOOK = Join-Path $PSScriptRoot 'lane-no-background.py'
+
+$GIT_BASH_EXE_RESOLUTION = Resolve-LaneExecutable -OverrideEnvName 'MLV_GIT_BASH' `
+    -PathCommandNames @('bash.exe') `
+    -KnownLocations @('C:\Program Files\Git\bin\bash.exe', 'C:\Program Files\Git\usr\bin\bash.exe', 'C:\Program Files (x86)\Git\bin\bash.exe')
+$GIT_BASH_EXE = $GIT_BASH_EXE_RESOLUTION.Path
 
 # Every tool that either fans out to another agent (Agent, Task, Workflow, TaskCreate) or
 # promises a LATER turn a headless lane cannot receive (Monitor, ScheduleWakeup, CronCreate,
@@ -693,6 +758,17 @@ if ($cfg.engine -eq 'claude') {
     } catch {
         throw "background-gate-copy-failed: $($_.Exception.Message)"
     }
+    # Round 9: resolution can come back empty (checked override, PATH, and known locations, and
+    # none of them exist on this host). An unrunnable hook command denies nothing, so refuse the
+    # launch here, before ever building the registered string or running the self-test against a
+    # command that could never have worked -- same fail-closed posture the self-test itself
+    # enforces below, just one step earlier because there is no command to even attempt yet.
+    if (-not $PYTHON_EXE) {
+        throw "background-gate-interpreter-not-found: no Python interpreter resolved ($($PYTHON_EXE_RESOLUTION.Source)); an unrunnable hook command denies nothing, so the launch is refused rather than registering one that cannot run."
+    }
+    if (-not $GIT_BASH_EXE) {
+        throw "background-gate-shell-not-found: no Git Bash resolved ($($GIT_BASH_EXE_RESOLUTION.Source)); an unrunnable hook command denies nothing, so the launch is refused rather than registering a hook whose self-test can never run."
+    }
     # Round 8 (sol major 1): the command STRING is built exactly ONCE, here -- both the
     # --settings hook entry below and the self-test use this same variable, so there is no way
     # for the string the self-test proves and the string actually registered to drift apart.
@@ -816,6 +892,13 @@ if ($cfg.engine -eq 'claude') {
         # run below, where a mismatch overwrites this value with 'background-gate-tampered'.
         backgroundGate       = 'denied-by-settings-hook'
         backgroundHookSha256 = $backgroundHookLaunchSha256
+        # Round 9: the resolved paths (never the pin) plus WHERE each came from -- override, PATH,
+        # or a known location -- so a receipt can be audited against what actually ran the gate on
+        # this host, not what a stale comment claims is pinned.
+        backgroundGateInterpreterPath   = $PYTHON_EXE
+        backgroundGateInterpreterSource = $PYTHON_EXE_RESOLUTION.Source
+        backgroundGateShellPath         = $GIT_BASH_EXE
+        backgroundGateShellSource       = $GIT_BASH_EXE_RESOLUTION.Source
     }
 } else {
     $exe  = $CODEX_EXE

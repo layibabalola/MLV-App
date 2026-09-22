@@ -68,19 +68,37 @@ and points the registration at that copy, never at the source. The copy is hashe
 immediately (`sha256`). **The registered command STRING is built exactly once**
 (`$hookCommand`) and used unchanged for both the `--settings` entry and the
 launch self-test, so the two can never name different commands. **Round 8 (sol
-major 1): the self-test runs that exact string through Git Bash**
-(`C:\Program Files\Git\bin\bash.exe -c $hookCommand`, fed the same synthetic
-`{"tool_name":"Bash","tool_input":{"run_in_background":true}}` payload on
-stdin), not by invoking the pinned Python interpreter and the copy as two
+major 1): the self-test runs that exact string through Git Bash**, fed the
+same synthetic `{"tool_name":"Bash","tool_input":{"run_in_background":true}}`
+payload on stdin, not by invoking the interpreter and the copy as two
 decomposed PowerShell argv tokens the way round 7 did. Claude Code's own docs
 state a shell-form `command` hook (one without an `args` field, which is what
 this launcher registers) is executed via `sh -c` on macOS/Linux, **Git Bash on
 Windows**, or PowerShell only when Git Bash is not installed
-(code.claude.com/docs/en/hooks-guide) -- Git Bash is installed on this fleet's
-hosts, so that is the shell that actually runs the registered command, and a
-self-test invoking a different shell (or bypassing the command string
-entirely) can pass while the real registration is broken by bad quoting or a
-wrong path baked into the string itself. The self-test requires the fail-closed
+(code.claude.com/docs/en/hooks-guide), so that is the shell that actually runs
+the registered command, and a self-test invoking a different shell (or
+bypassing the command string entirely) can pass while the real registration is
+broken by bad quoting or a wrong path baked into the string itself.
+
+**Round 9: both the interpreter and the shell are RESOLVED at runtime, never
+pinned.** The dev-machine-only pins broke hosted CI: the real job log (run
+35758428267, job 106850299120, 2026-09-22) shows Git Bash ran fine on the
+runner -- the self-test's exit 127 was bash's own "No such file or directory"
+for the pinned `$PYTHON_EXE`, not for bash. Both now resolve the same way, in
+order: (1) an authoritative per-variable override (`MLV_GIT_BASH`,
+`MLV_LANE_PYTHON_EXE`) that never falls through, even to a real hit, so a test
+forcing "unresolvable" is deterministic regardless of host layout; (2) known,
+verified install locations, including the previous pins; (3) `PATH` as a last
+resort -- deliberately last, not first as a shell resolver would naturally do
+it: `Get-Command bash.exe` on the dev machine resolves to the Windows-shipped
+WSL launcher stub ahead of real Git Bash (System32 precedes Git's `bin` on
+`PATH`), which would have refused every default launch on any box with WSL
+enabled. **Nothing resolving for either variable refuses the launch before a
+hook command is ever built** (`background-gate-shell-not-found` /
+`-interpreter-not-found`) -- an unrunnable command denies nothing. The
+receipt's `authority` block records each resolved path and which tier found it
+(`backgroundGateShellPath`/`-Source`, `backgroundGateInterpreterPath`/
+`-Source`). The self-test requires the fail-closed
 deny (exit 2) -- a launch whose self-test does not pass never starts the
 provider; the receipt records `failure: "background-gate-selftest-failed: ..."`
 instead. After the run, the copy is re-hashed; a lane with Bash/Edit access is
