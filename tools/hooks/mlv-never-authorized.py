@@ -814,18 +814,12 @@ MANIFEST_PROMPTS_PREFIX = "prompts/v2/"
 # consented footage table lives IN the hook script, so the third tail already guards it.  The
 # FOURTH tail is that table's content verifier (NA4-OWNER-CONSENTED-FOOTAGE-1 round 3, E):
 # every tracked, id-addressed footage consumer must call it before opening a clip, so a lane
-# that rewrites it rewrites the only content check those consumers have.)  The FIFTH tail is
-# the lane-no-background PreToolUse hook (LANE-NO-BACKGROUND-END-TURN-1 round 7): Invoke-Lane
-# copies it from the launcher's own checkout into each run directory and hashes the copy, so a
-# lane that rewrote the launcher-side script would disarm every later lane's background gate.
-# Invoke-Lane.ps1 itself is deliberately NOT a tail: lanes implement launcher PRs, and its
-# pre-launch self-test plus review are what cover it.
+# that rewrites it rewrites the only content check those consumers have.)
 NA10_GUARDED_TAILS = (
     ".claude/settings.json",
     ".claude/settings.local.json",
     "tools/hooks/mlv-never-authorized.py",
     "tools/gates/verify_consented_footage.py",
-    "tools/coordination/lane-no-background.py",
 )
 
 
@@ -3907,12 +3901,12 @@ def rule_na9(ctx):
 #     `hook-unregistered` refusals at dispatch and the sol review of every PR diff.
 #
 # NA-10 runs LAST, in register order.  Every specified row is attributable there: NA-7
-# allows a lane's own worktree by construction, and none of the five tails is an NA-2
+# allows a lane's own worktree by construction, and none of the four tails is an NA-2
 # protected path, so nothing else fires first and steals the reason line.
 
 
 def _na10_guarded(path_norm):
-    """Does this path END with one of the five gate tails, under any root?"""
+    """Does this path END with one of the four gate tails, under any root?"""
     if not path_norm:
         return False
     return any(

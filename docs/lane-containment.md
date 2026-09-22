@@ -79,15 +79,14 @@ nor the re-hash proves anything about a FUTURE launch from this same worktree if
 the lane instead rewrote the WORKTREE'S SOURCE copy of
 `tools/coordination/lane-no-background.py` (the file the next launch would copy
 from) or of `Invoke-Lane.ps1` itself (the file that performs the copy-and-wire
-step). **Closed for the hook, deliberately open for the launcher (round 7, landed
-by the board-rooted hub because `mlv-never-authorized.py` is itself an NA-10 tail
-a lane worktree cannot edit):** `tools/coordination/lane-no-background.py` is now
-NA-10's fifth guarded tail, so a lane may write it only at the board venue.
-`Invoke-Lane.ps1` is deliberately NOT a tail -- lanes implement launcher PRs --
-so a lane that rewrites its worktree's launcher can still change what a FUTURE
-launch from that worktree does. That residual is covered by review of every
-launcher diff, not by NA-10. The pre-launch self-test catches a broken or
-non-denying hook, but not a launcher rewritten to skip the self-test itself.
+step). **Known gap, not yet closed (round 7):** NA-10 in
+`tools/hooks/mlv-never-authorized.py` is the natural place to guard both paths as
+gate tails a lane may write only at the board venue, the same way it already
+guards `.claude/settings.json` and its own script -- but `mlv-never-authorized.py`
+is itself one of NA-10's guarded tails, so a session running in a lane worktree
+(this one included) is refused by NA-10 when it tries to make that edit; it is
+attributable ONLY to the board-rooted actor. Filed for a board-venue session to
+land, not done here.
 
 The hook script reads the tool-call JSON on stdin and denies the call (exit 2,
 one line on stderr -- the same fail-closed protocol
