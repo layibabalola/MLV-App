@@ -505,9 +505,15 @@ if ($cfg.engine -eq 'claude') {
         $capabilityNotice = 'This read-only lane has permission to use only Read, Grep, and Glob. Bash, PowerShell, editing tools, Agent, and Task are unavailable: do not call or retry them. Inspect hub-exported diffs and evidence with the available read tools. If a required export is missing, name that missing evidence and return an unmeasured finding; do not claim you ran shell commands or tests.'
         $argv += @('--append-system-prompt', $capabilityNotice)
     }
-    # Prevent nested provider fan-out through the CLI's supported deny surface.
-    # One comma-separated token avoids the same variadic swallowing hazard as allowedTools.
-    $argv += @('--disallowedTools', 'Agent,Task')
+    # Prevent nested provider fan-out through the CLI's supported deny surface, AND
+    # deny every tool that hands a headless lane a LATER turn it does not have.
+    # LANE-NO-BACKGROUND-END-TURN-1 (2026-09-22): four headless `claude -p` implementer
+    # lanes ended their final turn on "I'll resume when the background job completes" --
+    # a headless lane gets no later turn, so the work sat uncommitted with no receipt.
+    # Monitor/ScheduleWakeup/CronCreate/CronDelete/RemoteTrigger all promise a callback
+    # this process cannot receive. One comma-separated token avoids the same variadic
+    # swallowing hazard as allowedTools.
+    $argv += @('--disallowedTools', 'Agent,Task,Monitor,ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger')
     # PROMPT GOES VIA STDIN, NOT AS A POSITIONAL ARGUMENT. Several claude flags
     # (--allowedTools, --add-dir) are VARIADIC and keep consuming every following
     # token that does not start with '-', so a trailing positional prompt is
@@ -526,7 +532,8 @@ if ($cfg.engine -eq 'claude') {
         maxTurns       = if ($MaxTurns -gt 0) { $MaxTurns } else { 'unset' }
         bulkReads      = if ($AllowBulkReads) { 'ALLOWED' } else { 'DENIED' }
         denyRules      = if ($AllowBulkReads) { @() } else { $denyRules }
-        disallowedTools = @('Agent', 'Task')
+        disallowedTools = @('Agent', 'Task', 'Monitor', 'ScheduleWakeup', 'CronCreate', 'CronDelete', 'RemoteTrigger')
+        backgroundTasks = 'disabled'
         capabilityNotice = if ($AllowEdits) { $null } else { $capabilityNotice }
     }
 } else {
@@ -582,6 +589,14 @@ $psi.CreateNoWindow         = $true
 # in the receipt but never applied to the process that ran.
 if ($cfg.engine -eq 'claude' -and $cfg.effort) {
     $psi.Environment['CLAUDE_CODE_EFFORT_LEVEL'] = $cfg.effort
+}
+# LANE-NO-BACKGROUND-END-TURN-1: belt-and-braces alongside the --disallowedTools deny
+# list above. Verified present in the installed CLI binary
+# (@anthropic-ai/claude-code-win32-x64/claude.exe) via `claude --help` plus a string
+# scan of the binary; --help does not document it, so this env var itself is the
+# verification, not the help text.
+if ($cfg.engine -eq 'claude') {
+    $psi.Environment['CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'] = '1'
 }
 # Per-run lane scratch under an MLV-owned root instead of the shared %TEMP%.
 $scratchDir = $null
@@ -933,6 +948,22 @@ try {
     $workEvidence = Get-LaneWorkEvidence -Engine $cfg.engine -Answer $stdout -ExitCode $exitCode
 } catch {
     $workEvidence = [ordered]@{ workCompleted = $false; reason = "cannot-determine: $($_.Exception.Message)"; subtype = $null; terminalReason = $null; isError = $null }
+}
+# LANE-NO-BACKGROUND-END-TURN-1: a success envelope is not positive evidence of work if the
+# tree never moved. HEAD still equal to the sha this lane started from, with tracked files
+# left dirty, is exactly what "I'll resume when the background job completes" leaves behind
+# on a headless lane that has no later turn to make good on that promise -- so it overrides
+# whatever the envelope claims. Untracked-only dirt (scratch files, logs) does not count.
+if ($BaseSha) {
+    $headAfter = try { (& git -C $WorkDir rev-parse HEAD 2>$null | Select-Object -First 1) } catch { $null }
+    if ($headAfter -eq $BaseSha) {
+        $statusLines = try { @(& git -C $WorkDir status --porcelain 2>$null) } catch { @() }
+        $trackedDirty = @($statusLines | Where-Object { $_ -and -not $_.StartsWith('??') })
+        if ($trackedDirty.Count -gt 0) {
+            $workEvidence.workCompleted = $false
+            $workEvidence.reason = 'dirty-worktree-no-commit'
+        }
+    }
 }
 $workCompleted = ($null -eq $failure -and $null -eq $providerRefusal -and $processEnded -and $workEvidence.workCompleted -eq $true)
 $receipt = [ordered]@{

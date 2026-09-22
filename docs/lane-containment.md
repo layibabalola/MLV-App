@@ -15,12 +15,24 @@ Setup, startup and provider execution share one monotonic timeout budget. The
 UTC deadline projects that budget from the same initial start time; the stopwatch
 enforces it. An exhausted setup budget prevents the host or provider from starting.
 
-Every Claude lane receives `--disallowedTools Agent,Task`. An editing allowlist
-containing either tool is rejected before reservation. Existing editing grants,
-hook checks, read restrictions and provider-refusal classification still apply.
-This blocks built-in nested agent tools; it is not a claim that Bash permissions
-prevent arbitrary external process launches. Those launches remain confined to
-the owning job unless an independently authorized external service starts them.
+Every Claude lane receives
+`--disallowedTools Agent,Task,Monitor,ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger`
+and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment
+(LANE-NO-BACKGROUND-END-TURN-1, 2026-09-22): a headless lane has no later turn, so a
+tool that promises one (background jobs, a scheduled wakeup, a cron entry, a remote
+trigger) leaves the work stranded exactly like the built-in nested-agent tools this
+deny list already blocked. An editing allowlist containing any denied tool is
+rejected before reservation. Existing editing grants, hook checks, read restrictions
+and provider-refusal classification still apply. This blocks the CLI's own tool
+surface; it is not a claim that Bash permissions prevent arbitrary external process
+launches. Those launches remain confined to the owning job unless an independently
+authorized external service starts them.
+
+A receipt is also never marked `complete` (or state `ended-incomplete` is forced)
+when the child's own worktree is still at the lane's starting sha with tracked files
+left dirty -- positive evidence in the provider's answer does not outrank a tree that
+never moved; see `workEvidence.reason: dirty-worktree-no-commit` in
+`tools/coordination/Invoke-Lane.ps1`.
 
 `-ReasoningEffort low` explicitly requests low effort for one invocation. Codex
 receives its normal reasoning configuration argument. Claude receives

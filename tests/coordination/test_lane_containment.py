@@ -28,6 +28,12 @@ POST_START_UNRECORDED = "post-start-unrecorded"
 # of trusting the hand-copy.
 KILL_OUTCOME_TOKENS = {"already-exited", "killed", "kill-wait-timeout", "kill-threw"}
 
+# LANE-NO-BACKGROUND-END-TURN-1: the deny list now blocks every tool that hands a
+# headless lane a callback it has no later turn to receive, on top of the pre-existing
+# nested-agent-fanout denial. Kept as one named constant instead of a literal per
+# assertion site so this file has exactly one place to update if the list changes.
+DISALLOWED_TOOLS_TOKEN = "Agent,Task,Monitor,ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger"
+
 
 def assert_owner_absence_is_legitimate(containment, context):
     # The one place round-3, round-4, and round-5 tests all funnel through. Since
@@ -94,6 +100,7 @@ $me=Get-Process -Id $PID
 @{pid=$PID;createdUtc=$me.StartTime.ToUniversalTime().ToString('o')}|ConvertTo-Json|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_CHILD
 $args|ConvertTo-Json|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_ARGS
 $env:CLAUDE_CODE_EFFORT_LEVEL|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_EFFORT
+$env:CLAUDE_CODE_DISABLE_BACKGROUND_TASKS|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_BGTASKS
 if($env:MLV_FIXTURE_MODE -ne 'normal'){
   $g=Start-Process pwsh.exe -ArgumentList @('-NoProfile','-NonInteractive','-File',$env:MLV_FIXTURE_GRAND_SCRIPT) -WindowStyle Hidden -PassThru
   while(-not(Test-Path $env:MLV_FIXTURE_GRAND)){Start-Sleep -Milliseconds 20}
@@ -133,7 +140,8 @@ def prepare(tree, mode, assignment_failure=False, editing=False, allowed_tools="
       "MLV_BOARD_ROOT":str(root),"MLV_FIXTURE_MODE":mode,
       "MLV_FIXTURE_CHILD":str(root/"child.json"),"MLV_FIXTURE_GRAND":str(root/"grand.json"),
       "MLV_FIXTURE_GRAND_SCRIPT":str(tree["grand"]),"MLV_FIXTURE_ARGS":str(root/"args.json"),
-      "MLV_FIXTURE_PROMPT":str(root/"prompt.txt"),"MLV_FIXTURE_EFFORT":str(root/"effort.txt")})
+      "MLV_FIXTURE_PROMPT":str(root/"prompt.txt"),"MLV_FIXTURE_EFFORT":str(root/"effort.txt"),
+      "MLV_FIXTURE_BGTASKS":str(root/"bgtasks.txt")})
     cmd=[PWSH,"-NoLogo","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",str(script),"-Lane",lane,"-Prompt","fixture prompt","-WorkDir",str(root),"-RunDir",str(run),"-TimeoutSec","3" if mode=="timeout" else "30","-Card","FIXTURE","-ReasoningEffort","low"]
     if editing: cmd += ["-AllowEdits","-AllowedTools",allowed_tools]
     return cmd,env,run/(lane+"-001.receipt.json")
@@ -148,7 +156,7 @@ def test_read_only_argv_json_stdin_and_tool_denial(fixture_tree):
     assert q["containment"]["childCreatedUtc"].endswith("Z") and "T" in q["containment"]["childCreatedUtc"]
     assert (fixture_tree["root"]/"prompt.txt").read_text(encoding="utf-8-sig").strip()=="fixture prompt"
     argv=json.loads((fixture_tree["root"]/"args.json").read_text(encoding="utf-8-sig"))
-    i=argv.index("--disallowedTools"); assert argv[i+1]=="Agent,Task"
+    i=argv.index("--disallowedTools"); assert argv[i+1]==DISALLOWED_TOOLS_TOKEN
     j=argv.index("--allowedTools"); assert argv[j+1]=="Read,Grep,Glob"
     assert "--append-system-prompt" in argv
     notice=argv[argv.index("--append-system-prompt")+1]
@@ -158,6 +166,8 @@ def test_read_only_argv_json_stdin_and_tool_denial(fixture_tree):
     assert q["outputBytes"]>0 and q["spend"]["costUsd"]==0
     assert q["effort"]=="low"
     assert (fixture_tree["root"]/"effort.txt").read_text(encoding="utf-8-sig").strip()=="low"
+    assert (fixture_tree["root"]/"bgtasks.txt").read_text(encoding="utf-8-sig").strip()=="1"
+    assert q["authority"]["backgroundTasks"]=="disabled"
 
 
 def test_timeout_kills_owned_child_and_grandchild(fixture_tree):
@@ -201,9 +211,11 @@ def test_editing_argv_preserves_allowlist_and_denies_nested_tools(fixture_tree):
     argv=json.loads((fixture_tree["root"]/"args.json").read_text(encoding="utf-8-sig"))
     assert argv[argv.index("--permission-mode")+1]=="acceptEdits"
     assert argv[argv.index("--allowedTools")+1]=="Read,Write,Edit"
-    assert argv[argv.index("--disallowedTools")+1]=="Agent,Task"
+    assert argv[argv.index("--disallowedTools")+1]==DISALLOWED_TOOLS_TOKEN
     assert "--append-system-prompt" not in argv
-    q=json.loads(receipt.read_text(encoding="utf-8")); assert q["authority"]["disallowedTools"]==["Agent","Task"]
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["authority"]["disallowedTools"]==DISALLOWED_TOOLS_TOKEN.split(",")
+    assert q["authority"]["backgroundTasks"]=="disabled"
 
 
 @pytest.mark.parametrize("bad",["Agent"," task ","Read, AGENT ,Write","Read,Task"])
@@ -225,6 +237,9 @@ def test_codex_launch_stays_direct_without_claude_flags(fixture_tree):
     assert 'model_reasoning_effort=low' in argv or 'model_reasoning_effort="low"' in argv
     q=json.loads(receipt.read_text(encoding="utf-8"))
     assert q["containment"] is None and q["effort"]=="low" and q["complete"]
+    # The background-tasks deny is a claude-only concept (Monitor/ScheduleWakeup/Cron*/
+    # RemoteTrigger are claude CLI tools) -- codex must not receive the env var.
+    assert (fixture_tree["root"]/"bgtasks.txt").read_text(encoding="utf-8-sig").strip()==""
 
 
 def test_startup_consumes_same_deadline_without_starting_provider(fixture_tree):
@@ -573,3 +588,61 @@ def test_unwritable_ledger_refuses_the_launch_with_a_named_failure(fixture_tree)
     q=json.loads(receipt.read_text(encoding="utf-8"))
     assert q["failure"].startswith("dispatch-ledger-write-failed") and not q["complete"]
     assert not (fixture_tree["root"]/"child.json").exists(), "no provider may start without a ledger row"
+
+
+def _git(root, *args):
+    r=subprocess.run(["git","-C",str(root)]+list(args),capture_output=True,text=True,timeout=10)
+    assert r.returncode==0,(args,r.stdout,r.stderr)
+    return r.stdout
+
+
+def _seed_git_repo(root):
+    _git(root,"init","-q")
+    _git(root,"config","user.email","fixture@example.com")
+    _git(root,"config","user.name","fixture")
+    (root/"tracked.txt").write_text("original\n",encoding="ascii")
+    _git(root,"add","tracked.txt")
+    _git(root,"commit","-q","-m","seed")
+
+
+# LANE-NO-BACKGROUND-END-TURN-1: the fake claude in fixture_tree always answers a clean
+# success envelope (mode "normal") without touching the tree -- exactly the shape of a
+# headless lane that announced "I'll resume when the background job completes" and left
+# nothing behind. A HEAD-unchanged, tracked-dirty worktree must override that envelope.
+def test_dirty_tracked_worktree_with_no_commit_is_ended_incomplete(fixture_tree):
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    (root/"tracked.txt").write_text("dirty-but-uncommitted\n",encoding="ascii")
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="ended-incomplete"
+    assert q["complete"] is False
+    assert q["workEvidence"]["reason"]=="dirty-worktree-no-commit"
+
+
+def test_untracked_only_dirt_does_not_trigger_dirty_no_commit(fixture_tree):
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    (root/"scratch.log").write_text("untracked scratch output\n",encoding="ascii")
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"] is True
+    assert q["workEvidence"]["reason"]!="dirty-worktree-no-commit"
+
+
+def test_clean_git_worktree_is_still_marked_complete(fixture_tree):
+    # The new check must not misfire on the common healthy case: a git worktree
+    # with nothing dirty at all.
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"] is True
+    assert q["workEvidence"]["reason"]!="dirty-worktree-no-commit"
+    assert q["failure"] is None
