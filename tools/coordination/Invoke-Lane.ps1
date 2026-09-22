@@ -183,6 +183,15 @@ function Get-Sha256([string]$Text) {
 # lookup below found nothing for it. Invoke-GitCaptureUtf8 routes through ProcessStartInfo with
 # an explicit StandardOutputEncoding instead (the same mechanism this script already uses for
 # provider child processes), which sidesteps console state entirely.
+#
+# Round 5 (sol minor 1 / fable minor 1): every caller used to receive plain '' on ANY failure --
+# process-start failure, a stream-read exception, or (previously unchecked entirely) a non-zero
+# git exit -- indistinguishable from '' being git's true, successful, empty output (e.g. `git
+# status --porcelain` on a clean tree). A caller could not tell "git could not be asked" from
+# "git answered: nothing is dirty", which is exactly the false-clean the dirty-no-commit check
+# below exists to rule out. This now returns a result object every caller must check `.ok` on
+# before touching `.stdout`; `.error` names WHERE the call failed, not git's raw stderr text (the
+# receipt is not the place to surface arbitrary process output as if it were a diagnosis).
 function Invoke-GitCaptureUtf8([string]$WorkDir, [string[]]$GitArgs) {
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = 'git'
@@ -192,16 +201,47 @@ function Invoke-GitCaptureUtf8([string]$WorkDir, [string[]]$GitArgs) {
     $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
     $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
-    try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return '' }
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+    } catch {
+        return [ordered]@{ ok = $false; stdout = $null; exitCode = $null; error = "git-start-failed: $($_.Exception.Message)" }
+    }
     $outTask = $p.StandardOutput.ReadToEndAsync()
     $errTask = $p.StandardError.ReadToEndAsync()
     $p.WaitForExit()
-    try { return $outTask.GetAwaiter().GetResult() } catch { return '' }
+    try {
+        $out = $outTask.GetAwaiter().GetResult()
+    } catch {
+        return [ordered]@{ ok = $false; stdout = $null; exitCode = $p.ExitCode; error = "git-read-failed: $($_.Exception.Message)" }
+    }
+    if ($p.ExitCode -ne 0) {
+        $errText = try { $errTask.GetAwaiter().GetResult() } catch { '' }
+        return [ordered]@{ ok = $false; stdout = $out; exitCode = $p.ExitCode; error = ("git-exit-{0}: {1}" -f $p.ExitCode, $errText).Trim() }
+    }
+    return [ordered]@{ ok = $true; stdout = $out; exitCode = 0; error = $null }
 }
 
+# Round 5 (sol minor 2): content identity of a dirty tracked path is now the git blob hash of the
+# WORKING-TREE FILE ITSELF (`git hash-object`), not a hash of rendered `git diff` text. Diff
+# rendering passes through config a caller does not control here (textconv filters, whitespace/
+# rename-detection options), which can make two DIFFERENT on-disk contents render as the SAME
+# diff text -- the opposite of what a content-identity check must guarantee. `hash-object`
+# reports the identity of the bytes git would actually commit, with nothing interpretive between
+# the file and the hash. A path absent from the working tree (deleted, or a rename's old path
+# already consumed below) has no bytes to hash, so it gets a fixed 'DELETED' marker instead --
+# distinct from any real hash-object output, so a delete can never collide with a real blob hash.
+#
+# Returns a result object, never a bare map: a git failure partway through (e.g. `status`
+# succeeds but a later `hash-object` fails) must be visible to the caller as "this snapshot could
+# not be taken" rather than silently returning whatever partial map had been built so far, which
+# would read as "here is the complete truth" when it is not.
 function Get-TrackedDirtyContentIdentity([string]$WorkDir) {
-    $raw = Invoke-GitCaptureUtf8 -WorkDir $WorkDir -GitArgs @('status', '--porcelain=v1', '-z')
-    if ([string]::IsNullOrEmpty($raw)) { return [ordered]@{} }
+    $statusResult = Invoke-GitCaptureUtf8 -WorkDir $WorkDir -GitArgs @('status', '--porcelain=v1', '-z')
+    if (-not $statusResult.ok) {
+        return [ordered]@{ ok = $false; map = $null; reason = "git status failed: $($statusResult.error)" }
+    }
+    $raw = $statusResult.stdout
+    if ([string]::IsNullOrEmpty($raw)) { return [ordered]@{ ok = $true; map = [ordered]@{}; reason = $null } }
     $fields = @($raw -split "`0" | Where-Object { $_ -ne '' })
     $map = [ordered]@{}
     $i = 0
@@ -218,10 +258,18 @@ function Get-TrackedDirtyContentIdentity([string]$WorkDir) {
             if ($i -lt $fields.Count) { $i++ }
         }
         if ($statusCode -eq '??') { continue }
-        $diffText = Invoke-GitCaptureUtf8 -WorkDir $WorkDir -GitArgs @('diff', 'HEAD', '--', $path)
-        $map[$path] = Get-Sha256 $diffText
+        $fullPath = Join-Path $WorkDir $path
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            $map[$path] = 'DELETED'
+            continue
+        }
+        $hashResult = Invoke-GitCaptureUtf8 -WorkDir $WorkDir -GitArgs @('hash-object', '--', $path)
+        if (-not $hashResult.ok) {
+            return [ordered]@{ ok = $false; map = $null; reason = "git hash-object failed for '$path': $($hashResult.error)" }
+        }
+        $map[$path] = $hashResult.stdout.Trim()
     }
-    return $map
+    return [ordered]@{ ok = $true; map = $map; reason = $null }
 }
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
@@ -403,8 +451,19 @@ if ([string]::IsNullOrWhiteSpace($BaseSha)) { $BaseSha = $null }
 # written under $RunDir / the board root, not $WorkDir), so this snapshot is equivalent to
 # "immediately before launch".
 $InitialTrackedDirt = $null
+# Round 5 (sol minor 1): a failed PRE-launch snapshot must never read as "nothing was dirty" --
+# that reading is a false-clean the post-exit comparison could then act on as ground truth. Kept
+# separate from $InitialTrackedDirt itself (rather than folding a sentinel into the map) so the
+# post-exit block below can distinguish "captured, empty" from "never captured" without
+# inspecting map contents.
+$InitialTrackedDirtUnavailableReason = $null
 if ($AllowEdits -and $LANES[$Lane].engine -eq 'claude' -and $BaseSha) {
-    $InitialTrackedDirt = Get-TrackedDirtyContentIdentity -WorkDir $WorkDir
+    $preSnapshot = Get-TrackedDirtyContentIdentity -WorkDir $WorkDir
+    if ($preSnapshot.ok) {
+        $InitialTrackedDirt = $preSnapshot.map
+    } else {
+        $InitialTrackedDirtUnavailableReason = $preSnapshot.reason
+    }
 }
 
 if (-not $RunDir) {
@@ -1076,19 +1135,45 @@ try {
 # porcelain status line differs. A further edit to an already-dirty tracked file keeps the
 # same status code (still ' M path') both before and after, so status-line comparison alone
 # missed it; comparing the per-path content hash catches it.
+# Round 5 (sol minor 1 / fable minor 1): `$dirtyCheck` records what this block actually managed
+# to determine, and is carried into the receipt below so a reader never has to infer it from
+# `workEvidence.reason` alone. Both git-capture failure paths -- the PRE-launch snapshot
+# ($InitialTrackedDirtUnavailableReason, set above) and this POST-exit snapshot -- resolve to
+# 'unavailable' and leave `workEvidence` completely untouched: an unavailable check must never
+# manufacture a false 'ended-incomplete' (git was merely unreachable, not evidence of a dirty
+# tree) NOR silently fall back to a false claim of 'clean' (an unavailable check has no basis to
+# claim the tree is clean either).
+$dirtyCheck = 'not-applicable'
+$dirtyCheckReason = $null
 if ($AllowEdits -and $cfg.engine -eq 'claude' -and $BaseSha) {
     $headAfter = try { (& git -C $WorkDir rev-parse HEAD 2>$null | Select-Object -First 1) } catch { $null }
-    if ($headAfter -eq $BaseSha) {
-        $trackedDirtyAfter = Get-TrackedDirtyContentIdentity -WorkDir $WorkDir
-        $introducedPaths = @($trackedDirtyAfter.Keys | Where-Object {
-            -not $InitialTrackedDirt.Contains($_) -or $InitialTrackedDirt[$_] -ne $trackedDirtyAfter[$_]
-        })
-        if ($introducedPaths.Count -gt 0) {
-            $workEvidence.workCompleted = $false
-            # Preserve any existing reason (e.g. a subtype-* classification from a partially
-            # successful envelope) by appending rather than overwriting it -- sol/fable round 1
-            # noted an unconditional overwrite can mask the original failure reason.
-            $workEvidence.reason = if ($workEvidence.reason) { "$($workEvidence.reason) | dirty-worktree-no-commit" } else { 'dirty-worktree-no-commit' }
+    if ($headAfter -ne $BaseSha) {
+        $dirtyCheck = 'not-applicable'
+        $dirtyCheckReason = 'HEAD moved: a commit landed, so pre-commit leftover dirt is out of scope for this check'
+    } elseif ($InitialTrackedDirtUnavailableReason) {
+        $dirtyCheck = 'unavailable'
+        $dirtyCheckReason = "pre-launch snapshot: $InitialTrackedDirtUnavailableReason"
+    } else {
+        $postSnapshot = Get-TrackedDirtyContentIdentity -WorkDir $WorkDir
+        if (-not $postSnapshot.ok) {
+            $dirtyCheck = 'unavailable'
+            $dirtyCheckReason = "post-exit snapshot: $($postSnapshot.reason)"
+        } else {
+            $trackedDirtyAfter = $postSnapshot.map
+            $introducedPaths = @($trackedDirtyAfter.Keys | Where-Object {
+                -not $InitialTrackedDirt.Contains($_) -or $InitialTrackedDirt[$_] -ne $trackedDirtyAfter[$_]
+            })
+            if ($introducedPaths.Count -gt 0) {
+                $dirtyCheck = 'dirty'
+                $dirtyCheckReason = "lane-introduced tracked dirt: $($introducedPaths -join ', ')"
+                $workEvidence.workCompleted = $false
+                # Preserve any existing reason (e.g. a subtype-* classification from a partially
+                # successful envelope) by appending rather than overwriting it -- sol/fable round 1
+                # noted an unconditional overwrite can mask the original failure reason.
+                $workEvidence.reason = if ($workEvidence.reason) { "$($workEvidence.reason) | dirty-worktree-no-commit" } else { 'dirty-worktree-no-commit' }
+            } else {
+                $dirtyCheck = 'clean'
+            }
         }
     }
 }
@@ -1141,6 +1226,13 @@ $receipt = [ordered]@{
     processEnded = $processEnded
     complete     = $workCompleted
     workEvidence = $workEvidence
+    # Round 5 (sol minor 1): what the dirty-no-commit check above actually determined --
+    # 'not-applicable' (gate did not apply, or HEAD moved), 'unavailable' (a git capture failed;
+    # see dirtyCheckReason for pre- vs post-snapshot and why), 'clean', or 'dirty' (folded into
+    # workEvidence.reason as dirty-worktree-no-commit). A reader must never treat 'unavailable'
+    # as either verdict.
+    dirtyCheck       = $dirtyCheck
+    dirtyCheckReason = $dirtyCheckReason
     spend        = [ordered]@{
         costUsd            = $costUsd
         costReported       = ($null -ne $costUsd)

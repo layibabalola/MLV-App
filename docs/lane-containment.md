@@ -58,24 +58,47 @@ carries tracked-file dirt the lane itself introduced -- positive evidence in the
 provider's answer does not outrank a tree that never moved; see
 `workEvidence.reason: dirty-worktree-no-commit` in
 `tools/coordination/Invoke-Lane.ps1`. **What this detects, precisely:** the check
-snapshots a per-path content identity (the sha256 of `git diff HEAD -- <path>`) for
-every tracked (non-`??`) dirty path before the child starts, and compares it against
-the same snapshot after exit; a path counts as lane-introduced if it is newly dirty
-or its content identity changed, so pre-existing dirt in an already-dirty worktree
-never flips a receipt on its own, but a further edit to an already-dirty tracked
-file does (round 3: a raw porcelain status line stays textually identical across
-such a further edit, so round 2's line-text comparison could not see it; comparing
-content identity per path can). **What this does NOT detect:** it only ever looks at
-the tracked-file working tree, so background work that changes no tracked file --
-a build, a test run, a Bash job reading files or writing only untracked scratch
-output -- leaves no trace here and is never caught by this mechanism, regardless of
-whether that work is still running in the background when the lane's last turn
-ends. It applies only to `-AllowEdits` Claude lanes -- a read-only lane can never
-move HEAD by construction, so applying the check there would degenerate to "was the
-surrounding checkout dirty," a fact outside a review lane's control; Codex lanes are
-excluded the same way. When the check fires it appends to any existing
-`workEvidence.reason` rather than overwriting it, so a prior failure classification
-(e.g. `subtype-error_max_turns`) is never masked.
+snapshots a per-path content identity for every tracked (non-`??`) dirty path
+before the child starts, and compares it against the same snapshot after exit; a
+path counts as lane-introduced if it is newly dirty or its content identity
+changed, so pre-existing dirt in an already-dirty worktree never flips a receipt on
+its own, but a further edit to an already-dirty tracked file does (round 3: a raw
+porcelain status line stays textually identical across such a further edit, so
+round 2's line-text comparison could not see it; comparing content identity per
+path can). Round 5: that per-path identity is now `git hash-object -- <path>` of
+the working-tree file itself (a `DELETED` marker when the path is absent), not a
+hash of rendered `git diff HEAD -- <path>` text -- diff rendering for a binary file
+collapses to the fixed text `Binary files a/<path> and b/<path> differ` regardless
+of which bytes are actually on disk, so hashing that text could not tell two
+different binary edits of the same path apart; `hash-object` reports the identity
+of the bytes git would actually commit. **What this does NOT detect:** it only
+ever looks at the tracked-file working tree, so background work that changes no
+tracked file -- a build, a test run, a Bash job reading files or writing only
+untracked scratch output -- leaves no trace here and is never caught by this
+mechanism, regardless of whether that work is still running in the background when
+the lane's last turn ends. It applies only to `-AllowEdits` Claude lanes -- a
+read-only lane can never move HEAD by construction, so applying the check there
+would degenerate to "was the surrounding checkout dirty," a fact outside a review
+lane's control; Codex lanes are excluded the same way. When the check fires it
+appends to any existing `workEvidence.reason` rather than overwriting it, so a
+prior failure classification (e.g. `subtype-error_max_turns`) is never masked.
+
+**Fail-closed git capture (round 5).** Every `git` call this check makes (`status
+--porcelain=v1 -z` for the snapshot, `hash-object` per dirty path) goes through
+`Invoke-GitCaptureUtf8`, which returns `{ok, stdout, exitCode, error}` instead of a
+bare string -- a caller must check `.ok` before touching `.stdout`, so a failure to
+start the process, a failure to read its output, or a non-zero git exit can never
+be silently read back as `''`, which previously collided with git's own genuine
+empty-and-successful output (a clean tree, an unchanged diff) and would have made
+a git failure indistinguishable from "nothing is dirty." If either the PRE-launch
+or the POST-exit snapshot cannot be taken, the receipt records
+`dirtyCheck: 'unavailable'` with `dirtyCheckReason` naming which snapshot failed
+and why, and `workEvidence` is left completely untouched -- an unavailable check
+never manufactures a false `ended-incomplete` (git being unreachable is not
+evidence of a dirty tree) and never falls back to claiming `dirtyCheck: 'clean'`
+(an unavailable check has no basis to claim the tree was actually verified).
+`dirtyCheck` also records `'not-applicable'` (the gate did not apply to this lane,
+or HEAD moved) and `'clean'`/`'dirty'` for a check that actually ran to completion.
 
 `-ReasoningEffort low` explicitly requests low effort for one invocation. Codex
 receives its normal reasoning configuration argument. Claude receives

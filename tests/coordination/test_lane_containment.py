@@ -119,6 +119,16 @@ if($env:MLV_FIXTURE_DIRTY_TRACKED_PATH){
 if($env:MLV_FIXTURE_FURTHER_EDIT_TRACKED_PATH){
   'lane-further-edit-uncommitted'|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_FURTHER_EDIT_TRACKED_PATH
 }
+# Round 5 (sol minor 2, required case): further-edit a BINARY tracked file (contains a NUL byte,
+# so git renders `git diff HEAD -- path` as the fixed text "Binary files a/path and b/path
+# differ" no matter what the actual bytes are) with DIFFERENT bytes than whatever pre-dirtied it.
+# A content-identity check built on a hash of that diff TEXT cannot see this edit at all -- the
+# rendered text is identical regardless of which binary bytes are on disk. A check built on
+# `git hash-object` of the working-tree bytes themselves can.
+if($env:MLV_FIXTURE_FURTHER_EDIT_BINARY_TRACKED_PATH){
+  [byte[]]$bytes=@(0x00,0x11,0x22,0x33,0x44,0x55,0xEE,0xFF)
+  [IO.File]::WriteAllBytes($env:MLV_FIXTURE_FURTHER_EDIT_BINARY_TRACKED_PATH,$bytes)
+}
 # Simulate a lane that commits its edit (HEAD moves) and then leaves a further,
 # still-uncommitted edit behind on top of that commit.
 if($env:MLV_FIXTURE_COMMIT_TRACKED_PATH){
@@ -712,6 +722,99 @@ def _seed_git_repo(root):
     (root/"tracked.txt").write_text("original\n",encoding="ascii")
     _git(root,"add","tracked.txt")
     _git(root,"commit","-q","-m","seed")
+
+
+# Round 5 (sol minor 1 / fable minor 1), required cases: inject a git-capture failure at exactly
+# the PRE-launch snapshot or exactly the POST-exit snapshot, and prove each is recorded as
+# dirtyCheck=='unavailable' without ever flipping the receipt's state -- neither a false
+# 'ended-incomplete' nor a silent claim of 'clean'. The injection keys on MLV_FIXTURE_CHILD's
+# existence (written as literally the fixture child's first action, before any dirty-file
+# simulation runs) rather than a call counter, because that marker is already exactly the
+# pre-launch/post-exit boundary this script cares about: the PRE snapshot always runs before the
+# child process exists, and the POST snapshot always runs after the child has already exited.
+def _inject_git_capture_failure(text):
+    marker = "function Invoke-GitCaptureUtf8([string]$WorkDir, [string[]]$GitArgs) {\n"
+    assert text.count(marker) == 1, "Invoke-GitCaptureUtf8 signature not found or not unique"
+    injected = marker + (
+        "    if ($env:MLV_FIXTURE_GIT_FAIL_MODE -and $GitArgs.Count -gt 0 -and $GitArgs[0] -eq 'status') {\n"
+        "        $childStarted = Test-Path -LiteralPath $env:MLV_FIXTURE_CHILD\n"
+        "        if ((($env:MLV_FIXTURE_GIT_FAIL_MODE -eq 'pre') -and -not $childStarted) -or "
+        "(($env:MLV_FIXTURE_GIT_FAIL_MODE -eq 'post') -and $childStarted)) {\n"
+        "            return [ordered]@{ ok = $false; stdout = $null; exitCode = $null; error = 'fixture-injected-git-failure' }\n"
+        "        }\n"
+        "    }\n"
+    )
+    return text.replace(marker, injected)
+
+
+def test_pre_launch_git_capture_failure_is_unavailable_and_never_flips_state(fixture_tree):
+    # Producer brief round 5, required case 1 (fail-closed git capture): if the PRE-launch
+    # tracked-dirt snapshot cannot be taken at all, the check must never fall back to treating
+    # that as "nothing was dirty" -- it must record dirtyCheck=='unavailable' and leave the
+    # receipt's state exactly as the envelope says (never a false ended-incomplete).
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit",
+                             mutation=_inject_git_capture_failure)
+    env["MLV_FIXTURE_GIT_FAIL_MODE"]="pre"
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"] is True
+    assert q["dirtyCheck"]=="unavailable"
+    assert "pre-launch snapshot" in q["dirtyCheckReason"]
+    assert q["workEvidence"]["reason"]!="dirty-worktree-no-commit"
+
+
+def test_post_exit_git_capture_failure_is_unavailable_and_never_claims_clean(fixture_tree):
+    # Producer brief round 5, required case 1: the lane DOES introduce uncommitted tracked dirt
+    # (MLV_FIXTURE_DIRTY_TRACKED_PATH), so a working check would flip this to ended-incomplete --
+    # but the POST-exit snapshot is the one that fails here, so there is no positive evidence
+    # either way. The receipt must show dirtyCheck=='unavailable', never 'clean' (which would be
+    # a false claim the tree was actually verified) and never force ended-incomplete (which would
+    # be treating an unreachable git as if it were positive evidence of a dirty tree).
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit",
+                             mutation=_inject_git_capture_failure)
+    env["MLV_FIXTURE_GIT_FAIL_MODE"]="post"
+    env["MLV_FIXTURE_DIRTY_TRACKED_PATH"]=str(root/"tracked.txt")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"] is True
+    assert q["dirtyCheck"]=="unavailable"
+    assert "post-exit snapshot" in q["dirtyCheckReason"]
+    assert q["workEvidence"]["reason"]!="dirty-worktree-no-commit"
+
+
+def test_further_edit_of_pre_dirty_binary_tracked_file_is_ended_incomplete(fixture_tree):
+    # Producer brief round 5, required case 2 (content identity): a binary tracked file that was
+    # ALREADY dirty before the lane started, and that the lane edits AGAIN with DIFFERENT binary
+    # bytes without staging or committing either edit, must still flip the receipt. `git diff
+    # HEAD -- <path>` renders any binary difference as the fixed text "Binary files a/<path> and
+    # b/<path> differ" -- identical no matter which bytes are actually on disk -- so a content
+    # identity built on hashing that diff TEXT (the pre-round-5 mechanism) cannot distinguish the
+    # pre-dirty bytes from the lane's further edit at all. `git hash-object` of the working-tree
+    # bytes themselves can.
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    binary_name="tracked.bin"
+    binary_path=root/binary_name
+    binary_path.write_bytes(bytes([0x00,0x01,0x02,0x7F,0x80,0xFF]))
+    _git(root,"add",binary_name)
+    _git(root,"commit","-q","-m","seed binary tracked file")
+    # Pre-dirty it, uncommitted, before the lane ever starts -- different bytes than the seed.
+    binary_path.write_bytes(bytes([0x00,0xAA,0xBB,0xCC,0xDD,0xFF]))
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
+    env["MLV_FIXTURE_FURTHER_EDIT_BINARY_TRACKED_PATH"]=str(binary_path)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="ended-incomplete"
+    assert q["complete"] is False
+    assert q["workEvidence"]["reason"]=="dirty-worktree-no-commit"
+    assert q["dirtyCheck"]=="dirty"
 
 
 # LANE-NO-BACKGROUND-END-TURN-1 round 2 (sol major 1 / fable minor 3): the check is now
