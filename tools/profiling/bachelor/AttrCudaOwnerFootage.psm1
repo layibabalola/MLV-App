@@ -110,13 +110,18 @@ function Send-AttrCudaOwnerFootagePartToStaging {
     Throws OWNER_FOOTAGE_STAGE_COPY_FAILED, OWNER_FOOTAGE_STAGE_VERIFY_FAILED (the share-side
     copy did not round-trip), OWNER_FOOTAGE_STAGE_PARTIAL_EXISTS (round 4: a partial already
     occupies the slot -- refused, untouched) or OWNER_FOOTAGE_STAGE_CONFLICT (index only, never a
-    path). Returns the final staged path (a neutral share path, not the source) on success.
+    path). Returns a pscustomobject { Path; Created } on success: Path is the final staged path
+    (a neutral share path, not the source); Created is $true only when THIS call is the one that
+    actually renamed the partial into the final slot, $false when a matching final slot already
+    existed and nothing was written (ATTR3-FOOTAGE-STAGE-1 round 8: the caller uses Created to
+    track, per slot, exactly what THIS attempt brought into existence, so an overall-failure
+    cleanup removes only that -- never a slot this call merely found already correct).
     ATTR3-FOOTAGE-STAGE-1 round 3 (astra PR #148 MAJOR, containment): before anything is created
     or copied, every EXISTING ancestor of -StagingDirectory, down to and including
     -StagingDirectory itself, is proved free of reparse points -- a junction planted at or above
-    -StagingDirectory would otherwise redirect the copy, the stale-partial cleanup, or a later
-    read outside the owned staging directory. Throws OWNER_FOOTAGE_STAGE_COPY_FAILED (index only)
-    on that check alone, before anything under -StagingDirectory is touched.
+    -StagingDirectory would otherwise redirect the copy or a later read outside the owned staging
+    directory. Throws OWNER_FOOTAGE_STAGE_COPY_FAILED (index only) on that check alone, before
+    anything under -StagingDirectory is touched.
     ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 2a): the partial slot is opened with EXCLUSIVE
     creation ([IO.FileMode]::CreateNew), never a Copy-Item -Force onto a pre-cleared slot -- a
     partial another concurrent attempt (or an earlier, still-in-flight call for this same part) is
@@ -126,6 +131,17 @@ function Send-AttrCudaOwnerFootagePartToStaging {
     $ErrorActionPreference = 'Stop' a terminating provider error -- whose own .Exception.Message
     can carry a real path -- can never escape this function uncaught; only a fixed
     OWNER_FOOTAGE_STAGE_* token, and the part -Index, is ever thrown.
+    ATTR3-FOOTAGE-STAGE-1 round 8 (astra major 2): both stream Dispose() calls now run INSIDE the
+    guarded try, each wrapped so a Dispose() failure (a network-mapped or nearly full share) maps
+    to the same fixed OWNER_FOOTAGE_STAGE_COPY_FAILED token a copy failure already uses -- never
+    the raw exception, whose own .Message can carry a real path. Before this round the disposal
+    calls lived only in an unguarded `finally`, so a throwing Dispose() escaped this function
+    entirely and reached the CLI's own transfer catch, which used to fold $_.Exception.Message
+    into its own thrown text (fixed at that call site too; see attr3-footage-stage.ps1's own step
+    5 comment). -TestHookForceDisposeThrow is a TEST-ONLY switch, never reachable from the
+    production CLI (attr3-footage-stage.ps1 never passes it): when set, it makes the destination
+    stream's own Dispose() throw a message naming this call's real partial path, proving that text
+    never reaches this function's own thrown message.
     #>
     [CmdletBinding()]
     param(
@@ -133,7 +149,8 @@ function Send-AttrCudaOwnerFootagePartToStaging {
         [Parameter(Mandatory = $true)][string]$StagingDirectory,
         [Parameter(Mandatory = $true)][int]$Index,
         [Parameter(Mandatory = $true)][int64]$ExpectedLength,
-        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+        [switch]$TestHookForceDisposeThrow
     )
 
     $stagingDriveRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($StagingDirectory))
@@ -163,7 +180,7 @@ function Send-AttrCudaOwnerFootagePartToStaging {
     }
     if ($finalExists) {
         $existingStatus = Test-AttrCudaFootagePart -Path $finalPath -ExpectedLength $ExpectedLength -ExpectedSha256 $ExpectedSha256
-        if ($existingStatus -eq 'PASS') { return $finalPath }
+        if ($existingStatus -eq 'PASS') { return [pscustomobject]@{ Path = $finalPath; Created = $false } }
         throw "OWNER_FOOTAGE_STAGE_CONFLICT part $Index is already staged with different bytes"
     }
 
@@ -196,15 +213,38 @@ function Send-AttrCudaOwnerFootagePartToStaging {
         } catch {
             throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index copy to the staging share failed"
         }
+        # ATTR3-FOOTAGE-STAGE-1 round 8 (astra major 2): disposed INSIDE this guarded try, each
+        # call wrapped on its own -- Dispose() itself can throw (a network-mapped or nearly full
+        # share), and its own .Message can carry a real path. Mapped to the same fixed
+        # OWNER_FOOTAGE_STAGE_COPY_FAILED token a copy failure already uses; never forwarded.
+        try {
+            $sourceStream.Dispose()
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not close the source stream"
+        }
+        $sourceStream = $null
+        try {
+            # Test-only hook (round 8): $false unless a test explicitly passed
+            # -TestHookForceDisposeThrow -- see this function's own header. Never reachable from
+            # the production CLI.
+            if ($TestHookForceDisposeThrow) {
+                throw [IO.IOException]::new("ATTR3_TEST_SENTINEL synthetic dispose failure at $partialPath")
+            }
+            $destStream.Dispose()
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not close the staging partial"
+        }
+        $destStream = $null
     } catch {
-        if ($destStream) { $destStream.Dispose(); $destStream = $null }
+        if ($destStream) { try { $destStream.Dispose() } catch {}; $destStream = $null }
+        if ($sourceStream) { try { $sourceStream.Dispose() } catch {}; $sourceStream = $null }
         if ($weCreatedPartial) {
             try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
         }
         throw
     } finally {
-        if ($sourceStream) { $sourceStream.Dispose() }
-        if ($destStream) { $destStream.Dispose() }
+        if ($sourceStream) { try { $sourceStream.Dispose() } catch {} }
+        if ($destStream) { try { $destStream.Dispose() } catch {} }
     }
 
     # The share-side re-verification: never trust that a byte-identical local copy stayed
@@ -222,14 +262,14 @@ function Send-AttrCudaOwnerFootagePartToStaging {
         # already there rather than assume either outcome.
         $racedStatus = Test-AttrCudaFootagePart -Path $finalPath -ExpectedLength $ExpectedLength -ExpectedSha256 $ExpectedSha256
         try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-        if ($racedStatus -eq 'PASS') { return $finalPath }
+        if ($racedStatus -eq 'PASS') { return [pscustomobject]@{ Path = $finalPath; Created = $false } }
         throw "OWNER_FOOTAGE_STAGE_CONFLICT part $Index is already staged with different bytes"
     } catch {
         try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
         throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not publish the staged part"
     }
 
-    return $finalPath
+    return [pscustomobject]@{ Path = $finalPath; Created = $true }
 }
 
 function Get-AttrCudaOwnerFootageNeutralName {
@@ -482,183 +522,9 @@ function Close-AttrCudaOwnerFootageWorkspace {
     }
 }
 
-function Remove-AttrCudaOwnerFootageStagingResidue {
-    <#
-    .SYNOPSIS
-    Best-effort cleanup of a per-attempt agent-share staging directory after a failed
-    attr3-footage-stage.ps1 run: deletes only the neutral, index-derived part slots (and their
-    .partial siblings) THIS attempt could have created, then removes -Directory itself if that
-    leaves it empty. ATTR3-FOOTAGE-STAGE-1 round 4 (sol minor / astra 5: no stranded parts).
-    .DESCRIPTION
-    -Directory is always a per-attempt directory -- its own name carries the emitting job's fresh
-    random component (see New-Attr3FootageStageJob's jobId) -- so nothing else could have written
-    into it; enumerating and removing its own contents outright is safe. Every existing ancestor
-    from -TrustedRoot down to, and including, -Directory is proved free of reparse points before
-    anything is touched. Never throws: this runs on a failure path, where an exception would mask
-    the caller's real error.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][string]$TrustedRoot,
-        [Parameter(Mandatory = $true)][string]$Directory
-    )
-
-    try {
-        $Directory = Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $TrustedRoot -Path $Directory
-    } catch {
-        Write-Warning 'ATTRCUDA_OWNER_STAGE_RESIDUE_OUTSIDE_TRUSTED_ROOT left in place'
-        return
-    }
-    if (-not (Test-Path -LiteralPath $Directory -PathType Container -ErrorAction SilentlyContinue)) { return }
-
-    $neutralPattern = '^part-\d+(\.partial)?$'
-    $entries = @(Get-ChildItem -LiteralPath $Directory -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match $neutralPattern })
-    foreach ($entry in $entries) {
-        try {
-            Remove-Item -LiteralPath $entry.FullName -Force -Confirm:$false -ErrorAction Stop
-        } catch {
-            Write-Warning 'ATTRCUDA_OWNER_STAGE_RESIDUE_CLEANUP_FAILED left in place'
-        }
-    }
-
-    try {
-        $remaining = @(Get-ChildItem -LiteralPath $Directory -Force -ErrorAction SilentlyContinue)
-        if ($remaining.Count -eq 0) {
-            Remove-Item -LiteralPath $Directory -Force -Confirm:$false -ErrorAction SilentlyContinue
-        }
-    } catch {}
-}
-
-function Assert-Attr3NoLinkFromBoundary {
-    <#
-    .SYNOPSIS
-    Prove -Path -- and -Boundary itself -- carry no reparse point, from the boundary root down to
-    and including the leaf. ATTR3-FOOTAGE-STAGE-1 round 7 (class a: root-inclusive link
-    containment).
-    .DESCRIPTION
-    Assert-AttrCudaNoLinkBelowRoot (AttrCudaArtifacts.psm1) proves every component from just below
-    -TrustedRoot down to and including -Path is link-free, but never inspects -TrustedRoot itself
-    -- correct for every one of its own existing callers, each of which already created (or
-    otherwise already trusts) its own root by the time it calls in. Three ATTR3-FOOTAGE-STAGE-1
-    sites do not have that guarantee: the share-side staging ROOT (a fixed constant this run never
-    creates), and the fixed-name residue-marker READ and WRITE slots (round 5/6's publish-recovery
-    marker, neither created nor proven link-free by anything upstream this run). All three can have
-    their OWN root or leaf replaced by a reparse point with no ancestor between it and -Path left
-    for Assert-AttrCudaNoLinkBelowRoot to ever walk. This function checks -Boundary itself first --
-    refusing with ATTR3_BOUNDARY_IS_LINK (never a path) if it is currently a reparse point -- then
-    delegates the rest of the chain, from -Boundary down to and including -Path, to
-    Assert-AttrCudaNoLinkBelowRoot unchanged. -Boundary and -Path may be the same path (a leaf-only
-    check): the boundary check alone then covers it. Returns the full, verified -Path.
-    ATTR3-FOOTAGE-STAGE-1 round 7 fix-forward: -Boundary is resolved via [IO.Path]::GetFullPath
-    and used UNTRIMMED everywhere it is fed back to the filesystem (Get-Item here, -TrustedRoot on
-    the delegated call below) -- never .TrimEnd('\')'d first. For an ordinary directory that trim
-    is harmless, but for a DRIVE ROOT ("C:\") it collapses the string to the bare "C:", which both
-    .NET's Path.GetFullPath and PowerShell's own Get-Item resolve via the process's per-drive
-    CURRENT DIRECTORY, not the drive's actual root -- silently substituting an unrelated path (this
-    shipped broken in this function's own first pass: the residue-marker call sites, whose
-    -Boundary is always $driveRoot -- exactly a bare drive root -- resolved to the wrong directory
-    entirely, and every EXISTING recovery test failed). The trailing separator is normalised on
-    BOTH sides, but only for the string-equality check below, never for a value resolved against
-    the filesystem again.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][string]$Boundary,
-        [Parameter(Mandatory = $true)][string]$Path
-    )
-
-    $boundaryFull = [IO.Path]::GetFullPath($Boundary)
-    $boundaryItem = Get-Item -LiteralPath $boundaryFull -Force -ErrorAction SilentlyContinue
-    if ($null -ne $boundaryItem -and (($boundaryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
-        throw 'ATTR3_BOUNDARY_IS_LINK the boundary root itself is a reparse point'
-    }
-
-    $pathFull = [IO.Path]::GetFullPath($Path)
-    if ($pathFull.TrimEnd('\').Equals($boundaryFull.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
-        return $pathFull
-    }
-
-    return (Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $boundaryFull -Path $pathFull)
-}
-
-function Remove-AttrCudaOwnerFootageStaleAttempts {
-    <#
-    .SYNOPSIS
-    At the start of a run, sweep only this tool's OWN stale per-attempt share staging directories
-    -- never anything else -- out of -TrustedRoot. ATTR3-FOOTAGE-STAGE-1 round 5 (sol minor /
-    astra major: interrupted-attempt residue).
-    .DESCRIPTION
-    Every attempt's own per-job share staging directory is named from a fresh random jobId (round
-    3's New-Attr3FootageStageJob fix) -- "attr3-footage-stage-<clip>-<hash12>-<nonce10>" -- so a
-    process killed before it could run its own cleanup (attr3-footage-stage.ps1's own catch block,
-    or Remove-AttrCudaOwnerFootageStagingResidue on a normal failure path) leaves that ENTIRE
-    directory behind forever; nothing else ever revisits an old jobId to clean it up. Only an
-    entry directly under -TrustedRoot whose NAME matches that exact jobId shape, and whose newest
-    write (the directory's own, or its newest file's, whichever is later) is older than
-    -StaleAfterSec, is ever considered -- old enough that no attempt still within its own agent-job
-    timeout could legitimately still be mid-flight. Removal itself is delegated to
-    Remove-AttrCudaOwnerFootageStagingResidue, so only the neutral part-<n>/part-<n>.partial
-    entries it already knows how to remove are ever touched, and the directory itself only once
-    left empty -- an unrecognised file inside a matching, stale-enough directory is still left in
-    place, exactly as that function already guarantees for any other caller.
-    Never throws: a missing -TrustedRoot is a silent no-op, matching every other cleanup helper in
-    this module.
-    ATTR3-FOOTAGE-STAGE-1 round 6 (sol blocker / astra major: sweep staleness threshold).
-    -StaleAfterSec rejects zero and negative values outright via [ValidateRange] -- attr3-footage-
-    stage.ps1's own body-level TimeoutSec validation already enforces the same minimum before this
-    is ever called from the CLI, but this function has its own trusted-caller contract to uphold
-    regardless of who calls it. The effective threshold used below also floors at
-    $MinStaleAttemptFloorSec independently of whatever value passes that check, so a
-    small-but-technically-valid caller timeout can never make this sweep treat a still-legitimate
-    concurrent attempt as stale.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][string]$TrustedRoot,
-        [Parameter(Mandatory = $true)][ValidateRange(30, [int]::MaxValue)][int]$StaleAfterSec
-    )
-
-    if (-not (Test-Path -LiteralPath $TrustedRoot -PathType Container -ErrorAction SilentlyContinue)) { return }
-    # ATTR3-FOOTAGE-STAGE-1 round 7 (class a: root-inclusive link containment). $TrustedRoot is a
-    # fixed constant attr3-footage-stage.ps1 never creates -- proved link-free HERE, before the
-    # very first Get-ChildItem below ever enumerates through it, never assumed from the Test-Path
-    # call above (which follows a reparse point exactly as readily as it does a real directory).
-    try {
-        [void](Assert-Attr3NoLinkFromBoundary -Boundary $TrustedRoot -Path $TrustedRoot)
-    } catch {
-        Write-Warning 'ATTRCUDA_OWNER_STALE_SWEEP_ROOT_IS_LINK sweep skipped'
-        return
-    }
-    $MinStaleAttemptFloorSec = 300
-    $effectiveStaleAfterSec = [Math]::Max($StaleAfterSec, $MinStaleAttemptFloorSec)
-    $staleJobIdPattern = '^attr3-footage-stage-[A-Za-z0-9_.-]{1,64}-[0-9a-f]{12}-[0-9a-f]{10}$'
-    $candidates = @(Get-ChildItem -LiteralPath $TrustedRoot -Directory -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match $staleJobIdPattern })
-    foreach ($candidate in $candidates) {
-        # round 7 (class a): a candidate directory ITSELF may be a reparse point (a symlinked
-        # directory whose NAME happens to match this tool's own stale-jobId shape) -- skipped
-        # before its own children are ever enumerated, never after.
-        if (($candidate.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
-        $newestWriteUtc = $candidate.LastWriteTimeUtc
-        try {
-            $newestChild = Get-ChildItem -LiteralPath $candidate.FullName -File -Force -ErrorAction SilentlyContinue |
-                Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-            if ($newestChild) { $newestWriteUtc = $newestChild.LastWriteTimeUtc }
-        } catch {}
-        $ageSec = ((Get-Date).ToUniversalTime() - $newestWriteUtc).TotalSeconds
-        if ($ageSec -gt $effectiveStaleAfterSec) {
-            [void](Remove-AttrCudaOwnerFootageStagingResidue -TrustedRoot $TrustedRoot -Directory $candidate.FullName)
-        }
-    }
-}
-
 Export-ModuleMember -Function `
     Get-AttrCudaOwnerFootageStagingName, `
     Send-AttrCudaOwnerFootagePartToStaging, `
-    Remove-AttrCudaOwnerFootageStagingResidue, `
-    Remove-AttrCudaOwnerFootageStaleAttempts, `
-    Assert-Attr3NoLinkFromBoundary, `
     Get-AttrCudaOwnerFootageNeutralName, `
     Assert-AttrCudaOwnerPartsNaming, `
     Get-AttrCudaFileIdentity, `

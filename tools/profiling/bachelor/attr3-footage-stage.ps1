@@ -50,10 +50,24 @@ param(
     # accepts anything (an int->string conversion, the ONLY direction the binder ever performs here,
     # never fails and never carries a leaked value); the actual int conversion and range check happen
     # in the BODY below, where a failure is a fixed token that never echoes $TimeoutSec.
-    [string]$TimeoutSec = '1800'
+    [string]$TimeoutSec = '1800',
+
+    # ATTR3-FOOTAGE-STAGE-1 round 8 (sol major: binder echo). Without a parameter declared to
+    # absorb them, a surplus positional argument is a BINDING failure -- PowerShell's own binder
+    # refuses it before this script's body ever runs, and its auto-generated error echoes the
+    # offending value VERBATIM, the same class of leak -ClipId's own ValidatePattern used to cause
+    # (see that parameter's own comment above). ValueFromRemainingArguments instead captures every
+    # surplus argument here, so the binder always succeeds and control reaches the body-level
+    # check below, where the refusal is a fixed token that never echoes $Remainder.
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Remainder
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($Remainder -and $Remainder.Count -gt 0) {
+    throw 'ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT an unexpected additional argument was supplied'
+}
 
 if ($ClipId -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
     throw 'ATTR3_FOOTAGE_STAGE_CLIP_ID_INVALID -ClipId does not match the required id pattern'
@@ -104,14 +118,11 @@ Import-Module (Join-Path $PSScriptRoot 'AttrCudaOwnerFootage.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Attr3FootageStageJob.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Attr3FootagePresenceJob.psm1') -Force
 
-# ATTR3-FOOTAGE-STAGE-1 round 5 (sol minor / astra major: interrupted-attempt residue). Every
-# attempt's own per-job share staging directory is named from a fresh random jobId (round 3), so a
-# process killed before its own cleanup (the catch block around steps 5-6 below) ever runs leaves
-# that ENTIRE directory behind forever -- nothing else ever revisits an old jobId. At the start of
-# every run, before anything else, sweep it -- see Remove-AttrCudaOwnerFootageStaleAttempts
-# (AttrCudaOwnerFootage.psm1) for exactly what is and is not touched.
+# ATTR3-FOOTAGE-STAGE-1 round 8 (scope cut): the round 5 start-of-run stale-attempt sweep was
+# removed here -- see Attr3FootageStageJob.psm1's own header CHANGELOG note. A failed attempt's
+# own per-job share staging directory (named from a fresh random jobId) is simply left for a
+# human to clear; nothing about a later, unrelated run depends on it being gone.
 $shareStageRoot = Join-Path $AgentShare 'footage-stage'
-[void](Remove-AttrCudaOwnerFootageStaleAttempts -TrustedRoot $shareStageRoot -StaleAfterSec $timeoutSecValue)
 
 # ATTR3-FOOTAGE-STAGE-1 round 3 (sol BLOCKER, astra MAJOR): -RepoRoot used to be a public
 # parameter, so a caller-supplied alternate tree could supply a replacement resolver and
@@ -298,32 +309,63 @@ foreach ($part in $needsWork) {
 #        (round 3) means a retried invocation never collides with a retained receipt from an
 #        earlier attempt's own submission (UMRUN_JOBID_IN_USE).
 $stageOutDir = Join-Path ([IO.Path]::GetTempPath()) ("attr3-footage-stage-job-$([guid]::NewGuid().ToString('N'))")
-$job = New-Attr3FootageStageJob -ClipId $ClipId -Parts $needsWork -OutDir $stageOutDir -AgentRoot $AgentRootOnHost -StaleResidueAfterSec $timeoutSecValue
+$job = New-Attr3FootageStageJob -ClipId $ClipId -Parts $needsWork -OutDir $stageOutDir -AgentRoot $AgentRootOnHost
 $shareStageDir = Join-Path $shareStageRoot $job.jobId
+
+# ATTR3-FOOTAGE-STAGE-1 round 8 (scope cut): on ANY failure below, cleanup removes only the
+# share-side slots THIS ATTEMPT itself created -- tracked here by path, per slot, as each
+# Send-AttrCudaOwnerFootagePartToStaging call reports whether it actually created its final slot
+# (Created=$true) or found one already correct and untouched (Created=$false; never this
+# attempt's to delete). This replaces the round 4 directory-pattern sweep
+# (Remove-AttrCudaOwnerFootageStagingResidue), which enumerated and deleted every part-<n>-shaped
+# entry in the directory regardless of which attempt actually wrote it.
+$createdSharePaths = New-Object System.Collections.Generic.List[string]
+function Remove-Attr3FootageStageAttemptResidue {
+    foreach ($createdPath in $createdSharePaths) {
+        [void](Remove-AttrCudaPartialFile -TrustedRoot $shareStageRoot -Path $createdPath)
+    }
+    # Every created part slot is already gone (or was never this attempt's), so $shareStageDir
+    # itself is removed only if that leaves it empty -- Remove-Item without -Recurse refuses a
+    # non-empty directory outright, so nothing but this attempt's own now-empty directory is ever
+    # at risk. Re-proves the chain link-free first (the individual removals above already did,
+    # for each created path, but only when $createdSharePaths is non-empty).
+    try {
+        [void](Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $shareStageRoot -Path $shareStageDir)
+    } catch {
+        return
+    }
+    try {
+        if (Test-Path -LiteralPath $shareStageDir -PathType Container -ErrorAction SilentlyContinue) {
+            Remove-Item -LiteralPath $shareStageDir -Force -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
 
 # --- 5+6. TRANSFER the missing parts to the agent share, then SUBMIT the pre-built job through
 #        um-run.ps1, the only tracked writer of the agent inbox. ATTR3-FOOTAGE-STAGE-1 round 4
 #        (sol minor / astra 5: no stranded parts): any failure anywhere in this block -- a
 #        transfer error, a submit error, or the job itself reporting anything other than
-#        FOOTAGE_STAGED for every part it was given -- removes only the staged parts THIS ATTEMPT
-#        created in its own per-attempt staging directory ($shareStageDir, named from this job's
-#        own fresh jobId, so nothing else could have written into it), and the directory itself if
-#        that leaves it empty.
+#        FOOTAGE_STAGED for every part it was given -- removes only the slots THIS ATTEMPT itself
+#        created (see $createdSharePaths above), and the directory itself if that leaves it empty.
 $attemptFailed = $false
 try {
     foreach ($part in $needsWork) {
         try {
-            [void](Send-AttrCudaOwnerFootagePartToStaging `
+            $sendResult = Send-AttrCudaOwnerFootagePartToStaging `
                 -SourcePath $part.path `
                 -StagingDirectory $shareStageDir `
                 -Index ([int]$part.index) `
                 -ExpectedLength ([int64]$part.length) `
-                -ExpectedSha256 ([string]$part.sha256))
+                -ExpectedSha256 ([string]$part.sha256)
         } catch {
-            # The underlying exception text is already path-free by contract (OWNER_FOOTAGE_STAGE_*
-            # tokens name only an index) -- folding it in here carries no path.
-            throw "ATTR3_FOOTAGE_STAGE_TRANSFER_FAILED part $($part.index): $($_.Exception.Message)"
+            # ATTR3-FOOTAGE-STAGE-1 round 8 (astra major 2): the underlying exception's own
+            # .Message is NEVER folded in here any more -- Send-AttrCudaOwnerFootagePartToStaging
+            # now disposes its own streams inside its OWN guarded try (see that function's own
+            # header), so a Dispose() failure already maps to a fixed OWNER_FOOTAGE_STAGE_* token
+            # there; this catch adds nothing but the part index to a fixed token of its own.
+            throw "ATTR3_FOOTAGE_STAGE_TRANSFER_FAILED part $($part.index)"
         }
+        if ($sendResult.Created) { $createdSharePaths.Add($sendResult.Path) }
         Write-Output "TRANSFER PART=$($part.index) STATUS=STAGED"
     }
 
@@ -349,12 +391,12 @@ try {
     if ($result.exitCode -ne 0) { $attemptFailed = $true }
 } catch {
     $attemptFailed = $true
-    [void](Remove-AttrCudaOwnerFootageStagingResidue -TrustedRoot $shareStageRoot -Directory $shareStageDir)
+    Remove-Attr3FootageStageAttemptResidue
     throw
 }
 
 if ($attemptFailed) {
-    [void](Remove-AttrCudaOwnerFootageStagingResidue -TrustedRoot $shareStageRoot -Directory $shareStageDir)
+    Remove-Attr3FootageStageAttemptResidue
     Write-Output "RESULT=FOOTAGE_STAGE_REFUSED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId)"
     exit 1
 }
