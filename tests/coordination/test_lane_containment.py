@@ -1,4 +1,4 @@
-import hashlib, json, os, re, shutil, subprocess, sys, time
+import hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 
@@ -429,6 +429,50 @@ def test_lane_no_background_script_denies_non_object_tool_input():
     assert "hook-error" in r.stderr
 
 
+def _load_lane_no_background_module():
+    spec = importlib.util.spec_from_file_location("lane_no_background", LANE_NO_BACKGROUND_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 12 (fable minor): the deny-reason substring "headless
+# lane" is load-bearing in THREE files that must be hand-kept in sync -- lane-no-background.py's
+# DENY_REASON (the text ONLY the genuine deny branch ever prints, per its own docstring above),
+# Invoke-Lane.ps1's $backgroundGateExpectedDenySubstring (what the launcher's self-test requires
+# in the captured output before it will trust ANY shell candidate as a genuine deny), and this
+# file's own _bash_candidate_runs_the_hook helper below (used to classify a real Git Bash for
+# the fixture tests). A reword of DENY_REASON alone would refuse every Claude lane launch --
+# fail-closed, never fail-open -- but silently, with nothing catching the drift before it reached
+# a real launch. This reads all three sites directly (never a fourth hand-copied literal) and
+# fails if any one disagrees with the others.
+def test_deny_reason_substring_matches_launcher_and_test_helper():
+    module = _load_lane_no_background_module()
+    deny_reason = module.DENY_REASON
+    ps1_text = CANDIDATE.read_text(encoding="utf-8")
+    m = re.search(r"\$backgroundGateExpectedDenySubstring\s*=\s*'([^']*)'", ps1_text)
+    assert m, "Invoke-Lane.ps1's $backgroundGateExpectedDenySubstring literal changed shape; update this test's regex to match"
+    launcher_substring = m.group(1)
+    assert launcher_substring, "launcher's expected deny substring must not be empty"
+    assert launcher_substring in deny_reason, (
+        f"Invoke-Lane.ps1 expects {launcher_substring!r} in the hook's deny output, but "
+        f"lane-no-background.py's DENY_REASON is {deny_reason!r} -- these two sites must agree "
+        f"or every Claude lane launch would refuse its self-test"
+    )
+    helper_source = Path(__file__).read_text(encoding="utf-8")
+    helper_match = re.search(r'return r\.returncode == 2 and "([^"]+)" in', helper_source)
+    assert helper_match, "_bash_candidate_runs_the_hook's substring check changed shape; update this test's regex to match"
+    assert helper_match.group(1) in deny_reason, (
+        f"_bash_candidate_runs_the_hook expects {helper_match.group(1)!r} in the hook's output, "
+        f"but DENY_REASON is {deny_reason!r}"
+    )
+    assert helper_match.group(1) == launcher_substring, (
+        "the test helper and the launcher must require the SAME substring, or a real Git Bash "
+        "this test file classifies as 'runs the hook' could still fail the launcher's own "
+        f"self-test: helper={helper_match.group(1)!r} launcher={launcher_substring!r}"
+    )
+
+
 # LANE-NO-BACKGROUND-END-TURN-1 round 7 (sol major 2): the launcher must PROVE the gate
 # before ever starting the provider -- run the exact registered command against a synthetic
 # background-Bash payload and require the fail-closed deny (exit 2). A self-test that does
@@ -688,6 +732,23 @@ def test_launch_refuses_when_neither_git_bash_nor_powershell_resolve(fixture_tre
 # ("override, then PATH, then known install locations"); this test asserts the actual winner
 # directly instead of leaving the order to comment-only documentation, which a future reader could
 # "fix" by inverting the real precedence and silently reintroducing the stub hazard.
+#
+# Round 12 (sol major, restated): the launcher no longer stops at the first candidate that
+# resolves -- it now self-tests EVERY discoverable candidate for the kind and requires all of
+# them to pass (see Resolve-LaneExecutableAllCandidates). A decoy that fails its self-test would
+# therefore disqualify 'bash' entirely rather than merely prove it was "never invoked" -- that
+# shape is now its own test, test_launch_falls_back_to_powershell_when_a_path_candidate_fails_
+# selftest_even_though_known_location_passes below. This test's decoy must therefore be a
+# WORKING second bash, not a non-POSIX stand-in (round 12: every candidate must pass, so a
+# non-working decoy here would prove the wrong thing). A byte-for-byte COPY of bash.exe alone
+# does not work: measured directly, Git's bash.exe is a launcher stub that locates its sibling
+# runtime via a path RELATIVE TO ITS OWN DIRECTORY (`..\usr\bin\bash.exe`), so a copy dropped
+# into an otherwise-empty directory fails immediately with "'...\usr\bin\bash.exe' not found" --
+# a real regression this test would silently paper over by reverting to the OLD never-invoked
+# decoy shape instead. A directory JUNCTION to bash's own directory (`_winapi.CreateJunction`,
+# no admin privilege required, unlike a symlink) gives a second, PATH-distinct, working
+# candidate that resolves its sibling files correctly through the junction -- measured directly
+# against the real hook.
 def test_resolve_prefers_known_location_over_path_when_both_resolve(fixture_tree):
     real_bash = _find_real_git_bash()
     if not real_bash:
@@ -698,9 +759,55 @@ def test_resolve_prefers_known_location_over_path_when_both_resolve(fixture_tree
         escaped = real_bash.replace("'", "''")
         return text.replace(needle, "-KnownLocations @('" + escaped + "')")
     cmd,env,receipt=prepare(fixture_tree,"normal",mutation=pin_known_location_to_real_bash)
-    # A second, DIFFERENT bash.exe on PATH, ahead of the real one, that must NEVER actually be
-    # invoked if known-location precedence holds -- this proves precedence rather than merely
-    # proving known-location resolves when it is the only candidate present.
+    # Selection must still prefer the known-location entry over this PATH entry even though
+    # both validate (both are the same real Git Bash install, reached two different ways).
+    path_dir = fixture_tree["root"]/"path-shadow"
+    import _winapi
+    _winapi.CreateJunction(str(Path(real_bash).parent), str(path_dir))
+    try:
+        env["PATH"] = str(path_dir) + os.pathsep + env["PATH"]
+        r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+        assert r.returncode==0,(r.stdout,r.stderr)
+        q=json.loads(receipt.read_text(encoding="utf-8"))
+        assert q["state"]=="complete" and q["complete"]
+        assert q["authority"]["backgroundGateShellKind"]=="bash"
+        assert q["authority"]["backgroundGateShellPath"]==real_bash
+        assert q["authority"]["backgroundGateShellSource"]==f"known-location:{real_bash}"
+        # Round 12: both the known-location entry AND the PATH entry were validated (proof the
+        # PATH candidate really was tested, not skipped because known-location already won) --
+        # the receipt must name both, not just the selected one.
+        validated = " ".join(q["authority"]["backgroundGateShellValidatedCandidates"])
+        assert f"known-location:{real_bash}" in validated
+        assert "PATH:bash.exe" in validated
+    finally:
+        # A junction, not a copy -- os.rmdir removes the reparse point only, never the target
+        # directory's own contents (measured; see the round-12 comment above).
+        if path_dir.exists():
+            os.rmdir(path_dir)
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 12 (sol major, restated): the mirror-image case of the
+# precedence test above -- a known-location candidate that WOULD pass self-test sits alongside a
+# PATH candidate that FAILS it (the WSL-stub shape, but reached via PATH rather than via
+# MLV_GIT_BASH). Round 11 only ever self-tested the precedence winner, so this host shape would
+# have selected 'bash' via the known-location entry without ever finding out the PATH sibling
+# denies nothing -- exactly sol's round-11-restated repro ("a different Claude-selected Bash
+# executable... can let the self-test pass... while the real hook command fails
+# non-blockingly"). The launcher must now refuse to trust 'bash' at all here and fall back to
+# PowerShell, because it cannot prove Claude Code would pick the known-location winner over the
+# broken PATH sibling.
+def test_launch_falls_back_to_powershell_when_a_path_candidate_fails_selftest_even_though_known_location_passes(fixture_tree):
+    real_bash = _find_real_git_bash()
+    if not real_bash:
+        pytest.skip("no Git Bash found on this test host -- cannot exercise the known-location-passes-but-PATH-fails shape")
+    def pin_known_location_to_real_bash(text):
+        needle = "-KnownLocations @('C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\usr\\bin\\bash.exe', 'C:\\Program Files (x86)\\Git\\bin\\bash.exe')"
+        assert needle in text, "Invoke-Lane.ps1's Git Bash KnownLocations literal changed shape; update this fixture's mutation to match"
+        escaped = real_bash.replace("'", "''")
+        return text.replace(needle, "-KnownLocations @('" + escaped + "')")
+    cmd,env,receipt=prepare(fixture_tree,"normal",mutation=pin_known_location_to_real_bash)
+    # A non-POSIX decoy on PATH -- same cmd.exe-copy shape test 621 uses for the override case,
+    # here reached through PATH instead, alongside a known-location candidate that DOES pass.
     path_dir = fixture_tree["root"]/"path-shadow"
     path_dir.mkdir()
     decoy = path_dir/"bash.exe"
@@ -710,9 +817,49 @@ def test_resolve_prefers_known_location_over_path_when_both_resolve(fixture_tree
     assert r.returncode==0,(r.stdout,r.stderr)
     q=json.loads(receipt.read_text(encoding="utf-8"))
     assert q["state"]=="complete" and q["complete"]
-    assert q["authority"]["backgroundGateShellKind"]=="bash"
-    assert q["authority"]["backgroundGateShellPath"]==real_bash
-    assert q["authority"]["backgroundGateShellSource"]==f"known-location:{real_bash}"
+    assert q["authority"]["backgroundGateShellKind"]=="powershell"
+    assert q["authority"]["backgroundGateShellSource"]!=f"known-location:{real_bash}"
+    settings=json.loads(settings_path_for(receipt).read_text(encoding="utf-8-sig"))
+    hook_entry=settings["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook_entry["shell"]=="powershell"
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 12: the producer brief's required verification, made
+# permanent -- the SAME two-bash-candidates-only-one-denies shape as the sibling test above,
+# but with PowerShell also forced unresolvable so there is no fallback kind left to rescue the
+# launch. "If any candidate the product might pick would not deny, that is a refusal to launch,
+# not a warning" (producer brief) -- this is that sentence taken to its floor: when bash is the
+# ONLY candidate kind and even one of its two discoverable candidates cannot prove the deny, the
+# launch must refuse outright, and the failure text must name the specific candidate that could
+# not prove it (never just "bash failed").
+def test_launch_refuses_when_one_of_two_bash_candidates_cannot_prove_the_deny_and_no_powershell_fallback_exists(fixture_tree):
+    real_bash = _find_real_git_bash()
+    if not real_bash:
+        pytest.skip("no Git Bash found on this test host -- cannot exercise the two-bash-candidates shape")
+    def pin_known_location_to_real_bash(text):
+        needle = "-KnownLocations @('C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\usr\\bin\\bash.exe', 'C:\\Program Files (x86)\\Git\\bin\\bash.exe')"
+        assert needle in text, "Invoke-Lane.ps1's Git Bash KnownLocations literal changed shape; update this fixture's mutation to match"
+        escaped = real_bash.replace("'", "''")
+        return text.replace(needle, "-KnownLocations @('" + escaped + "')")
+    cmd,env,receipt=prepare(fixture_tree,"normal",mutation=pin_known_location_to_real_bash)
+    path_dir = fixture_tree["root"]/"path-shadow"
+    path_dir.mkdir()
+    decoy = path_dir/"bash.exe"
+    decoy.write_bytes((Path(os.environ.get("WINDIR", r"C:\Windows"))/"System32"/"cmd.exe").read_bytes())
+    env["PATH"] = str(path_dir) + os.pathsep + env["PATH"]
+    env["MLV_LANE_POWERSHELL_EXE"]=str(fixture_tree["root"]/"nonexistent-powershell.exe")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode!=0,(r.stdout,r.stderr)
+    assert not (fixture_tree["root"]/"child.json").exists()
+    assert not (fixture_tree["root"]/"args.json").exists()
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="failed"
+    assert not q["complete"]
+    assert q["failure"].startswith("background-gate-selftest-failed")
+    # Names the specific failing candidate (the PATH decoy) by its source label, not merely "bash".
+    assert "PATH:bash.exe" in q["failure"]
+    # And does NOT claim the known-location candidate (which genuinely passed) was the problem.
+    assert f"known-location:{real_bash}" not in q["failure"].split("attempts:")[1]
 
 
 def test_launch_refuses_when_python_override_is_unresolvable(fixture_tree):

@@ -39,6 +39,15 @@ Pure. No side effects, no network, no filesystem access beyond stdin/stdout/stde
 import json
 import sys
 
+# Round 12 (fable minor): the substring "headless lane" is load-bearing in two OTHER files that
+# must be hand-kept in sync with this literal -- tools/coordination/Invoke-Lane.ps1's
+# $backgroundGateExpectedDenySubstring (the launcher's self-test requires this text in the
+# captured output before it will trust a shell candidate denies at all) and
+# tests/coordination/test_lane_containment.py's _bash_candidate_runs_the_hook helper. Reword
+# this string alone and every candidate's self-test fails the deny-reason check -- fail-closed,
+# not fail-open (every Claude lane launch is refused, loudly, rather than silently under-
+# blocking), but still an outage. test_deny_reason_substring_matches_launcher_and_test_helper in
+# that test file fails if any of the three sites disagrees with this literal.
 DENY_REASON = (
     "headless lane: run this command in the foreground with an explicit timeout; "
     "a headless lane has no later turn"

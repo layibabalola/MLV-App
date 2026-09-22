@@ -140,6 +140,90 @@ is trusted -- a subject and a control that differ is what proves the gate
 discriminates, not exit 2 in isolation. Both checks apply per candidate in the
 fallback loop above.
 
+**Round 12 (sol major, restated): `shell` pins a KIND, not an executable --
+Claude Code resolves the actual bash.exe/powershell.exe independently of this
+launcher, and the self-test must now prove every candidate that independent
+resolution could plausibly land on, not just the one this launcher's own
+precedence preferred.** Established from the vendor docs directly
+(code.claude.com/docs/en/setup, "Set up on Windows", fetched 2026-09-22; full
+fetch transcript in this round's summary.md):
+
+> With Git for Windows, Claude Code uses Git Bash for the Bash tool. If Claude
+> Code can't find Git Bash, set the path in your settings.json file:
+> `{"env": {"CLAUDE_CODE_GIT_BASH_PATH": "C:\\Program Files\\Git\\bin\\bash.exe"}}`
+
+and (code.claude.com/docs/en/hooks, "Command hook fields"):
+
+> `shell` ... Accepts `"bash"` or `"powershell"`. Defaults to `"bash"`, or to
+> `"powershell"` on Windows when Git Bash isn't installed. ... Ignored when
+> `args` is set.
+
+Two things follow, stated plainly per the producer brief: (1) the `shell`
+field selects which FORM Claude Code runs the command as, never which
+executable runs it -- Claude Code's own Git-Bash discovery decides that,
+independently of anything this launcher resolved for its self-test; (2) the
+only DOCUMENTED way to pin Claude Code's own choice is
+`env.CLAUDE_CODE_GIT_BASH_PATH` in `--settings` -- which NA-3 forbids this
+launcher from ever setting, no exception, so that gap cannot be closed by
+registration alone. Round 11's self-test proved ONE candidate -- whichever
+this launcher's own override/known-location/PATH precedence preferred -- and
+trusted the `bash` kind on that single proof. Sol's round-11-restated repro:
+put a working Git Bash somewhere only this launcher's own resolution would
+find (or, equivalently, let a SECOND Git Bash sit on `PATH` ahead of the
+curated known location), and the self-test proves the one this launcher
+prefers while staying silent about a sibling Claude Code's own,
+undocumented, discovery might invoke instead -- the receipt then claims
+`denied-by-settings-hook` for a shell that was never actually proven.
+
+Since Claude Code's real selection algorithm is not published beyond
+"installed or not", the strongest proof this launcher can construct without
+the forbidden environment variable is to self-test EVERY candidate a kind
+could plausibly resolve to, and trust that kind only when ALL of them pass --
+narrowing the gap, not eliminating it outright. `Resolve-LaneExecutableAllCandidates`
+(`tools/coordination/Invoke-Lane.ps1`) replaces the single-winner resolver for
+this purpose: when no override env var is set, it returns every KNOWN
+LOCATION that exists (not just the first) plus the `PATH` hit, deduplicated
+by resolved path; when an override IS set, it returns exactly that one path,
+unchanged from round 11 -- the override is this launcher's own test/operator
+mechanism (`MLV_GIT_BASH` / `MLV_LANE_POWERSHELL_EXE`), which Claude Code does
+not read, so a deliberately-forced candidate is not made safer by also
+probing whatever else the host happens to expose. The launch self-test loop
+now tests every candidate in a kind's list -- never short-circuiting on the
+first pass or the first failure, so every attempt lands in the receipt or the
+refusal message -- and disqualifies the WHOLE kind if even one candidate
+fails either self-test half, even when the precedence winner itself passed.
+SELECTION (which path/source the receipt and the `--settings` file actually
+name) still follows the same override-then-known-location-then-PATH
+precedence as round 11; only the GATE for trusting a kind at all changed.
+The receipt's `authority.backgroundGateShellValidatedCandidates` names every
+candidate that was self-tested and passed for the winning kind, answering
+"which candidates were validated" rather than merely asserting that one was.
+`test_resolve_prefers_known_location_over_path_when_both_resolve` and its new
+sibling `test_launch_falls_back_to_powershell_when_a_path_candidate_fails_
+selftest_even_though_known_location_passes`
+(`tests/coordination/test_lane_containment.py`) cover both directions: two
+independently-working candidates still select by precedence, and one
+candidate failing disqualifies the kind entirely and falls back to
+PowerShell -- the shape sol's round-11-restated repro constructs. **Residual,
+stated honestly:** this still cannot PROVE Claude Code will pick one of the
+candidates this launcher discovered at all, only that it cannot find a
+discoverable-but-broken sibling among them; a bash.exe reachable only through
+some means neither known-location nor `PATH` search would surface (a
+non-standard install Claude Code's own detection nonetheless finds) remains
+outside what this launcher can self-test without `CLAUDE_CODE_GIT_BASH_PATH`,
+which NA-3 forbids setting.
+
+**Round 12 (fable minor): the deny-reason substring is a hand-synchronized
+literal across three files, now cross-referenced and tested.** `"headless
+lane"` is load-bearing in `lane-no-background.py`'s `DENY_REASON`,
+`Invoke-Lane.ps1`'s `$backgroundGateExpectedDenySubstring`, and
+`test_lane_containment.py`'s `_bash_candidate_runs_the_hook` helper. `DENY_REASON`
+now carries a comment naming the other two sites and the consequence of
+rewording it alone (every Claude lane launch refuses its self-test --
+fail-closed, never fail-open, but an outage nonetheless), and
+`test_deny_reason_substring_matches_launcher_and_test_helper` reads all three
+sites directly and fails if any one disagrees.
+
 **Round 9: both the interpreter and the shell are RESOLVED at runtime, never
 pinned.** The dev-machine-only pins broke hosted CI: the real job log (run
 35758428267, job 106850299120, 2026-09-22) shows Git Bash ran fine on the
