@@ -108,14 +108,24 @@ function Send-AttrCudaOwnerFootagePartToStaging {
     -ExpectedSha256 is left alone and this returns without copying again; a final slot holding
     DIFFERENT bytes throws OWNER_FOOTAGE_STAGE_CONFLICT rather than overwriting it.
     Throws OWNER_FOOTAGE_STAGE_COPY_FAILED, OWNER_FOOTAGE_STAGE_VERIFY_FAILED (the share-side
-    copy did not round-trip) or OWNER_FOOTAGE_STAGE_CONFLICT (index only, never a path). Returns
-    the final staged path (a neutral share path, not the source) on success.
+    copy did not round-trip), OWNER_FOOTAGE_STAGE_PARTIAL_EXISTS (round 4: a partial already
+    occupies the slot -- refused, untouched) or OWNER_FOOTAGE_STAGE_CONFLICT (index only, never a
+    path). Returns the final staged path (a neutral share path, not the source) on success.
     ATTR3-FOOTAGE-STAGE-1 round 3 (astra PR #148 MAJOR, containment): before anything is created
     or copied, every EXISTING ancestor of -StagingDirectory, down to and including
     -StagingDirectory itself, is proved free of reparse points -- a junction planted at or above
     -StagingDirectory would otherwise redirect the copy, the stale-partial cleanup, or a later
     read outside the owned staging directory. Throws OWNER_FOOTAGE_STAGE_COPY_FAILED (index only)
     on that check alone, before anything under -StagingDirectory is touched.
+    ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 2a): the partial slot is opened with EXCLUSIVE
+    creation ([IO.FileMode]::CreateNew), never a Copy-Item -Force onto a pre-cleared slot -- a
+    partial another concurrent attempt (or an earlier, still-in-flight call for this same part) is
+    actively writing is never silently deleted and overwritten; it is refused, untouched.
+    ATTR3-FOOTAGE-STAGE-1 round 4 (sol MAJOR, path-free output): every filesystem call below,
+    including the plain Test-Path reads round 3 left unwrapped, is now wrapped so that under
+    $ErrorActionPreference = 'Stop' a terminating provider error -- whose own .Exception.Message
+    can carry a real path -- can never escape this function uncaught; only a fixed
+    OWNER_FOOTAGE_STAGE_* token, and the part -Index, is ever thrown.
     #>
     [CmdletBinding()]
     param(
@@ -134,7 +144,7 @@ function Send-AttrCudaOwnerFootagePartToStaging {
     }
 
     try {
-        if (-not (Test-Path -LiteralPath $StagingDirectory -PathType Container)) {
+        if (-not (Test-Path -LiteralPath $StagingDirectory -PathType Container -ErrorAction Stop)) {
             [void](New-Item -ItemType Directory -Path $StagingDirectory -Force -ErrorAction Stop)
         }
     } catch {
@@ -145,25 +155,56 @@ function Send-AttrCudaOwnerFootagePartToStaging {
     $finalPath = Join-Path $StagingDirectory $finalName
     $partialPath = "$finalPath.partial"
 
-    if (Test-Path -LiteralPath $finalPath -PathType Leaf) {
+    $finalExists = $false
+    try {
+        $finalExists = Test-Path -LiteralPath $finalPath -PathType Leaf -ErrorAction Stop
+    } catch {
+        throw "OWNER_FOOTAGE_STAGE_STATE_UNKNOWN part $Index could not determine whether the final slot is occupied"
+    }
+    if ($finalExists) {
         $existingStatus = Test-AttrCudaFootagePart -Path $finalPath -ExpectedLength $ExpectedLength -ExpectedSha256 $ExpectedSha256
         if ($existingStatus -eq 'PASS') { return $finalPath }
         throw "OWNER_FOOTAGE_STAGE_CONFLICT part $Index is already staged with different bytes"
     }
 
-    if (Test-Path -LiteralPath $partialPath) {
-        try {
-            Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction Stop
-        } catch {
-            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not clear a stale partial copy"
-        }
-    }
-
+    # Exclusive-creation stream copy: [IO.FileMode]::CreateNew fails (IOException) if the partial
+    # slot is already occupied -- by design, never pre-cleared and never overwritten. $weCreated-
+    # Partial only becomes $true once OUR OWN CreateNew call actually succeeded, so the cleanup
+    # below (round 4 fix: the original version deleted the slot unconditionally, including when
+    # PARTIAL_EXISTS meant this call never created anything) removes the partial ONLY when this
+    # call is the one that brought it into existence -- never a slot another attempt owns.
+    $sourceStream = $null
+    $destStream = $null
+    $weCreatedPartial = $false
     try {
-        Copy-Item -LiteralPath $SourcePath -Destination $partialPath -Force -ErrorAction Stop
+        try {
+            $sourceStream = [IO.File]::Open($SourcePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not open the source for reading"
+        }
+        try {
+            $destStream = [IO.File]::Open($partialPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $weCreatedPartial = $true
+        } catch [IO.IOException] {
+            throw "OWNER_FOOTAGE_STAGE_PARTIAL_EXISTS part $Index a partial copy already occupies the slot"
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not create the staging partial"
+        }
+        try {
+            $sourceStream.CopyTo($destStream)
+            $destStream.Flush()
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index copy to the staging share failed"
+        }
     } catch {
-        try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-        throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index copy to the staging share failed"
+        if ($destStream) { $destStream.Dispose(); $destStream = $null }
+        if ($weCreatedPartial) {
+            try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        }
+        throw
+    } finally {
+        if ($sourceStream) { $sourceStream.Dispose() }
+        if ($destStream) { $destStream.Dispose() }
     }
 
     # The share-side re-verification: never trust that a byte-identical local copy stayed
@@ -183,6 +224,9 @@ function Send-AttrCudaOwnerFootagePartToStaging {
         try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
         if ($racedStatus -eq 'PASS') { return $finalPath }
         throw "OWNER_FOOTAGE_STAGE_CONFLICT part $Index is already staged with different bytes"
+    } catch {
+        try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not publish the staged part"
     }
 
     return $finalPath
@@ -438,9 +482,58 @@ function Close-AttrCudaOwnerFootageWorkspace {
     }
 }
 
+function Remove-AttrCudaOwnerFootageStagingResidue {
+    <#
+    .SYNOPSIS
+    Best-effort cleanup of a per-attempt agent-share staging directory after a failed
+    attr3-footage-stage.ps1 run: deletes only the neutral, index-derived part slots (and their
+    .partial siblings) THIS attempt could have created, then removes -Directory itself if that
+    leaves it empty. ATTR3-FOOTAGE-STAGE-1 round 4 (sol minor / astra 5: no stranded parts).
+    .DESCRIPTION
+    -Directory is always a per-attempt directory -- its own name carries the emitting job's fresh
+    random component (see New-Attr3FootageStageJob's jobId) -- so nothing else could have written
+    into it; enumerating and removing its own contents outright is safe. Every existing ancestor
+    from -TrustedRoot down to, and including, -Directory is proved free of reparse points before
+    anything is touched. Never throws: this runs on a failure path, where an exception would mask
+    the caller's real error.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$TrustedRoot,
+        [Parameter(Mandatory = $true)][string]$Directory
+    )
+
+    try {
+        $Directory = Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $TrustedRoot -Path $Directory
+    } catch {
+        Write-Warning 'ATTRCUDA_OWNER_STAGE_RESIDUE_OUTSIDE_TRUSTED_ROOT left in place'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $Directory -PathType Container -ErrorAction SilentlyContinue)) { return }
+
+    $neutralPattern = '^part-\d+(\.partial)?$'
+    $entries = @(Get-ChildItem -LiteralPath $Directory -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $neutralPattern })
+    foreach ($entry in $entries) {
+        try {
+            Remove-Item -LiteralPath $entry.FullName -Force -Confirm:$false -ErrorAction Stop
+        } catch {
+            Write-Warning 'ATTRCUDA_OWNER_STAGE_RESIDUE_CLEANUP_FAILED left in place'
+        }
+    }
+
+    try {
+        $remaining = @(Get-ChildItem -LiteralPath $Directory -Force -ErrorAction SilentlyContinue)
+        if ($remaining.Count -eq 0) {
+            Remove-Item -LiteralPath $Directory -Force -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
 Export-ModuleMember -Function `
     Get-AttrCudaOwnerFootageStagingName, `
     Send-AttrCudaOwnerFootagePartToStaging, `
+    Remove-AttrCudaOwnerFootageStagingResidue, `
     Get-AttrCudaOwnerFootageNeutralName, `
     Assert-AttrCudaOwnerPartsNaming, `
     Get-AttrCudaFileIdentity, `

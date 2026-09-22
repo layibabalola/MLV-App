@@ -57,11 +57,13 @@ function New-Attr3FootagePresenceJob {
     describing the emitted job otherwise.
     On Bachelor, the emitted job checks each part with every filesystem call wrapped in its own
     try/catch (round 4), reporting an honest per-part status -- PASS, NOT_FOUND, ACCESS_DENIED,
-    UNREADABLE, LENGTH_MISMATCH or SHA256_MISMATCH -- and an overall result of FOOTAGE_PRESENT
-    (exit 0), FOOTAGE_ABSENT (exit 1), FOOTAGE_MISMATCH (exit 2) or FOOTAGE_INDETERMINATE (exit
-    3); see the mapping documented above the overall-result block in the job template below for
-    the exact rule. No exception's own text ever reaches this job's output, since it can contain
-    the part's real path.
+    UNREADABLE, LENGTH_MISMATCH, SHA256_MISMATCH or TARGET_PATH_UNSAFE (round 4: the same
+    target-chain reparse-point check Attr3FootageStageJob.psm1's own emitted job applies, run
+    here before a single byte of the part is ever read) -- and an overall result of
+    FOOTAGE_PRESENT (exit 0), FOOTAGE_ABSENT (exit 1), FOOTAGE_MISMATCH (exit 2) or
+    FOOTAGE_INDETERMINATE (exit 3); see the mapping documented above the overall-result block in
+    the job template below for the exact rule. No exception's own text ever reaches this job's
+    output, since it can contain the part's real path.
     #>
     [CmdletBinding()]
     param(
@@ -142,7 +144,10 @@ function New-Attr3FootagePresenceJob {
     # ATTR3-FOOTAGE-BIND-1 PR-B: Test-AttrCudaFootagePart is the ONE shared per-part content
     # verifier, also embedded (byte-identically) in playback-attr-3-cuda-job.ps1's owner-clip
     # content gate -- see that function's own header in AttrCudaArtifacts.psm1.
-    $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @('Read-AttrCudaBase64Payload', 'Test-AttrCudaFootagePart')
+    # ATTR3-FOOTAGE-STAGE-1 round 4 (astra 3): Assert-AttrCudaNoLinkBelowRoot is the SAME
+    # target-chain link check Attr3FootageStageJob.psm1's own emitted job applies to its target
+    # path -- embedded here too so this probe never hashes/reads a part through an unproven chain.
+    $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @('Read-AttrCudaBase64Payload', 'Test-AttrCudaFootagePart', 'Assert-AttrCudaNoLinkBelowRoot')
 
     # --- job body template (placeholders are substituted below; the body itself never touches
     #     this function's variables directly, so there is no accidental capture of this process's
@@ -172,11 +177,28 @@ foreach ($rawPart in $RawParts) {
     $decoded = Read-AttrCudaBase64Payload -Base64 $rawPart.pathBase64
     $partPath = [Text.Encoding]::UTF8.GetString($decoded.bytes)
 
+    # ATTR3-FOOTAGE-STAGE-1 round 4 (astra 3, link checks on read paths): before this probe reads
+    # or hashes a single byte, prove every EXISTING ancestor of $partPath, down to and including
+    # $partPath itself, carries no reparse point -- the same target-chain check
+    # Attr3FootageStageJob.psm1's own emitted job applies to $targetPath before it reads it.
+    # Nothing here ever writes $_, $_.Exception or its .Message.
+    $driveRoot = [IO.Path]::GetPathRoot($partPath)
+    $pathSafe = $true
+    try {
+        [void](Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $driveRoot -Path $partPath)
+    } catch {
+        $pathSafe = $false
+    }
+
     # ATTR3-FOOTAGE-BIND-1 PR-B: the per-part content check is now the ONE shared function
     # Test-AttrCudaFootagePart (AttrCudaArtifacts.psm1), embedded verbatim -- never a
     # re-implementation. Nothing below ever writes $_, $_.Exception or its .Message; the function
     # itself returns only a fixed status TOKEN, never exception text.
-    $status = Test-AttrCudaFootagePart -Path $partPath -ExpectedLength ([int64]$rawPart.length) -ExpectedSha256 ([string]$rawPart.sha256)
+    $status = if ($pathSafe) {
+        Test-AttrCudaFootagePart -Path $partPath -ExpectedLength ([int64]$rawPart.length) -ExpectedSha256 ([string]$rawPart.sha256)
+    } else {
+        'TARGET_PATH_UNSAFE'
+    }
     Write-Output "PART=$($rawPart.index) STATUS=$status"
     $results.Add([ordered]@{
         index = $rawPart.index
@@ -199,7 +221,9 @@ foreach ($rawPart in $RawParts) {
 #                                 cannot honestly be called PRESENT, ABSENT or MISMATCH.
 $statuses = @($results | ForEach-Object { $_.status })
 $diffStatuses = @('LENGTH_MISMATCH', 'SHA256_MISMATCH')
-$uncertainStatuses = @('ACCESS_DENIED', 'UNREADABLE')
+# TARGET_PATH_UNSAFE (round 4) never observed a byte, honest or otherwise -- it belongs in the
+# same "could not tell" bucket as ACCESS_DENIED/UNREADABLE, never folded into ABSENT or MISMATCH.
+$uncertainStatuses = @('ACCESS_DENIED', 'UNREADABLE', 'TARGET_PATH_UNSAFE')
 if (($statuses | Where-Object { $_ -ne 'PASS' }).Count -eq 0) {
     $overall = 'FOOTAGE_PRESENT'; $exitCode = 0
 } elseif (($statuses | Where-Object { $_ -ne 'NOT_FOUND' }).Count -eq 0) {
@@ -257,4 +281,44 @@ exit $exitCode
     }
 }
 
-Export-ModuleMember -Function New-Attr3FootagePresenceJob
+function Get-Attr3FootagePresentPartIndexes {
+    <#
+    .SYNOPSIS
+    Parse a footage-presence job's own stdout and return the part INDEXES it reported PASS for a
+    given -ClipId, as a sorted int array -- never anything else out of that text.
+    .DESCRIPTION
+    ATTR3-FOOTAGE-STAGE-1 round 4 (sol minor / astra 5: per-part resume). Split out of
+    attr3-footage-stage.ps1 so a test can exercise the parsing directly against fabricated stdout,
+    without driving the real CLI (whose only path to parts is the resolver -- see that script's
+    own header). Only the LAST line matching the presence job's own
+    mlvapp.attr3-footage-presence.v1 schema is trusted (a real job's stdout carries exactly one);
+    a clip id mismatch, a missing or malformed payload, or no matching line at all all return an
+    EMPTY set -- never a guess that could skip transferring a part that is not actually there.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][AllowNull()][string]$Stdout,
+        [Parameter(Mandatory = $true)][string]$ClipId
+    )
+
+    $present = New-Object 'System.Collections.Generic.HashSet[int]'
+    if ([string]::IsNullOrEmpty($Stdout)) { return , @() }
+
+    $lines = @($Stdout -split "`r?`n" | Where-Object { $_ })
+    $jsonLine = $lines | Where-Object { $_ -match '"schema"\s*:\s*"mlvapp\.attr3-footage-presence\.v1"' } | Select-Object -Last 1
+    if (-not $jsonLine) { return , @() }
+
+    try {
+        $payload = $jsonLine | ConvertFrom-Json
+    } catch {
+        return , @()
+    }
+    if ($payload.clipId -cne $ClipId) { return , @() }
+
+    foreach ($part in @($payload.parts)) {
+        if ([string]$part.status -eq 'PASS') { [void]$present.Add([int]$part.index) }
+    }
+    return , @($present | Sort-Object)
+}
+
+Export-ModuleMember -Function New-Attr3FootagePresenceJob, Get-Attr3FootagePresentPartIndexes

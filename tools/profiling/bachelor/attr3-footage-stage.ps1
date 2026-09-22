@@ -36,28 +36,23 @@ param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')]
     [string]$ClipId,
 
-    # A FIXED SHAPE, not an arbitrary caller-controlled path: exactly `\\host\share`, matching
-    # the default's own shape (ATTR3-FOOTAGE-STAGE-1 round 3, sol/astra PR #148). This still
-    # admits a test's local stand-in share (a plain UNC-shaped path is not required to resolve
-    # to a real host) while refusing a deeper caller-chosen subpath.
-    [ValidatePattern('^\\\\[A-Za-z0-9_.-]+\\[A-Za-z0-9_.-]+$')]
-    [string]$AgentShare = '\\bachelor\mlv-agent',
-
-    # The LOCAL path the agent share above resolves to ON BACHELOR ITSELF -- baked into the
-    # emitted job (which runs there, with no UNC path back to its own share), never used by this
-    # script to touch the filesystem directly. Independent of -AgentShare on purpose: a test
-    # points -AgentShare at a fake local directory standing in for the share while leaving this
-    # at a value the job template never actually dereferences in that test (the job is run
-    # directly with -File, not through the real Bachelor agent).
-    # `~` is admitted because Windows temp roots carry 8.3 short names (RUNNER~1, OBABAL~1) and
-    # the behavioural tests point -AgentRootOnHost at one; it is inert everywhere this value is used.
-    [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
-    [string]$AgentRootOnHost = 'C:\mlvtmp\mlv-agent',
-
     [int]$TimeoutSec = 1800
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 1): -AgentShare and -AgentRootOnHost used to be
+# public parameters -- the id-only interface's actual remaining authority boundary, since a
+# caller-supplied share or agent root could redirect every byte this script transfers and every
+# job it submits to a destination of the CALLER's choosing, not the owner-consented one. Both are
+# now fixed constants, equal to what were previously their only-ever-used defaults; nothing on
+# this script's public surface can change either. A test that needs a synthetic stand-in share
+# calls the underlying functions (the AttrCudaOwnerFootage.psm1 part-to-share transfer function,
+# New-Attr3FootageStageJob, New-Attr3FootagePresenceJob) directly with its own
+# -AgentRoot/-StagingDirectory, never through this CLI -- exactly the same split the
+# resolver-only-source-of-parts contract above already relies on.
+$AgentShare = '\\bachelor\mlv-agent'
+$AgentRootOnHost = 'C:\mlvtmp\mlv-agent'
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaOwnerFootage.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Attr3FootageStageJob.psm1') -Force
@@ -90,6 +85,40 @@ function Resolve-Attr3StagePython {
         return [pscustomobject]@{ Exe = $pyLauncher.Source; PrefixArgs = @('-3') }
     }
     throw 'ATTR3_FOOTAGE_STAGE_NO_PYTHON no Python 3 interpreter is available to run the resolver'
+}
+
+function ConvertTo-Attr3FootageStageSafeOutput {
+    <#
+    .SYNOPSIS
+    Parse a submitted Bachelor job's raw stdout+stderr and return ONLY the PART=/RESULT= lines
+    whose shape this script already knows, reconstructed from their own matched groups -- never
+    the raw job text itself.
+    .DESCRIPTION
+    ATTR3-FOOTAGE-STAGE-1 round 4 (sol MAJOR, astra 4): the submitted job's own text is trusted to
+    be path-free by THAT job's own contract, but this script's job is never to simply believe that
+    contract by forwarding it verbatim -- a submitter/agent bug, or a future job template that
+    stops upholding it, must not turn into a path leaking through THIS script's own output. Every
+    line that does not fully match one of the two allowlisted shapes below -- including anything
+    that merely LOOKS like one, and the job's own path-free JSON summary line -- is silently
+    dropped, never echoed.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory = $true)][string]$ClipId
+    )
+
+    $safeLines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match '^PART=(\d+) STATUS=([A-Z][A-Z0-9_]*)$') {
+            $safeLines.Add("PART=$($Matches[1]) STATUS=$($Matches[2])")
+            continue
+        }
+        if ($line -match '^RESULT=([A-Z][A-Z0-9_]*) CLIP=([A-Za-z0-9][A-Za-z0-9_.-]{0,63}) PARTS=(\d+)$' -and $Matches[2] -ceq $ClipId) {
+            $safeLines.Add("SUBMITTER RESULT=$($Matches[1]) PARTS=$($Matches[3])")
+        }
+    }
+    return ,@($safeLines)
 }
 
 $ResolverPath = Join-Path $RepoRoot 'tools\gates\resolve_consented_clip.py'
@@ -141,26 +170,36 @@ $umRun = Join-Path $RepoRoot 'tools\profiling\um-run.ps1'
 #        call, so a retained receipt from an EARLIER attempt's own preflight never blocks this
 #        one (UMRUN_JOBID_IN_USE), which would otherwise silently fall through to a full
 #        retransfer.
+# ATTR3-FOOTAGE-STAGE-1 round 4 (sol minor / astra 5: per-part resume). The preflight's own
+# per-part JSON payload decides which parts are already good, via Get-Attr3FootagePresentPart-
+# Indexes (Attr3FootagePresenceJob.psm1 -- split out so a test can drive the parsing directly),
+# so a rerun after a partial success transfers only what is actually missing rather than
+# retransferring everything.
 $presenceOutDir = Join-Path ([IO.Path]::GetTempPath()) ("attr3-footage-stage-presence-$([guid]::NewGuid().ToString('N'))")
 $presenceJob = New-Attr3FootagePresenceJob -ClipId $ClipId -Parts $parts -OutDir $presenceOutDir
-$alreadyPresent = $false
+$presentIndexArray = @()
 try {
     $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec
-    if ($presenceResult.exitCode -eq 0) { $alreadyPresent = $true }
+    $presentIndexArray = @(Get-Attr3FootagePresentPartIndexes -Stdout $presenceResult.stdout -ClipId $ClipId)
 } catch {
     # Presence is an optimization, not a correctness requirement -- if the preflight itself could
     # not be submitted or timed out, fall through to the normal verify-and-transfer path below
     # rather than failing the whole run over an inconclusive probe.
     Write-Output 'PRESENCE PREFLIGHT=INCONCLUSIVE'
 }
+$presentIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
+foreach ($presentIndex in $presentIndexArray) { [void]$presentIndexes.Add([int]$presentIndex) }
 
-if ($alreadyPresent) {
+$needsWork = @($parts | Where-Object { -not $presentIndexes.Contains([int]$_.index) })
+
+if ($needsWork.Count -eq 0) {
     Write-Output "RESULT=FOOTAGE_STAGED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($presenceJob.jobId) ALREADY_PRESENT=true"
     exit 0
 }
 
-# --- 3. VERIFY every source part on THIS host, before anything is sent anywhere ----------------
-foreach ($part in $parts) {
+# --- 3. VERIFY only the parts the preflight found missing or mismatched, before anything is sent
+#        anywhere -----------------------------------------------------------------------------
+foreach ($part in $needsWork) {
     $status = Test-AttrCudaFootagePart -Path $part.path -ExpectedLength ([int64]$part.length) -ExpectedSha256 ([string]$part.sha256)
     Write-Output "SOURCE PART=$($part.index) STATUS=$status"
     if ($status -ne 'PASS') {
@@ -168,49 +207,70 @@ foreach ($part in $parts) {
     }
 }
 
-# --- 4. BUILD the job first: its jobId names the SAME per-job staging directory this script
-#        transfers into next, so both sides agree on it without exchanging state. A fresh random
-#        component in the jobId (round 3) means a retried invocation never collides with a
-#        retained receipt from an earlier attempt's own submission (UMRUN_JOBID_IN_USE).
+# --- 4. BUILD the job first, for only the parts that still need work (round 4: per-part resume):
+#        its jobId names the SAME per-job staging directory this script transfers into next, so
+#        both sides agree on it without exchanging state. A fresh random component in the jobId
+#        (round 3) means a retried invocation never collides with a retained receipt from an
+#        earlier attempt's own submission (UMRUN_JOBID_IN_USE).
 $stageOutDir = Join-Path ([IO.Path]::GetTempPath()) ("attr3-footage-stage-job-$([guid]::NewGuid().ToString('N'))")
-$job = New-Attr3FootageStageJob -ClipId $ClipId -Parts $parts -OutDir $stageOutDir -AgentRoot $AgentRootOnHost
-$shareStageDir = Join-Path $AgentShare ("footage-stage\" + $job.jobId)
+$job = New-Attr3FootageStageJob -ClipId $ClipId -Parts $needsWork -OutDir $stageOutDir -AgentRoot $AgentRootOnHost
+$shareStageRoot = Join-Path $AgentShare 'footage-stage'
+$shareStageDir = Join-Path $shareStageRoot $job.jobId
 
-# --- 5. TRANSFER every verified source part to the agent share, under a neutral, index-derived
-#        name, into that dedicated staging directory. -------------------------------------------
-foreach ($part in $parts) {
-    try {
-        [void](Send-AttrCudaOwnerFootagePartToStaging `
-            -SourcePath $part.path `
-            -StagingDirectory $shareStageDir `
-            -Index ([int]$part.index) `
-            -ExpectedLength ([int64]$part.length) `
-            -ExpectedSha256 ([string]$part.sha256))
-    } catch {
-        # The underlying exception text is already path-free by contract (OWNER_FOOTAGE_STAGE_*
-        # tokens name only an index) -- folding it in here carries no path.
-        throw "ATTR3_FOOTAGE_STAGE_TRANSFER_FAILED part $($part.index): $($_.Exception.Message)"
-    }
-    Write-Output "TRANSFER PART=$($part.index) STATUS=STAGED"
-}
-
-# --- 6. SUBMIT the pre-built job through um-run.ps1, the only tracked writer of the agent inbox.
-#        Any exception um-run.ps1 itself throws (a dead-agent heartbeat path, a missing script
-#        path, a poll timeout naming the result file) carries an operational path in its own
-#        text (round 3, no-path-in-any-branch) -- converted to a fixed token before it can ever
-#        reach this script's own output.
+# --- 5+6. TRANSFER the missing parts to the agent share, then SUBMIT the pre-built job through
+#        um-run.ps1, the only tracked writer of the agent inbox. ATTR3-FOOTAGE-STAGE-1 round 4
+#        (sol minor / astra 5: no stranded parts): any failure anywhere in this block -- a
+#        transfer error, a submit error, or the job itself reporting anything other than
+#        FOOTAGE_STAGED for every part it was given -- removes only the staged parts THIS ATTEMPT
+#        created in its own per-attempt staging directory ($shareStageDir, named from this job's
+#        own fresh jobId, so nothing else could have written into it), and the directory itself if
+#        that leaves it empty.
+$attemptFailed = $false
 try {
-    $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec
+    foreach ($part in $needsWork) {
+        try {
+            [void](Send-AttrCudaOwnerFootagePartToStaging `
+                -SourcePath $part.path `
+                -StagingDirectory $shareStageDir `
+                -Index ([int]$part.index) `
+                -ExpectedLength ([int64]$part.length) `
+                -ExpectedSha256 ([string]$part.sha256))
+        } catch {
+            # The underlying exception text is already path-free by contract (OWNER_FOOTAGE_STAGE_*
+            # tokens name only an index) -- folding it in here carries no path.
+            throw "ATTR3_FOOTAGE_STAGE_TRANSFER_FAILED part $($part.index): $($_.Exception.Message)"
+        }
+        Write-Output "TRANSFER PART=$($part.index) STATUS=STAGED"
+    }
+
+    # ATTR3-FOOTAGE-STAGE-1 round 3 (no-path-in-any-branch): any exception um-run.ps1 itself
+    # throws (a dead-agent heartbeat path, a missing script path, a poll timeout naming the result
+    # file) carries an operational path in its own text -- converted to a fixed token before it can
+    # ever reach this script's own output.
+    try {
+        $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec
+    } catch {
+        throw "ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED job could not be submitted or its result could not be retrieved"
+    }
+
+    # ATTR3-FOOTAGE-STAGE-1 round 4 (sol MAJOR, astra 4: path-free output): the submitted job's own
+    # stdout/stderr are never forwarded verbatim -- only lines matching an allowlist of known
+    # shapes, re-emitted from their own matched groups.
+    $safeJobOutput = ConvertTo-Attr3FootageStageSafeOutput -Text (@($result.stdout, $result.stderr) -join "`n") -ClipId $ClipId
+    foreach ($safeLine in $safeJobOutput) { Write-Output $safeLine }
+
+    if ($result.exitCode -ne 0) { $attemptFailed = $true }
 } catch {
-    throw "ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED job could not be submitted or its result could not be retrieved"
+    $attemptFailed = $true
+    [void](Remove-AttrCudaOwnerFootageStagingResidue -TrustedRoot $shareStageRoot -Directory $shareStageDir)
+    throw
 }
 
-if ($result.stdout) { Write-Output $result.stdout }
-if ($result.stderr) { Write-Output $result.stderr }
-
-if ($result.exitCode -eq 0) {
-    Write-Output "RESULT=FOOTAGE_STAGED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId)"
-    exit 0
+if ($attemptFailed) {
+    [void](Remove-AttrCudaOwnerFootageStagingResidue -TrustedRoot $shareStageRoot -Directory $shareStageDir)
+    Write-Output "RESULT=FOOTAGE_STAGE_REFUSED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId)"
+    exit 1
 }
-Write-Output "RESULT=FOOTAGE_STAGE_REFUSED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId) EXIT=$($result.exitCode)"
-exit 1
+
+Write-Output "RESULT=FOOTAGE_STAGED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId)"
+exit 0

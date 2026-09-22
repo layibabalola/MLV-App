@@ -135,6 +135,21 @@ class SendPartToStagingTests(unittest.TestCase):
         self.assertNotIn(str(token_source), proc.stdout + proc.stderr)
         self.assertNotIn(TOKEN, proc.stdout + proc.stderr)
 
+    def test_a_pre_existing_partial_is_refused_and_left_untouched(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 2a): the share-side partial slot is opened
+        # with exclusive creation -- a partial another concurrent attempt is actively writing (or
+        # one already occupying the slot for any other reason) is refused, never pre-cleared and
+        # overwritten.
+        stage_dir = self.share / "job7"
+        stage_dir.mkdir()
+        partial = stage_dir / "part-0.partial"
+        partial.write_bytes(b"bytes a concurrent attempt is still writing")
+        proc = self.send(self.source, stage_dir, 0, len(self.content), self.sha256)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("OWNER_FOOTAGE_STAGE_PARTIAL_EXISTS", proc.stdout + proc.stderr)
+        self.assertEqual(partial.read_bytes(), b"bytes a concurrent attempt is still writing")
+        self.assertFalse((stage_dir / "part-0").exists())
+
     def test_a_junction_at_the_staging_directory_is_refused_and_the_junction_target_is_untouched(self) -> None:
         # ATTR3-FOOTAGE-STAGE-1 round 3 (astra PR #148 MAJOR, containment): a junction planted AT
         # the staging directory itself must be refused before anything under it is touched --
@@ -204,6 +219,22 @@ class FootageStageJobTests(unittest.TestCase):
         )
         return _run(["-Command", script])
 
+    def build_with_corrupt_hook(self, corrupt_index: int) -> subprocess.CompletedProcess:
+        # ATTR3-FOOTAGE-STAGE-1 round 4: -TestHookCorruptAfterVerifyPartIndex is a test-only
+        # parameter on New-Attr3FootageStageJob, never reachable from the production CLI (see
+        # that function's own header) -- calling it directly here is the same split every other
+        # row in this file already relies on.
+        parts_json_path = self.tmp / f"parts-hook-{id(self.parts_payload)}.json"
+        parts_json_path.write_text(json.dumps(self.parts_payload), encoding="utf-8")
+        script = (
+            f"Import-Module '{STAGE_MODULE}' -Force; "
+            f"$parts = @(Get-Content -LiteralPath '{parts_json_path}' -Raw | ConvertFrom-Json); "
+            f"New-Attr3FootageStageJob -ClipId '{self.clip_id}' -Parts $parts "
+            f"-OutDir '{self.out}' -AgentRoot '{self.agent_root}' "
+            f"-TestHookCorruptAfterVerifyPartIndex {corrupt_index}"
+        )
+        return _run(["-Command", script])
+
     def job_path(self, proc: subprocess.CompletedProcess) -> Path:
         jobs = sorted(self.out.glob("*.job.ps1"))
         self.assertEqual(len(jobs), 1, proc.stdout + proc.stderr)
@@ -251,6 +282,8 @@ class FootageStageJobTests(unittest.TestCase):
         # and submitter tree) shipped right past the old version of this test. Asserting the
         # FULL parameter set instead means any new caller-controlled parameter fails this test
         # by construction, whatever it is named.
+        # ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 1): -AgentShare and -AgentRootOnHost are
+        # gone too -- both are now fixed constants inside the script, not parameters at all.
         script = (
             f"(Get-Command -CommandType ExternalScript '{GENERATOR}').Parameters.Keys | "
             "Where-Object { @('Verbose','Debug','ErrorAction','WarningAction','InformationAction',"
@@ -262,18 +295,32 @@ class FootageStageJobTests(unittest.TestCase):
         names = json.loads(proc.stdout.strip())
         if isinstance(names, str):
             names = [names]
-        self.assertEqual(set(names), {"ClipId", "AgentShare", "AgentRootOnHost", "TimeoutSec"})
+        self.assertEqual(set(names), {"ClipId", "TimeoutSec"})
         self.assertNotIn("RepoRoot", names)
+        self.assertNotIn("AgentShare", names)
+        self.assertNotIn("AgentRootOnHost", names)
 
-    def test_agent_share_rejects_a_deeper_caller_chosen_subpath(self) -> None:
-        # ATTR3-FOOTAGE-STAGE-1 round 3: -AgentShare must be exactly `\\host\share` (the default's
-        # own shape) -- a caller-chosen deeper subpath is refused by parameter validation before
-        # this script ever runs.
+    def test_agent_share_is_no_longer_a_parameter_at_all(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 3 gave -AgentShare a ValidatePattern refusing a deeper
+        # caller-chosen subpath; round 4 (sol BLOCKER 1) removes the parameter entirely -- a
+        # caller cannot even NAME an alternate share any more, let alone a deeper subpath under
+        # the real one. PowerShell itself refuses to bind an unknown parameter before this
+        # script's own body ever runs.
         proc = _run(["-File", str(GENERATOR), "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE",
                      "-AgentShare", r"\\bachelor\mlv-agent\deeper\subpath"])
         self.assertNotEqual(proc.returncode, 0)
         combined = proc.stdout + proc.stderr
         self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
+        self.assertIn("AgentShare", combined)
+
+    def test_agent_root_on_host_is_no_longer_a_parameter_at_all(self) -> None:
+        # Same closure as above (round 4, sol BLOCKER 1), for the other formerly-public parameter.
+        proc = _run(["-File", str(GENERATOR), "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE",
+                     "-AgentRootOnHost", r"C:\caller-chosen-root"])
+        self.assertNotEqual(proc.returncode, 0)
+        combined = proc.stdout + proc.stderr
+        self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
+        self.assertIn("AgentRootOnHost", combined)
 
     def test_resolver_refusal_yields_a_typed_refusal_token_and_no_transfer(self) -> None:
         # The REAL resolver, against the REAL repository, with a clip id that does not exist --
@@ -535,6 +582,143 @@ class FootageStageJobTests(unittest.TestCase):
         second_sha = second_proc.stdout.split("SOURCE_SHA256=")[1].split()[0]
         self.assertEqual(first_sha, second_sha)
 
+    # ---- round 4: exclusive-creation partials, publish-verify race, link check on the staged leaf
+
+    def test_a_pre_existing_target_volume_partial_is_refused_and_left_untouched(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 2a): the target-volume partial slot is opened
+        # with exclusive creation -- a partial another concurrent placer for this exact part is
+        # actively writing is refused, never pre-cleared and overwritten.
+        proc = self.build()
+        job = self.job_path(proc)
+        job_id = self.job_path(proc).name[: -len(".job.ps1")]
+        stage_dir = self.stage_dir(job_id)
+        self.stage_all_parts(stage_dir)
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        local_partial = self.target_dir / f".attr3-footage-stage-{job_id}-part0.partial"
+        local_partial.write_bytes(b"bytes a concurrent placer is still writing")
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("PART=0 STATUS=TARGET_VOLUME_PARTIAL_EXISTS", run.stdout)
+        self.assertEqual(local_partial.read_bytes(), b"bytes a concurrent placer is still writing")
+        self.assertFalse(self.targets[0].exists())
+        # Part 1's own placement is unaffected by part 0's refusal.
+        self.assertIn("PART=1 STATUS=PLACED", run.stdout)
+        self.assertTrue(self.targets[1].is_file())
+
+    def test_corruption_between_local_verify_and_publish_removes_the_target_and_a_rerun_is_not_blocked(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 2b). The test-only corruption hook flips a
+        # byte in the LOCAL target-volume partial after it passed local verification but before
+        # the same-volume publish rename -- modelling bytes changing between "verified" and
+        # "published". The post-rename re-hash must catch it, this job must remove the target IT
+        # just placed (never leaving a corrupt file at the spec path under a PLACED-shaped
+        # status), and a later rerun must succeed rather than being blocked by a false
+        # TARGET_CONFLICT against the bytes this job itself removed.
+        proc = self.build_with_corrupt_hook(0)
+        job = self.job_path(proc)
+        stage_dir = self.stage_dir(job.name[: -len(".job.ps1")])
+        self.stage_all_parts(stage_dir)
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("PART=0 STATUS=PLACED_VERIFY_LENGTH_MISMATCH", run.stdout)
+        self.assertFalse(self.targets[0].exists())
+        # Part 1 (never corrupted) still places cleanly in the SAME run.
+        self.assertIn("PART=1 STATUS=PLACED", run.stdout)
+        self.assertTrue(self.targets[1].is_file())
+        job.unlink()
+
+        second_proc = self.build()
+        second_job = self.job_path(second_proc)
+        second_stage_dir = self.stage_dir(second_job.name[: -len(".job.ps1")])
+        self.stage_all_parts(second_stage_dir)
+        second_run = self.run_job(second_job)
+        self.assertEqual(second_run.returncode, 0, second_run.stdout + second_run.stderr)
+        self.assertIn("PART=0 STATUS=PLACED", second_run.stdout)
+        self.assertNotIn("TARGET_CONFLICT", second_run.stdout)
+        self.assertIn("PART=1 STATUS=ALREADY_PRESENT", second_run.stdout)
+        for target, content in zip(self.targets, self.content):
+            self.assertEqual(target.read_bytes(), content)
+
+    def test_a_symlink_as_the_staged_file_leaf_is_refused_before_hashing(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 4 (astra 3, link checks on read paths): the per-job staging
+        # directory's own chain check (round 3) only proves the DIRECTORY itself carries no
+        # reparse point -- the individual leaf "part-<n>" was never checked on its own. A real
+        # NTFS file symlink planted AT that leaf must be refused before a single byte of it is
+        # ever hashed.
+        proc = self.build()
+        job = self.job_path(proc)
+        job_id = self.job_path(proc).name[: -len(".job.ps1")]
+        stage_dir = self.stage_dir(job_id)
+        elsewhere = self.tmp / "elsewhere-leaf-target.raw"
+        elsewhere.write_bytes(self.content[0])
+        made = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType SymbolicLink -Path '{stage_dir / 'part-0'}' -Target '{elsewhere}' | Out-Null"],
+            capture_output=True, text=True,
+        )
+        if made.returncode != 0 or not (stage_dir / "part-0").exists():
+            self.skipTest(f"cannot create a file symlink here (needs elevation/Developer Mode): {made.stderr}")
+        (stage_dir / "part-1").write_bytes(self.content[1])
+        run = self.run_job(job)
+        self.assertIn("PART=0 STATUS=STAGED_PATH_UNSAFE", run.stdout, run.stdout + run.stderr)
+        self.assertFalse(self.targets[0].exists())
+        self.assertEqual(elsewhere.read_bytes(), self.content[0])
+        # Part 1 (an ordinary staged file) still places cleanly.
+        self.assertIn("PART=1 STATUS=PLACED", run.stdout)
+
+
+@unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+@unittest.skipUnless(os.name == "nt", "the emitted job and agent target a Windows host")
+class StagingResidueCleanupTests(unittest.TestCase):
+    """AttrCudaOwnerFootage.psm1's Remove-AttrCudaOwnerFootageStagingResidue (ATTR3-FOOTAGE-STAGE-1
+    round 4, sol minor / astra 5: no stranded parts after a failed attr3-footage-stage.ps1
+    attempt)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="attr3residue-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.share_root = self.tmp / "footage-stage"
+        self.share_root.mkdir()
+
+    def remove(self, directory: Path) -> subprocess.CompletedProcess:
+        script = (
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force; "
+            f"Remove-AttrCudaOwnerFootageStagingResidue -TrustedRoot '{self.share_root}' -Directory '{directory}'"
+        )
+        return _run(["-Command", script])
+
+    def test_removes_staged_part_slots_and_partials_and_the_now_empty_directory(self) -> None:
+        attempt_dir = self.share_root / "attempt-1"
+        attempt_dir.mkdir()
+        (attempt_dir / "part-0").write_bytes(b"staged part zero")
+        (attempt_dir / "part-1.partial").write_bytes(b"in-flight part one")
+        proc = self.remove(attempt_dir)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(attempt_dir.exists())
+
+    def test_leaves_an_unrecognized_file_in_place_and_does_not_remove_the_directory(self) -> None:
+        attempt_dir = self.share_root / "attempt-2"
+        attempt_dir.mkdir()
+        (attempt_dir / "part-0").write_bytes(b"staged part zero")
+        (attempt_dir / "unrelated.txt").write_bytes(b"not this cleanup's to touch")
+        proc = self.remove(attempt_dir)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(attempt_dir.is_dir())
+        self.assertFalse((attempt_dir / "part-0").exists())
+        self.assertTrue((attempt_dir / "unrelated.txt").exists())
+
+    def test_a_missing_directory_is_a_silent_noop(self) -> None:
+        proc = self.remove(self.share_root / "never-existed")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_a_directory_outside_the_trusted_root_is_refused_and_left_in_place(self) -> None:
+        outside = self.tmp / "outside-root"
+        outside.mkdir()
+        (outside / "part-0").write_bytes(b"not this attempt's to touch")
+        proc = self.remove(outside)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue((outside / "part-0").exists())
+
 
 @unittest.skipIf(PWSH is None, "pwsh is not on PATH")
 @unittest.skipUnless(os.name == "nt", "the emitted job and agent target a Windows host")
@@ -612,6 +796,7 @@ class EndToEndTransferIdempotenceTests(unittest.TestCase):
             f"$r = & '{UM_RUN}' -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare '{self.share}' "
             "-TimeoutSec 60 -PollSeconds 1\n"
             "Write-Output ('E2E_PRESENCE_EXIT=' + $r.exitCode)\n"
+            "Write-Output $r.stdout\n"
         )
 
     def _transfer_and_place(self) -> subprocess.CompletedProcess:
@@ -678,6 +863,122 @@ class EndToEndTransferIdempotenceTests(unittest.TestCase):
         self.assertIn("PART=1 STATUS=ALREADY_PRESENT", second.stdout)
         for target, content in zip(self.targets, self.content):
             self.assertEqual(target.read_bytes(), content)
+
+    # ---- round 4: per-part resume and no stranded parts (sol minor / astra 5) -------------------
+
+    def test_per_part_resume_only_transfers_the_part_still_missing_after_a_partial_failure(self) -> None:
+        # Models exactly what attr3-footage-stage.ps1 itself does across two attempts: attempt 1
+        # is BUILT for both parts (mirroring the CLI, which does not yet know part 1's transfer
+        # will never happen) but only part 0 actually gets staged to the share before the attempt
+        # is abandoned (simulating a failure after part 0 placed) -- so the job itself reports
+        # part 0 PLACED and part 1 STAGED_NOT_FOUND, refusing overall. The presence preflight
+        # before attempt 2 then reports part 0 PASS / part 1 NOT_FOUND,
+        # Get-Attr3FootagePresentPartIndexes turns that into "needs work: part 1 only", and
+        # attempt 2 transfers and places just that one part -- part 0's own SOURCE is never read
+        # or transferred a second time.
+        stage_out_dir_1 = self.tmp / "resume-stage-out-1"
+        parts_json_path_1 = self.tmp / "resume-parts-1.json"
+        parts_json_path_1.write_text(json.dumps(self.parts), encoding="utf-8")
+        attempt1 = self._run_ps1(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{ARTIFACTS_MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            f"Import-Module '{STAGE_MODULE}' -Force\n"
+            f"$parts = @(Get-Content -LiteralPath '{parts_json_path_1}' -Raw | ConvertFrom-Json)\n"
+            f"$job = New-Attr3FootageStageJob -ClipId 'FIX-E2E-0001' -Parts $parts -OutDir '{stage_out_dir_1}' -AgentRoot '{self.share}'\n"
+            f"$shareStageDir = Join-Path '{self.share}' ('footage-stage\\' + $job.jobId)\n"
+            # Only part 0 is staged -- part 1's transfer never happens this attempt.
+            f"Send-AttrCudaOwnerFootagePartToStaging -SourcePath '{self.source[0]}' -StagingDirectory $shareStageDir "
+            f"-Index 0 -ExpectedLength {len(self.content[0])} -ExpectedSha256 '{_sha256(self.content[0])}' | Out-Null\n"
+            f"$r = & '{UM_RUN}' -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare '{self.share}' "
+            "-TimeoutSec 60 -PollSeconds 1\n"
+            "Write-Output ('E2E_ATTEMPT1_EXIT=' + $r.exitCode)\n"
+            "Write-Output $r.stdout\n"
+        )
+        self.assertIn("E2E_ATTEMPT1_EXIT=1", attempt1.stdout, attempt1.stdout + attempt1.stderr)
+        self.assertIn("PART=1 STATUS=STAGED_NOT_FOUND", attempt1.stdout)
+        self.assertIn("PART=0 STATUS=PLACED", attempt1.stdout)
+        self.assertTrue(self.targets[0].is_file())
+        self.assertFalse(self.targets[1].exists())
+
+        presence = self._presence_check()
+        self.assertIn("E2E_PRESENCE_EXIT=3", presence.stdout, presence.stdout + presence.stderr)
+
+        presence_stdout_file = self.tmp / "presence-stdout.txt"
+        presence_stdout_file.write_text(presence.stdout, encoding="utf-8")
+        resolve = self._run_ps1(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{PRESENCE_MODULE}' -Force\n"
+            f"$stdout = Get-Content -LiteralPath '{presence_stdout_file}' -Raw\n"
+            "(Get-Attr3FootagePresentPartIndexes -Stdout $stdout -ClipId 'FIX-E2E-0001') -join ','\n"
+        )
+        self.assertEqual(resolve.returncode, 0, resolve.stdout + resolve.stderr)
+        self.assertEqual(resolve.stdout.strip(), "0")
+
+        # Attempt 2: only part 1 is transferred.
+        stage_out_dir_2 = self.tmp / "resume-stage-out-2"
+        parts_json_path_2 = self.tmp / "resume-parts-2.json"
+        parts_json_path_2.write_text(json.dumps([self.parts[1]]), encoding="utf-8")
+        attempt2 = self._run_ps1(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{ARTIFACTS_MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            f"Import-Module '{STAGE_MODULE}' -Force\n"
+            f"$parts = @(Get-Content -LiteralPath '{parts_json_path_2}' -Raw | ConvertFrom-Json)\n"
+            f"$job = New-Attr3FootageStageJob -ClipId 'FIX-E2E-0001' -Parts $parts -OutDir '{stage_out_dir_2}' -AgentRoot '{self.share}'\n"
+            f"$shareStageDir = Join-Path '{self.share}' ('footage-stage\\' + $job.jobId)\n"
+            f"Send-AttrCudaOwnerFootagePartToStaging -SourcePath '{self.source[1]}' -StagingDirectory $shareStageDir "
+            f"-Index 1 -ExpectedLength {len(self.content[1])} -ExpectedSha256 '{_sha256(self.content[1])}' | Out-Null\n"
+            f"$r = & '{UM_RUN}' -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare '{self.share}' "
+            "-TimeoutSec 60 -PollSeconds 1\n"
+            "Write-Output ('E2E_ATTEMPT2_EXIT=' + $r.exitCode)\n"
+            "Write-Output $r.stdout\n"
+        )
+        self.assertIn("E2E_ATTEMPT2_EXIT=0", attempt2.stdout, attempt2.stdout + attempt2.stderr)
+        self.assertIn("PART=1 STATUS=PLACED", attempt2.stdout)
+        for target, content in zip(self.targets, self.content):
+            self.assertTrue(target.is_file())
+            self.assertEqual(target.read_bytes(), content)
+
+    def test_a_transfer_failure_after_one_part_staged_leaves_no_residue_after_cleanup(self) -> None:
+        # Models exactly what attr3-footage-stage.ps1's own step 5 does when a LATER part's
+        # transfer throws after an EARLIER part already staged successfully: nothing is ever
+        # submitted to Bachelor, so no job ever gets a chance to clean up the share-side copy
+        # itself -- this script's own residue cleanup (Remove-AttrCudaOwnerFootageStagingResidue)
+        # is what removes it.
+        share_stage_root = self.share / "footage-stage"
+        share_stage_dir = share_stage_root / "attempt-fail-1"
+        proc0 = self._run_ps1(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{ARTIFACTS_MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            f"Send-AttrCudaOwnerFootagePartToStaging -SourcePath '{self.source[0]}' "
+            f"-StagingDirectory '{share_stage_dir}' -Index 0 -ExpectedLength {len(self.content[0])} "
+            f"-ExpectedSha256 '{_sha256(self.content[0])}' | Out-Null\n"
+            "Write-Output DONE\n"
+        )
+        self.assertEqual(proc0.returncode, 0, proc0.stdout + proc0.stderr)
+        self.assertTrue((share_stage_dir / "part-0").is_file())
+
+        # Part 1's transfer fails source verification (wrong expected hash) -- the CLI's own step
+        # 5 throws ATTR3_FOOTAGE_STAGE_TRANSFER_FAILED here and never reaches the submit step.
+        proc1 = self._run_ps1(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{ARTIFACTS_MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            f"Send-AttrCudaOwnerFootagePartToStaging -SourcePath '{self.source[1]}' "
+            f"-StagingDirectory '{share_stage_dir}' -Index 1 -ExpectedLength {len(self.content[1])} "
+            f"-ExpectedSha256 '{'0' * 64}'\n"
+        )
+        self.assertNotEqual(proc1.returncode, 0)
+
+        cleanup = self._run_ps1(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            f"Remove-AttrCudaOwnerFootageStagingResidue -TrustedRoot '{share_stage_root}' -Directory '{share_stage_dir}'\n"
+        )
+        self.assertEqual(cleanup.returncode, 0, cleanup.stdout + cleanup.stderr)
+        self.assertFalse(share_stage_dir.exists())
 
 
 @unittest.skipIf(PWSH is None, "pwsh is not on PATH")
@@ -764,6 +1065,54 @@ class NoPathInAnyBranchTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertNotIn(str(occupied), proc.stdout + proc.stderr)
         self.assertTrue(occupied.is_dir(), "a directory occupying the slot must be left in place, not deleted")
+
+    def test_a_non_throwing_submission_result_carrying_a_sentinel_path_never_forwards_it(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 4 (sol MAJOR, astra 4: path-free output). The submitted
+        # job's own stdout/stderr are never forwarded verbatim -- this drives
+        # ConvertTo-Attr3FootageStageSafeOutput (attr3-footage-stage.ps1's own helper, extracted
+        # here via the AST -- the CLI itself never exposes a way to fake a submission result)
+        # directly against fabricated text carrying a sentinel path inside a line that does NOT
+        # match either allowlisted shape, and inside a part status field that DOES look
+        # PART=/STATUS=-shaped but fails the strict token pattern -- neither may survive.
+        sentinel_dir = self.tmp / f"{TOKEN}-sentinel"
+        sentinel_dir.mkdir()
+        sentinel_path = str(sentinel_dir / "real-owner-footage.raw")
+        raw_text = (
+            "[job-1] START clip=FIX-SAFE-0001 parts=2\n"
+            "PART=0 STATUS=PLACED\n"
+            f"a stray diagnostic line naming {sentinel_path} that must never be forwarded\n"
+            f"PART=1 STATUS={sentinel_path}\n"
+            "PART=1 STATUS=STAGED_NOT_FOUND\n"
+            "RESULT=FOOTAGE_STAGE_REFUSED CLIP=FIX-SAFE-0001 PARTS=2\n"
+            + json.dumps({
+                "schema": "mlvapp.attr3-footage-stage.v1", "jobId": "job-1", "clipId": "FIX-SAFE-0001",
+                "result": "FOOTAGE_STAGE_REFUSED", "partCount": 2,
+                "parts": [{"index": 0, "status": "PLACED"}, {"index": 1, "status": "STAGED_NOT_FOUND", "note": sentinel_path}],
+            }) + "\n"
+        )
+        text_file = self.tmp / "raw_output.txt"
+        text_file.write_text(raw_text, encoding="utf-8")
+        script = (
+            f"$genText = [IO.File]::ReadAllText('{GENERATOR}'); "
+            "$t=$null; $e=$null; "
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput($genText, [ref]$t, [ref]$e); "
+            "$fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+            "$n.Name -eq 'ConvertTo-Attr3FootageStageSafeOutput' }, $true) | Select-Object -First 1; "
+            "if (-not $fn) { throw 'FUNCTION_NOT_FOUND' }; "
+            "Invoke-Expression $fn.Extent.Text; "
+            f"$rawText = Get-Content -LiteralPath '{text_file}' -Raw; "
+            "ConvertTo-Attr3FootageStageSafeOutput -Text $rawText -ClipId 'FIX-SAFE-0001'"
+        )
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn(sentinel_path, proc.stdout)
+        self.assertNotIn(TOKEN, proc.stdout)
+        self.assertIn("PART=0 STATUS=PLACED", proc.stdout)
+        self.assertIn("PART=1 STATUS=STAGED_NOT_FOUND", proc.stdout)
+        self.assertIn("SUBMITTER RESULT=FOOTAGE_STAGE_REFUSED PARTS=2", proc.stdout)
 
 
 if __name__ == "__main__":

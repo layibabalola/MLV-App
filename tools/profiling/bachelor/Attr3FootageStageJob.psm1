@@ -70,10 +70,13 @@ function New-Attr3FootageStageJob {
     content-derived audit/dedup key the id itself used to be.
     On Bachelor, the emitted job's per-part status is one of PLACED, ALREADY_PRESENT,
     TARGET_CONFLICT, TARGET_PATH_UNSAFE, TARGET_STATE_UNKNOWN, TARGET_DIR_FAILED,
-    TARGET_VOLUME_COPY_FAILED, TARGET_VOLUME_VERIFY_<Test-AttrCudaFootagePart status> (the
-    same-volume partial copy failed verification), PLACED_VERIFY_<status> (the post-rename
-    re-hash at the spec path failed), STAGE_SLOT_INVALID, or STAGED_<status> (the staged copy
-    itself failed verification); the
+    TARGET_VOLUME_PARTIAL_EXISTS (round 4: the target-volume partial slot is already occupied --
+    refused, untouched, never this job's to delete), TARGET_VOLUME_COPY_FAILED,
+    TARGET_VOLUME_VERIFY_<Test-AttrCudaFootagePart status> (the same-volume partial copy failed
+    verification), PLACED_VERIFY_<status> (the post-rename re-hash at the spec path failed -- this
+    job removes the target IT just placed in this case, round 4), STAGE_SLOT_INVALID,
+    STAGED_PATH_UNSAFE (round 4: the staged file's own leaf is a reparse point) or STAGED_<status>
+    (the staged copy itself failed verification); the
     overall result is FOOTAGE_STAGED (exit 0) when every part is PLACED or ALREADY_PRESENT, else
     FOOTAGE_STAGE_REFUSED (exit 1). No exception's own text ever reaches this job's output, since
     it can contain a real path.
@@ -94,7 +97,17 @@ function New-Attr3FootageStageJob {
         # `~` is admitted because Windows temp roots carry 8.3 short names (RUNNER~1, OBABAL~1) and
         # the behavioural tests point -AgentRoot at one; it is inert everywhere this value is used.
         [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
-        [string]$AgentRoot = 'C:\mlvtmp\mlv-agent'
+        [string]$AgentRoot = 'C:\mlvtmp\mlv-agent',
+
+        # ATTR3-FOOTAGE-STAGE-1 round 4: a TEST-ONLY hook, never reachable from the production
+        # CLI (attr3-footage-stage.ps1 never passes it -- see that script's own header on the
+        # resolver being the only way it obtains parts). -1 (the default) never matches any real
+        # part index and is inert. A test that passes a real index gets a job whose emitted body
+        # corrupts that part's already-verified local partial AFTER the local verify but BEFORE
+        # the same-volume publish rename -- proving the POST-RENAME re-hash, not the pre-rename
+        # check, is what gates a PLACED report, and that a target this job's own rename just
+        # created is removed by this same job when that re-hash fails.
+        [int]$TestHookCorruptAfterVerifyPartIndex = -1
     )
 
     if ($Parts.Count -eq 0) {
@@ -193,6 +206,9 @@ $JobId = '__JOB_ID__'
 $ClipId = '__CLIP_ID__'
 $AgentRoot = '__AGENT_ROOT__'
 $PartsJson = '__PARTS_JSON__'
+# Test-only hook (round 4): -1 unless a test explicitly built this job with
+# -TestHookCorruptAfterVerifyPartIndex set -- see New-Attr3FootageStageJob's own header.
+$TestHookCorruptPartIndex = __TEST_HOOK_CORRUPT_PART_INDEX__
 $StageDir = Join-Path $AgentRoot ("footage-stage\" + $JobId)
 
 function Say([string]$Message) { Write-Output "[$JobId] $Message" }
@@ -270,6 +286,18 @@ foreach ($rawPart in $RawParts) {
         $stagedPath = Assert-AttrCudaDirectChild -Root $StageDir -Path (Join-Path $StageDir $stagedName) -Label "stage part $index"
     } catch {
         Record-PartResult -Index $index -Status 'STAGE_SLOT_INVALID' -CleanupPath $null
+        continue
+    }
+
+    # ATTR3-FOOTAGE-STAGE-1 round 4 (astra 3, link checks on read paths): the whole-chain check up
+    # front (above, before this loop) only proves $StageDir ITSELF carries no reparse point -- the
+    # individual leaf "part-<n>" has never been checked. Re-running the SAME chain check with
+    # $StageDir as the trusted root walks exactly that one remaining component before a single
+    # byte of it is ever hashed or read.
+    try {
+        [void](Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $StageDir -Path $stagedPath)
+    } catch {
+        Record-PartResult -Index $index -Status 'STAGED_PATH_UNSAFE' -CleanupPath $stagedPath
         continue
     }
 
@@ -353,9 +381,48 @@ foreach ($rawPart in $RawParts) {
         continue
     }
 
+    # ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 2a): the target-volume partial is opened with
+    # EXCLUSIVE creation ([IO.FileMode]::CreateNew) -- never a Copy-Item -Force onto a pre-cleared
+    # slot -- so a partial another concurrent placer for this exact part is actively writing is
+    # never silently deleted and overwritten; it is refused, untouched.
+    $localPartialExists = $false
+    $localCopyFailed = $false
+    $localSrcStream = $null
+    $localDstStream = $null
     try {
-        Copy-Item -LiteralPath $stagedPath -Destination $localPartialPath -Force -ErrorAction Stop
-    } catch {
+        try {
+            $localSrcStream = [IO.File]::Open($stagedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        } catch {
+            $localCopyFailed = $true
+        }
+        if (-not $localCopyFailed) {
+            try {
+                $localDstStream = [IO.File]::Open($localPartialPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            } catch [IO.IOException] {
+                $localPartialExists = $true
+            } catch {
+                $localCopyFailed = $true
+            }
+        }
+        if (-not $localCopyFailed -and -not $localPartialExists) {
+            try {
+                $localSrcStream.CopyTo($localDstStream)
+                $localDstStream.Flush()
+            } catch {
+                $localCopyFailed = $true
+            }
+        }
+    } finally {
+        if ($localSrcStream) { $localSrcStream.Dispose() }
+        if ($localDstStream) { $localDstStream.Dispose() }
+    }
+    if ($localPartialExists) {
+        # Refused, untouched: this is NOT ours to delete -- either a concurrent placer for this
+        # exact part is still writing it, or a prior attempt's own partial is still there.
+        Record-PartResult -Index $index -Status 'TARGET_VOLUME_PARTIAL_EXISTS' -CleanupPath $stagedPath
+        continue
+    }
+    if ($localCopyFailed) {
         try { Remove-Item -LiteralPath $localPartialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
         Record-PartResult -Index $index -Status 'TARGET_VOLUME_COPY_FAILED' -CleanupPath $stagedPath
         continue
@@ -366,6 +433,14 @@ foreach ($rawPart in $RawParts) {
         try { Remove-Item -LiteralPath $localPartialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
         Record-PartResult -Index $index -Status "TARGET_VOLUME_VERIFY_$localStatus" -CleanupPath $stagedPath
         continue
+    }
+
+    if ($index -eq $TestHookCorruptPartIndex) {
+        # Test-only hook (round 4): corrupts the LOCAL, already-verified partial's bytes AFTER
+        # the local verify above but BEFORE the same-volume publish rename below -- see this
+        # function's own header for what this proves.
+        $corruptStream = [IO.File]::Open($localPartialPath, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $corruptStream.WriteByte(0) } finally { $corruptStream.Dispose() }
     }
 
     try {
@@ -389,6 +464,15 @@ foreach ($rawPart in $RawParts) {
     # proves the arrived bytes are correct: report PLACED only when a fresh read confirms it.
     $placedStatus = Test-AttrCudaFootagePart -Path $targetPath -ExpectedLength $expectedLength -ExpectedSha256 $expectedSha256
     if ($placedStatus -ne 'PASS') {
+        # ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 2b): the non-overwriting rename just above
+        # created $targetPath as THIS JOB'S OWN OBJECT -- nothing else could already have been
+        # there, or the rename itself would have thrown ATTRCUDA_NONOVERWRITE_DESTINATION_EXISTS
+        # instead of succeeding. A failed post-rename re-hash therefore means the bytes THIS JOB
+        # just placed are wrong, so this job -- and only this job -- removes them, rather than
+        # leaving a corrupt file at the spec path under a PLACED-shaped status. A rerun's own
+        # ALREADY_PRESENT check then sees a clean absence, never a false TARGET_CONFLICT against
+        # bytes this job itself left broken.
+        try { Remove-Item -LiteralPath $targetPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
         Record-PartResult -Index $index -Status "PLACED_VERIFY_$placedStatus" -CleanupPath $stagedPath
         continue
     }
@@ -430,6 +514,7 @@ exit $exitCode
         AGENT_ROOT = $AgentRoot
         PARTS_JSON = $partsJson
         EMBEDDED_FUNCTIONS = $embeddedFunctions
+        TEST_HOOK_CORRUPT_PART_INDEX = $TestHookCorruptAfterVerifyPartIndex
     })
 
     if (-not (Test-Path -LiteralPath $OutDir)) { [void](New-Item -ItemType Directory -Path $OutDir -Force) }
