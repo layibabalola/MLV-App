@@ -1155,7 +1155,8 @@ void GpuDisplayWindow::paintGL()
     const bool presentingReconTexture = m_textureFromGpuRecon;
     const bool reconLutsReady = presentingReconTexture
         && gpuPreviewProcessingLutTextureSetReady(m_lutSet, m_reconPresentationOptions.previewProcessing);
-    const bool reconRefused = presentingReconTexture && !reconLutsReady;
+    const bool reconRefused = gpuPreviewProcessingReconTexturePresentationRefused(
+        presentingReconTexture, m_lutSet, m_reconPresentationOptions.previewProcessing);
     QOpenGLShaderProgram *activeProgram = presentingReconTexture ? m_previewProcessingProgram : m_program;
 
     if ( !m_texture || !activeProgram || width() <= 0 || height() <= 0 || reconRefused )

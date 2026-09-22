@@ -2141,7 +2141,25 @@ void gpuPreviewProcessingUpdateLutTextureSet(GpuPreviewProcessingLutTextureSet &
     QOpenGLFunctions * gl = currentContext ? currentContext->functions() : nullptr;
     if ( gl )
     {
-        while ( gl->glGetError() != GL_NO_ERROR ) {}
+        // BOUNDED (GPU-TEXNR-S1-DARK-GREEN-1 round 4, fable minor): on a robustness-
+        // enabled context (GL_KHR_robustness), glGetError() can report GL_CONTEXT_LOST
+        // (0x0507) persistently until the app handles the reset, which would otherwise
+        // spin this drain forever. Cap it at 16 iterations -- comfortably above any real
+        // burst of stale errors -- and treat a lost context as not-ready immediately
+        // rather than draining through it and attempting five uploads that cannot
+        // succeed.
+        constexpr GLenum kGlContextLost = 0x0507;
+        int drainIterations = 0;
+        GLenum drainedError = GL_NO_ERROR;
+        while ( drainIterations < 16 && (drainedError = gl->glGetError()) != GL_NO_ERROR )
+        {
+            if ( drainedError == kGlContextLost )
+            {
+                gpuPreviewProcessingDestroyLutTextureSet(set);
+                return;
+            }
+            ++drainIterations;
+        }
     }
 
     set.levels->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, levelsBytes.constData());
@@ -2172,6 +2190,14 @@ bool gpuPreviewProcessingLutTextureSetReady(const GpuPreviewProcessingLutTexture
     return config.enabled
         && set.signatureValid
         && set.levels && set.matrixR && set.matrixG && set.matrixB && set.gamma;
+}
+
+bool gpuPreviewProcessingReconTexturePresentationRefused(
+    bool presentingReconTexture,
+    const GpuPreviewProcessingLutTextureSet & set,
+    const GpuPreviewProcessingConfig & config)
+{
+    return presentingReconTexture && !gpuPreviewProcessingLutTextureSetReady(set, config);
 }
 
 void gpuPreviewProcessingBindDisplayUniformsAndTextures(

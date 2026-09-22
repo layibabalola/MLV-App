@@ -1015,7 +1015,8 @@ void GpuDisplayViewport::paintGL()
     const bool presentingReconTexture = m_pendingTextureFromGpuRecon || m_pendingTextureFromGpuAmaze;
     const bool reconLutsReady = presentingReconTexture
         && gpuPreviewProcessingLutTextureSetReady(m_lutSet, m_presentationOptions.previewProcessing);
-    const bool reconRefused = presentingReconTexture && !reconLutsReady;
+    const bool reconRefused = gpuPreviewProcessingReconTexturePresentationRefused(
+        presentingReconTexture, m_lutSet, m_presentationOptions.previewProcessing);
 
     if ( !m_texture || !m_program || !m_view || reconRefused )
     {
@@ -1304,6 +1305,21 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
 
     setPresentationOptions(options);
     updateProcessingTexturesIfNeeded();
+
+    // FAIL CLOSED (GPU-TEXNR-S1-DARK-GREEN-1 round 4, fable minor): this raw-Bayer16
+    // route feeds the same shared display shader/LUT set as the AMaZE route, whose
+    // submit path already refuses here (see setPresentedGpuPlaybackReconAmazePostWbTexture
+    // above) -- this route was missing the same gate, so an unready LUT set only refused
+    // at paintGL's draw-time re-check, AFTER this function had already returned true and
+    // MainWindow had recorded a successful present with no fallback. Refuse up front, same
+    // as the AMaZE route, so MainWindow's existing fallback runs instead.
+    if ( !gpuPreviewProcessingLutTextureSetReady(m_lutSet, options.previewProcessing) )
+    {
+        if ( madeCurrent ) doneCurrent();
+        return fail(QStringLiteral(
+            "GPU playback recon texture-present refused: LUT texture upload failed "
+            "for a linear post-WB-undo texture (trace=gpu_viewport_recon_raw_lut_upload_failed)"));
+    }
 
     if ( !m_texture
       || m_texture->width() != width

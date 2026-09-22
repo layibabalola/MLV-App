@@ -2511,17 +2511,21 @@ void GuiSmokeTest::gpuPreviewProcessingLutTextureSetFailsClosedOnMissingUploadAn
 
 void GuiSmokeTest::gpuPreviewProcessingReconRefusalMatchesForBothPresentersOnInjectedUploadFailure()
 {
-    // GPU-TEXNR-S1-DARK-GREEN-1 round 3 (sol major, tests_run gap): round 2's viewport
-    // paintGL() drew a GPU-recon/AMaZE texture through the shared shader's
-    // previewProcessingEnabled=0 branch whenever its LUT set was not ready, instead of
-    // refusing to present it -- the same fail-open shape GpuDisplayWindow::paintGL's
-    // reconRefused re-check already closed for the window route. This is a GPU-free test
-    // of the exact boolean formula both paintGL() functions now use --
-    // "presentingReconTexture && !gpuPreviewProcessingLutTextureSetReady(set, config)" --
-    // against an injected-upload-failure shape (signatureValid=false despite an otherwise
-    // usable config and mostly-populated pointers, exactly what
-    // gpuPreviewProcessingUpdateLutTextureSet leaves behind on a partial GL failure), so
-    // it fails if either presenter's refusal logic regresses or the two diverge.
+    // GPU-TEXNR-S1-DARK-GREEN-1 round 3 (sol major, tests_run gap), tightened round 4
+    // (sol minor + fable minor 3): round 2's viewport paintGL() drew a GPU-recon/AMaZE
+    // texture through the shared shader's previewProcessingEnabled=0 branch whenever its
+    // LUT set was not ready, instead of refusing to present it -- the same fail-open
+    // shape GpuDisplayWindow::paintGL's reconRefused re-check already closed for the
+    // window route. Round 3's test re-encoded that formula in two local lambdas rather
+    // than exercising production code, so it could not catch a divergence in either
+    // presenter; round 4 removes the re-encoding entirely and calls the SAME production
+    // function (gpuPreviewProcessingReconTexturePresentationRefused) that both
+    // GpuDisplayWindow::paintGL and GpuDisplayViewport::paintGL now call for their
+    // re-check, so a regression in either presenter's re-check is necessarily a
+    // regression in this function too, against an injected-upload-failure shape
+    // (signatureValid=false despite an otherwise usable config and mostly-populated
+    // pointers, exactly what gpuPreviewProcessingUpdateLutTextureSet leaves behind on a
+    // partial GL failure).
     const GpuPreviewProcessingConfig config = make_synthetic_preview_processing_config();
 
     GpuPreviewProcessingLutTextureSet failedUploadSet;
@@ -2536,39 +2540,31 @@ void GuiSmokeTest::gpuPreviewProcessingReconRefusalMatchesForBothPresentersOnInj
     GpuPreviewProcessingLutTextureSet readySet = failedUploadSet;
     readySet.signatureValid = true;
 
-    auto windowDecision = [](bool presentingReconTexture,
-                             const GpuPreviewProcessingLutTextureSet &set,
-                             const GpuPreviewProcessingConfig &cfg) -> bool
-    {
-        // GpuDisplayWindow::paintGL's reconRefused formula, verbatim.
-        const bool reconLutsReady = presentingReconTexture
-            && gpuPreviewProcessingLutTextureSetReady(set, cfg);
-        return presentingReconTexture && !reconLutsReady;
-    };
-    auto viewportDecision = [](bool presentingReconTexture,
-                               const GpuPreviewProcessingLutTextureSet &set,
-                               const GpuPreviewProcessingConfig &cfg) -> bool
-    {
-        // GpuDisplayViewport::paintGL's reconRefused formula, verbatim (round 3).
-        const bool reconLutsReady = presentingReconTexture
-            && gpuPreviewProcessingLutTextureSetReady(set, cfg);
-        return presentingReconTexture && !reconLutsReady;
-    };
+    // Presenting a recon/AMaZE texture with a failed upload: the shared decision refuses.
+    QVERIFY(gpuPreviewProcessingReconTexturePresentationRefused(true, failedUploadSet, config));
 
-    // Presenting a recon/AMaZE texture with a failed upload: both presenters must refuse.
-    QVERIFY(windowDecision(true, failedUploadSet, config));
-    QVERIFY(viewportDecision(true, failedUploadSet, config));
-    QCOMPARE(windowDecision(true, failedUploadSet, config), viewportDecision(true, failedUploadSet, config));
-
-    // Presenting a recon/AMaZE texture with a successful upload: neither refuses.
-    QVERIFY(!windowDecision(true, readySet, config));
-    QVERIFY(!viewportDecision(true, readySet, config));
+    // Presenting a recon/AMaZE texture with a successful upload: it does not refuse.
+    QVERIFY(!gpuPreviewProcessingReconTexturePresentationRefused(true, readySet, config));
 
     // NOT presenting a recon/AMaZE texture (e.g. the ordinary already-processed QImage
-    // route): neither presenter may refuse just because grading LUTs aren't ready --
-    // that content is already display-referred and correct on its own.
-    QVERIFY(!windowDecision(false, failedUploadSet, config));
-    QVERIFY(!viewportDecision(false, failedUploadSet, config));
+    // route): never refuse just because grading LUTs aren't ready -- that content is
+    // already display-referred and correct on its own -- regardless of set readiness.
+    QVERIFY(!gpuPreviewProcessingReconTexturePresentationRefused(false, failedUploadSet, config));
+    QVERIFY(!gpuPreviewProcessingReconTexturePresentationRefused(false, readySet, config));
+
+    // A single missing LUT pointer (not just signatureValid) must also refuse.
+    GpuPreviewProcessingLutTextureSet missingMatrixSet = readySet;
+    missingMatrixSet.matrixG = nullptr;
+    QVERIFY(gpuPreviewProcessingReconTexturePresentationRefused(true, missingMatrixSet, config));
+
+    // A disabled processing config refuses too, even with an otherwise-ready set.
+    GpuPreviewProcessingConfig disabledConfig = config;
+    disabledConfig.enabled = false;
+    QVERIFY(gpuPreviewProcessingReconTexturePresentationRefused(true, readySet, disabledConfig));
+
+    // The shared decision is exactly the negation of readiness whenever presenting.
+    QCOMPARE(gpuPreviewProcessingReconTexturePresentationRefused(true, failedUploadSet, config),
+             !gpuPreviewProcessingLutTextureSetReady(failedUploadSet, config));
 }
 
 void GuiSmokeTest::gpuViewportRefusesReconTextureDrawWhenLutReadinessIsFalse()
@@ -2723,10 +2719,18 @@ void GuiSmokeTest::gpuDisplayWindowRecoversRetainedQImageAfterContextLossTeardow
                                         "resubmission; serialValid=%1 serial=%2")
                         .arg(serialValidAfter).arg(serialAfter)));
     {
+        // Frame A was filled green (qRgb(10, 200, 30)) above -- assert that colour comes
+        // back, not an unrelated one, so this test is internally consistent. Checking for
+        // non-black and green-dominant (rather than an exact match) is also what makes
+        // this fail if cleanupGLResources() did NOT re-arm m_textureDirty: with m_texture
+        // destroyed and never re-uploaded, paintGL()'s "!m_texture" early-return clears to
+        // black (glClearColor(0,0,0,1) above) instead of drawing frame A, so a stale/
+        // missing upload shows as a near-black center pixel and this assertion catches it.
         const QColor center(grabbedAfter.pixel(grabbedAfter.width() / 2, grabbedAfter.height() / 2));
-        QVERIFY2(center.red() > 150 && center.green() < 80 && center.blue() < 80,
-                 qPrintable(QStringLiteral("Expected frame A to reappear after context-loss teardown with no "
-                                            "resubmission; center pixel was rgb(%1,%2,%3)")
+        QVERIFY2(center.green() > 150 && center.red() < 80 && center.blue() < 80,
+                 qPrintable(QStringLiteral("Expected frame A (green, rgb(10,200,30)) to reappear after "
+                                            "context-loss teardown with no resubmission; center pixel was "
+                                            "rgb(%1,%2,%3)")
                             .arg(center.red()).arg(center.green()).arg(center.blue())));
     }
 

@@ -187,6 +187,17 @@ void gpuPreviewProcessingUpdateLutTextureSet(GpuPreviewProcessingLutTextureSet &
                                              const GpuPreviewProcessingConfig & config);
 bool gpuPreviewProcessingLutTextureSetReady(const GpuPreviewProcessingLutTextureSet & set,
                                             const GpuPreviewProcessingConfig & config);
+/* Single production decision for whether a presenter must refuse to draw a GPU-recon/
+ * AMaZE texture (post-WB-undo linear camera RGB) this paint, rather than ever letting it
+ * fall through to the shared shader's previewProcessingEnabled=0 passthrough-equivalent
+ * branch. Both GpuDisplayWindow::paintGL and GpuDisplayViewport::paintGL call this exact
+ * function for their re-check (GPU-TEXNR-S1-DARK-GREEN-1 round 4) so the two routes
+ * cannot diverge. False whenever presentingReconTexture is false -- only-already-
+ * display-referred content (the QImage route) is never refused for LUT unreadiness. */
+bool gpuPreviewProcessingReconTexturePresentationRefused(
+    bool presentingReconTexture,
+    const GpuPreviewProcessingLutTextureSet & set,
+    const GpuPreviewProcessingConfig & config);
 /* Binds every display-shader uniform (including the LUT sampler units 1-5) on
  * `program`, which must already be ->bind()'d by the caller; the caller retains
  * ownership of texture unit 0 (frameTexture). */
