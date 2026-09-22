@@ -137,13 +137,16 @@ $LANES = @{
 $CLAUDE_EXE = Join-Path $env:APPDATA 'npm\claude.cmd'
 $CODEX_EXE  = Join-Path $env:APPDATA 'npm\codex.cmd'
 
-# Every tool that either fans out to another agent (Agent, Task) or promises a LATER turn a
-# headless lane cannot receive (Monitor, ScheduleWakeup, CronCreate, CronDelete, RemoteTrigger).
-# ONE constant feeds the pre-reservation allowlist rejection, the --disallowedTools argv, and
-# the receipt's authority.disallowedTools, so the enforcement points cannot drift apart the way
-# sol PR #150 round 1 found them (rejection checked only Agent/Task while the deny list covered
-# all seven).
-$DENIED_TOOLS_DISPLAY = @('Agent', 'Task', 'Monitor', 'ScheduleWakeup', 'CronCreate', 'CronDelete', 'RemoteTrigger')
+# Every tool that either fans out to another agent (Agent, Task, Workflow, TaskCreate) or
+# promises a LATER turn a headless lane cannot receive (Monitor, ScheduleWakeup, CronCreate,
+# CronDelete, RemoteTrigger). ONE constant feeds the pre-reservation allowlist rejection, the
+# --disallowedTools argv, and the receipt's authority.disallowedTools, so the enforcement
+# points cannot drift apart the way sol PR #150 round 1 found them (rejection checked only
+# Agent/Task while the deny list covered all seven). Round 3 (fable minor 1): Workflow spawns
+# a background-orchestrated fan-out the launching lane cannot supervise, and TaskCreate is the
+# same background-promise shape as ScheduleWakeup/CronCreate -- both belong beside the other
+# six, not only in a caller's allowlist check.
+$DENIED_TOOLS_DISPLAY = @('Agent', 'Task', 'Monitor', 'ScheduleWakeup', 'CronCreate', 'CronDelete', 'RemoteTrigger', 'Workflow', 'TaskCreate')
 $DENIED_TOOLS = @($DENIED_TOOLS_DISPLAY | ForEach-Object { $_.ToLowerInvariant() })
 
 function Get-Sha256([string]$Text) {
@@ -152,6 +155,31 @@ function Get-Sha256([string]$Text) {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
         return ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '')
     } finally { $sha.Dispose() }
+}
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 3 (sol minor / fable minor 2): a porcelain STATUS LINE
+# (e.g. ' M tracked.txt') is the same text before and after a lane makes a SECOND edit to a
+# file that was already dirty when the lane started -- the status code does not change, only
+# the content does -- so round 2's line-text comparison could not see it. This returns a
+# path -> content-identity map instead: the sha256 of `git diff HEAD -- <path>`, which changes
+# whenever the path's actual content (staged or unstaged, relative to HEAD) changes, covering
+# modify/add/delete uniformly. Callers compare this map's VALUES for a given key, not just key
+# presence, so a further edit to an already-dirty path is visible even though the path was
+# already in the map.
+function Get-TrackedDirtyContentIdentity([string]$WorkDir) {
+    $statusLines = try { @(& git -C $WorkDir status --porcelain 2>$null) } catch { @() }
+    $trackedLines = @($statusLines | Where-Object { $_ -and -not $_.StartsWith('??') })
+    $map = [ordered]@{}
+    foreach ($line in $trackedLines) {
+        # Porcelain v1: two status chars, one space, then the path ('OLD -> NEW' for a rename;
+        # the current path is what matters for content identity).
+        $pathPart = $line.Substring(3)
+        if ($pathPart -match '^.* -> (.*)$') { $pathPart = $Matches[1] }
+        $path = $pathPart.Trim('"')
+        $diffText = try { (& git -C $WorkDir diff HEAD -- $path 2>$null) -join "`n" } catch { '' }
+        $map[$path] = Get-Sha256 $diffText
+    }
+    return $map
 }
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
@@ -317,15 +345,16 @@ $BaseSha = try {
 if ([string]::IsNullOrWhiteSpace($BaseSha)) { $BaseSha = $null }
 # LANE-NO-BACKGROUND-END-TURN-1 round 2 (sol major 1 / fable minor 3): the dirty-no-commit
 # override below applies ONLY to editing Claude lanes, and only to tracked dirt the LANE
-# ITSELF introduced. Snapshot the tracked (non-'??') porcelain lines HERE, before the child
-# ever starts, so pre-existing dirt in a shared or already-dirty worktree can never be
-# mistaken for work the lane left behind. Nothing between here and process launch touches
-# $WorkDir's tracked files (settings.json and the prompt file are written under $RunDir /
-# the board root, not $WorkDir), so this snapshot is equivalent to "immediately before launch".
+# ITSELF introduced. Snapshot a per-path CONTENT IDENTITY (round 3: sol minor / fable minor 2 --
+# a raw status line cannot tell a further edit of an already-dirty path from no edit at all)
+# HERE, before the child ever starts, so pre-existing dirt in a shared or already-dirty
+# worktree can never be mistaken for work the lane left behind. Nothing between here and
+# process launch touches $WorkDir's tracked files (settings.json and the prompt file are
+# written under $RunDir / the board root, not $WorkDir), so this snapshot is equivalent to
+# "immediately before launch".
 $InitialTrackedDirt = $null
 if ($AllowEdits -and $LANES[$Lane].engine -eq 'claude' -and $BaseSha) {
-    $initialStatusLines = try { @(& git -C $WorkDir status --porcelain 2>$null) } catch { @() }
-    $InitialTrackedDirt = @($initialStatusLines | Where-Object { $_ -and -not $_.StartsWith('??') })
+    $InitialTrackedDirt = Get-TrackedDirtyContentIdentity -WorkDir $WorkDir
 }
 
 if (-not $RunDir) {
@@ -534,10 +563,11 @@ if ($cfg.engine -eq 'claude') {
     # LANE-NO-BACKGROUND-END-TURN-1 (2026-09-22): four headless `claude -p` implementer
     # lanes ended their final turn on "I'll resume when the background job completes" --
     # a headless lane gets no later turn, so the work sat uncommitted with no receipt.
-    # Monitor/ScheduleWakeup/CronCreate/CronDelete/RemoteTrigger all promise a callback
-    # this process cannot receive. One comma-separated token avoids the same variadic
-    # swallowing hazard as allowedTools. Built from $DENIED_TOOLS_DISPLAY, the same list the
-    # pre-reservation rejection above checks against.
+    # Monitor/ScheduleWakeup/CronCreate/CronDelete/RemoteTrigger/TaskCreate all promise a
+    # callback this process cannot receive, and Workflow fans out background-orchestrated
+    # work the launching lane cannot supervise. One comma-separated token avoids the same
+    # variadic swallowing hazard as allowedTools. Built from $DENIED_TOOLS_DISPLAY, the same
+    # list the pre-reservation rejection above checks against.
     $argv += @('--disallowedTools', ($DENIED_TOOLS_DISPLAY -join ','))
     # PROMPT GOES VIA STDIN, NOT AS A POSITIONAL ARGUMENT. Several claude flags
     # (--allowedTools, --add-dir) are VARIADIC and keep consuming every following
@@ -612,14 +642,23 @@ $psi.CreateNoWindow         = $true
 # effort (e.g. fable/opus/sol/luna at 'high') actually reach the child instead of being recorded
 # in the receipt but never applied to the process that ran.
 if ($cfg.engine -eq 'claude' -and $cfg.effort) {
+    # LANE-NO-BACKGROUND-END-TURN-1 round 3 (hub ruling): this PR does not ADD any
+    # ANTHROPIC_/OPENAI_/CLAUDE_CODE_ assignment; the pre-existing CLAUDE_CODE_EFFORT_LEVEL
+    # assignment (from 8ad69168, 2026-09-07, previously reviewed) is tracked under
+    # NA3-CHILD-ENV-SCOPE-1 -- whether NA-3's prefix rule covers a launcher setting a child
+    # process's environment in code is a governance interpretation filed separately there,
+    # not decided by this PR. Do not remove or change this assignment to "fix" NA-3 here.
     $psi.Environment['CLAUDE_CODE_EFFORT_LEVEL'] = $cfg.effort
 }
 # LANE-NO-BACKGROUND-END-TURN-1 round 2 (hub ruling): a CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
 # child-environment flag was here through round 1. docs/never-authorized.json NA-3 prohibits
 # assigning ANY CLAUDE_CODE_* variable, and widening that rule is an authority change the hub
-# will not make -- so the flag is removed entirely, not narrowed. Containment of background
-# work now rests on the --disallowedTools deny list above, the dirty-no-commit receipt check
-# below, and the brief-level prohibition on background work; see docs/lane-containment.md.
+# will not make -- so the flag is removed entirely, not narrowed (this PR adds no new
+# ANTHROPIC_/OPENAI_/CLAUDE_CODE_ assignment of its own; see the NA3-CHILD-ENV-SCOPE-1 note
+# above for the one pre-existing assignment that remains). Containment of background work now
+# rests on the --disallowedTools deny list above, the dirty-no-commit receipt check below
+# (scoped to lane-introduced tracked-file changes only), and the brief-level prohibition on
+# background work; see docs/lane-containment.md.
 # Per-run lane scratch under an MLV-owned root instead of the shared %TEMP%.
 $scratchDir = $null
 if ($ScratchRoot) {
@@ -982,15 +1021,19 @@ try {
 # lane can never move HEAD by construction, so without this gate the check degenerated to
 # "was the surrounding checkout dirty" -- a fact outside a review lane's control. A codex
 # lane never sets $InitialTrackedDirt (claude-only capture above) and is likewise excluded.
+# Round 3 (sol minor / fable minor 2): a path counts as lane-introduced if it is NEWLY dirty
+# (absent from $InitialTrackedDirt) OR its CONTENT IDENTITY changed -- not merely if its
+# porcelain status line differs. A further edit to an already-dirty tracked file keeps the
+# same status code (still ' M path') both before and after, so status-line comparison alone
+# missed it; comparing the per-path content hash catches it.
 if ($AllowEdits -and $cfg.engine -eq 'claude' -and $BaseSha) {
     $headAfter = try { (& git -C $WorkDir rev-parse HEAD 2>$null | Select-Object -First 1) } catch { $null }
     if ($headAfter -eq $BaseSha) {
-        $statusLines = try { @(& git -C $WorkDir status --porcelain 2>$null) } catch { @() }
-        $trackedDirtyAfter = @($statusLines | Where-Object { $_ -and -not $_.StartsWith('??') })
-        # New or changed lines only -- a porcelain line that changed status code (e.g. ' M' to
-        # 'M ') for the SAME pre-existing file still counts as the lane touching it.
-        $introducedDirt = @($trackedDirtyAfter | Where-Object { $InitialTrackedDirt -notcontains $_ })
-        if ($introducedDirt.Count -gt 0) {
+        $trackedDirtyAfter = Get-TrackedDirtyContentIdentity -WorkDir $WorkDir
+        $introducedPaths = @($trackedDirtyAfter.Keys | Where-Object {
+            -not $InitialTrackedDirt.Contains($_) -or $InitialTrackedDirt[$_] -ne $trackedDirtyAfter[$_]
+        })
+        if ($introducedPaths.Count -gt 0) {
             $workEvidence.workCompleted = $false
             # Preserve any existing reason (e.g. a subtype-* classification from a partially
             # successful envelope) by appending rather than overwriting it -- sol/fable round 1

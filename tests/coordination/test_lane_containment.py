@@ -32,7 +32,9 @@ KILL_OUTCOME_TOKENS = {"already-exited", "killed", "kill-wait-timeout", "kill-th
 # headless lane a callback it has no later turn to receive, on top of the pre-existing
 # nested-agent-fanout denial. Kept as one named constant instead of a literal per
 # assertion site so this file has exactly one place to update if the list changes.
-DISALLOWED_TOOLS_TOKEN = "Agent,Task,Monitor,ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger"
+# Round 3 (fable minor 1): Workflow (background-orchestrated fan-out) and TaskCreate (the
+# same background-promise shape as ScheduleWakeup/CronCreate) joined the list.
+DISALLOWED_TOOLS_TOKEN = "Agent,Task,Monitor,ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger,Workflow,TaskCreate"
 
 
 def assert_owner_absence_is_legitimate(containment, context):
@@ -105,6 +107,13 @@ $env:CLAUDE_CODE_DISABLE_BACKGROUND_TASKS|Set-Content -Encoding utf8NoBOM $env:M
 # committing (env-gated no-op for every other test).
 if($env:MLV_FIXTURE_DIRTY_TRACKED_PATH){
   'lane-edit-uncommitted'|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_DIRTY_TRACKED_PATH
+}
+# Round 3 (sol minor / fable minor 2): simulate a lane that FURTHER edits a tracked file the
+# test already dirtied BEFORE launch, without ever staging or committing either edit -- the
+# porcelain status line for this path (' M path') is identical before and after, so only a
+# content-identity comparison can see the lane's own edit landed on top of the pre-existing one.
+if($env:MLV_FIXTURE_FURTHER_EDIT_TRACKED_PATH){
+  'lane-further-edit-uncommitted'|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_FURTHER_EDIT_TRACKED_PATH
 }
 # Simulate a lane that commits its edit (HEAD moves) and then leaves a further,
 # still-uncommitted edit behind on top of that commit.
@@ -243,7 +252,8 @@ def test_editing_argv_preserves_allowlist_and_denies_nested_tools(fixture_tree):
 # checked the deny-list argv/receipt but never exercised the guard against the five newer
 # tools, so a drift between the guard and the deny list (exactly what sol found) went untested.
 @pytest.mark.parametrize("bad",["Agent"," task ","Read, AGENT ,Write","Read,Task",
-    "Monitor","Read,ScheduleWakeup","CronCreate,Write","Read,CronDelete,Write"," remotetrigger "])
+    "Monitor","Read,ScheduleWakeup","CronCreate,Write","Read,CronDelete,Write"," remotetrigger ",
+    "Workflow","Read, WORKFLOW ,Write","TaskCreate","Read,taskcreate,Write"])
 def test_editing_explicit_nested_tool_is_rejected_before_reservation(fixture_tree,bad):
     cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools=bad)
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=10)
@@ -653,6 +663,25 @@ def test_dirty_tracked_worktree_introduced_by_editing_lane_is_ended_incomplete(f
     _seed_git_repo(root)
     cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
     env["MLV_FIXTURE_DIRTY_TRACKED_PATH"]=str(root/"tracked.txt")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="ended-incomplete"
+    assert q["complete"] is False
+    assert q["workEvidence"]["reason"]=="dirty-worktree-no-commit"
+
+
+def test_further_edit_of_already_dirty_tracked_file_is_ended_incomplete(fixture_tree):
+    # Producer brief round 3, required case (sol minor / fable minor 2): a path that was
+    # ALREADY dirty before the lane started, and that the lane edits AGAIN without staging or
+    # committing either edit, must still flip the receipt -- even though the porcelain status
+    # line for that path (' M tracked.txt') never changes text across either edit. Only a
+    # per-path content-identity comparison (not a status-line comparison) can see this.
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    (root/"tracked.txt").write_text("dirty-before-the-lane-ever-ran\n",encoding="ascii")
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
+    env["MLV_FIXTURE_FURTHER_EDIT_TRACKED_PATH"]=str(root/"tracked.txt")
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
     assert r.returncode==0,(r.stdout,r.stderr)
     q=json.loads(receipt.read_text(encoding="utf-8"))

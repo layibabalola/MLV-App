@@ -33,39 +33,55 @@ denying it would require denying `Bash` entirely, which editing lanes need. Roun
 (hub ruling, 2026-09-22) removed a `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` child-
 environment flag that stood here through round 1: `docs/never-authorized.json` NA-3
 prohibits assigning ANY `CLAUDE_CODE_*` variable, and widening that rule is an
-authority change the hub will not make. Containment of background work now rests on
-three things, and none of them technically prevents a lane from starting a
-background shell job: the `--disallowedTools` deny list above (nested-agent and
-callback-promising CLI tools only), the dirty-no-commit receipt below (the
-after-the-fact detector -- a lane that leaves work stranded in a background job
-receipts `ended-incomplete`, not `complete`), and the brief-level prohibition on
-background work carried in each lane's dispatch prompt. Arbitrary shell descendants
-remain confined to the owning Windows job unless an independently authorized
-external service starts them (see the job-object section above); the job closes
-them, it does not prevent them from being started.
+authority change the hub will not make. This PR does not ADD any
+`ANTHROPIC_`/`OPENAI_`/`CLAUDE_CODE_` assignment; the pre-existing
+`CLAUDE_CODE_EFFORT_LEVEL` assignment described below (from 8ad69168, 2026-09-07,
+previously reviewed) is out of scope for this PR and is tracked separately under
+card NA3-CHILD-ENV-SCOPE-1 -- whether NA-3's prefix rule covers a launcher setting a
+child process's environment in code is a governance interpretation that PR does not
+decide here. Containment of background work now rests on three things, and none of
+them technically prevents a lane from starting a background shell job: the
+`--disallowedTools` deny list above (nested-agent and callback-promising CLI tools
+only), the dirty-no-commit receipt below (an after-the-fact detector scoped
+narrowly -- see exactly what it does and does not catch), and the brief-level
+prohibition on background work carried in each lane's dispatch prompt. Arbitrary
+shell descendants remain confined to the owning Windows job unless an independently
+authorized external service starts them (see the job-object section above); the job
+closes them, it does not prevent them from being started.
 
 A receipt is also never marked `complete` (or state `ended-incomplete` is forced)
 when an EDITING Claude lane's own worktree is still at the lane's starting sha and
 carries tracked-file dirt the lane itself introduced -- positive evidence in the
 provider's answer does not outrank a tree that never moved; see
 `workEvidence.reason: dirty-worktree-no-commit` in
-`tools/coordination/Invoke-Lane.ps1`. The check snapshots the tracked (non-`??`)
-`git status --porcelain` lines before the child starts and compares them against the
-same snapshot after exit: only NEW or CHANGED tracked lines trigger it, so
-pre-existing dirt in an already-dirty worktree never flips a receipt. It applies
-only to `-AllowEdits` Claude lanes -- a read-only lane can never move HEAD by
-construction, so applying the check there would degenerate to "was the surrounding
-checkout dirty," a fact outside a review lane's control; Codex lanes are excluded
-the same way. When the check fires it appends to any existing
+`tools/coordination/Invoke-Lane.ps1`. **What this detects, precisely:** the check
+snapshots a per-path content identity (the sha256 of `git diff HEAD -- <path>`) for
+every tracked (non-`??`) dirty path before the child starts, and compares it against
+the same snapshot after exit; a path counts as lane-introduced if it is newly dirty
+or its content identity changed, so pre-existing dirt in an already-dirty worktree
+never flips a receipt on its own, but a further edit to an already-dirty tracked
+file does (round 3: a raw porcelain status line stays textually identical across
+such a further edit, so round 2's line-text comparison could not see it; comparing
+content identity per path can). **What this does NOT detect:** it only ever looks at
+the tracked-file working tree, so background work that changes no tracked file --
+a build, a test run, a Bash job reading files or writing only untracked scratch
+output -- leaves no trace here and is never caught by this mechanism, regardless of
+whether that work is still running in the background when the lane's last turn
+ends. It applies only to `-AllowEdits` Claude lanes -- a read-only lane can never
+move HEAD by construction, so applying the check there would degenerate to "was the
+surrounding checkout dirty," a fact outside a review lane's control; Codex lanes are
+excluded the same way. When the check fires it appends to any existing
 `workEvidence.reason` rather than overwriting it, so a prior failure classification
 (e.g. `subtype-error_max_turns`) is never masked.
 
 `-ReasoningEffort low` explicitly requests low effort for one invocation. Codex
 receives its normal reasoning configuration argument. Claude receives
-`CLAUDE_CODE_EFFORT_LEVEL=low` in the child environment. The receipt records the
-override; user settings and the parent environment are unchanged. Omitting it
-preserves the existing lane defaults. Codex continues through its existing
-direct process path; the new Windows job containment applies to Claude.
+`CLAUDE_CODE_EFFORT_LEVEL=low` in the child environment -- the same pre-existing,
+out-of-scope-for-this-PR assignment tracked under NA3-CHILD-ENV-SCOPE-1 above. The
+receipt records the override; user settings and the parent environment are
+unchanged. Omitting it preserves the existing lane defaults. Codex continues
+through its existing direct process path; the new Windows job containment applies
+to Claude.
 
 Run the real Windows fixture suite with:
 
