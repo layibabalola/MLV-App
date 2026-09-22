@@ -1259,6 +1259,16 @@ private:
     bool m_playbackSmokeLastOpenMpThreadCapActive = false;
     int m_playbackSmokeLastScaleRequest = 1;
     int m_playbackSmokeLastScaleActive = 1;
+    mutable bool m_playbackScaleClampedForGpuTextureRouteActive = false;
+    mutable int m_playbackScaleClampedForGpuTextureRouteRequestedScale = 0;
+    /* CUDA-S4-TEXTURE-ROUTE-CLAMP-1 round 2: gpuPlaybackReconTextureRouteEligibleAtScaleOne()
+     * touches m_pProcessingObject, which initLib() does not assign until after initGui() has
+     * already run (and already called into the eligibility predicate via
+     * initPlaybackScaleFactorFromSettings()). m_pProcessingObject has no default member
+     * initializer, so reading it before initLib() runs is an indeterminate-pointer read, not a
+     * null one -- gpuPreviewProcessingIsSupported()'s null check cannot catch it. Gate the whole
+     * predicate on this flag instead of relying on pointer nullness. */
+    bool m_gpuPlaybackReconPolicyLibraryReady = false;
     bool m_headlessPlaybackProfileUsePlaybackPolicy = false;
     bool m_headlessPlaybackProfileActive = false;
     uint64_t m_nextRenderRequestSerial = 1;
@@ -1443,6 +1453,8 @@ private:
     QString activeClipPhase3Fingerprint( void ) const;
     QStringList pinnedClipFingerprintsForPhase3( void ) const;
     int  effectivePlaybackScaleFactorForRequest( void ) const;
+    int  playbackScaleFactorPolicyDecision( void ) const;
+    bool gpuPlaybackReconTextureRouteEligibleAtScaleOne( void ) const;
     MainWindowGpuPreviewPolicyState gpuPreviewPolicyForCurrentScopeState(
         bool includeVisibleScopes ) const;
     bool visibleScopesBlockGpuTexturePlayback( void ) const;
