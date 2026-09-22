@@ -90,6 +90,7 @@ $settledValidationRecommendedSeconds = 30
 $validationWarnings = @()
 . (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')
 . (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')
+. (Join-Path $PSScriptRoot 'gui-smoke-gpu-texture-route-validation.ps1')
 Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force
 . (Join-Path $PSScriptRoot 'provenance-stamp.ps1')
 
@@ -1160,6 +1161,9 @@ $summaryLine = $recentLines |
 $cpuSummaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.cpu_summary *" } |
     Select-Object -Last 1
+$gpuSummaryLine = $recentLines |
+    Where-Object { $_ -like "*playback_smoke.gpu_summary*" } |
+    Select-Object -Last 1
 # Round-4: fields that used to sit beyond QString::arg's %99 limit (garbage)
 # now arrive on a continuation line; merged into the same cpuSummary object.
 $cpuSummaryExtLine = $recentLines |
@@ -1253,6 +1257,7 @@ else {
 $playbackStart = if ($playbackStartLine) { Convert-PlaybackLogLineToObject $playbackStartLine } else { $null }
 $playbackSummary = if ($summaryLine) { Convert-PlaybackLogLineToObject $summaryLine } else { $null }
 $cpuSummary = if ($cpuSummaryLine) { Convert-PlaybackLogLineToObject $cpuSummaryLine } else { $null }
+$gpuSummary = if ($gpuSummaryLine) { Convert-PlaybackLogLineToObject $gpuSummaryLine } else { $null }
 if ($cpuSummary -and $cpuSummaryExtLine) {
     $cpuSummaryExt = Convert-PlaybackLogLineToObject $cpuSummaryExtLine
     if ($cpuSummaryExt) {
@@ -1578,6 +1583,13 @@ if ($glOutputValidationRequested) {
             "app_internal_gl_viewport_grab", "gl_window_framebuffer_readback")) {
         $validationFailures += "Screenshot color scan did not use a GL-presented surface (method=$($glOutputProof.screenshotMethod))."
     }
+}
+$gpuTextureRouteReadbackRegressionFailure =
+    Get-GuiSmokeGpuTextureRouteReadbackRegressionFailure -LaunchEnv $launchEnv `
+        -ClearedEnvironment $clearedEnvironment -GpuSummary $gpuSummary `
+        -AmbientEnvironment ([System.Environment]::GetEnvironmentVariables())
+if ($null -ne $gpuTextureRouteReadbackRegressionFailure) {
+    $validationFailures += $gpuTextureRouteReadbackRegressionFailure
 }
 if ($ExpectedScaleRequest -ge 0 -and
     ($null -eq $validatedScaleRequest -or [int]$validatedScaleRequest -ne $ExpectedScaleRequest)) {
