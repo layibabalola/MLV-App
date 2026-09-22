@@ -530,6 +530,58 @@ function Remove-AttrCudaOwnerFootageStagingResidue {
     } catch {}
 }
 
+function Assert-Attr3NoLinkFromBoundary {
+    <#
+    .SYNOPSIS
+    Prove -Path -- and -Boundary itself -- carry no reparse point, from the boundary root down to
+    and including the leaf. ATTR3-FOOTAGE-STAGE-1 round 7 (class a: root-inclusive link
+    containment).
+    .DESCRIPTION
+    Assert-AttrCudaNoLinkBelowRoot (AttrCudaArtifacts.psm1) proves every component from just below
+    -TrustedRoot down to and including -Path is link-free, but never inspects -TrustedRoot itself
+    -- correct for every one of its own existing callers, each of which already created (or
+    otherwise already trusts) its own root by the time it calls in. Three ATTR3-FOOTAGE-STAGE-1
+    sites do not have that guarantee: the share-side staging ROOT (a fixed constant this run never
+    creates), and the fixed-name residue-marker READ and WRITE slots (round 5/6's publish-recovery
+    marker, neither created nor proven link-free by anything upstream this run). All three can have
+    their OWN root or leaf replaced by a reparse point with no ancestor between it and -Path left
+    for Assert-AttrCudaNoLinkBelowRoot to ever walk. This function checks -Boundary itself first --
+    refusing with ATTR3_BOUNDARY_IS_LINK (never a path) if it is currently a reparse point -- then
+    delegates the rest of the chain, from -Boundary down to and including -Path, to
+    Assert-AttrCudaNoLinkBelowRoot unchanged. -Boundary and -Path may be the same path (a leaf-only
+    check): the boundary check alone then covers it. Returns the full, verified -Path.
+    ATTR3-FOOTAGE-STAGE-1 round 7 fix-forward: -Boundary is resolved via [IO.Path]::GetFullPath
+    and used UNTRIMMED everywhere it is fed back to the filesystem (Get-Item here, -TrustedRoot on
+    the delegated call below) -- never .TrimEnd('\')'d first. For an ordinary directory that trim
+    is harmless, but for a DRIVE ROOT ("C:\") it collapses the string to the bare "C:", which both
+    .NET's Path.GetFullPath and PowerShell's own Get-Item resolve via the process's per-drive
+    CURRENT DIRECTORY, not the drive's actual root -- silently substituting an unrelated path (this
+    shipped broken in this function's own first pass: the residue-marker call sites, whose
+    -Boundary is always $driveRoot -- exactly a bare drive root -- resolved to the wrong directory
+    entirely, and every EXISTING recovery test failed). The trailing separator is normalised on
+    BOTH sides, but only for the string-equality check below, never for a value resolved against
+    the filesystem again.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Boundary,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $boundaryFull = [IO.Path]::GetFullPath($Boundary)
+    $boundaryItem = Get-Item -LiteralPath $boundaryFull -Force -ErrorAction SilentlyContinue
+    if ($null -ne $boundaryItem -and (($boundaryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw 'ATTR3_BOUNDARY_IS_LINK the boundary root itself is a reparse point'
+    }
+
+    $pathFull = [IO.Path]::GetFullPath($Path)
+    if ($pathFull.TrimEnd('\').Equals($boundaryFull.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+        return $pathFull
+    }
+
+    return (Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $boundaryFull -Path $pathFull)
+}
+
 function Remove-AttrCudaOwnerFootageStaleAttempts {
     <#
     .SYNOPSIS
@@ -568,12 +620,26 @@ function Remove-AttrCudaOwnerFootageStaleAttempts {
     )
 
     if (-not (Test-Path -LiteralPath $TrustedRoot -PathType Container -ErrorAction SilentlyContinue)) { return }
+    # ATTR3-FOOTAGE-STAGE-1 round 7 (class a: root-inclusive link containment). $TrustedRoot is a
+    # fixed constant attr3-footage-stage.ps1 never creates -- proved link-free HERE, before the
+    # very first Get-ChildItem below ever enumerates through it, never assumed from the Test-Path
+    # call above (which follows a reparse point exactly as readily as it does a real directory).
+    try {
+        [void](Assert-Attr3NoLinkFromBoundary -Boundary $TrustedRoot -Path $TrustedRoot)
+    } catch {
+        Write-Warning 'ATTRCUDA_OWNER_STALE_SWEEP_ROOT_IS_LINK sweep skipped'
+        return
+    }
     $MinStaleAttemptFloorSec = 300
     $effectiveStaleAfterSec = [Math]::Max($StaleAfterSec, $MinStaleAttemptFloorSec)
     $staleJobIdPattern = '^attr3-footage-stage-[A-Za-z0-9_.-]{1,64}-[0-9a-f]{12}-[0-9a-f]{10}$'
     $candidates = @(Get-ChildItem -LiteralPath $TrustedRoot -Directory -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match $staleJobIdPattern })
     foreach ($candidate in $candidates) {
+        # round 7 (class a): a candidate directory ITSELF may be a reparse point (a symlinked
+        # directory whose NAME happens to match this tool's own stale-jobId shape) -- skipped
+        # before its own children are ever enumerated, never after.
+        if (($candidate.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
         $newestWriteUtc = $candidate.LastWriteTimeUtc
         try {
             $newestChild = Get-ChildItem -LiteralPath $candidate.FullName -File -Force -ErrorAction SilentlyContinue |
@@ -592,6 +658,7 @@ Export-ModuleMember -Function `
     Send-AttrCudaOwnerFootagePartToStaging, `
     Remove-AttrCudaOwnerFootageStagingResidue, `
     Remove-AttrCudaOwnerFootageStaleAttempts, `
+    Assert-Attr3NoLinkFromBoundary, `
     Get-AttrCudaOwnerFootageNeutralName, `
     Assert-AttrCudaOwnerPartsNaming, `
     Get-AttrCudaFileIdentity, `

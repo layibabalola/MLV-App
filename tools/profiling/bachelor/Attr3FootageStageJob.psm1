@@ -161,7 +161,29 @@ function New-Attr3FootageStageJob {
         # race or holding a cross-process lock from a test. Proves the RESIDUE_MARKER_REMOVAL_FAILED
         # token is reported, rather than silently swallowed, when the recovery itself succeeds but
         # the marker that authorized it does not go away.
-        [int]$TestHookForceMarkerRemovalFailurePartIndex = -1
+        [int]$TestHookForceMarkerRemovalFailurePartIndex = -1,
+
+        # ATTR3-FOOTAGE-STAGE-1 round 7: a fifth TEST-ONLY hook, same non-reachability guarantee as
+        # the four above. -1 (the default) is inert. A test that passes a real index gets a job
+        # whose emitted body makes the target-volume destination stream's own Dispose() throw an
+        # exception naming the real local partial PATH for that one part -- modelling the genuine
+        # failure the round-7 Dispose-in-finally fix exists to contain (a network-mapped or nearly
+        # full target volume can make Dispose() itself fail) without depending on reproducing that
+        # condition for real. Proves the thrown exception's own .Message -- which can carry a real
+        # footage path -- never reaches this job's own output: only the existing TARGET_VOLUME_
+        # COPY_FAILED status token, which names an index, never a path.
+        [int]$TestHookForceDisposeThrowPartIndex = -1,
+
+        # ATTR3-FOOTAGE-STAGE-1 round 7: a sixth TEST-ONLY hook, same non-reachability guarantee.
+        # -1 (the default) is inert. A test that passes a real index gets a job that throws an
+        # untyped exception naming the real target PATH for that one part, at a point in the
+        # per-part loop no existing try/catch wraps -- modelling a genuinely unanticipated failure
+        # (a future code path this job's own authors never foresaw) rather than any of the specific
+        # failure modes the five hooks above already model. Proves the round-7 whole-template
+        # try/catch (see this template's own opening comment) is the backstop for exactly that: the
+        # thrown exception's own .Message never reaches this job's output, only the fixed
+        # RESULT=FOOTAGE_STAGE_JOB_ERROR token.
+        [int]$TestHookForceArbitraryThrowPartIndex = -1
     )
 
     if ($Parts.Count -eq 0) {
@@ -250,6 +272,15 @@ function New-Attr3FootageStageJob {
         'Publish-AttrCudaFileMoveNonOverwriting',
         'Remove-AttrCudaPartialFile'
     )
+    # ATTR3-FOOTAGE-STAGE-1 round 7 (class a: root-inclusive link containment). Assert-Attr3NoLink-
+    # FromBoundary lives in AttrCudaOwnerFootage.psm1 (see that module's own header on why the
+    # per-job owner-footage workspace is its own module, separate from AttrCudaArtifacts.psm1) --
+    # extracted from the new module by the SAME Get-AttrCudaEmbeddedFunctionSource this file
+    # already calls above, pointed at a different -ModulePath, exactly as playback-attr-3-cuda-
+    # job.ps1 already does for that module's owner-link functions.
+    $embeddedFunctions = $embeddedFunctions + "`r`n`r`n" + (Get-AttrCudaEmbeddedFunctionSource -ModulePath (Join-Path $PSScriptRoot 'AttrCudaOwnerFootage.psm1') -Name @(
+        'Assert-Attr3NoLinkFromBoundary'
+    ))
 
     # --- job body template (placeholders are substituted below; the body itself never touches
     #     this function's variables directly, so there is no accidental capture of this process's
@@ -273,6 +304,12 @@ $TestHookForceLocalSourceOpenFailurePartIndex = __TEST_HOOK_FORCE_LOCAL_SOURCE_O
 # Test-only hook (round 6): -1 unless a test explicitly built this job with
 # -TestHookForceMarkerRemovalFailurePartIndex set -- see New-Attr3FootageStageJob's own header.
 $TestHookForceMarkerRemovalFailurePartIndex = __TEST_HOOK_FORCE_MARKER_REMOVAL_FAILURE_PART_INDEX__
+# Test-only hook (round 7): -1 unless a test explicitly built this job with
+# -TestHookForceDisposeThrowPartIndex set -- see New-Attr3FootageStageJob's own header.
+$TestHookForceDisposeThrowPartIndex = __TEST_HOOK_FORCE_DISPOSE_THROW_PART_INDEX__
+# Test-only hook (round 7): -1 unless a test explicitly built this job with
+# -TestHookForceArbitraryThrowPartIndex set -- see New-Attr3FootageStageJob's own header.
+$TestHookForceArbitraryThrowPartIndex = __TEST_HOOK_FORCE_ARBITRARY_THROW_PART_INDEX__
 $StageDir = Join-Path $AgentRoot ("footage-stage\" + $JobId)
 
 function Say([string]$Message) { Write-Output "[$JobId] $Message" }
@@ -281,6 +318,12 @@ function Say([string]$Message) { Write-Output "[$JobId] $Message" }
 __EMBEDDED_FUNCTIONS__
 # --- end embedded verifiers -------------------------------------------------------------------
 
+# ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary). Everything from here through this
+# job's own final `exit $exitCode` runs inside ONE try/catch: every per-part failure this job can
+# anticipate already maps to a typed PART=/RESULT= token below, so this is the backstop for
+# anything it cannot -- a caught exception's own .Message is NEVER forwarded (it can carry a real
+# footage path), only the one fixed, path-free token in the catch at the bottom of this template.
+try {
 $RawParts = @($PartsJson | ConvertFrom-Json | Sort-Object { [int]$_.index })
 $PartCount = $RawParts.Count
 
@@ -389,6 +432,14 @@ foreach ($rawPart in $RawParts) {
     # parses as code.
     $decoded = Read-AttrCudaBase64Payload -Base64 $rawPart.pathBase64
     $targetPath = ConvertTo-AttrCudaUtf8String -Bytes $decoded.bytes
+    # Test-only hook (round 7): -1 unless a test explicitly built this job with
+    # -TestHookForceArbitraryThrowPartIndex set -- see New-Attr3FootageStageJob's own header. An
+    # UNTYPED, UNWRAPPED throw naming the real $targetPath, at a point no per-part try/catch below
+    # is positioned to catch -- proving the round-7 whole-template try/catch is the backstop for a
+    # genuinely unanticipated failure, not just the specific ones the other hooks model.
+    if ($index -eq $TestHookForceArbitraryThrowPartIndex) {
+        throw "ATTR3_TEST_SENTINEL arbitrary unwrapped throw at $targetPath"
+    }
     # The staging slot name is derived from the index alone -- the SAME formula
     # Get-AttrCudaOwnerFootageStagingName (AttrCudaOwnerFootage.psm1) uses -- so this job never
     # trusts a caller-supplied name for a path it is about to read from.
@@ -470,7 +521,21 @@ foreach ($rawPart in $RawParts) {
         $recoveryAuthorized = $false
         $markerReadable = $false
         try { $markerReadable = Test-Path -LiteralPath $residueMarkerPath -PathType Leaf -ErrorAction Stop } catch { $markerReadable = $false }
+        # ATTR3-FOOTAGE-STAGE-1 round 7 (class a: root-inclusive link containment). $targetPath's
+        # own chain, down to and including its leaf, was already proved link-free above (or this
+        # code path is unreachable) -- but $residueMarkerPath is a DIFFERENT leaf in that same
+        # directory, and its own existence has never been checked. Refuse a reparse point planted
+        # at this exact fixed name before Get-Content ever reads through it.
+        $markerLinkSafe = $false
         if ($markerReadable) {
+            try {
+                [void](Assert-Attr3NoLinkFromBoundary -Boundary $driveRoot -Path $residueMarkerPath)
+                $markerLinkSafe = $true
+            } catch {
+                $markerLinkSafe = $false
+            }
+        }
+        if ($markerLinkSafe) {
             try {
                 # ATTR3-FOOTAGE-STAGE-1 round 6 fix-forward: ConvertFrom-Json auto-converts an
                 # ISO-8601-shaped JSON STRING into a [datetime] object -- so a
@@ -616,8 +681,24 @@ foreach ($rawPart in $RawParts) {
             }
         }
     } finally {
-        if ($localSrcStream) { $localSrcStream.Dispose() }
-        if ($localDstStream) { $localDstStream.Dispose() }
+        # ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary). Dispose() itself CAN throw (a
+        # network-mapped volume, a full target volume) -- unwrapped, that exception would escape
+        # this whole try/finally with no per-part status ever recorded for it, past the outer
+        # try/catch this template now carries only as a last-resort fixed token. Mapped instead to
+        # the SAME $localCopyFailed flag a copy failure already sets, so a dispose failure reports
+        # through the existing TARGET_VOLUME_COPY_FAILED status below -- never a raw exception.
+        try { if ($localSrcStream) { $localSrcStream.Dispose() } } catch { $localCopyFailed = $true }
+        try {
+            # Test-only hook (round 7): -1 unless a test explicitly built this job with
+            # -TestHookForceDisposeThrowPartIndex set -- see New-Attr3FootageStageJob's own header.
+            # The thrown message deliberately names $localPartialPath (a real path) so a test can
+            # prove that text never reaches this job's own output -- only the mapped
+            # TARGET_VOLUME_COPY_FAILED status token does.
+            if ($index -eq $TestHookForceDisposeThrowPartIndex) {
+                throw [System.IO.IOException]::new("ATTR3_TEST_SENTINEL synthetic dispose failure at $localPartialPath")
+            }
+            if ($localDstStream) { $localDstStream.Dispose() }
+        } catch { $localCopyFailed = $true }
     }
     if ($localPartialExists) {
         # Refused, untouched: this is NOT ours to delete -- either a concurrent placer for this
@@ -694,7 +775,17 @@ foreach ($rawPart in $RawParts) {
         $targetRemoved = $true
         try { $targetRemoved = -not (Test-Path -LiteralPath $targetPath -PathType Leaf -ErrorAction Stop) } catch { $targetRemoved = $false }
         if ($targetRemoved) {
-            try { Remove-Item -LiteralPath $residueMarkerPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+            # ATTR3-FOOTAGE-STAGE-1 round 7 (class a: root-inclusive link containment). A STALE
+            # marker from an earlier, unrelated failed attempt for this same part can still be
+            # sitting here -- opportunistic best-effort cleanup, same as every other removal on
+            # this path -- but never through a reparse point planted at this exact fixed name.
+            # Skipping the removal on an unsafe leaf is harmless: the target this job just placed
+            # is fresh and PASSes, so a later run's own ALREADY_PRESENT check never even reaches
+            # the marker-read code path that would otherwise be misled by a stale marker here.
+            try {
+                [void](Assert-Attr3NoLinkFromBoundary -Boundary $driveRoot -Path $residueMarkerPath)
+                Remove-Item -LiteralPath $residueMarkerPath -Force -Confirm:$false -ErrorAction SilentlyContinue
+            } catch {}
             Record-PartResult -Index $index -Status "PLACED_VERIFY_$placedStatus" -CleanupPath $stagedPath
         } else {
             # ATTR3-FOOTAGE-STAGE-1 round 6 (sol blocker, astra blocker: residue identity
@@ -721,7 +812,21 @@ foreach ($rawPart in $RawParts) {
                     lastWriteTimeUtcTicks = [int64]$retainedItem.LastWriteTimeUtc.Ticks
                     jobId = $JobId
                 }
-                [IO.File]::WriteAllText($residueMarkerPath, ($markerRecord | ConvertTo-Json -Compress))
+                $markerBytes = [Text.Encoding]::UTF8.GetBytes(($markerRecord | ConvertTo-Json -Compress))
+                # ATTR3-FOOTAGE-STAGE-1 round 7 (class a: root-inclusive link containment).
+                # [IO.FileMode]::CreateNew -- never WriteAllText -- so a residue-marker slot that
+                # already exists, as a REAL FILE or as a REPARSE POINT planted at this exact fixed
+                # name, is refused outright rather than written through or silently overwritten.
+                # Nothing is written on that refusal: the safe TARGET_CONFLICT default (no marker
+                # readable next run) applies exactly as it already does for any other failure here.
+                $markerStream = $null
+                try {
+                    $markerStream = [IO.File]::Open($residueMarkerPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    $markerStream.Write($markerBytes, 0, $markerBytes.Length)
+                    $markerStream.Flush()
+                } finally {
+                    if ($markerStream) { $markerStream.Dispose() }
+                }
             } catch {}
             Record-PartResult -Index $index -Status 'PLACED_VERIFY_FAILED_TARGET_RETAINED' -CleanupPath $stagedPath
         }
@@ -754,6 +859,14 @@ Write-Output (([ordered]@{
     parts = $results
 }) | ConvertTo-Json -Compress -Depth 5)
 exit $exitCode
+} catch {
+    # ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary): a fixed, path-free token only --
+    # see the opening comment on this try block. Distinct exit code (2) from the ordinary
+    # FOOTAGE_STAGED (0) / FOOTAGE_STAGE_REFUSED (1) so a caller can tell "every part got an
+    # honest status" from "this job itself hit something it never anticipated" apart.
+    Write-Output "RESULT=FOOTAGE_STAGE_JOB_ERROR CLIP=$ClipId"
+    exit 2
+}
 '@
 
     # ATTR3-FOOTAGE-STAGE-1, following ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): a
@@ -770,6 +883,8 @@ exit $exitCode
         TEST_HOOK_FORCE_REMOVAL_FAILURE_PART_INDEX = $TestHookForceRemovalFailurePartIndex
         TEST_HOOK_FORCE_LOCAL_SOURCE_OPEN_FAILURE_PART_INDEX = $TestHookForceLocalSourceOpenFailurePartIndex
         TEST_HOOK_FORCE_MARKER_REMOVAL_FAILURE_PART_INDEX = $TestHookForceMarkerRemovalFailurePartIndex
+        TEST_HOOK_FORCE_DISPOSE_THROW_PART_INDEX = $TestHookForceDisposeThrowPartIndex
+        TEST_HOOK_FORCE_ARBITRARY_THROW_PART_INDEX = $TestHookForceArbitraryThrowPartIndex
     })
 
     if (-not (Test-Path -LiteralPath $OutDir)) { [void](New-Item -ItemType Directory -Path $OutDir -Force) }

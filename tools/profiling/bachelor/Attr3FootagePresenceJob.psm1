@@ -164,6 +164,12 @@ function Say([string]$Message) { Write-Output "[$JobId] $Message" }
 __EMBEDDED_FUNCTIONS__
 # --- end embedded verifiers -------------------------------------------------------------------
 
+# ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary). Everything from here through this
+# job's own final `exit $exitCode` runs inside ONE try/catch: every per-part failure this probe
+# can anticipate already maps to a typed PART=/RESULT= token below, so this is the backstop for
+# anything it cannot -- a caught exception's own .Message is NEVER forwarded (it can carry a real
+# footage path), only the one fixed, path-free token in the catch at the bottom of this template.
+try {
 $RawParts = @($PartsJson | ConvertFrom-Json)
 $PartCount = $RawParts.Count
 
@@ -247,6 +253,14 @@ Write-Output (([ordered]@{
     parts = $results
 }) | ConvertTo-Json -Compress -Depth 5)
 exit $exitCode
+} catch {
+    # ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary): a fixed, path-free token only --
+    # see the opening comment on this try block. Distinct exit code (4) from the ordinary
+    # FOOTAGE_PRESENT/ABSENT/MISMATCH/INDETERMINATE (0-3) so a caller can tell "every part got an
+    # honest status" from "this probe itself hit something it never anticipated" apart.
+    Write-Output "RESULT=FOOTAGE_PRESENCE_JOB_ERROR CLIP=$ClipId"
+    exit 4
+}
 '@
 
     # ATTR3-FOOTAGE-BIND-1 PR-B round 3 (STRUCTURAL): a single-pass substitution over the WHOLE

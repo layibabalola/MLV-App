@@ -901,6 +901,162 @@ class FootageStageJobTests(unittest.TestCase):
         # Part 1 (an ordinary staged file) still places cleanly.
         self.assertIn("PART=1 STATUS=PLACED", run.stdout)
 
+    # ---- round 7 (item 2ii/2iii): root-inclusive link containment on the residue marker ---------
+
+    def _identity(self, path: Path) -> dict:
+        script = (
+            f"$item = Get-Item -LiteralPath '{path}' -Force; "
+            f"$sha = (Get-FileHash -LiteralPath '{path}' -Algorithm SHA256).Hash.ToLowerInvariant(); "
+            "[pscustomobject]@{ length = $item.Length; sha256 = $sha; ticks = $item.LastWriteTimeUtc.Ticks } | ConvertTo-Json -Compress"
+        )
+        proc = _run(["-Command", script])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout.strip())
+
+    def test_a_symlink_at_the_residue_marker_path_is_refused_before_reading_it(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 7 (item 2ii): the residue-marker READ had NO link check on
+        # the marker's own leaf at all -- $targetPath's chain being link-free says nothing about
+        # $residueMarkerPath, a DIFFERENT leaf in the same directory. A symlink planted at this
+        # exact fixed name, pointing at a record that would OTHERWISE exactly authorize recovery
+        # (correct length/sha256/ticks for the current mismatched target), must still be refused --
+        # isolating the LINK check, not a content mismatch, as what gates this.
+        proc = self.build()
+        job = self.job_path(proc)
+        job_id = self.job_path(proc).name[: -len(".job.ps1")]
+        stage_dir = self.stage_dir(job_id)
+        self.stage_all_parts(stage_dir)
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        mismatched = b"pre-existing, different bytes -- the mismatch this recovery reacts to"
+        self.targets[0].write_bytes(mismatched)
+        identity = self._identity(self.targets[0])
+
+        marker = Path(str(self.targets[0]) + ".attr3-footage-stage-verify-failed")
+        real_marker_item = self.tmp / "elsewhere-marker-target.json"
+        real_marker_item.write_text(json.dumps({
+            "length": identity["length"], "sha256": identity["sha256"],
+            "lastWriteTimeUtcTicks": identity["ticks"], "jobId": "attacker-planted",
+        }), encoding="utf-8")
+        made = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType SymbolicLink -Path '{marker}' -Target '{real_marker_item}' | Out-Null"],
+            capture_output=True, text=True,
+        )
+        if made.returncode != 0 or not marker.exists():
+            self.skipTest(f"cannot create a file symlink here (needs elevation/Developer Mode): {made.stderr}")
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("PART=0 STATUS=TARGET_CONFLICT", run.stdout, run.stdout + run.stderr)
+        self.assertEqual(self.targets[0].read_bytes(), mismatched)
+        self.assertIn("PART=1 STATUS=PLACED", run.stdout)
+
+    def test_a_pre_existing_file_at_the_residue_marker_path_is_never_overwritten(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 7 (item 2iii): the marker WRITE used [IO.File]::WriteAllText,
+        # which overwrites whatever is already there. It now uses [IO.FileMode]::CreateNew --
+        # exclusive creation -- so an existing file at this exact fixed name is left untouched and
+        # no marker is written (the safe TARGET_CONFLICT default then applies to any later run).
+        proc = self.build_with_corrupt_and_removal_failure_hooks(corrupt_index=0, removal_failure_index=0)
+        job = self.job_path(proc)
+        stage_dir = self.stage_dir(job.name[: -len(".job.ps1")])
+        self.stage_all_parts(stage_dir)
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        marker = Path(str(self.targets[0]) + ".attr3-footage-stage-verify-failed")
+        marker.write_bytes(b"pre-existing content that must never be overwritten by the marker write")
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("PART=0 STATUS=PLACED_VERIFY_FAILED_TARGET_RETAINED", run.stdout)
+        self.assertEqual(marker.read_bytes(), b"pre-existing content that must never be overwritten by the marker write")
+
+    def test_a_symlink_at_the_residue_marker_path_is_never_written_through(self) -> None:
+        # Same refusal, for a reparse point specifically rather than an ordinary pre-existing file.
+        proc = self.build_with_corrupt_and_removal_failure_hooks(corrupt_index=0, removal_failure_index=0)
+        job = self.job_path(proc)
+        stage_dir = self.stage_dir(job.name[: -len(".job.ps1")])
+        self.stage_all_parts(stage_dir)
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        marker = Path(str(self.targets[0]) + ".attr3-footage-stage-verify-failed")
+        real_elsewhere = self.tmp / "elsewhere-marker-write-target.raw"
+        real_elsewhere.write_bytes(b"unrelated bytes that must survive untouched")
+        made = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType SymbolicLink -Path '{marker}' -Target '{real_elsewhere}' | Out-Null"],
+            capture_output=True, text=True,
+        )
+        if made.returncode != 0 or not marker.exists():
+            self.skipTest(f"cannot create a file symlink here (needs elevation/Developer Mode): {made.stderr}")
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("PART=0 STATUS=PLACED_VERIFY_FAILED_TARGET_RETAINED", run.stdout)
+        self.assertEqual(real_elsewhere.read_bytes(), b"unrelated bytes that must survive untouched")
+
+    # ---- round 7 (item 1): whole-template outer boundary, sentinel leak proofs -------------------
+
+    def build_with_dispose_throw_hook(self, index: int, parts, clip_id: str) -> subprocess.CompletedProcess:
+        parts_json_path = self.tmp / f"parts-disposehook-{id(parts)}.json"
+        parts_json_path.write_text(json.dumps(parts), encoding="utf-8")
+        script = (
+            f"Import-Module '{STAGE_MODULE}' -Force; "
+            f"$parts = @(Get-Content -LiteralPath '{parts_json_path}' -Raw | ConvertFrom-Json); "
+            f"New-Attr3FootageStageJob -ClipId '{clip_id}' -Parts $parts "
+            f"-OutDir '{self.out}' -AgentRoot '{self.agent_root}' "
+            f"-TestHookForceDisposeThrowPartIndex {index}"
+        )
+        return _run(["-Command", script])
+
+    def test_a_dispose_failure_never_leaks_its_own_path_bearing_message(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 7 (item 1, dispose sentinel): -TestHookForceDisposeThrow-
+        # PartIndex makes the target-volume destination stream's own Dispose() throw a message
+        # naming the real local partial path (which lives under the real footage target
+        # directory). The round-7 Dispose-in-finally fix must map that to the existing
+        # TARGET_VOLUME_COPY_FAILED status -- never let the thrown .Message reach this job's own
+        # output.
+        payload = [{
+            "index": 0, "path": str(self.tmp / f"{TOKEN}-dispose-target" / "part0.raw"),
+            "length": len(self.content[0]), "sha256": _sha256(self.content[0]),
+        }]
+        proc = self.build_with_dispose_throw_hook(0, payload, "FIX-STAGE-DISPOSE-SENTINEL")
+        job = self.job_path(proc)
+        stage_dir = self.stage_dir(job.name[: -len(".job.ps1")])
+        (stage_dir / "part-0").write_bytes(self.content[0])
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("PART=0 STATUS=TARGET_VOLUME_COPY_FAILED", run.stdout, run.stdout + run.stderr)
+        self._assert_no_token(run.stdout, run.stderr)
+        self.assertNotIn("ATTR3_TEST_SENTINEL", run.stdout + run.stderr)
+
+    def build_with_arbitrary_throw_hook(self, index: int, parts, clip_id: str) -> subprocess.CompletedProcess:
+        parts_json_path = self.tmp / f"parts-arbthrow-{id(parts)}.json"
+        parts_json_path.write_text(json.dumps(parts), encoding="utf-8")
+        script = (
+            f"Import-Module '{STAGE_MODULE}' -Force; "
+            f"$parts = @(Get-Content -LiteralPath '{parts_json_path}' -Raw | ConvertFrom-Json); "
+            f"New-Attr3FootageStageJob -ClipId '{clip_id}' -Parts $parts "
+            f"-OutDir '{self.out}' -AgentRoot '{self.agent_root}' "
+            f"-TestHookForceArbitraryThrowPartIndex {index}"
+        )
+        return _run(["-Command", script])
+
+    def test_an_arbitrary_unwrapped_throw_is_caught_by_the_whole_template_boundary(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 7 (item 1, "at an arbitrary site" sentinel): -TestHookForce-
+        # ArbitraryThrowPartIndex throws, untyped and unwrapped by any per-part try/catch, naming
+        # the real target path -- modelling a genuinely unanticipated future failure. The
+        # whole-template try/catch this round adds must be the backstop: only the fixed
+        # RESULT=FOOTAGE_STAGE_JOB_ERROR token reaches output, never the thrown message, and no
+        # per-part status is ever emitted for the throwing part (it never got that far).
+        payload = [{
+            "index": 0, "path": str(self.tmp / f"{TOKEN}-arbitrary-target" / "part0.raw"),
+            "length": len(self.content[0]), "sha256": _sha256(self.content[0]),
+        }]
+        proc = self.build_with_arbitrary_throw_hook(0, payload, "FIX-STAGE-ARBITRARY-SENTINEL")
+        job = self.job_path(proc)
+        stage_dir = self.stage_dir(job.name[: -len(".job.ps1")])
+        (stage_dir / "part-0").write_bytes(self.content[0])
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("RESULT=FOOTAGE_STAGE_JOB_ERROR CLIP=FIX-STAGE-ARBITRARY-SENTINEL", run.stdout)
+        self._assert_no_token(run.stdout, run.stderr)
+        self.assertNotIn("ATTR3_TEST_SENTINEL", run.stdout + run.stderr)
+        self.assertNotIn("PART=0 STATUS=", run.stdout)
+
 
 @unittest.skipIf(PWSH is None, "pwsh is not on PATH")
 @unittest.skipUnless(os.name == "nt", "the emitted job and agent target a Windows host")
@@ -1350,6 +1506,71 @@ class NoPathInAnyBranchTests(unittest.TestCase):
         self.assertIn("PART=1 STATUS=STAGED_NOT_FOUND", proc.stdout)
         self.assertIn("SUBMITTER RESULT=FOOTAGE_STAGE_REFUSED PARTS=2", proc.stdout)
 
+    # ---- round 7 (item 1): the CLI's own whole-body outer boundary, sentinel leak proofs ---------
+
+    def _run_generator_outer_catch(self, throw_statement: str, clip_id: str) -> subprocess.CompletedProcess:
+        # Drives the REAL catch block, extracted via AST from the tracked generator -- never a
+        # hand-copied duplicate -- exactly like ConvertTo-Attr3FootageStageSafeOutput's own
+        # extraction above. -throw_statement supplies the PowerShell statement that raises the
+        # exception the extracted catch then has to handle. Written to a temp .ps1 FILE and run
+        # via -File (never -Command with the statement inlined): -throw_statement itself embeds a
+        # real path in a quoted string, and process-argument quoting for a single -Command string
+        # containing nested single AND double quotes is fragile on Windows.
+        harness = self.tmp / f"outer-catch-harness-{id(throw_statement)}.ps1"
+        harness.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$genText = [IO.File]::ReadAllText('{GENERATOR}')\n"
+            "$t=$null; $e=$null\n"
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput($genText, [ref]$t, [ref]$e)\n"
+            "$tryStatement = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] }, $true) | Select-Object -First 1\n"
+            "if (-not $tryStatement) { throw 'TRY_NOT_FOUND' }\n"
+            # .Body.Extent.Text includes the surrounding '{' '}' -- [scriptblock]::Create on THAT
+            # text would parse the whole thing as a single bare script-block-literal STATEMENT
+            # (producing the inner scriptblock as an output VALUE, never running its statements);
+            # stripping the outer braces first makes the extracted STATEMENTS themselves the
+            # created scriptblock's own body, so dot-sourcing it actually executes them.
+            "$catchBodyText = $tryStatement.CatchClauses[0].Body.Extent.Text\n"
+            "$catchBody = $catchBodyText.Substring(1, $catchBodyText.Length - 2)\n"
+            f"$ClipId = '{clip_id}'\n"
+            "try {\n"
+            f"    {throw_statement}\n"
+            "} catch {\n"
+            "    . ([scriptblock]::Create($catchBody))\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+            capture_output=True, text=True,
+        )
+
+    def test_the_outer_catch_never_forwards_a_non_token_shaped_exception_message(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 7 (item 1: outer boundary). A synthetic exception shaped
+        # like a raw, unanticipated .NET exception (not one of this script's own established
+        # fixed tokens), whose own .Message carries a real-looking footage path. Only the
+        # exception's TYPE NAME may reach output; the sentinel path text must not.
+        sentinel_path = str(self.tmp / f"{TOKEN}-real-owner-footage.raw")
+        proc = self._run_generator_outer_catch(
+            f"throw [System.IO.IOException]::new(\"Could not access '{sentinel_path}'\")",
+            "FIX-SENTINEL-EMISSION",
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotIn(sentinel_path, combined)
+        self.assertNotIn(TOKEN, combined)
+        self.assertIn("RESULT=FOOTAGE_STAGE_ERROR CLIP=FIX-SENTINEL-EMISSION CLASS=IOException", combined)
+
+    def test_the_outer_catch_forwards_an_already_safe_fixed_token_message_verbatim(self) -> None:
+        # The other half of the same rule: a message ALREADY shaped like this script's own
+        # established ATTR3_*-style fixed token is forwarded verbatim, so every existing refusal
+        # token the rest of this suite already asserts on keeps working unchanged.
+        proc = self._run_generator_outer_catch(
+            "throw 'ATTR3_FOOTAGE_STAGE_RESOLVE_REFUSED synthetic refusal for this test only'",
+            "FIX-SENTINEL-SAFE-TOKEN",
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertIn("ATTR3_FOOTAGE_STAGE_RESOLVE_REFUSED synthetic refusal for this test only", combined)
+        self.assertNotIn("CLASS=", combined)
+
 
 @unittest.skipIf(PWSH is None, "pwsh is not on PATH")
 @unittest.skipUnless(os.name == "nt", "the emitted job and agent target a Windows host")
@@ -1425,6 +1646,54 @@ class StaleAttemptSweepTests(unittest.TestCase):
             proc = self.sweep(stale_after_sec=bad_value)
             self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertIn("Cannot validate argument", proc.stdout + proc.stderr)
+
+    # ---- round 7 (class a): root-inclusive link containment on the sweep itself -----------------
+
+    def test_a_junction_at_the_trusted_root_itself_is_refused_and_nothing_under_it_is_touched(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 7 (item 2i): Assert-AttrCudaNoLinkBelowRoot never inspected
+        # -TrustedRoot itself (only components strictly below it) -- a junction planted AT the
+        # staging root would previously have been followed by this sweep's own Get-ChildItem
+        # before any check could refuse it. The sweep must now skip entirely (Assert-Attr3NoLink-
+        # FromBoundary refuses the root itself) with nothing under the junction's target touched.
+        elsewhere = self.tmp / "elsewhere-root-target"
+        elsewhere.mkdir()
+        stale_dir = elsewhere / "attr3-footage-stage-FIX-SWEEP-ROOT-abcdef012345-0123456789"
+        stale_dir.mkdir()
+        part = stale_dir / "part-0"
+        part.write_bytes(b"bytes behind the root junction, must never be touched")
+        self._age(part, 4000)
+        self._age(stale_dir, 4000)
+        made = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType Junction -Path '{self.share_root}' -Target '{elsewhere}' | Out-Null"],
+            capture_output=True, text=True,
+        )
+        if made.returncode != 0 or not self.share_root.exists():
+            self.skipTest(f"cannot create a junction here: {made.stderr}")
+        proc = self.sweep(stale_after_sec=1800)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(part.exists(), "a stale entry reachable only through a root junction must never be swept")
+        self.assertEqual(part.read_bytes(), b"bytes behind the root junction, must never be touched")
+
+    def test_a_junction_candidate_directly_under_the_trusted_root_is_skipped_before_enumeration(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 7 (item 2i): a candidate directory ITSELF may be a reparse
+        # point whose NAME happens to match this tool's own stale-jobId shape -- skipped before its
+        # own children are ever enumerated (Get-ChildItem), never after.
+        elsewhere = self.tmp / "elsewhere-candidate-target"
+        elsewhere.mkdir()
+        (elsewhere / "part-0").write_bytes(b"bytes behind the candidate junction, must never be touched")
+        candidate = self.share_root / "attr3-footage-stage-FIX-SWEEP-CAND-abcdef012345-0123456789"
+        made = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType Junction -Path '{candidate}' -Target '{elsewhere}' | Out-Null"],
+            capture_output=True, text=True,
+        )
+        if made.returncode != 0 or not candidate.exists():
+            self.skipTest(f"cannot create a junction here: {made.stderr}")
+        proc = self.sweep(stale_after_sec=1800)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(candidate.exists(), "the junction candidate itself must be left in place, never followed or removed")
+        self.assertEqual((elsewhere / "part-0").read_bytes(), b"bytes behind the candidate junction, must never be touched")
 
 
 @unittest.skipIf(PWSH is None, "pwsh is not on PATH")

@@ -85,6 +85,20 @@ if (-not [int]::TryParse($TimeoutSec, [ref]$timeoutSecValue) -or $timeoutSecValu
 # resolver-only-source-of-parts contract above already relies on.
 $AgentShare = '\\bachelor\mlv-agent'
 $AgentRootOnHost = 'C:\mlvtmp\mlv-agent'
+
+# ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary). Everything from the module imports
+# below through this script's own final `exit 0` runs inside ONE try/catch -- most notably the
+# two job-emission calls (New-Attr3FootagePresenceJob, New-Attr3FootageStageJob) that were
+# previously the only two statements in this script's whole body with no try/catch of their own
+# at all. Every throw site between here and the bottom of this script already follows this
+# script's own established contract -- a FIXED, all-caps TOKEN followed by a path-free
+# description (ATTR3_FOOTAGE_STAGE_*, and the ATTR3_PRESENCE_*/ATTR3_STAGE_* tokens the two job
+# builders throw on their own) -- so the catch below forwards a message already shaped that way
+# VERBATIM, preserving every existing refusal token's own text and exit behaviour. Anything NOT
+# shaped that way is an exception this script never anticipated -- a raw .NET exception surfaced
+# through an untried code path, whose own .Message can carry a real footage path -- and is never
+# forwarded: only the exception's TYPE NAME (never its .Message) is reported.
+try {
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaOwnerFootage.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Attr3FootageStageJob.psm1') -Force
@@ -347,3 +361,19 @@ if ($attemptFailed) {
 
 Write-Output "RESULT=FOOTAGE_STAGED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId)"
 exit 0
+} catch {
+    # ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary) -- see the opening comment on this
+    # try block for the forwarding rule.
+    $exceptionMessage = [string]$_.Exception.Message
+    # -cmatch (case-SENSITIVE), never plain -match: PowerShell's -match is case-insensitive by
+    # default, so [A-Z] would otherwise admit lowercase letters too -- "Could not access '...'"
+    # (an ordinary .NET exception message) matches [A-Z][A-Z0-9_]{2,}\s under plain -match just as
+    # readily as a real ATTR3_FOOTAGE_STAGE_* token does, defeating this whole check.
+    if ($exceptionMessage -cmatch '^[A-Z][A-Z0-9_]{2,}\s') {
+        [Console]::Error.WriteLine($exceptionMessage)
+        exit 1
+    }
+    $exceptionClass = $_.Exception.GetType().Name
+    Write-Output "RESULT=FOOTAGE_STAGE_ERROR CLIP=$ClipId CLASS=$exceptionClass"
+    exit 1
+}
