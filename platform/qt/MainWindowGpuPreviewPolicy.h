@@ -251,6 +251,36 @@ inline int mainWindowClampPlaybackScaleForGpuTextureRoute(
     return requestedScale;
 }
 
+// CUDA-S4-TEXTURE-ROUTE-CLAMP-1 round 2: pure decision table backing
+// MainWindow::gpuPlaybackReconTextureRouteEligibleAtScaleOne(), pulled out so it
+// can be unit-tested without a live MainWindow/processing library. libraryReady
+// must gate everything else -- before initLib() has run, m_pProcessingObject
+// (gpuPreviewProcessingSupported's input) has no default member initializer, so
+// evaluating any of the other inputs first would be an indeterminate-pointer
+// read, not a null one.
+inline bool mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+    bool libraryReady,
+    bool gpuPreviewSurfaceActive,
+    bool hasScopeVisualization,
+    bool reconRequestedByEnvironment,
+    bool texturePresentRequestedByEnvironment,
+    bool gpuPreviewProcessingSupported,
+    bool backendRequestIsCpu,
+    bool requestedPhase3ModeIsDecodeReconProcess,
+    bool cachingChecked)
+{
+    if (!libraryReady) return false;
+    if (!gpuPreviewSurfaceActive) return false;
+    if (hasScopeVisualization) return false;
+    if (!reconRequestedByEnvironment) return false;
+    if (!texturePresentRequestedByEnvironment) return false;
+    if (!gpuPreviewProcessingSupported) return false;
+    if (backendRequestIsCpu) return false;
+    if (!requestedPhase3ModeIsDecodeReconProcess) return false;
+    if (cachingChecked) return false;
+    return true;
+}
+
 inline bool mainWindowUsesGpuImagePresentation(
     const MainWindowGpuPreviewPolicyState &state)
 {

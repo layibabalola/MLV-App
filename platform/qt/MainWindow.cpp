@@ -10869,6 +10869,10 @@ void MainWindow::initLib( void )
 
     m_pRawImage = NULL;
     m_pRawImage16 = NULL;
+
+    /* CUDA-S4-TEXTURE-ROUTE-CLAMP-1 round 2: m_pProcessingObject (and the rest of the
+     * processing library state above) is only safe to read from here on. */
+    m_gpuPlaybackReconPolicyLibraryReady = true;
 }
 
 //Read some settings from registry
@@ -20535,7 +20539,13 @@ void MainWindow::updatePlaybackQualityIndicator( void )
  * '== 1' gate. */
 bool MainWindow::gpuPlaybackReconTextureRouteEligibleAtScaleOne( void ) const
 {
-    if( !gpuPreviewSurfaceActive() ) return false;
+    /* Not eligible until initLib() has finished -- m_pProcessingObject and the rest of
+     * the processing/recon library state below are not safe to touch before that,
+     * regardless of whether the GL presenter already exists. See the flag's
+     * declaration comment in MainWindow.h for why this can't be a null check instead.
+     * This early return must stay first and must short-circuit: nothing past it may
+     * be evaluated before the library is ready. */
+    if( !m_gpuPlaybackReconPolicyLibraryReady ) return false;
 
     const bool scopeDisplayVisible = ui->dockWidgetEdit->isVisible();
     const bool hasScopeVisualization =
@@ -20547,21 +20557,24 @@ bool MainWindow::gpuPlaybackReconTextureRouteEligibleAtScaleOne( void ) const
             scopeDisplayVisible, ui->actionShowParade->isChecked() )
         || mainWindowScopeActionConsumesPresentedPixels(
             scopeDisplayVisible, ui->actionShowVectorScope->isChecked() );
-    if( hasScopeVisualization ) return false;
-
-    if( !playback_recon_requested_by_environment() ) return false;
-    if( !playback_recon_texture_present_requested_by_environment() ) return false;
-    if( !gpuPreviewProcessingIsSupported( m_pProcessingObject ) ) return false;
-    if( m_gpuPreviewProcessingBackendRequest
-            == GpuPreviewProcessingBackendRequest::Cpu ) return false;
 
     const Phase3Mode requestedPhase3Mode =
         phase3ModeFor( playbackQualityModeFromInt( m_playbackQualityMode ) );
-    if( requestedPhase3Mode != Phase3Mode::DecodeReconProcess ) return false;
 
-    if( ui->actionCaching->isChecked() ) return false;
-
-    return true;
+    // The pure decision table (also unit-tested standalone in
+    // MainWindowGpuPreviewPolicy.h) re-asserts libraryReady=true; every input past
+    // this point was only just computed because the early return above already
+    // proved the library is ready.
+    return mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        /*libraryReady*/ true,
+        gpuPreviewSurfaceActive(),
+        hasScopeVisualization,
+        playback_recon_requested_by_environment(),
+        playback_recon_texture_present_requested_by_environment(),
+        gpuPreviewProcessingIsSupported( m_pProcessingObject ),
+        m_gpuPreviewProcessingBackendRequest == GpuPreviewProcessingBackendRequest::Cpu,
+        requestedPhase3Mode == Phase3Mode::DecodeReconProcess,
+        ui->actionCaching->isChecked() );
 }
 
 int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const

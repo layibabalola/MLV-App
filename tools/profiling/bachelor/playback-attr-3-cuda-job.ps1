@@ -488,15 +488,16 @@ if ($PresentMonSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
 }
 
 # ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN): the runner is not standalone -- it
-# dot-sources gui-smoke-screenshot-provenance.ps1, provenance-stamp.ps1, and (since
-# ATTR3-VISUAL-QUALITY-EVIDENCE-1 round 2) gui-smoke-color-artifact-scan.ps1, and imports
+# dot-sources gui-smoke-screenshot-provenance.ps1, provenance-stamp.ps1, (since
+# ATTR3-VISUAL-QUALITY-EVIDENCE-1 round 2) gui-smoke-color-artifact-scan.ps1, and (since
+# CUDA-S4-TEXTURE-ROUTE-CLAMP-1 round 2) gui-smoke-gpu-texture-route-validation.ps1, and imports
 # gui-smoke-process-boundary.psm1, all resolved through $PSScriptRoot at runtime. Staging the
 # runner alone (ATTR3-SMOKE-RUNNER-PIN-1) left Bachelor unable to launch it at all: the runner
 # died at its own dot-source line, the app never launched, PresentMon never saw a target and
 # never exited, and PRESENTMON_TIMEOUT masked the real cause. Round 1/2 discovered this closure
 # by SCANNING; a design swarm ruled that undiscoverable-by-patching (a literal-based scanner
 # cannot see an extension-less load or a bareword Import-Module, and a basename-only classifier
-# can be satisfied by an unrelated absolute path). The closure is the EXPLICITLY PINNED five-file
+# can be satisfied by an unrelated absolute path). The closure is the EXPLICITLY PINNED six-file
 # manifest (Get-AttrCudaSmokeRunnerClosureManifest) -- never mechanically derived or scanned for;
 # Assert-AttrCudaClosureComplete is the generator-time proof that the pinned list still matches
 # what the real files load, using an AST census instead of a scan. Resolve-AttrCudaSmokeRunnerClosure
@@ -827,7 +828,7 @@ foreach ($check in $manifestChecks) {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $Cache $PresentMonName))) { throw "cache missing $PresentMonName" }
 # ATTR3-SMOKE-RUNNER-DEPS-1 round 3 (NARROW BY REDESIGN): the runner alone is not launchable --
-# it is one file in an explicitly pinned five-file manifest (three dot-sourced siblings and one
+# it is one file in an explicitly pinned six-file manifest (four dot-sourced siblings and one
 # imported module besides the runner itself), all resolved via $PSScriptRoot, and staging
 # only the runner (ATTR3-SMOKE-RUNNER-PIN-1) left Bachelor unable to reach line 1 of playback,
 # which PRESENTMON_TIMEOUT then mis-reported as a PresentMon problem. Round 1/2 checked the

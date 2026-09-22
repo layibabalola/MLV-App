@@ -637,6 +637,7 @@ private slots:
     void mainWindowGpuPreviewPolicyRequiresWidgetViewportForAmazeTexturePresentAtAllScales();
     void mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExplicitAndNested();
     void mainWindowClampsPlaybackScaleForGpuTextureRouteDecisionTable();
+    void mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOneRequiresLibraryReadyFirst();
     void mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus();
     void mainWindowGpuPreviewPolicyLabelsVisibleScopeCpuFallback();
     void dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate();
@@ -1157,6 +1158,59 @@ void GuiSmokeTest::mainWindowClampsPlaybackScaleForGpuTextureRouteDecisionTable(
     QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 2, false ), 2 );
     QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 4, false ), 4 );
     QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 8, false ), 8 );
+}
+
+void GuiSmokeTest::mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOneRequiresLibraryReadyFirst()
+{
+    // CUDA-S4-TEXTURE-ROUTE-CLAMP-1 round 2: this is the startup-crash regression.
+    // MainWindow::gpuPlaybackReconTextureRouteEligibleAtScaleOne() runs during
+    // initGui(), before initLib() has assigned m_pProcessingObject -- a raw
+    // pointer with no default member initializer, so it is garbage (not null)
+    // at that point. libraryReady=false must short-circuit everything else,
+    // even when every other input below says "eligible", exactly matching the
+    // GPU env under which bachelor crashed on startup (GL window viewport +
+    // GPU playback recon + texture present, all "on").
+    QVERIFY( !mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        /*libraryReady*/ false,
+        /*gpuPreviewSurfaceActive*/ true,
+        /*hasScopeVisualization*/ false,
+        /*reconRequestedByEnvironment*/ true,
+        /*texturePresentRequestedByEnvironment*/ true,
+        /*gpuPreviewProcessingSupported*/ true,
+        /*backendRequestIsCpu*/ false,
+        /*requestedPhase3ModeIsDecodeReconProcess*/ true,
+        /*cachingChecked*/ false ) );
+
+    // Once the library is ready and every other input says "eligible", the
+    // route is eligible -- proves libraryReady is a gate, not a permanent veto.
+    QVERIFY( mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        /*libraryReady*/ true,
+        /*gpuPreviewSurfaceActive*/ true,
+        /*hasScopeVisualization*/ false,
+        /*reconRequestedByEnvironment*/ true,
+        /*texturePresentRequestedByEnvironment*/ true,
+        /*gpuPreviewProcessingSupported*/ true,
+        /*backendRequestIsCpu*/ false,
+        /*requestedPhase3ModeIsDecodeReconProcess*/ true,
+        /*cachingChecked*/ false ) );
+
+    // libraryReady=true but every other gate still applies normally.
+    QVERIFY( !mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        true, false, false, true, true, true, false, true, false ) );  // no GPU surface
+    QVERIFY( !mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        true, true, true, true, true, true, false, true, false ) );    // scope visible
+    QVERIFY( !mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        true, true, false, false, true, true, false, true, false ) );  // recon not requested
+    QVERIFY( !mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        true, true, false, true, false, true, false, true, false ) );  // texture-present not requested
+    QVERIFY( !mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        true, true, false, true, true, false, false, true, false ) );  // processing unsupported
+    QVERIFY( !mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        true, true, false, true, true, true, true, true, false ) );    // backend forced CPU
+    QVERIFY( !mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        true, true, false, true, true, true, false, false, false ) );  // wrong phase3 mode
+    QVERIFY( !mainWindowGpuPlaybackReconTextureRouteEligibleAtScaleOne(
+        true, true, false, true, true, true, false, true, true ) );    // caching enabled
 }
 
 void GuiSmokeTest::mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus()
