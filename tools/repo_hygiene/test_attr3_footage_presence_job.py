@@ -377,6 +377,128 @@ class FootagePresenceJobTests(unittest.TestCase):
         self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
         self._assert_no_token(run.stdout, run.stderr)
 
+    def test_repeated_builds_for_identical_content_get_different_job_ids(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 3: a purely content-derived job id meant a repeated presence
+        # check for the SAME clip and parts always submitted the SAME id, so a retained result
+        # receipt from an earlier probe refused every later one (UMRUN_JOBID_IN_USE). The id must
+        # differ per call; the reported SOURCE_SHA256 audit key must not.
+        first_proc = self.generate()
+        first_job = self.job_path(first_proc)
+        first_job_id = first_job.name[: -len(".job.ps1")]
+        first_job.unlink()
+        second_proc = self.generate()
+        second_job = self.job_path(second_proc)
+        second_job_id = second_job.name[: -len(".job.ps1")]
+        self.assertNotEqual(first_job_id, second_job_id)
+        first_sha = first_proc.stdout.split("SOURCE_SHA256=")[1].split()[0]
+        second_sha = second_proc.stdout.split("SOURCE_SHA256=")[1].split()[0]
+        self.assertEqual(first_sha, second_sha)
+
+    def test_job_emission_prints_the_job_id_never_the_local_job_file_path(self) -> None:
+        proc = self.generate()
+        job = self.job_path(proc)
+        job_id = job.name[: -len(".job.ps1")]
+        self.assertIn(f"JOB={job_id}", proc.stdout)
+        self.assertNotIn(str(job), proc.stdout + proc.stderr)
+
+    # ---- round 4: link check on the read path (astra 3) ------------------------------------------
+
+    def test_a_junction_above_the_target_path_yields_target_path_unsafe_and_footage_indeterminate(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 4 (astra 3, link checks on read paths): a junction planted
+        # at an ANCESTOR of the target path must be refused before a single byte is read or
+        # hashed -- this probe applies the SAME target-chain check
+        # Attr3FootageStageJob.psm1's own emitted job applies to its own target path.
+        linked_container = self.tmp / f"{TOKEN}-linked-container"
+        real_container = self.tmp / f"{TOKEN}-real-container"
+        real_container.mkdir()
+        real_file = real_container / "clip.raw"
+        real_file.write_bytes(self.contents[0])
+        made = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType Junction -Path '{linked_container}' -Target '{real_container}' | Out-Null"],
+            capture_output=True, text=True,
+        )
+        if made.returncode != 0 or not linked_container.exists():
+            self.skipTest(f"cannot create a junction here: {made.stderr}")
+        linked_path = str(linked_container / "clip.raw")
+        parts = [{"index": 0, "path": linked_path, "length": len(self.contents[0]), "sha256": _sha256(self.contents[0])}]
+        job = self.job_path(self.generate(parts=parts, clip_id="FIX-PRESENCE-LINK"))
+        run = self.run_job(job)
+        self.assertIn("PART=0 STATUS=TARGET_PATH_UNSAFE", run.stdout, run.stdout + run.stderr)
+        self.assertIn("RESULT=FOOTAGE_INDETERMINATE", run.stdout)
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        self.assertEqual(real_file.read_bytes(), self.contents[0])
+
+
+@unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+@unittest.skipUnless(os.name == "nt", "Get-Attr3FootagePresentPartIndexes runs a PowerShell module")
+class GetPresentPartIndexesTests(unittest.TestCase):
+    """Attr3FootagePresenceJob.psm1's Get-Attr3FootagePresentPartIndexes (ATTR3-FOOTAGE-STAGE-1
+    round 4, sol minor / astra 5: per-part resume) -- parses a presence job's own stdout directly,
+    without driving the real CLI or the real resolver."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="attr3presentidx-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def resolve(self, stdout_text: str, clip_id: str) -> subprocess.CompletedProcess:
+        stdout_file = self.tmp / f"stdout-{id(stdout_text)}.txt"
+        stdout_file.write_text(stdout_text, encoding="utf-8")
+        script = (
+            f"Import-Module '{MODULE}' -Force; "
+            f"$stdout = Get-Content -LiteralPath '{stdout_file}' -Raw; "
+            f"(Get-Attr3FootagePresentPartIndexes -Stdout $stdout -ClipId '{clip_id}') -join ','"
+        )
+        return subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True,
+        )
+
+    def _payload_stdout(self, clip_id: str, parts) -> str:
+        payload = {
+            "schema": "mlvapp.attr3-footage-presence.v1", "jobId": "job-x", "clipId": clip_id,
+            "result": "FOOTAGE_INDETERMINATE", "partCount": len(parts), "parts": parts,
+        }
+        lines = [f"PART={p['index']} STATUS={p['status']}" for p in parts]
+        lines.append(f"RESULT=FOOTAGE_INDETERMINATE CLIP={clip_id} PARTS={len(parts)}")
+        lines.append(json.dumps(payload))
+        return "\n".join(lines) + "\n"
+
+    def test_extracts_only_pass_indexes_for_the_matching_clip(self) -> None:
+        stdout = self._payload_stdout(
+            "FIX-RESUME-0001",
+            [{"index": 0, "status": "PASS"}, {"index": 1, "status": "NOT_FOUND"}, {"index": 2, "status": "PASS"}],
+        )
+        proc = self.resolve(stdout, "FIX-RESUME-0001")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "0,2")
+
+    def test_returns_empty_for_a_clip_id_mismatch(self) -> None:
+        stdout = self._payload_stdout("FIX-RESUME-OTHER", [{"index": 0, "status": "PASS"}])
+        proc = self.resolve(stdout, "FIX-RESUME-0001")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_returns_empty_for_malformed_or_missing_payload(self) -> None:
+        proc = self.resolve("not json at all, no schema line here\n", "FIX-RESUME-0001")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_returns_empty_for_empty_stdout(self) -> None:
+        proc = self.resolve("", "FIX-RESUME-0001")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_only_the_last_matching_schema_line_is_trusted(self) -> None:
+        # Two payload lines in the same text (e.g. concatenated stdout+stderr) -- only the LAST is
+        # trusted, matching a real job's own contract of emitting exactly one.
+        first = self._payload_stdout("FIX-RESUME-0001", [{"index": 0, "status": "NOT_FOUND"}])
+        second = self._payload_stdout("FIX-RESUME-0001", [{"index": 0, "status": "PASS"}])
+        proc = self.resolve(first + second, "FIX-RESUME-0001")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "0")
+
 
 if __name__ == "__main__":
     unittest.main()

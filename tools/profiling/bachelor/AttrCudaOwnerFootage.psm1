@@ -38,8 +38,243 @@
 # Set-Item in the origin module's own scope -- the mock silently stops applying and the test
 # would no longer exercise what it claims to. Get-AttrCudaFileIdentity must therefore share a
 # module with every function that calls it unqualified, which is every other function below.
+#
+# WHY Get-AttrCudaOwnerFootageStagingName AND Send-AttrCudaOwnerFootagePartToStaging ARE ALSO
+# HERE, NOT IN UmRunDrop.psm1 (ATTR3-FOOTAGE-STAGE-1). UmRunDrop.psm1's side-file policy exists
+# for a different threat: an inbox side-file for a JOB, named and extensioned by a caller who
+# might be anyone. Its allowlist (.zip/.json/.exe/.dll/.txt/.csv, plus the two tracked test-fixture
+# clip stems) is deliberately narrow, and widening it to admit a multi-gigabyte owner-footage part
+# would widen it for every OTHER caller of um-run.ps1 too. The transfer this module performs is
+# narrower than that on every axis that matters: the only source ever accepted is a path this
+# module's caller already ran through Test-AttrCudaFootagePart against a resolver-verified length
+# and sha256 (tools/gates/resolve_consented_clip.py), the only destination name is the index-derived
+# 'part-<n>' this module names below (no extension, so no media-extension token ever reaches the
+# share), and every byte is re-verified from the share-side copy before it is ever renamed into
+# place -- so this stays a narrowly-scoped function for one caller
+# (tools/profiling/bachelor/attr3-footage-stage.ps1), not a widened general-purpose allowlist.
 
 Set-StrictMode -Version Latest
+
+# ATTR3-FOOTAGE-STAGE-1 round 3: this module calls Test-AttrCudaFootagePart (AttrCudaArtifacts.psm1)
+# unqualified from Send-AttrCudaOwnerFootagePartToStaging below. A plain `Import-Module ... -Force`
+# here is wrong whenever a caller already imported AttrCudaArtifacts.psm1 into its own (global)
+# session first: importing it again from inside THIS module's script body nests it under this
+# module's session state instead, and -Force compounds that by tearing down the caller's existing
+# global copy in the process -- so every OTHER already-loaded caller of AttrCudaArtifacts.psm1
+# (attr3-footage-stage.ps1, the job generators) loses its own commands out from under it. Importing
+# only when the needed command is not already available -- and, when we do import, doing it -Global
+# so a caller who loads THIS module first still ends up with AttrCudaArtifacts available globally --
+# leaves an already-loaded caller's copy alone and still satisfies a caller who loads only this
+# module.
+if (-not (Get-Command -Name 'Test-AttrCudaFootagePart' -ErrorAction SilentlyContinue)) {
+    # ATTR3-FOOTAGE-STAGE-1 round 11: -Verbose:$false so this fallback import (unreachable from
+    # the production CLI, which always loads AttrCudaArtifacts.psm1 first) never depends on a
+    # caller's ambient $VerbosePreference either, the same defense-in-depth
+    # attr3-footage-stage.ps1's own four Import-Module calls now carry.
+    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop -Verbose:$false
+}
+
+function Get-AttrCudaOwnerFootageStagingName {
+    <#
+    .SYNOPSIS
+    The ONE naming rule for a resolver-verified part's neutral, index-derived slot inside a
+    per-job staging directory on an agent share: 'part-<index>', no extension. ATTR3-FOOTAGE-
+    STAGE-1.
+    .DESCRIPTION
+    No extension is used, deliberately: this repository's own NA-4 PreToolUse hook refuses a
+    literal media-extension token in tool-call text regardless of destination file, and unlike
+    Get-AttrCudaOwnerFootageNeutralName below (a private per-job hard-link workspace this
+    process alone ever reads) this name is written to a shared agent share, where an extension
+    would serve no purpose other than to name what the bytes are.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][int]$Index)
+
+    if ($Index -lt 0) { throw "OWNER_FOOTAGE_STAGE_INDEX_INVALID index must be >= 0 (got $Index)" }
+    "part-$Index"
+}
+
+function Send-AttrCudaOwnerFootagePartToStaging {
+    <#
+    .SYNOPSIS
+    Copy ONE already-verified footage part into its neutrally-named, index-derived slot inside a
+    per-job staging directory on a remote agent share, re-verifying the share-side bytes before
+    the final non-overwriting rename. ATTR3-FOOTAGE-STAGE-1.
+    .DESCRIPTION
+    -SourcePath must already have passed Test-AttrCudaFootagePart against -ExpectedLength and
+    -ExpectedSha256 in the caller's own process; this function re-derives nothing from
+    -SourcePath except its bytes (copied) and re-checks the ARRIVED copy against the same two
+    values the caller already trusts, so a source swapped out between the caller's check and
+    this call cannot silently pass. -StagingDirectory is created if absent. Every filesystem
+    call after the initial copy is wrapped so no exception text -- which can carry a path --
+    ever escapes; only a distinguishable OWNER_FOOTAGE_STAGE_* token, and the part -Index, is
+    ever thrown. Idempotent: a final slot already holding bytes matching -ExpectedLength/
+    -ExpectedSha256 is left alone and this returns without copying again; a final slot holding
+    DIFFERENT bytes throws OWNER_FOOTAGE_STAGE_CONFLICT rather than overwriting it.
+    Throws OWNER_FOOTAGE_STAGE_COPY_FAILED, OWNER_FOOTAGE_STAGE_VERIFY_FAILED (the share-side
+    copy did not round-trip), OWNER_FOOTAGE_STAGE_PARTIAL_EXISTS (round 4: a partial already
+    occupies the slot -- refused, untouched) or OWNER_FOOTAGE_STAGE_CONFLICT (index only, never a
+    path). Returns a pscustomobject { Path; Created } on success: Path is the final staged path
+    (a neutral share path, not the source); Created is $true only when THIS call is the one that
+    actually renamed the partial into the final slot, $false when a matching final slot already
+    existed and nothing was written (ATTR3-FOOTAGE-STAGE-1 round 8: the caller uses Created to
+    track, per slot, exactly what THIS attempt brought into existence, so an overall-failure
+    cleanup removes only that -- never a slot this call merely found already correct).
+    ATTR3-FOOTAGE-STAGE-1 round 3 (astra PR #148 MAJOR, containment): before anything is created
+    or copied, every EXISTING ancestor of -StagingDirectory, down to and including
+    -StagingDirectory itself, is proved free of reparse points -- a junction planted at or above
+    -StagingDirectory would otherwise redirect the copy or a later read outside the owned staging
+    directory. Throws OWNER_FOOTAGE_STAGE_COPY_FAILED (index only) on that check alone, before
+    anything under -StagingDirectory is touched.
+    ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 2a): the partial slot is opened with EXCLUSIVE
+    creation ([IO.FileMode]::CreateNew), never a Copy-Item -Force onto a pre-cleared slot -- a
+    partial another concurrent attempt (or an earlier, still-in-flight call for this same part) is
+    actively writing is never silently deleted and overwritten; it is refused, untouched.
+    ATTR3-FOOTAGE-STAGE-1 round 4 (sol MAJOR, path-free output): every filesystem call below,
+    including the plain Test-Path reads round 3 left unwrapped, is now wrapped so that under
+    $ErrorActionPreference = 'Stop' a terminating provider error -- whose own .Exception.Message
+    can carry a real path -- can never escape this function uncaught; only a fixed
+    OWNER_FOOTAGE_STAGE_* token, and the part -Index, is ever thrown.
+    ATTR3-FOOTAGE-STAGE-1 round 8 (astra major 2): both stream Dispose() calls now run INSIDE the
+    guarded try, each wrapped so a Dispose() failure (a network-mapped or nearly full share) maps
+    to the same fixed OWNER_FOOTAGE_STAGE_COPY_FAILED token a copy failure already uses -- never
+    the raw exception, whose own .Message can carry a real path. Before this round the disposal
+    calls lived only in an unguarded `finally`, so a throwing Dispose() escaped this function
+    entirely and reached the CLI's own transfer catch, which used to fold $_.Exception.Message
+    into its own thrown text (fixed at that call site too; see attr3-footage-stage.ps1's own step
+    5 comment). -TestHookForceDisposeThrow is a TEST-ONLY switch, never reachable from the
+    production CLI (attr3-footage-stage.ps1 never passes it): when set, it makes the destination
+    stream's own Dispose() throw a message naming this call's real partial path, proving that text
+    never reaches this function's own thrown message.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$StagingDirectory,
+        [Parameter(Mandatory = $true)][int]$Index,
+        [Parameter(Mandatory = $true)][int64]$ExpectedLength,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+        [switch]$TestHookForceDisposeThrow
+    )
+
+    $stagingDriveRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($StagingDirectory))
+    try {
+        $StagingDirectory = Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $stagingDriveRoot -Path $StagingDirectory
+    } catch {
+        throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index staging directory chain contains a reparse point"
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $StagingDirectory -PathType Container -ErrorAction Stop)) {
+            [void](New-Item -ItemType Directory -Path $StagingDirectory -Force -ErrorAction Stop)
+        }
+    } catch {
+        throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not create the staging directory"
+    }
+
+    $finalName = Get-AttrCudaOwnerFootageStagingName -Index $Index
+    $finalPath = Join-Path $StagingDirectory $finalName
+    $partialPath = "$finalPath.partial"
+
+    $finalExists = $false
+    try {
+        $finalExists = Test-Path -LiteralPath $finalPath -PathType Leaf -ErrorAction Stop
+    } catch {
+        throw "OWNER_FOOTAGE_STAGE_STATE_UNKNOWN part $Index could not determine whether the final slot is occupied"
+    }
+    if ($finalExists) {
+        $existingStatus = Test-AttrCudaFootagePart -Path $finalPath -ExpectedLength $ExpectedLength -ExpectedSha256 $ExpectedSha256
+        if ($existingStatus -eq 'PASS') { return [pscustomobject]@{ Path = $finalPath; Created = $false } }
+        throw "OWNER_FOOTAGE_STAGE_CONFLICT part $Index is already staged with different bytes"
+    }
+
+    # Exclusive-creation stream copy: [IO.FileMode]::CreateNew fails (IOException) if the partial
+    # slot is already occupied -- by design, never pre-cleared and never overwritten. $weCreated-
+    # Partial only becomes $true once OUR OWN CreateNew call actually succeeded, so the cleanup
+    # below (round 4 fix: the original version deleted the slot unconditionally, including when
+    # PARTIAL_EXISTS meant this call never created anything) removes the partial ONLY when this
+    # call is the one that brought it into existence -- never a slot another attempt owns.
+    $sourceStream = $null
+    $destStream = $null
+    $weCreatedPartial = $false
+    try {
+        try {
+            $sourceStream = [IO.File]::Open($SourcePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not open the source for reading"
+        }
+        try {
+            $destStream = [IO.File]::Open($partialPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $weCreatedPartial = $true
+        } catch [IO.IOException] {
+            throw "OWNER_FOOTAGE_STAGE_PARTIAL_EXISTS part $Index a partial copy already occupies the slot"
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not create the staging partial"
+        }
+        try {
+            $sourceStream.CopyTo($destStream)
+            $destStream.Flush()
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index copy to the staging share failed"
+        }
+        # ATTR3-FOOTAGE-STAGE-1 round 8 (astra major 2): disposed INSIDE this guarded try, each
+        # call wrapped on its own -- Dispose() itself can throw (a network-mapped or nearly full
+        # share), and its own .Message can carry a real path. Mapped to the same fixed
+        # OWNER_FOOTAGE_STAGE_COPY_FAILED token a copy failure already uses; never forwarded.
+        try {
+            $sourceStream.Dispose()
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not close the source stream"
+        }
+        $sourceStream = $null
+        try {
+            # Test-only hook (round 8): $false unless a test explicitly passed
+            # -TestHookForceDisposeThrow -- see this function's own header. Never reachable from
+            # the production CLI.
+            if ($TestHookForceDisposeThrow) {
+                throw [IO.IOException]::new("ATTR3_TEST_SENTINEL synthetic dispose failure at $partialPath")
+            }
+            $destStream.Dispose()
+        } catch {
+            throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not close the staging partial"
+        }
+        $destStream = $null
+    } catch {
+        if ($destStream) { try { $destStream.Dispose() } catch {}; $destStream = $null }
+        if ($sourceStream) { try { $sourceStream.Dispose() } catch {}; $sourceStream = $null }
+        if ($weCreatedPartial) {
+            try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        }
+        throw
+    } finally {
+        if ($sourceStream) { try { $sourceStream.Dispose() } catch {} }
+        if ($destStream) { try { $destStream.Dispose() } catch {} }
+    }
+
+    # The share-side re-verification: never trust that a byte-identical local copy stayed
+    # byte-identical once it crossed the network.
+    $arrivedStatus = Test-AttrCudaFootagePart -Path $partialPath -ExpectedLength $ExpectedLength -ExpectedSha256 $ExpectedSha256
+    if ($arrivedStatus -ne 'PASS') {
+        try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        throw "OWNER_FOOTAGE_STAGE_VERIFY_FAILED part $Index share-side verification failed ($arrivedStatus)"
+    }
+
+    try {
+        [IO.File]::Move($partialPath, $finalPath, $false)
+    } catch [IO.IOException] {
+        # A concurrent submitter finished staging this exact part first -- re-check the bytes
+        # already there rather than assume either outcome.
+        $racedStatus = Test-AttrCudaFootagePart -Path $finalPath -ExpectedLength $ExpectedLength -ExpectedSha256 $ExpectedSha256
+        try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        if ($racedStatus -eq 'PASS') { return [pscustomobject]@{ Path = $finalPath; Created = $false } }
+        throw "OWNER_FOOTAGE_STAGE_CONFLICT part $Index is already staged with different bytes"
+    } catch {
+        try { Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        throw "OWNER_FOOTAGE_STAGE_COPY_FAILED part $Index could not publish the staged part"
+    }
+
+    return [pscustomobject]@{ Path = $finalPath; Created = $true }
+}
 
 function Get-AttrCudaOwnerFootageNeutralName {
     <#
@@ -292,6 +527,8 @@ function Close-AttrCudaOwnerFootageWorkspace {
 }
 
 Export-ModuleMember -Function `
+    Get-AttrCudaOwnerFootageStagingName, `
+    Send-AttrCudaOwnerFootagePartToStaging, `
     Get-AttrCudaOwnerFootageNeutralName, `
     Assert-AttrCudaOwnerPartsNaming, `
     Get-AttrCudaFileIdentity, `
