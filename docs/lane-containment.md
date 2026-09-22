@@ -29,8 +29,8 @@ checked only for Claude lanes -- codex lanes keep their previous behaviour. Exis
 editing grants, hook
 checks, read restrictions and provider-refusal classification still apply. This
 blocks the CLI's own tool surface; it is not a claim that Bash permissions prevent
-arbitrary external process launches, and **`Bash`'s `run_in_background` parameter is
-not technically blocked** -- `--disallowedTools` denies tools by name, and
+arbitrary external process launches, and `Bash`'s `run_in_background` parameter
+cannot be reached by `--disallowedTools` -- it denies tools by name, and
 `run_in_background` is a parameter of the `Bash` tool, not a separate tool, so
 denying it would require denying `Bash` entirely, which editing lanes need. Round 2
 (hub ruling, 2026-09-22) removed a `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` child-
@@ -42,15 +42,37 @@ authority change the hub will not make. This PR does not ADD any
 previously reviewed) is out of scope for this PR and is tracked separately under
 card NA3-CHILD-ENV-SCOPE-1 -- whether NA-3's prefix rule covers a launcher setting a
 child process's environment in code is a governance interpretation that PR does not
-decide here. Containment of background work now rests on three things, and none of
-them technically prevents a lane from starting a background shell job: the
-`--disallowedTools` deny list above (nested-agent and callback-promising CLI tools
-only), the dirty-no-commit receipt below (an after-the-fact detector scoped
-narrowly -- see exactly what it does and does not catch), and the brief-level
-prohibition on background work carried in each lane's dispatch prompt. Arbitrary
-shell descendants remain confined to the owning Windows job unless an independently
-authorized external service starts them (see the job-object section above); the job
-closes them, it does not prevent them from being started.
+decide here.
+
+**Blocking `run_in_background` (round 6, swarm ruling, 2026-09-22).** Every
+Claude-engine lane -- read-only and editing alike, previously only a non-bulk-reads
+read-only lane got a `--settings` file at all -- now receives a per-run
+`--settings` JSON written beside its receipt (`<lane>-NNN.settings.json`) that
+registers `tools/coordination/lane-no-background.py` as a `PreToolUse` hook on the
+`Bash` matcher, invoked with the same absolute per-user Python interpreter
+`.claude/settings.json` pins its own `mlv-never-authorized.py` gate to (a hook is
+`interpreter x script x registration`; a portable-but-wrong command fails open
+silently -- proven cost, 2026-08-09). The hook reads the tool-call JSON on stdin
+and denies the call (`hookSpecificOutput.permissionDecision: "deny"`) exactly when
+`tool_input.run_in_background` is `true`, with reason text naming that a headless
+lane has no later turn to receive the callback; every other input -- the flag
+absent or false, any non-`Bash` tool, malformed stdin -- allows silently (exit 0,
+no output). It is pure: no side effects, no network, no filesystem access beyond
+stdin/stdout. The Read deny rules for the manifest-surface paths stay conditional
+on `-AllowBulkReads` exactly as before this round; the hook is unconditional. This
+is a Claude-CLI-only mechanism (`--settings` and its hook keys are claude-specific),
+so Codex lanes get neither the settings file nor the hook. The receipt's authority
+block records `backgroundBash = 'denied-by-settings-hook'` for every Claude lane.
+Containment of background work now rests on three things: the `--disallowedTools`
+deny list above (nested-agent and callback-promising CLI tools by name), this
+settings-file hook (the one mechanism that actually denies `run_in_background` on
+the tool call that would start it), and the dirty-no-commit receipt below as an
+after-the-fact backstop for anything that reaches a background shell by some other
+route -- auto-backgrounding by the harness, if any, would not necessarily carry the
+`run_in_background` flag this hook keys on. Arbitrary shell descendants remain
+confined to the owning Windows job unless an independently authorized external
+service starts them (see the job-object section above); the job closes them, it
+does not prevent them from being started.
 
 A receipt is also never marked `complete` (or state `ended-incomplete` is forced)
 when an EDITING Claude lane's own worktree is still at the lane's starting sha and

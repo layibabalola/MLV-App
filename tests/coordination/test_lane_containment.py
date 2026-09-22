@@ -158,7 +158,7 @@ exit 0
             except Exception: pass
 
 
-def prepare(tree, mode, assignment_failure=False, editing=False, allowed_tools="", lane="sonnet", mutation=None):
+def prepare(tree, mode, assignment_failure=False, editing=False, allowed_tools="", lane="sonnet", mutation=None, allow_bulk_reads=False):
     root=tree["root"]; script=root/"Invoke-Lane.ps1"
     text=CANDIDATE.read_text(encoding="utf-8")
     text=text.replace("$CLAUDE_EXE = Join-Path $env:APPDATA 'npm\\claude.cmd'", "$CLAUDE_EXE = '"+str(tree['shim']).replace("'","''")+"'")
@@ -168,6 +168,7 @@ def prepare(tree, mode, assignment_failure=False, editing=False, allowed_tools="
     if mutation: text=mutation(text)
     script.write_text(text,encoding="utf-8")
     (root/"lane-provider-refusal.ps1").write_bytes((ROOT/"tools"/"coordination"/"lane-provider-refusal.ps1").read_bytes())
+    (root/"lane-no-background.py").write_bytes((ROOT/"tools"/"coordination"/"lane-no-background.py").read_bytes())
     if editing:
         hook=root/"tools"/"hooks"/"mlv-never-authorized.py"; hook.parent.mkdir(parents=True); hook.write_text("# fixture hook\n",encoding="ascii")
         rec=root/".claude-state"/"coordination"/"dual-lane"/"receipts"/"0.05-hook-enforced.json"; rec.parent.mkdir(parents=True)
@@ -181,7 +182,15 @@ def prepare(tree, mode, assignment_failure=False, editing=False, allowed_tools="
       "MLV_FIXTURE_BGTASKS":str(root/"bgtasks.txt")})
     cmd=[PWSH,"-NoLogo","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",str(script),"-Lane",lane,"-Prompt","fixture prompt","-WorkDir",str(root),"-RunDir",str(run),"-TimeoutSec","3" if mode=="timeout" else "30","-Card","FIXTURE","-ReasoningEffort","low"]
     if editing: cmd += ["-AllowEdits","-AllowedTools",allowed_tools]
+    if allow_bulk_reads: cmd += ["-AllowBulkReads"]
     return cmd,env,run/(lane+"-001.receipt.json")
+
+
+def settings_path_for(receipt):
+    # Invoke-Lane.ps1 names every per-run artifact off the same reserved base
+    # ("<lane>-NNN"); the settings file sits beside the receipt with the same base.
+    assert receipt.name.endswith(".receipt.json")
+    return receipt.parent / (receipt.name[: -len(".receipt.json")] + ".settings.json")
 
 
 def test_read_only_argv_json_stdin_and_tool_denial(fixture_tree):
@@ -210,6 +219,95 @@ def test_read_only_argv_json_stdin_and_tool_denial(fixture_tree):
     # behavior.
     assert (fixture_tree["root"]/"bgtasks.txt").read_text(encoding="utf-8-sig").strip()==""
     assert "backgroundTasks" not in q["authority"]
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 6 (swarm ruling): --disallowedTools cannot reach
+# `run_in_background` -- it is a parameter of the Bash tool call, not a separate tool name --
+# so a per-lane Claude Code settings file now wires tools/coordination/lane-no-background.py
+# as a PreToolUse hook on the `Bash` matcher for every Claude-engine lane, read-only and
+# editing alike. No env-var mechanism, no NA-3 change: see docs/lane-containment.md.
+def test_read_only_settings_json_wires_lane_no_background_hook(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    argv=json.loads((fixture_tree["root"]/"args.json").read_text(encoding="utf-8-sig"))
+    i=argv.index("--settings")
+    settings=json.loads(settings_path_for(receipt).read_text(encoding="utf-8-sig"))
+    assert argv[i+1]==str(settings_path_for(receipt))
+    pre=settings["hooks"]["PreToolUse"]
+    assert len(pre)==1
+    assert pre[0]["matcher"]=="Bash"
+    hook=pre[0]["hooks"]
+    assert len(hook)==1 and hook[0]["type"]=="command"
+    assert "lane-no-background.py" in hook[0]["command"]
+    # The Read deny rules stay conditional on -AllowBulkReads exactly as before this round --
+    # a read-only lane without -AllowBulkReads still gets them, alongside the new hook.
+    assert settings["permissions"]["deny"]
+
+
+def test_bulk_reads_lane_still_gets_the_hook_without_the_deny_rules(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal",allow_bulk_reads=True)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    settings=json.loads(settings_path_for(receipt).read_text(encoding="utf-8-sig"))
+    assert "permissions" not in settings
+    assert "lane-no-background.py" in settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+
+def test_editing_settings_json_also_wires_lane_no_background_hook(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    argv=json.loads((fixture_tree["root"]/"args.json").read_text(encoding="utf-8-sig"))
+    assert "--settings" in argv
+    settings=json.loads(settings_path_for(receipt).read_text(encoding="utf-8-sig"))
+    assert settings["hooks"]["PreToolUse"][0]["matcher"]=="Bash"
+    assert "lane-no-background.py" in settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["authority"]["backgroundBash"]=="denied-by-settings-hook"
+
+
+def test_codex_lane_gets_no_settings_file_or_flag(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal",lane="sol")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    argv=json.loads((fixture_tree["root"]/"args.json").read_text(encoding="utf-8-sig"))
+    assert "--settings" not in argv
+    assert not settings_path_for(receipt).exists()
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert "backgroundBash" not in q["authority"]
+
+
+LANE_NO_BACKGROUND_SCRIPT = ROOT / "tools" / "coordination" / "lane-no-background.py"
+
+
+def run_lane_no_background(payload):
+    return subprocess.run(
+        [sys.executable, str(LANE_NO_BACKGROUND_SCRIPT)],
+        input=json.dumps(payload), text=True, capture_output=True, timeout=10)
+
+
+def test_lane_no_background_script_denies_backgrounded_bash():
+    r=run_lane_no_background({"tool_name":"Bash","tool_input":{"command":"x","run_in_background":True}})
+    assert r.returncode==0,(r.stdout,r.stderr)
+    out=json.loads(r.stdout)
+    decision=out["hookSpecificOutput"]
+    assert decision["permissionDecision"]=="deny"
+    assert decision["hookEventName"]=="PreToolUse"
+    assert "headless lane" in decision["permissionDecisionReason"]
+    assert "later turn" in decision["permissionDecisionReason"]
+
+
+def test_lane_no_background_script_allows_bash_without_the_flag():
+    r=run_lane_no_background({"tool_name":"Bash","tool_input":{"command":"x"}})
+    assert r.returncode==0,(r.stdout,r.stderr)
+    assert r.stdout==""
+
+
+def test_lane_no_background_script_allows_non_bash_tools():
+    r=run_lane_no_background({"tool_name":"Write","tool_input":{"file_path":"x","run_in_background":True}})
+    assert r.returncode==0,(r.stdout,r.stderr)
+    assert r.stdout==""
 
 
 def test_timeout_kills_owned_child_and_grandchild(fixture_tree):

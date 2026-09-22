@@ -137,6 +137,14 @@ $LANES = @{
 $CLAUDE_EXE = Join-Path $env:APPDATA 'npm\claude.cmd'
 $CODEX_EXE  = Join-Path $env:APPDATA 'npm\codex.cmd'
 
+# LANE-NO-BACKGROUND-END-TURN-1 round 6: the same per-user absolute Python interpreter
+# .claude/settings.json's own PreToolUse hook is pinned to (tools/hooks/mlv-never-authorized.py's
+# registration). Repeated here rather than resolved from PATH at runtime for the same reason that
+# registration gives for its own pin: a hook is (interpreter x script x registration), and a
+# portable-but-wrong command fails open silently -- proven cost, 2026-08-09.
+$PYTHON_EXE = 'C:/Users/obabalola/AppData/Local/Python/bin/python.exe'
+$LANE_NO_BACKGROUND_HOOK = Join-Path $PSScriptRoot 'lane-no-background.py'
+
 # Every tool that either fans out to another agent (Agent, Task, Workflow, TaskCreate) or
 # promises a LATER turn a headless lane cannot receive (Monitor, ScheduleWakeup, CronCreate,
 # CronDelete, RemoteTrigger). ONE constant feeds the pre-reservation allowlist rejection, the
@@ -636,8 +644,27 @@ if ($cfg.engine -eq 'claude') {
     $argv = @('-p', '--model', $cfg.model, '--output-format', 'json', '--add-dir', $WorkDir)
     if ($ExtraReadDir) { $argv += @('--add-dir', $ExtraReadDir) }
     if ($MaxTurns -gt 0) { $argv += @('--max-turns', [string]$MaxTurns) }
-    # Deny-list written to the RUN DIR so the grant is auditable beside the receipt that
-    # it produced, rather than being an invisible property of the invocation.
+    # Settings file written to the RUN DIR so the grant is auditable beside the receipt that
+    # it produced, rather than being an invisible property of the invocation. Round 6
+    # (swarm ruling, 2026-09-22): every Claude-engine lane now gets this file -- previously
+    # only a non-bulk-reads lane did -- because it is now also how the lane-no-background
+    # PreToolUse hook is wired; the Read deny rules stay conditional on -AllowBulkReads exactly
+    # as before.
+    $settingsObj = [ordered]@{
+        hooks = [ordered]@{
+            PreToolUse = @(
+                [ordered]@{
+                    matcher = 'Bash'
+                    hooks   = @(
+                        [ordered]@{
+                            type    = 'command'
+                            command = ('"{0}" "{1}"' -f $PYTHON_EXE, $LANE_NO_BACKGROUND_HOOK)
+                        }
+                    )
+                }
+            )
+        }
+    }
     if (-not $AllowBulkReads) {
         $denyRules = @(
             'Read(**/gpu-lane-impl-review-sync.md)',
@@ -646,10 +673,10 @@ if ($cfg.engine -eq 'claude') {
             'Read(**/fable-resume-CURRENT.md)',
             'Read(**/orchestrator-resume-CURRENT.md)'
         )
-        $settingsObj = @{ permissions = @{ deny = $denyRules } }
-        Write-Utf8NoBom $settingsPath ($settingsObj | ConvertTo-Json -Depth 5)
-        $argv += @('--settings', $settingsPath)
+        $settingsObj.permissions = [ordered]@{ deny = $denyRules }
     }
+    Write-Utf8NoBom $settingsPath ($settingsObj | ConvertTo-Json -Depth 6)
+    $argv += @('--settings', $settingsPath)
     if ($AllowEdits) {
         # 0.1: acceptEdits still takes an explicit --allowedTools list - the mode
         # decides HOW an allowed tool behaves (auto-accept vs prompt), the list
@@ -698,6 +725,11 @@ if ($cfg.engine -eq 'claude') {
         denyRules      = if ($AllowBulkReads) { @() } else { $denyRules }
         disallowedTools = $DENIED_TOOLS_DISPLAY
         capabilityNotice = if ($AllowEdits) { $null } else { $capabilityNotice }
+        # Round 6 (swarm ruling): --disallowedTools cannot reach run_in_background -- it is a
+        # parameter of the Bash tool, not a separate tool name -- so the settings-file
+        # PreToolUse hook wired above is the actual mechanism, with the dirty-no-commit receipt
+        # check as the after-the-fact backstop. See docs/lane-containment.md.
+        backgroundBash = 'denied-by-settings-hook'
     }
 } else {
     $exe  = $CODEX_EXE
