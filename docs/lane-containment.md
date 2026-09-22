@@ -16,14 +16,17 @@ UTC deadline projects that budget from the same initial start time; the stopwatc
 enforces it. An exhausted setup budget prevents the host or provider from starting.
 
 Every Claude lane receives
-`--disallowedTools Agent,Task,Monitor,ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger`
+`--disallowedTools Agent,Task,Monitor,ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger,Workflow,TaskCreate`
 (LANE-NO-BACKGROUND-END-TURN-1, 2026-09-22): a headless lane has no later turn, so a
 tool that promises one (background jobs, a scheduled wakeup, a cron entry, a remote
 trigger) leaves the work stranded exactly like the built-in nested-agent tools this
 deny list already blocked. The same list (`$DENIED_TOOLS` /
 `$DENIED_TOOLS_DISPLAY` in `tools/coordination/Invoke-Lane.ps1`) is checked at
-pre-reservation, so an editing allowlist containing ANY of the seven denied tools is
-rejected before reservation, not only `Agent`/`Task`. Existing editing grants, hook
+pre-reservation, so an editing allowlist containing ANY of the nine denied tools is
+rejected before reservation, not only `Agent`/`Task`. This is a Claude-CLI-only
+mechanism (`--disallowedTools` is a claude flag; codex has no equivalent), so it is
+checked only for Claude lanes -- codex lanes keep their previous behaviour. Existing
+editing grants, hook
 checks, read restrictions and provider-refusal classification still apply. This
 blocks the CLI's own tool surface; it is not a claim that Bash permissions prevent
 arbitrary external process launches, and **`Bash`'s `run_in_background` parameter is

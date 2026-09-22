@@ -7,6 +7,7 @@ import pytest
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 CANDIDATE = ROOT / "tools" / "coordination" / "Invoke-Lane.ps1"
+DOC = ROOT / "docs" / "lane-containment.md"
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object contract")
 PWSH = "pwsh.exe"
 
@@ -35,6 +36,9 @@ KILL_OUTCOME_TOKENS = {"already-exited", "killed", "kill-wait-timeout", "kill-th
 # Round 3 (fable minor 1): Workflow (background-orchestrated fan-out) and TaskCreate (the
 # same background-promise shape as ScheduleWakeup/CronCreate) joined the list.
 DISALLOWED_TOOLS_TOKEN = "Agent,Task,Monitor,ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger,Workflow,TaskCreate"
+
+_NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+                 7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
 
 
 def assert_owner_absence_is_legitimate(containment, context):
@@ -270,6 +274,65 @@ def test_every_disallowed_tool_is_individually_rejected_from_an_editing_allowlis
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=10)
     assert r.returncode!=0 and "nested-agent-tool-forbidden" in r.stderr
     assert not receipt.exists() and not (fixture_tree["root"]/"child.json").exists()
+
+
+def _read_denied_tools_display_from_source():
+    text = CANDIDATE.read_text(encoding="utf-8")
+    m = re.search(r"\$DENIED_TOOLS_DISPLAY\s*=\s*@\(([^)]*)\)", text)
+    assert m, "could not find $DENIED_TOOLS_DISPLAY in Invoke-Lane.ps1"
+    return [tok.strip().strip("'") for tok in m.group(1).split(",")]
+
+
+def test_doc_disallowed_tools_token_and_count_word_match_the_constant():
+    # Producer brief round 4 (sol + fable minor): docs/lane-containment.md quotes the
+    # --disallowedTools token verbatim and names its length in English prose ("the N denied
+    # tools"). Round 3 grew the constant from seven entries to nine (Workflow, TaskCreate) and
+    # the doc was never updated to match -- it still said seven. Derive BOTH the token and the
+    # count word from Invoke-Lane.ps1's own $DENIED_TOOLS_DISPLAY constant directly (not from
+    # this file's own DISALLOWED_TOOLS_TOKEN hand-copy, which is itself just as capable of
+    # drifting), so a future addition/removal to the deny list fails this test loudly instead of
+    # leaving stale doc prose behind.
+    tools = _read_denied_tools_display_from_source()
+    token = ",".join(tools)
+    assert token == DISALLOWED_TOOLS_TOKEN, (
+        "this test file's own DISALLOWED_TOOLS_TOKEN hand-copy has drifted from "
+        f"Invoke-Lane.ps1's $DENIED_TOOLS_DISPLAY: source={token!r} test-copy={DISALLOWED_TOOLS_TOKEN!r}"
+    )
+    doc_text = DOC.read_text(encoding="utf-8")
+    assert f"`--disallowedTools {token}`" in doc_text, (
+        "docs/lane-containment.md's quoted --disallowedTools token does not match "
+        f"the Invoke-Lane.ps1 constant {token!r}"
+    )
+    count_word = _NUMBER_WORDS[len(tools)]
+    assert f"the {count_word} denied tools" in doc_text, (
+        f"docs/lane-containment.md does not say 'the {count_word} denied tools' "
+        f"(the constant currently has {len(tools)} entries)"
+    )
+
+
+def test_codex_editing_lane_with_denied_tool_in_allowlist_is_not_rejected_by_the_claude_only_preflight(fixture_tree):
+    # Producer brief round 4, required case (sol major 1): the denied-tool preflight at
+    # Invoke-Lane.ps1 (~line 303-309) is now explicitly gated on `$LANES[$Lane].engine -eq
+    # 'claude'`, not merely on -AllowEdits. In production a codex+-AllowEdits combination is
+    # already refused earlier by the codex-lane-never-edits check (~line 290-292) before this
+    # preflight is ever reached, so without neutralising that EARLIER, UNRELATED throw there is
+    # no way to exercise this specific gate for a codex invocation at all -- and the whole point
+    # of this test is to prove the gate is an explicit engine check, not an accident of check
+    # ORDER that a future refactor could silently undo. Neutralise ONLY the codex-never-edits
+    # throw (every other check, including the preflight under test, is untouched) and prove a
+    # codex allowlist naming a denied tool is NOT rejected here.
+    def bypass_codex_never_edits(text):
+        old = ("if ($AllowEdits -and $LANES[$Lane].engine -eq 'codex') {\n"
+               "    throw \"codex-lane-never-edits: -Lane $Lane with -AllowEdits "
+               "(no Claude hook is visible to codex exec)\"\n"
+               "}")
+        assert text.count(old) == 1
+        return text.replace(old, "# fixture: codex-never-edits neutralised for this test only")
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Agent,Write",
+                             lane="sol",mutation=bypass_codex_never_edits)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert "nested-agent-tool-forbidden" not in r.stderr, (r.stdout, r.stderr)
+    assert r.returncode==0,(r.stdout,r.stderr)
 
 
 def test_codex_launch_stays_direct_without_claude_flags(fixture_tree):
@@ -682,6 +745,34 @@ def test_further_edit_of_already_dirty_tracked_file_is_ended_incomplete(fixture_
     (root/"tracked.txt").write_text("dirty-before-the-lane-ever-ran\n",encoding="ascii")
     cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
     env["MLV_FIXTURE_FURTHER_EDIT_TRACKED_PATH"]=str(root/"tracked.txt")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="ended-incomplete"
+    assert q["complete"] is False
+    assert q["workEvidence"]["reason"]=="dirty-worktree-no-commit"
+
+
+def test_further_edit_of_already_dirty_tracked_path_with_space_and_non_ascii_name_is_ended_incomplete(fixture_tree):
+    # Producer brief round 4, required case (sol + fable minor): round 3's parser read
+    # `git status --porcelain` (no -z) and stripped one leading/trailing '"' per path -- git's
+    # default quoting wraps a path in '"' and C-style-octal-escapes non-ASCII bytes whenever it
+    # quotes at all, so Trim('"') alone cannot restore a path containing BOTH a space and a
+    # non-ASCII character (a space alone needs no quoting; a non-ASCII byte alone gets quoted
+    # AND escaped). `-z` disables quoting entirely, so the real path must round-trip exactly.
+    # Exercises the exact "pre-dirty, then further edited" shape as the round-3 ASCII test
+    # above, on a path this repo's real fleet-runs tree can plausibly contain.
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    tracked_name = "trac ked éè.txt"  # embedded space + non-ASCII (accented) characters
+    tracked_path = root / tracked_name
+    tracked_path.write_text("seed\n", encoding="utf-8")
+    _git(root, "add", tracked_name)
+    _git(root, "commit", "-q", "-m", "seed space/non-ASCII tracked file")
+    # Pre-dirty it, uncommitted, before the lane ever starts.
+    tracked_path.write_text("dirty-before-the-lane-ever-ran\n", encoding="utf-8")
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
+    env["MLV_FIXTURE_FURTHER_EDIT_TRACKED_PATH"]=str(tracked_path)
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
     assert r.returncode==0,(r.stdout,r.stderr)
     q=json.loads(receipt.read_text(encoding="utf-8"))

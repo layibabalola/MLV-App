@@ -166,17 +166,59 @@ function Get-Sha256([string]$Text) {
 # modify/add/delete uniformly. Callers compare this map's VALUES for a given key, not just key
 # presence, so a further edit to an already-dirty path is visible even though the path was
 # already in the map.
+#
+# Round 4 (sol minor / fable minor 3): round 3's parser read `git status --porcelain` (no -z)
+# and stripped one leading/trailing '"' per path -- git's default quoting escapes a space with
+# nothing (a space needs no quoting) but escapes non-ASCII bytes as C-style octal sequences
+# ('\346\226\207...') and wraps the whole path in quotes when it does, so a tracked path with
+# both a space AND a non-ASCII character round-tripped through Trim('"') as a still-escaped,
+# not-actually-restored string that never matched the real on-disk path. `-z` asks git for
+# NUL-separated records with quoting turned OFF entirely: each record is "XY <path>" for an
+# ordinary change, or "XY <newpath>\0<origpath>\0" for a rename/copy (two NUL-separated fields,
+# no " -> " text to parse). PowerShell's line-based capture of `&` output only ever splits on
+# LF, never NUL, so the whole -z stream comes back as one string to split ourselves. `&`-captured
+# output is also decoded using [Console]::OutputEncoding, which is not reliably UTF-8 in this
+# script's redirected/non-interactive invocation -- measured: a non-ASCII byte in a path
+# silently mis-decoded, so the returned path never matched the real on-disk path and the diff
+# lookup below found nothing for it. Invoke-GitCaptureUtf8 routes through ProcessStartInfo with
+# an explicit StandardOutputEncoding instead (the same mechanism this script already uses for
+# provider child processes), which sidesteps console state entirely.
+function Invoke-GitCaptureUtf8([string]$WorkDir, [string[]]$GitArgs) {
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'git'
+    foreach ($a in (@('-C', $WorkDir) + $GitArgs)) { [void]$psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+    try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return '' }
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
+    $p.WaitForExit()
+    try { return $outTask.GetAwaiter().GetResult() } catch { return '' }
+}
+
 function Get-TrackedDirtyContentIdentity([string]$WorkDir) {
-    $statusLines = try { @(& git -C $WorkDir status --porcelain 2>$null) } catch { @() }
-    $trackedLines = @($statusLines | Where-Object { $_ -and -not $_.StartsWith('??') })
+    $raw = Invoke-GitCaptureUtf8 -WorkDir $WorkDir -GitArgs @('status', '--porcelain=v1', '-z')
+    if ([string]::IsNullOrEmpty($raw)) { return [ordered]@{} }
+    $fields = @($raw -split "`0" | Where-Object { $_ -ne '' })
     $map = [ordered]@{}
-    foreach ($line in $trackedLines) {
-        # Porcelain v1: two status chars, one space, then the path ('OLD -> NEW' for a rename;
-        # the current path is what matters for content identity).
-        $pathPart = $line.Substring(3)
-        if ($pathPart -match '^.* -> (.*)$') { $pathPart = $Matches[1] }
-        $path = $pathPart.Trim('"')
-        $diffText = try { (& git -C $WorkDir diff HEAD -- $path 2>$null) -join "`n" } catch { '' }
+    $i = 0
+    while ($i -lt $fields.Count) {
+        $entry = $fields[$i]; $i++
+        if ($entry.Length -lt 3) { continue }
+        $statusCode = $entry.Substring(0, 2)
+        $path = $entry.Substring(3)
+        if ($statusCode[0] -eq 'R' -or $statusCode[0] -eq 'C') {
+            # Rename/copy: $path (just read) is the NEW path -- the one that still exists
+            # in the working tree and is what content identity keys on. The ORIGINAL path
+            # is the NEXT NUL-separated field; consume it here so it is never mistaken for
+            # a separate status entry of its own.
+            if ($i -lt $fields.Count) { $i++ }
+        }
+        if ($statusCode -eq '??') { continue }
+        $diffText = Invoke-GitCaptureUtf8 -WorkDir $WorkDir -GitArgs @('diff', 'HEAD', '--', $path)
         $map[$path] = Get-Sha256 $diffText
     }
     return $map
@@ -300,7 +342,15 @@ if ($AllowEdits -and ([string]::IsNullOrWhiteSpace($AllowedTools) -or $AllowedTo
 # --disallowedTools argv is built from below, not a re-enumerated Agent/Task pair -- sol PR #150
 # round 1 found the two lists had drifted (rejection: Agent/Task only; deny list: seven tools).
 # Normalize comma tokens for the decision; preserve the original argv text.
-if ($AllowEdits) {
+# Round 4 (sol major 1): explicitly gated to engine -eq 'claude', not just $AllowEdits. Today the
+# codex-never-edits throw at (a) above always fires first for any codex+-AllowEdits combination,
+# so this block is already unreachable for codex in practice -- but that unreachability was an
+# ACCIDENT of check ORDER, not a stated invariant, and DENIED_TOOLS/DENIED_TOOLS_DISPLAY are
+# claude-CLI tool names (Agent/Task/Monitor/... are claude flags; codex has no --disallowedTools
+# equivalent and its own $AllowedTools value is never consumed for argv -- see the codex argv
+# branch below, which hardcodes authority.allowedTools = 'ALL'). Codex lanes keep their previous
+# behaviour: this check never applies to them, explicitly, independent of check order elsewhere.
+if ($AllowEdits -and $LANES[$Lane].engine -eq 'claude') {
     $forbiddenTools = @($AllowedTools -split ',' | ForEach-Object { $_.Trim().ToLowerInvariant() } |
         Where-Object { $DENIED_TOOLS -contains $_ })
     if ($forbiddenTools.Count -gt 0) {
