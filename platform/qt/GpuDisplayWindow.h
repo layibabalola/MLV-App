@@ -147,7 +147,16 @@ private:
     void ensurePreviewProcessingProgram(void);
     void updateTextureIfNeeded(void);
     void destroyTexture(void);
-    void applySamplingMode(void);
+    void applySamplingMode(GpuDisplayViewport::SamplingMode samplingMode);
+    /* Releases every context-bound processing resource (passthrough program, shared
+     * preview-processing program, LUT texture set) so the next present rebuilds them
+     * from scratch, mirroring GpuDisplayViewport::cleanupGLResources. Called from the
+     * destructor and from QOpenGLContext::aboutToBeDestroyed so a context recreation
+     * (not just window teardown) cannot leave stale/non-null GL wrappers behind that
+     * would otherwise short-circuit ensureProgram()/ensurePreviewProcessingProgram()'s
+     * "already built" check and get bound as if still valid (GPU-TEXNR-S1-DARK-GREEN-1
+     * round 2). */
+    void cleanupGLResources(void);
 
     QOpenGLShaderProgram *m_program;
     // Shared with GpuDisplayViewport (GpuPreviewProcessing.h): the display shader +

@@ -308,12 +308,7 @@ GpuDisplayWindow::~GpuDisplayWindow()
     if ( isValid() )
     {
         makeCurrent();
-        destroyTexture();
-        gpuPreviewProcessingDestroyLutTextureSet(m_lutSet);
-        delete m_program;
-        m_program = nullptr;
-        delete m_previewProcessingProgram;
-        m_previewProcessingProgram = nullptr;
+        cleanupGLResources();
         doneCurrent();
     }
 }
@@ -519,7 +514,7 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
         m_gpuReconSourceTexture->setWrapMode(QOpenGLTexture::ClampToEdge);
     }
     m_gpuReconSourceTextureCurrent = false;
-    applySamplingMode();
+    applySamplingMode(options.samplingMode);
     setupMs = elapsedMs() - setupStartMs;
 
     int rc = -1;
@@ -926,6 +921,21 @@ bool GpuDisplayWindow::grabPresentedFramebufferIfActive(QImage *outImage,
 void GpuDisplayWindow::initializeGL()
 {
     initializeOpenGLFunctions();
+
+    // FAIL CLOSED (GPU-TEXNR-S1-DARK-GREEN-1 round 2): mirrors
+    // GpuDisplayViewport::initializeGL's connection. Without this, a context recreation
+    // (not just window teardown) left m_program/m_previewProcessingProgram/m_lutSet
+    // non-null pointing at objects the destroyed context owned, so ensureProgram() and
+    // ensurePreviewProcessingProgram()'s "already built, return" fast path would trust
+    // them instead of rebuilding against the new context.
+    if ( context() )
+    {
+        connect(context(), &QOpenGLContext::aboutToBeDestroyed, this, [this]()
+        {
+            cleanupGLResources();
+        }, Qt::UniqueConnection);
+    }
+
     if ( m_loggedContext ) return;
 
     const GLubyte *renderer = glGetString(GL_RENDERER);
@@ -1001,10 +1011,33 @@ void GpuDisplayWindow::destroyTexture()
     m_pendingDisplayHeight = 0;
 }
 
-void GpuDisplayWindow::applySamplingMode()
+void GpuDisplayWindow::cleanupGLResources()
+{
+    destroyTexture();
+    gpuPreviewProcessingDestroyLutTextureSet(m_lutSet);
+    delete m_program;
+    m_program = nullptr;
+    delete m_previewProcessingProgram;
+    m_previewProcessingProgram = nullptr;
+}
+
+void GpuDisplayWindow::applySamplingMode(GpuDisplayViewport::SamplingMode samplingMode)
 {
     if ( !m_texture ) return;
-    m_texture->setMinMagFilters(QOpenGLTexture::Linear, QOpenGLTexture::Linear);
+    // Matches GpuDisplayViewport::applySamplingMode's non-Bayer case exactly (the
+    // window's recon texture is always already-debayered RGBA16, frameTextureMode=0,
+    // so there is no m_textureIsBayer16-equivalent forced-nearest case here): bicubic
+    // is done in-shader (GpuPreviewProcessing.cpp's samplingMode==2 branch) against a
+    // Nearest-filtered source, so both SamplingNearest and SamplingBicubic select the
+    // GL Nearest filter and only SamplingLinear selects Linear
+    // (GPU-TEXNR-S1-DARK-GREEN-1 round 2 -- previously this always forced Linear,
+    // ignoring PresentationOptions::samplingMode).
+    const bool useNearest = samplingMode == GpuDisplayViewport::SamplingNearest;
+    const bool useBicubic = samplingMode == GpuDisplayViewport::SamplingBicubic;
+    const QOpenGLTexture::Filter filter = (useNearest || useBicubic)
+        ? QOpenGLTexture::Nearest
+        : QOpenGLTexture::Linear;
+    m_texture->setMinMagFilters(filter, filter);
 }
 
 void GpuDisplayWindow::updateTextureIfNeeded()

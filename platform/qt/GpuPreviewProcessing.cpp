@@ -2041,7 +2041,7 @@ QOpenGLTexture * gpuPreviewProcessingCreateOrResizeLookupTexture(QOpenGLTexture 
                                                                  int width,
                                                                  int height)
 {
-    if ( texture && texture->width() == width && texture->height() == height )
+    if ( texture && texture->isCreated() && texture->width() == width && texture->height() == height )
     {
         return texture;
     }
@@ -2052,6 +2052,16 @@ QOpenGLTexture * gpuPreviewProcessingCreateOrResizeLookupTexture(QOpenGLTexture 
     texture->setSize(width, height);
     texture->setMipLevels(1);
     texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16);
+    // FAIL CLOSED (GPU-TEXNR-S1-DARK-GREEN-1 round 2): allocateStorage() is void, so
+    // isCreated() is the only signal that the GL texture object actually came into
+    // being (e.g. it stays false with no current context or a lost context). A caller
+    // that got a non-null pointer back here used to be indistinguishable from one that
+    // got a real GPU texture; now a failed allocation returns nullptr instead.
+    if ( !texture->isCreated() )
+    {
+        delete texture;
+        return nullptr;
+    }
     texture->setWrapMode(QOpenGLTexture::ClampToEdge);
     texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
     return texture;
@@ -2109,6 +2119,17 @@ void gpuPreviewProcessingUpdateLutTextureSet(GpuPreviewProcessingLutTextureSet &
     set.matrixB = gpuPreviewProcessingCreateOrResizeLookupTexture(set.matrixB, kLutTextureEdge, kLutTextureEdge);
     set.gamma = gpuPreviewProcessingCreateOrResizeLookupTexture(set.gamma, kLutTextureEdge, kLutTextureEdge);
 
+    // FAIL CLOSED (GPU-TEXNR-S1-DARK-GREEN-1 round 2): a real GL allocation failure
+    // (lost/recreated context, out of memory) now surfaces as a null member above
+    // instead of a stale/half-built set silently being stamped ready. Destroy
+    // whatever did get created and leave signatureValid false so the next call
+    // retries from scratch rather than presenting with a subset of LUTs bound.
+    if ( !set.levels || !set.matrixR || !set.matrixG || !set.matrixB || !set.gamma )
+    {
+        gpuPreviewProcessingDestroyLutTextureSet(set);
+        return;
+    }
+
     set.levels->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, levelsBytes.constData());
     set.matrixR->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, matrixRBytes.constData());
     set.matrixG->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, matrixGBytes.constData());
@@ -2122,7 +2143,13 @@ void gpuPreviewProcessingUpdateLutTextureSet(GpuPreviewProcessingLutTextureSet &
 bool gpuPreviewProcessingLutTextureSetReady(const GpuPreviewProcessingLutTextureSet & set,
                                             const GpuPreviewProcessingConfig & config)
 {
+    // FAIL CLOSED (GPU-TEXNR-S1-DARK-GREEN-1 round 2): signatureValid is only set by
+    // gpuPreviewProcessingUpdateLutTextureSet() after every LUT texture is confirmed
+    // GL-created and uploaded (see above) -- checking it here, not just the pointers,
+    // is what makes readiness reflect actual GL success rather than "five non-null
+    // C++ wrappers", which a never-created QOpenGLTexture would otherwise satisfy.
     return config.enabled
+        && set.signatureValid
         && set.levels && set.matrixR && set.matrixG && set.matrixB && set.gamma;
 }
 

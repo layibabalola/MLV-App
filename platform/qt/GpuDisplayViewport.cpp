@@ -1395,6 +1395,32 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
         return fail(QStringLiteral("GPU playback recon AMaZE texture-present input is invalid"));
     }
 
+    // FAIL CLOSED (GPU-TEXNR-S1-DARK-GREEN-1 round 2): same gate as
+    // GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture -- this texture is
+    // the post-WB-undo linear camera RGB output of AMaZE, not display-referred. Without
+    // usable LUTs the shared display shader would still draw it, just with
+    // previewProcessingEnabled=0 (passthrough-equivalent in-shader), which is the same
+    // dark/green-cast regression this fix line exists to close. Refuse up front rather
+    // than let the in-shader disable stand in for a real refusal. MainWindow passes the
+    // same task.gpuPresentationOptions to this route as to the window route today
+    // (MainWindow.cpp), so this is not reachable in production; it closes the gap for
+    // any future/direct caller.
+    const GpuPreviewProcessingConfig &previewProcessing = options.previewProcessing;
+    const bool previewProcessingOptionsUsable =
+        previewProcessing.enabled
+        && previewProcessing.levelsLut.size() >= static_cast<int>(65536u * sizeof(uint16_t))
+        && previewProcessing.matrixLutR.size() >= static_cast<int>(65536u * sizeof(uint16_t))
+        && previewProcessing.matrixLutG.size() >= static_cast<int>(65536u * sizeof(uint16_t))
+        && previewProcessing.matrixLutB.size() >= static_cast<int>(65536u * sizeof(uint16_t))
+        && previewProcessing.gammaLut.size() >= static_cast<int>(65536u * sizeof(uint16_t));
+    if ( !previewProcessingOptionsUsable )
+    {
+        return fail(QStringLiteral(
+            "GPU playback recon AMaZE texture-present refused: preview-processing options/LUTs "
+            "are not ready for a linear post-WB-undo texture "
+            "(trace=gpu_viewport_recon_missing_processing_options)"));
+    }
+
     const int width = state->width;
     const int height = state->height;
     const bool retainedDeviceValid =

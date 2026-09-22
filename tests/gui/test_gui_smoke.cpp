@@ -25,6 +25,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
 #include <QPalette>
 #include <QPaintEvent>
 #include <QScopeGuard>
@@ -645,7 +647,8 @@ private slots:
     void gpuViewportZebraProcessingMatchesCpuReference();
     void gpuViewportPreviewProcessingMatchesCpuReference();
     void gpuViewportPreviewProcessingWithZebrasMatchesCpuReference();
-    void gpuPreviewProcessingLutReadinessMatchesForBothPresenters();
+    void gpuPreviewProcessingLutReadinessReflectsSignatureNotJustPointers();
+    void gpuPreviewProcessingLutTextureSetFailsClosedOnMissingUploadAndContextLoss();
     void gpuPreviewProcessingCpuReferenceCorrectsPostWbUndoGreenCast();
     void histogramRegressionMatchesGolden();
     void vectorScopeRegressionMatchesGolden();
@@ -2382,41 +2385,124 @@ void GuiSmokeTest::gpuViewportPreviewProcessingWithZebrasMatchesCpuReference()
     qunsetenv(GpuDisplayViewport::environmentVariableName());
 }
 
-void GuiSmokeTest::gpuPreviewProcessingLutReadinessMatchesForBothPresenters()
+void GuiSmokeTest::gpuPreviewProcessingLutReadinessReflectsSignatureNotJustPointers()
 {
-    // GPU-TEXNR-S1-DARK-GREEN-1 requirement 4 (plan parity): GpuDisplayWindow and
-    // GpuDisplayViewport must reach the SAME decision -- draw a recon/preview texture
-    // through the shared preview-processing shader with its LUTs bound, or refuse --
-    // for the same options. Both routes now call this exact function
-    // (gpuPreviewProcessingLutTextureSetReady) from their own paintGL(), so this is
-    // not a simulation of their logic, it IS their logic, exercised directly. The
-    // function only null-checks the texture pointers and never dereferences them, so
-    // uncreated QOpenGLTexture placeholders are safe stand-ins here and this needs no
-    // live GL context (runs under the offscreen platform too).
+    // GPU-TEXNR-S1-DARK-GREEN-1 round 2 (sol minor 3): the round-1 version of this test
+    // (gpuPreviewProcessingLutReadinessMatchesForBothPresenters) was tautological -- it
+    // constructed QOpenGLTexture wrappers that were never create()'d and asserted the
+    // predicate called them "ready", which encoded the pointer-only fail-open defect
+    // sol's round-1 major finding was about rather than detecting it. This test instead
+    // proves the fix: gpuPreviewProcessingLutTextureSetReady now requires
+    // signatureValid, which gpuPreviewProcessingUpdateLutTextureSet only sets once every
+    // LUT texture is confirmed GL-created (see
+    // gpuPreviewProcessingLutTextureSetFailsClosedOnMissingUploadAndContextLoss for the
+    // live-GL path that exercises that production function directly). No live GL
+    // context is needed here because the predicate itself only reads struct fields --
+    // this is pure logic coverage of the signature/pointer combination table, including
+    // the shapes an injected failed upload or a context-loss teardown would leave
+    // behind.
     const GpuPreviewProcessingConfig config = make_synthetic_preview_processing_config();
 
-    GpuPreviewProcessingLutTextureSet completeSet;
-    completeSet.levels = new QOpenGLTexture(QOpenGLTexture::Target2D);
-    completeSet.matrixR = new QOpenGLTexture(QOpenGLTexture::Target2D);
-    completeSet.matrixG = new QOpenGLTexture(QOpenGLTexture::Target2D);
-    completeSet.matrixB = new QOpenGLTexture(QOpenGLTexture::Target2D);
-    completeSet.gamma = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    GpuPreviewProcessingLutTextureSet readySet;
+    readySet.levels = reinterpret_cast<QOpenGLTexture *>(0x1);
+    readySet.matrixR = reinterpret_cast<QOpenGLTexture *>(0x1);
+    readySet.matrixG = reinterpret_cast<QOpenGLTexture *>(0x1);
+    readySet.matrixB = reinterpret_cast<QOpenGLTexture *>(0x1);
+    readySet.gamma = reinterpret_cast<QOpenGLTexture *>(0x1);
+    readySet.signature = config.signature;
+    readySet.signatureValid = true;
+    QVERIFY(gpuPreviewProcessingLutTextureSetReady(readySet, config));
 
-    QVERIFY(gpuPreviewProcessingLutTextureSetReady(completeSet, config));
+    // Shape of an injected failed upload: allocation returned non-null pointers for
+    // every texture except one (a partial GL failure), so signatureValid was correctly
+    // never set -- must NOT be ready even though 4 of 5 pointers are non-null.
+    GpuPreviewProcessingLutTextureSet failedUploadSet = readySet;
+    failedUploadSet.signatureValid = false;
+    QVERIFY(!gpuPreviewProcessingLutTextureSetReady(failedUploadSet, config));
 
-    GpuPreviewProcessingLutTextureSet missingGammaSet = completeSet;
+    // Shape of a fully failed upload: no textures survived, signature never stamped --
+    // this is what gpuPreviewProcessingUpdateLutTextureSet leaves behind today on any
+    // allocation failure (it destroys the whole set rather than a partial one).
+    GpuPreviewProcessingLutTextureSet emptyFailedSet;
+    QVERIFY(!gpuPreviewProcessingLutTextureSetReady(emptyFailedSet, config));
+
+    // Shape left behind by a context-loss teardown (GpuDisplayWindow/GpuDisplayViewport
+    // ::cleanupGLResources -> gpuPreviewProcessingDestroyLutTextureSet leaves every
+    // pointer null and signatureValid false -- verified directly against a live GL
+    // context, not fake pointers, in
+    // gpuPreviewProcessingLutTextureSetFailsClosedOnMissingUploadAndContextLoss). A
+    // stale non-zero cached signature surviving the teardown must not matter.
+    GpuPreviewProcessingLutTextureSet contextLostSet;
+    contextLostSet.signature = config.signature;
+    contextLostSet.signatureValid = false;
+    QVERIFY(!gpuPreviewProcessingLutTextureSetReady(contextLostSet, config));
+
+    // A stale signature match with missing pointers (one dropped) must still refuse --
+    // signatureValid alone is not sufficient, exactly mirroring the round-1 test's
+    // missing-gamma case.
+    GpuPreviewProcessingLutTextureSet missingGammaSet = readySet;
     missingGammaSet.gamma = nullptr;
     QVERIFY(!gpuPreviewProcessingLutTextureSetReady(missingGammaSet, config));
 
+    // Disabled config must refuse regardless of an otherwise-ready set.
     GpuPreviewProcessingConfig disabledConfig = config;
     disabledConfig.enabled = false;
-    QVERIFY(!gpuPreviewProcessingLutTextureSetReady(completeSet, disabledConfig));
+    QVERIFY(!gpuPreviewProcessingLutTextureSetReady(readySet, disabledConfig));
+}
 
-    delete completeSet.levels;
-    delete completeSet.matrixR;
-    delete completeSet.matrixG;
-    delete completeSet.matrixB;
-    delete completeSet.gamma;
+void GuiSmokeTest::gpuPreviewProcessingLutTextureSetFailsClosedOnMissingUploadAndContextLoss()
+{
+    // GPU-TEXNR-S1-DARK-GREEN-1 round 2 (sol minor 3): exercises the REAL production
+    // functions (gpuPreviewProcessingUpdateLutTextureSet / ...Ready /
+    // ...DestroyLutTextureSet) against a live GL context, rather than hand-built
+    // struct shapes -- this is the GL-dependent half sol asked for: a test that fails
+    // when an upload is missing, and after a simulated context loss.
+    MLV_SKIP_OR_FAIL_IF_OFFSCREEN("GPU LUT texture set upload needs a platform plugin that can create an OpenGL context");
+
+    QOffscreenSurface surface;
+    surface.setFormat(QSurfaceFormat::defaultFormat());
+    surface.create();
+    if (!surface.isValid()) {
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("QOffscreenSurface creation failed in this environment");
+    }
+    QOpenGLContext context;
+    context.setFormat(surface.requestedFormat());
+    if (!context.create() || !context.makeCurrent(&surface)) {
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("QOpenGLContext creation/makeCurrent failed in this environment");
+    }
+
+    GpuPreviewProcessingLutTextureSet set;
+    const GpuPreviewProcessingConfig validConfig = make_synthetic_preview_processing_config();
+
+    // Real success: a full upload against a live context must actually report ready.
+    gpuPreviewProcessingUpdateLutTextureSet(set, validConfig);
+    QVERIFY(gpuPreviewProcessingLutTextureSetReady(set, validConfig));
+
+    // Missing upload: undersized LUT bytes (as if the source LUT was never populated)
+    // must be refused rather than silently keeping the previous upload's readiness.
+    GpuPreviewProcessingConfig missingUploadConfig = validConfig;
+    missingUploadConfig.gammaLut.clear();
+    missingUploadConfig.signature = validConfig.signature + 1;
+    gpuPreviewProcessingUpdateLutTextureSet(set, missingUploadConfig);
+    QVERIFY(!gpuPreviewProcessingLutTextureSetReady(set, missingUploadConfig));
+
+    // Rebuild for the context-loss case.
+    gpuPreviewProcessingUpdateLutTextureSet(set, validConfig);
+    QVERIFY(gpuPreviewProcessingLutTextureSetReady(set, validConfig));
+
+    // Simulated context loss: this is exactly the call
+    // GpuDisplayWindow/GpuDisplayViewport now make from their
+    // QOpenGLContext::aboutToBeDestroyed handler (cleanupGLResources). Readiness must
+    // drop immediately, and a subsequent rebuild against the still-current context
+    // (standing in for "a new context was made current after recreation") must recover.
+    gpuPreviewProcessingDestroyLutTextureSet(set);
+    QVERIFY(!gpuPreviewProcessingLutTextureSetReady(set, validConfig));
+
+    gpuPreviewProcessingUpdateLutTextureSet(set, validConfig);
+    QVERIFY(gpuPreviewProcessingLutTextureSetReady(set, validConfig));
+
+    gpuPreviewProcessingDestroyLutTextureSet(set);
+    context.doneCurrent();
 }
 
 void GuiSmokeTest::gpuPreviewProcessingCpuReferenceCorrectsPostWbUndoGreenCast()
