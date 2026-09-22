@@ -250,6 +250,32 @@ function Get-GuiSmokeScreenshotProvenanceV2 {
         if ($null -eq $required.value) { $failures.Add($required.failure) }
     }
 
+    # The GL-window path reports, on the screenshot event itself, the presentation serial
+    # of the frame grabPresentedFramebufferIfActive() actually captured (see
+    # platform/qt/GpuDisplayWindow.cpp paintGL()/grabPresentedFramebufferIfActive()) --
+    # this is the frame's OWN account of what it captured, independent of the
+    # playback_smoke.frame binding derived above. Cross-checking the two closes the gap
+    # where a screenshot could otherwise be attributed to the wrong frame (e.g. queued
+    # telemetry running ahead of what was actually captured). Only meaningful for the
+    # GL-window readback method: other capture methods never populate this field and
+    # legitimately report serial_valid=0, which must not be treated as a failure here.
+    $glWindowPresentedSerial = Get-GuiSmokeObjectPropertyValue $screenshot 'gl_window_presented_serial'
+    $glWindowPresentedSerialValid = Get-GuiSmokeObjectPropertyValue $screenshot 'gl_window_presented_serial_valid'
+    if ([string]$screenshotMethod -eq 'gl_window_framebuffer_readback') {
+        if ($null -eq $glWindowPresentedSerialValid) {
+            $failures.Add('missing-gl-window-presented-serial-valid')
+        }
+        elseif ([long]$glWindowPresentedSerialValid -eq 0) {
+            $failures.Add('gl-window-presented-serial-invalid')
+        }
+        if ($null -eq $glWindowPresentedSerial) {
+            $failures.Add('missing-gl-window-presented-serial')
+        }
+        elseif ($null -ne $requestSerial -and [long]$glWindowPresentedSerial -ne [long]$requestSerial) {
+            $failures.Add('gl-window-presented-serial-mismatch')
+        }
+    }
+
     $manifestIndex = -1
     if ($frameIndex -ge 0 -and $screenshotIndex -gt $frameIndex) {
         $manifestIndex = Find-GuiSmokeLogEventIndex `
@@ -483,6 +509,8 @@ function Get-GuiSmokeScreenshotProvenanceV2 {
         screenshotMethod = $screenshotMethod
         screenshotWidth = $screenshotWidth
         screenshotHeight = $screenshotHeight
+        glWindowPresentedSerial = $glWindowPresentedSerial
+        glWindowPresentedSerialValid = $glWindowPresentedSerialValid
         presentedHistory = @($history)
         effectiveState = [pscustomobject]@{
             visualState = Copy-GuiSmokeStableProperties $visualState @('event')

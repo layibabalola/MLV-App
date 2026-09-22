@@ -24,7 +24,10 @@ function New-V2ProvenanceFixture {
         [int[]]$Frames,
         [string]$TargetHash = 'target-content',
         [int]$TargetRawPrefetch = 1,
-        [int]$Temperature = 6000
+        [int]$Temperature = 6000,
+        [string]$ScreenshotMethod = 'app_internal_presented_pixmap',
+        [Nullable[long]]$GlWindowPresentedSerial = $null,
+        [Nullable[long]]$GlWindowPresentedSerialValid = $null
     )
 
     $lines = [System.Collections.Generic.List[string]]::new()
@@ -44,7 +47,15 @@ function New-V2ProvenanceFixture {
         $lines.Add("[INFO] playback_smoke.render_manifest session=1 index=$presentIndex path_code=3 path_label=full-xy-pre-recon path_source=render_thread processed8_cache_hit=0 raw_prefetch=$rawPrefetch dual_iso_valid=1 rendered_w=452 rendered_h=567 reduced=1")
         $lines.Add("[INFO] interaction_trace event=draw_frame_ready.end serial=$serial display_frame=$frame")
     }
-    $lines.Add('[INFO] interaction_trace event=gui_smoke.screenshot path="frame.png" width=1958 height=818 method=app_internal_presented_pixmap')
+    $screenshotLine =
+        "[INFO] interaction_trace event=gui_smoke.screenshot path=`"frame.png`" width=1958 height=818 method=$ScreenshotMethod"
+    if ($null -ne $GlWindowPresentedSerial) {
+        $screenshotLine += " gl_window_presented_serial=$GlWindowPresentedSerial"
+    }
+    if ($null -ne $GlWindowPresentedSerialValid) {
+        $screenshotLine += " gl_window_presented_serial_valid=$GlWindowPresentedSerialValid"
+    }
+    $lines.Add($screenshotLine)
     return @($lines)
 }
 
@@ -188,6 +199,45 @@ Assert-True $controlledPair.validComparable `
     "Controlled equal-history replay should pass: $($controlledPair.failures -join ', ')"
 Assert-True ($controlledParentProof.presentationIndex -eq 3) 'Controlled parent index should be 3.'
 Assert-True ($controlledParentProof.requestSerial -eq 6) 'Controlled parent serial should be 6.'
+
+# gl_window_presented_serial cross-check (ATTR3-VISUAL-QUALITY-EVIDENCE-1 round 5): the
+# GL-window path reports, on the screenshot event itself, the serial of the frame it
+# actually captured (paintGL()'s promotion, see GpuDisplayWindow.cpp). This must be
+# cross-checked against the bound playback_smoke.frame serial (6, for this fixture) and
+# must fail closed both on a mismatch and on a reported-invalid serial. Other capture
+# methods never populate this field and must not be penalized for serial_valid=0.
+$glWindowMatchLines = @(New-V2ProvenanceFixture `
+    -StartFrame 90 -Frames @(91, 92, 93) -TargetHash 'gl-window-match' `
+    -ScreenshotMethod 'gl_window_framebuffer_readback' `
+    -GlWindowPresentedSerial 6 -GlWindowPresentedSerialValid 1)
+$glWindowMatchProof = Get-GuiSmokeScreenshotProvenance `
+    -OrderedLogLines $glWindowMatchLines -RequestedStartFrame 90
+Assert-True $glWindowMatchProof.validFresh `
+    "A GL-window capture whose presented serial matches the bound frame serial should pass: $($glWindowMatchProof.failures -join ', ')"
+Assert-True ($glWindowMatchProof.glWindowPresentedSerial -eq 6) `
+    'gl_window_presented_serial was not parsed from the screenshot event.'
+
+$glWindowMismatchLines = @(New-V2ProvenanceFixture `
+    -StartFrame 90 -Frames @(91, 92, 93) -TargetHash 'gl-window-mismatch' `
+    -ScreenshotMethod 'gl_window_framebuffer_readback' `
+    -GlWindowPresentedSerial 5 -GlWindowPresentedSerialValid 1)
+Assert-Failure (Get-GuiSmokeScreenshotProvenance `
+    -OrderedLogLines $glWindowMismatchLines -RequestedStartFrame 90) `
+    'gl-window-presented-serial-mismatch'
+
+$glWindowInvalidLines = @(New-V2ProvenanceFixture `
+    -StartFrame 90 -Frames @(91, 92, 93) -TargetHash 'gl-window-invalid' `
+    -ScreenshotMethod 'gl_window_framebuffer_readback' `
+    -GlWindowPresentedSerial 6 -GlWindowPresentedSerialValid 0)
+Assert-Failure (Get-GuiSmokeScreenshotProvenance `
+    -OrderedLogLines $glWindowInvalidLines -RequestedStartFrame 90) `
+    'gl-window-presented-serial-invalid'
+
+# A non-GL-window capture method never populates this field (serial_valid=0 by
+# construction) and must not be flagged -- this fixture omits the field entirely, matching
+# the plain app_internal_presented_pixmap method the base fixture already produces.
+Assert-True $controlledParentProof.validFresh `
+    'A non-GL-window screenshot method must not be penalized for a missing/invalid gl_window_presented_serial.'
 
 $requestFrameMismatchLines = [System.Collections.Generic.List[string]]::new()
 $requestFrameMismatchLines.AddRange([string[]]$controlledParentLines)

@@ -72,27 +72,31 @@ public:
         int retainedDeviceWidth = 0,
         int retainedDeviceHeight = 0,
         int displayWidth = 0,
-        int displayHeight = 0);
+        int displayHeight = 0,
+        quint64 presentationSerial = 0);
     static bool readGpuReconSourceBayer16TextureIfActive(QByteArray *textureBytes,
                                                         int *width,
                                                         int *height,
                                                         QString *reason = nullptr);
-    /* Read back the frame this window's OWN swapchain most recently presented: re-runs
-     * paintGL() against the still-current texture/state and reads the resulting default
-     * framebuffer with glReadPixels immediately afterward, before any further swap can
-     * leave it stale -- QOpenGLWindow::grabFramebuffer() reads the default framebuffer as
-     * it stands at call time, which for this NoPartialUpdate window is the back buffer left
-     * over from a prior frame once a swap has already happened, with content the GL spec
-     * leaves undefined post-swap (measured: a solid black readback despite a successful
-     * present). The re-render is capture-only: it does NOT call updateTextureIfNeeded(), so
-     * a frame submitted-but-not-yet-painted through a real paint event is never promoted
-     * into the capture -- the pixels read back are always exactly what the last REAL
-     * paintGL()+swap drew. Never a screen-region capture. GUI-thread only; call after a
+    /* Read back the frame this window's OWN swapchain is about to present: makes the
+     * context current, calls this window's real paintGL() SYNCHRONOUSLY on the GUI
+     * thread (the same function Qt's own paint-event cycle calls), reads the resulting
+     * default framebuffer with glReadPixels from inside that same paintGL() call --
+     * before any further swap can leave it stale -- and only then swaps. Because
+     * paintGL() runs normally (it is not suppressed or isolated in any way), it promotes
+     * whatever frame is currently pending exactly as a real paint would, for BOTH the
+     * QImage and the GPU-recon texture route; the pixels read back are therefore always
+     * exactly what THIS call just drew and swapped. Owner-visible effect: a capture
+     * presents a pending frame one paint early, rather than waiting for Qt's own next
+     * paint event -- there is no "stale-but-valid" gap, because capture and paint are the
+     * same synchronous operation and never race. Never a screen-region capture: pixels
+     * come only from this window's own default framebuffer. GUI-thread only; call after a
      * completed present. Image size is the window's real device-pixel framebuffer size.
      * presentedSerial, when non-null, receives the presentationSerial (see
-     * presentImageIfActive) of the frame actually captured, and presentedSerialValid
-     * reports whether any real paint has happened yet (false before the first one, or
-     * after clearIfActive()). */
+     * presentImageIfActive / presentGpuPlaybackReconAmazePostWbTextureIfActive) of the
+     * frame this call actually presented, and presentedSerialValid reports whether that
+     * route supplied a real serial (false before any frame has ever been presented, after
+     * clearIfActive(), or when a route did not supply a presentationSerial). */
     static bool grabPresentedFramebufferIfActive(QImage *outImage,
                                                  QString *reason = nullptr,
                                                  quint64 *presentedSerial = nullptr,
@@ -123,7 +127,8 @@ public:
         int retainedDeviceWidth,
         int retainedDeviceHeight,
         int displayWidth,
-        int displayHeight);
+        int displayHeight,
+        quint64 presentationSerial = 0);
     bool readGpuReconSourceBayer16Texture(QByteArray *textureBytes,
                                           int *width,
                                           int *height,
@@ -153,9 +158,16 @@ private:
     bool m_texturePresentationActive;
     bool m_textureDirty;
     quint64 m_pendingPresentationSerial;
+    bool m_pendingPresentationSerialValid;
     quint64 m_presentedSerial;
     bool m_presentedSerialValid;
-    bool m_captureRenderInProgress;
+    /* Set only for the duration of a synchronous grabPresentedFramebufferIfActive()
+     * call: tells paintGL() to glReadPixels into m_captureReadback* right after it
+     * finishes drawing, so the readback and the draw it reads back are the same call. */
+    bool m_captureReadbackRequested;
+    bool m_captureReadbackSucceeded;
+    QImage m_captureReadbackImage;
+    QString m_captureReadbackError;
     bool m_loggedContext;
     bool m_loggedPaint;
     bool m_loggedPresented;

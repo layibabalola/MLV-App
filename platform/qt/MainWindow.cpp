@@ -5035,7 +5035,8 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                         task.gpuPlaybackReconTextureRetainedDeviceWidth,
                         task.gpuPlaybackReconTextureRetainedDeviceHeight,
                         textureDisplaySize.width(),
-                        textureDisplaySize.height() );
+                        textureDisplaySize.height(),
+                        task.requestSerial );
                 gpuPlaybackReconAmazeTexturePresentedByWindow =
                     framePresentedByViewport;
             }
