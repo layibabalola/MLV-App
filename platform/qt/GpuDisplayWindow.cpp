@@ -150,7 +150,8 @@ bool GpuDisplayWindow::installInPreview(QGraphicsView *view)
 }
 
 bool GpuDisplayWindow::presentImageIfActive(const QImage &image,
-                                            const QSize &displaySize)
+                                            const QSize &displaySize,
+                                            quint64 presentationSerial)
 {
     QMutexLocker lock(&g_activeMutex);
     GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
@@ -160,7 +161,7 @@ bool GpuDisplayWindow::presentImageIfActive(const QImage &image,
     {
         // Same (GUI) thread: setPresentedImage deep-copies synchronously, and the
         // destructor runs on this same thread, so there is no race here.
-        win->setPresentedImage(image, displaySize);
+        win->setPresentedImage(image, displaySize, presentationSerial);
     }
     else
     {
@@ -170,8 +171,8 @@ bool GpuDisplayWindow::presentImageIfActive(const QImage &image,
         // the copy() inside setPresentedImage would run too late. The mutex keeps the
         // destructor from freeing `win` between this load and the queued post.
         const QImage owned = image.copy();
-        QMetaObject::invokeMethod(win, [win, owned, displaySize]() {
-                                      win->setPresentedImage(owned, displaySize);
+        QMetaObject::invokeMethod(win, [win, owned, displaySize, presentationSerial]() {
+                                      win->setPresentedImage(owned, displaySize, presentationSerial);
                                   },
                                   Qt::QueuedConnection);
     }
@@ -205,7 +206,8 @@ bool GpuDisplayWindow::presentGpuPlaybackReconAmazePostWbTextureIfActive(
     int retainedDeviceWidth,
     int retainedDeviceHeight,
     int displayWidth,
-    int displayHeight)
+    int displayHeight,
+    quint64 presentationSerial)
 {
     QMutexLocker lock(&g_activeMutex);
     GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
@@ -233,7 +235,8 @@ bool GpuDisplayWindow::presentGpuPlaybackReconAmazePostWbTextureIfActive(
         retainedDeviceWidth,
         retainedDeviceHeight,
         displayWidth,
-        displayHeight);
+        displayHeight,
+        presentationSerial);
 }
 
 bool GpuDisplayWindow::readGpuReconSourceBayer16TextureIfActive(
@@ -271,6 +274,12 @@ GpuDisplayWindow::GpuDisplayWindow(QWindow *parent)
     , m_textureFromGpuRecon(false)
     , m_texturePresentationActive(false)
     , m_textureDirty(false)
+    , m_pendingPresentationSerial(0)
+    , m_pendingPresentationSerialValid(false)
+    , m_presentedSerial(0)
+    , m_presentedSerialValid(false)
+    , m_captureReadbackRequested(false)
+    , m_captureReadbackSucceeded(false)
     , m_loggedContext(false)
     , m_loggedPaint(false)
     , m_loggedPresented(false)
@@ -304,7 +313,8 @@ GpuDisplayWindow::~GpuDisplayWindow()
 }
 
 void GpuDisplayWindow::setPresentedImage(const QImage &image,
-                                         const QSize &displaySize)
+                                         const QSize &displaySize,
+                                         quint64 presentationSerial)
 {
     const QSize previousDisplaySize(m_pendingDisplayWidth,
                                     m_pendingDisplayHeight);
@@ -331,6 +341,8 @@ void GpuDisplayWindow::setPresentedImage(const QImage &image,
     m_pendingDisplayWidth = effectiveDisplaySize.width();
     m_pendingDisplayHeight = effectiveDisplaySize.height();
     m_textureDirty = true;
+    m_pendingPresentationSerial = presentationSerial;
+    m_pendingPresentationSerialValid = presentationSerial != 0;
     if ( !m_loggedSetImage )
     {
         qInfo().nospace() << "gpu_window setPresentedImage: first frame received ("
@@ -353,6 +365,10 @@ void GpuDisplayWindow::clearPresented()
     m_pendingTextureFromGpuRecon = false;
     m_texturePresentationActive = false;
     m_textureDirty = true;
+    m_pendingPresentationSerial = 0;
+    m_pendingPresentationSerialValid = false;
+    m_presentedSerial = 0;
+    m_presentedSerialValid = false;
     update();
 }
 
@@ -370,7 +386,8 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
     int retainedDeviceWidth,
     int retainedDeviceHeight,
     int displayWidth,
-    int displayHeight)
+    int displayHeight,
+    quint64 presentationSerial)
 {
     auto fail = [&](const QString &why) -> bool
     {
@@ -667,6 +684,13 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
     m_textureFromGpuRecon = true;
     m_textureDirty = false;
     m_texturePresentationActive = false;
+    // This texture is already fully written (the AMaZE render above drew straight into
+    // it), unlike the QImage route where the upload is deferred to updateTextureIfNeeded().
+    // The presentation serial is still only promoted to m_presentedSerial by paintGL()
+    // (see paintGL()), so a submit that never reaches a real paint cannot be mistaken for
+    // a presented frame.
+    m_pendingPresentationSerial = presentationSerial;
+    m_pendingPresentationSerialValid = presentationSerial != 0;
     if ( madeCurrent ) doneCurrent();
     if ( !m_loggedSetGpuTexture )
     {
@@ -776,6 +800,86 @@ bool GpuDisplayWindow::readGpuReconSourceBayer16Texture(QByteArray *textureBytes
     if ( reason ) reason->clear();
     return true;
 #endif
+}
+
+bool GpuDisplayWindow::grabPresentedFramebufferIfActive(QImage *outImage,
+                                                        QString *reason,
+                                                        quint64 *presentedSerial,
+                                                        bool *presentedSerialValid)
+{
+    if ( presentedSerial ) *presentedSerial = 0;
+    if ( presentedSerialValid ) *presentedSerialValid = false;
+
+    QMutexLocker lock(&g_activeMutex);
+    GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
+    if ( !win )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU window framebuffer readback requires an active GPU display window");
+        return false;
+    }
+    if ( QThread::currentThread() != win->thread() )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU window framebuffer readback must run on the GUI thread");
+        return false;
+    }
+    if ( !win->isExposed() || !win->isValid() )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU window framebuffer readback requires an exposed, valid window");
+        return false;
+    }
+
+    QOpenGLContext *glContext = win->context();
+    if ( !glContext )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU window framebuffer readback requires an initialized OpenGL context");
+        return false;
+    }
+    const bool needsCurrent = QOpenGLContext::currentContext() != glContext;
+    const bool madeCurrent = needsCurrent ? (win->makeCurrent(), true) : false;
+
+    // Call this window's real paintGL() SYNCHRONOUSLY, on the GUI thread, exactly as Qt's
+    // own paint-event cycle would -- it is not suppressed or isolated in any way, so it
+    // promotes whatever frame is currently pending (QImage upload or GPU-recon texture,
+    // whichever route is pending) exactly as a real paint would. Reading naively via
+    // QOpenGLWindow::grabFramebuffer() instead would see the BACK buffer left over from a
+    // PRIOR frame once a swap has already happened (as it always has by the time a
+    // screenshot is requested) -- content the GL spec leaves undefined post-swap, measured
+    // here as a solid black readback despite a successful present -- so paintGL() draws
+    // fresh into that framebuffer, reads it back from the END OF THAT SAME paintGL() call
+    // (see m_captureReadbackRequested there), and only then is it swapped, below. Because
+    // the draw and the readback are literally the same call, there is no capture/paint race
+    // to isolate: whatever paintGL() just drew is unconditionally what gets read back and
+    // then swapped, and the presentation serial promoted inside that same call (also see
+    // paintGL()) identifies exactly that content. Owner-visible effect: a capture can
+    // present a pending frame one paint earlier than Qt's own event loop otherwise would.
+    win->m_captureReadbackRequested = true;
+    win->m_captureReadbackSucceeded = false;
+    win->m_captureReadbackImage = QImage();
+    win->m_captureReadbackError.clear();
+    win->paintGL();
+    win->m_captureReadbackRequested = false;
+
+    if ( presentedSerial ) *presentedSerial = win->m_presentedSerial;
+    if ( presentedSerialValid ) *presentedSerialValid = win->m_presentedSerialValid;
+
+    if ( !win->m_captureReadbackSucceeded )
+    {
+        if ( madeCurrent ) win->doneCurrent();
+        if ( reason ) *reason = win->m_captureReadbackError.isEmpty()
+            ? QStringLiteral("GPU window framebuffer readback failed")
+            : win->m_captureReadbackError;
+        return false;
+    }
+
+    // The capture-triggered paintGL() call above genuinely drew and read back a frame --
+    // swap now so the window's own swapchain reflects exactly what was just captured,
+    // making this a real present rather than a side-channel readback.
+    glContext->swapBuffers(win);
+    if ( madeCurrent ) win->doneCurrent();
+
+    if ( outImage ) *outImage = win->m_captureReadbackImage;
+    if ( reason ) reason->clear();
+    return true;
 }
 
 void GpuDisplayWindow::initializeGL()
@@ -901,6 +1005,11 @@ void GpuDisplayWindow::updateTextureIfNeeded()
     m_pendingTextureWidth = uploadImage.width();
     m_pendingTextureHeight = uploadImage.height();
     m_texturePresentationActive = false;
+
+    // Presentation-serial promotion happens once, uniformly, in paintGL() -- for both
+    // this QImage upload and the GPU-recon texture route (which never reaches this
+    // function at all, since its texture write happens at submit time) -- so it always
+    // reflects whichever route's content m_texture currently holds. See paintGL().
 }
 
 void GpuDisplayWindow::paintGL()
@@ -916,10 +1025,20 @@ void GpuDisplayWindow::paintGL()
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
+    // Always runs, whether this paintGL() call came from Qt's own paint-event cycle or
+    // synchronously from grabPresentedFramebufferIfActive() -- a capture is a real paint,
+    // so it promotes pending state exactly as any other paint would (see the header doc
+    // comment on grabPresentedFramebufferIfActive for the owner-visible effect).
     updateTextureIfNeeded();
     if ( !m_texture || !m_program || width() <= 0 || height() <= 0 )
     {
         m_texturePresentationActive = false;
+        m_presentedSerialValid = false;
+        if ( m_captureReadbackRequested )
+        {
+            m_captureReadbackSucceeded = false;
+            m_captureReadbackError = QStringLiteral("GPU window framebuffer readback found no presented texture");
+        }
         if ( !m_loggedPaint )
         { qInfo() << "gpu_window paintGL: no texture/program yet (clearing)."; m_loggedPaint = true; }
         return;
@@ -958,6 +1077,15 @@ void GpuDisplayWindow::paintGL()
     m_program->release();
     m_texturePresentationActive = true;
 
+    // Promote whichever route (QImage upload or GPU-recon texture) most recently
+    // supplied pending state into "presented" -- runs for EVERY real paintGL() draw,
+    // including a capture-triggered one (see grabPresentedFramebufferIfActive), so the
+    // presented serial always identifies exactly the content m_texture holds right now,
+    // for both routes, not only the QImage path. presentedSerialValid is false when the
+    // route that produced this content did not supply a presentationSerial.
+    m_presentedSerial = m_pendingPresentationSerial;
+    m_presentedSerialValid = m_pendingPresentationSerialValid;
+
     if ( !m_loggedPresented )
     {
         qInfo().nospace() << "gpu_window paintGL: presented a frame texture ("
@@ -965,6 +1093,41 @@ void GpuDisplayWindow::paintGL()
                           << ", display=" << displayWidth
                           << "x" << displayHeight << ").";
         m_loggedPresented = true;
+    }
+
+    // Capture readback: grabPresentedFramebufferIfActive() sets m_captureReadbackRequested
+    // and calls this paintGL() directly and synchronously, then swaps afterward. Reading
+    // back here, at the end of the very call that just drew, means the pixels captured are
+    // always exactly what this call presented -- never a stale back buffer, never a frame
+    // one step removed from what m_presentedSerial above identifies.
+    if ( m_captureReadbackRequested )
+    {
+        if ( fbw <= 0 || fbh <= 0 )
+        {
+            m_captureReadbackSucceeded = false;
+            m_captureReadbackError = QStringLiteral("GPU window framebuffer readback found a non-positive window size");
+        }
+        else
+        {
+            QImage grabbed(fbw, fbh, QImage::Format_RGBA8888);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, fbw, fbh, GL_RGBA, GL_UNSIGNED_BYTE, grabbed.bits());
+            const GLenum readbackError = glGetError();
+            if ( readbackError != GL_NO_ERROR )
+            {
+                m_captureReadbackSucceeded = false;
+                m_captureReadbackError = QStringLiteral(
+                    "glReadPixels failed for GPU window framebuffer readback with GL error 0x%1")
+                    .arg(static_cast<unsigned int>(readbackError), 0, 16);
+            }
+            else
+            {
+                // GL reads bottom-up; QImage rows are top-down.
+                m_captureReadbackImage = grabbed.flipped(Qt::Vertical);
+                m_captureReadbackSucceeded = true;
+                m_captureReadbackError.clear();
+            }
+        }
     }
 
     // Diagnostic (env-gated MLVAPP_WINDOW_READBACK_DIR): read back the ACTUAL rendered

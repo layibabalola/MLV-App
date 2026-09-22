@@ -195,7 +195,8 @@ def _make_fixture_repo(path: Path) -> list[str]:
         "# fixture stand-in for run-release-gui-smoke.ps1\n"
         ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
         "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
-        ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n",
+        ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+        ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n",
         encoding="utf-8",
     )
     (path / "tools" / "profiling" / "gui-smoke-screenshot-provenance.ps1").write_text(
@@ -206,6 +207,9 @@ def _make_fixture_repo(path: Path) -> list[str]:
     )
     (path / "tools" / "profiling" / "gui-smoke-process-boundary.psm1").write_text(
         "# fixture stand-in sibling (imported directly by the runner).\n", encoding="utf-8"
+    )
+    (path / "tools" / "profiling" / "gui-smoke-color-artifact-scan.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
     )
     shas = []
     for index, text in enumerate(("first", "second")):
@@ -1907,13 +1911,17 @@ def _make_fixture_repo_missing_closure_sibling(path: Path) -> list[str]:
         "# fixture stand-in for run-release-gui-smoke.ps1\n"
         ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
         "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
-        ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n",
+        ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+        ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n",
         encoding="utf-8",
     )
     (path / "tools" / "profiling" / "gui-smoke-screenshot-provenance.ps1").write_text(
         "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
     )
     (path / "tools" / "profiling" / "provenance-stamp.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    (path / "tools" / "profiling" / "gui-smoke-color-artifact-scan.ps1").write_text(
         "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
     )
     # Deliberately OMITTED: gui-smoke-process-boundary.psm1.
@@ -2227,22 +2235,26 @@ class StageFixtureJobCommittedBytesWiringTests(_PwshCase):
 
 
 # --------------------------------------------------------------------------------------------
-# ATTR3-SMOKE-RUNNER-DEPS-1: the runner is not standalone -- it dot-sources two siblings and
+# ATTR3-SMOKE-RUNNER-DEPS-1: the runner is not standalone -- it dot-sources three siblings and
 # imports a module, all resolved through $PSScriptRoot at runtime. Round 1 staged the runner
 # alone (ATTR3-SMOKE-RUNNER-PIN-1) and Bachelor could not even launch it: PresentMon never saw
-# a target and PRESENTMON_TIMEOUT masked the real cause. The full dependency CLOSURE is now
-# derived mechanically (Resolve-AttrCudaSmokeRunnerClosure), staged into one content-addressed
-# subdirectory (smoke-runner-<digest16>), and every file in it is hash-pinned before launch.
+# a target and PRESENTMON_TIMEOUT masked the real cause. The full dependency CLOSURE is an
+# explicitly pinned five-file manifest (Get-AttrCudaSmokeRunnerClosureManifest, resolved via
+# Resolve-AttrCudaSmokeRunnerClosure) -- never mechanically derived or scanned for -- staged into
+# one content-addressed subdirectory (smoke-runner-<digest16>), and every file in it is
+# hash-pinned before launch.
 # --------------------------------------------------------------------------------------------
 
-# Expected discovery order for the shared fixture repo's runner (see _make_fixture_repo): the
-# root first, then each $PSScriptRoot-relative load in the order the regex finds it on the
-# runner's own line, then the one dependency reached by recursion (through the .psm1).
+# Expected order for the shared fixture repo's runner (see _make_fixture_repo): the pinned,
+# explicit manifest order from Get-AttrCudaSmokeRunnerClosureManifest -- root first, then each
+# sibling in the order it is listed in the manifest, never mechanically discovered or scanned
+# for (ATTR3-SMOKE-RUNNER-DEPS-1 round 3, NARROW BY REDESIGN).
 SMOKE_RUNNER_CLOSURE_NAMES = (
     "run-release-gui-smoke.ps1",
     "gui-smoke-screenshot-provenance.ps1",
     "provenance-stamp.ps1",
     "gui-smoke-process-boundary.psm1",
+    "gui-smoke-color-artifact-scan.ps1",
 )
 
 
@@ -2251,7 +2263,7 @@ class SmokeRunnerClosureManifestTests(_PwshCase):
     """Get-AttrCudaSmokeRunnerClosureManifest: the EXPLICIT, pinned list that replaced discovery
     (ATTR3-SMOKE-RUNNER-DEPS-1 round 3, NARROW BY REDESIGN)."""
 
-    def test_the_manifest_is_the_four_pinned_repo_relative_paths_in_order(self) -> None:
+    def test_the_manifest_is_the_five_pinned_repo_relative_paths_in_order(self) -> None:
         proc = self.run_with_module(
             "Get-AttrCudaSmokeRunnerClosureManifest | ForEach-Object { Write-Output \"PATH=$_\" }\n"
         )
@@ -2264,6 +2276,7 @@ class SmokeRunnerClosureManifestTests(_PwshCase):
                 "tools/profiling/gui-smoke-screenshot-provenance.ps1",
                 "tools/profiling/provenance-stamp.ps1",
                 "tools/profiling/gui-smoke-process-boundary.psm1",
+                "tools/profiling/gui-smoke-color-artifact-scan.ps1",
             ],
         )
 
@@ -2370,7 +2383,11 @@ class ClosureCompletenessTests(_PwshCase):
         _git_run(["config", "user.name", "attr3 census fixture"], path)
         (path / "tools" / "profiling").mkdir(parents=True)
         (path / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(runner_text, encoding="utf-8")
-        for sibling in ("gui-smoke-screenshot-provenance.ps1", "provenance-stamp.ps1"):
+        for sibling in (
+            "gui-smoke-screenshot-provenance.ps1",
+            "provenance-stamp.ps1",
+            "gui-smoke-color-artifact-scan.ps1",
+        ):
             (path / "tools" / "profiling" / sibling).write_text(f"# {sibling} stand-in\n", encoding="utf-8")
         (path / "tools" / "profiling" / "gui-smoke-process-boundary.psm1").write_text(
             "# gui-smoke-process-boundary.psm1 stand-in\n", encoding="utf-8"
@@ -2395,12 +2412,13 @@ class ClosureCompletenessTests(_PwshCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("NO_THROW", proc.stdout)
 
-    def test_all_four_pinned_dependency_loads_classify_cleanly(self) -> None:
+    def test_all_five_pinned_dependency_loads_classify_cleanly(self) -> None:
         repo = self.tmp / "repo"
         runner = (
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
         )
         sha = self._repo_with_runner_text(repo, runner)
         proc = self._assert_complete(repo, sha)
@@ -2414,6 +2432,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             ". 'C:\\evil\\provenance-stamp.ps1'\n"
         )
         sha = self._repo_with_runner_text(repo, runner)
@@ -2426,6 +2445,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             ". (Join-Path $root 'provenance-stamp.ps1')\n"
         )
         sha = self._repo_with_runner_text(repo, runner)
@@ -2438,6 +2458,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             ". (Join-Path $PSScriptRoot '..\\evil\\provenance-stamp.ps1')\n"
         )
         sha = self._repo_with_runner_text(repo, runner)
@@ -2452,6 +2473,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             '& "$PSScriptRoot\\helper"\n'
         )
         sha = self._repo_with_runner_text(repo, runner)
@@ -2464,6 +2486,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "Import-Module $PSScriptRoot/modx\n"
         )
         sha = self._repo_with_runner_text(repo, runner)
@@ -2476,6 +2499,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "$name = 'Get-Process'\n"
             "& $name\n"
         )
@@ -2509,6 +2533,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "function f([scriptblock]$p) { & $p 1 }\n"
         )
         sha = self._repo_with_runner_text(repo, runner)
@@ -2522,6 +2547,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "$predicate = { param($x) $x -eq 1 }\n"
             "& $predicate 1\n"
         )
@@ -2538,6 +2564,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "$cmd = 'Get-Process'\n"
             "& $cmd\n"
         )
@@ -2551,6 +2578,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "Add-Type -AssemblyName System.Drawing\n"
         )
         sha = self._repo_with_runner_text(repo, runner)
@@ -2566,6 +2594,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "Add-Type -Path 'C:\\some\\extra.cs'\n"
         )
         sha = self._repo_with_runner_text(repo, runner)
@@ -2578,6 +2607,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "$detectorPwsh = 'pwsh.exe'\n"
             "$detectorArgs = @()\n"
             "$detectorOut = & $detectorPwsh @detectorArgs 2>&1\n"
@@ -2594,6 +2624,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "$detectorPwsh = 'pwsh.exe'\n"
             "$detectorArgs = @()\n"
             "$detectorOut = & $detectorPwsh @detectorArgs\n"  # no trailing 2>&1
@@ -2611,6 +2642,7 @@ class ClosureCompletenessTests(_PwshCase):
         runner = (
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "Microsoft.PowerShell.Core\\Import-Module "
             "(Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
         )
@@ -2627,6 +2659,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "Microsoft.PowerShell.Core\\Import-Module (Join-Path $PSScriptRoot 'x.psm1')\n"
         )
         sha = self._repo_with_runner_text(repo, runner)
@@ -2652,6 +2685,7 @@ class ClosureCompletenessTests(_PwshCase):
                     ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
                     ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
                     "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+                    ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
                     + alias_line
                 )
                 sha = self._repo_with_runner_text(repo, runner)
@@ -2669,6 +2703,7 @@ class ClosureCompletenessTests(_PwshCase):
                     ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
                     ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
                     "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+                    ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
                     f"Add-Type {abbreviation} 'C:\\some\\extra.cs'\n"
                 )
                 sha = self._repo_with_runner_text(repo, runner)
@@ -2684,6 +2719,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "$startInfo = [System.Diagnostics.ProcessStartInfo]::new()\n"
             "$process = [System.Diagnostics.Process]::Start($startInfo)\n"
         )
@@ -2700,6 +2736,7 @@ class ClosureCompletenessTests(_PwshCase):
             ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
             ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
             "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+            ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
             "$otherStartInfo = [System.Diagnostics.ProcessStartInfo]::new()\n"
             "$process = [System.Diagnostics.Process]::Start($otherStartInfo)\n"
         )
@@ -3062,8 +3099,10 @@ class SmokeRunnerStageJobTests(_PwshCase):
     cache DIRECTORY out, every file's sha256 == its committed blob.
 
     ATTR3-SMOKE-RUNNER-DEPS-1: staging the runner alone left Bachelor unable to launch it at all
-    (round 1 PRESENTMON_TIMEOUT). The closure is derived mechanically from the shared fixture
-    repo's real $PSScriptRoot loads (see _make_fixture_repo), never hand-listed here.
+    (round 1 PRESENTMON_TIMEOUT). The closure is the explicitly pinned five-file manifest
+    (Get-AttrCudaSmokeRunnerClosureManifest) -- never mechanically derived or scanned for; the
+    shared fixture repo's $PSScriptRoot loads (see _make_fixture_repo) exist to prove the pinned
+    list still matches what the real files load, not to discover the list.
 
     No side file, no inbox: the emitted job carries every closure file's bytes INLINE (base64),
     exactly as the single-file stager did (ATTR3-SMOKE-RUNNER-PIN-1 round 2) -- there is no inbox

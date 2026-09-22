@@ -39,6 +39,10 @@ public:
         float zebraUnderThreshold;
         float zebraOverThreshold;
         GpuPreviewProcessingConfig previewProcessing;
+        // Identity of the frame being presented (e.g. RenderFrameThread's requestSerial),
+        // forwarded to GpuDisplayWindow so it can record which frame it actually swapped
+        // in (see GpuDisplayWindow::grabPresentedFramebufferIfActive's presentedSerial).
+        quint64 presentationSerial;
 
         PresentationOptions()
             : samplingMode(SamplingLinear)
@@ -46,6 +50,7 @@ public:
             , zebraUnderThreshold(preview_zebra::kUnderThresholdNormalized)
             , zebraOverThreshold(preview_zebra::kOverThresholdNormalized)
             , previewProcessing()
+            , presentationSerial(0)
         {
         }
     };

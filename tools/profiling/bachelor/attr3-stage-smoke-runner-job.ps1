@@ -6,13 +6,14 @@
 # (ATTR3-SMOKE-RUNNER-DEPS-1).
 #
 # THE DEFECT THIS CLOSES. ATTR3-SMOKE-RUNNER-PIN-1 staged the runner alone. Bachelor still could
-# not launch it: run-release-gui-smoke.ps1 dot-sources gui-smoke-screenshot-provenance.ps1 and
-# provenance-stamp.ps1, and imports gui-smoke-process-boundary.psm1, all resolved through
-# $PSScriptRoot at runtime -- none of the three was ever staged, so the runner died at its own
-# first dot-source line ("...gui-smoke-screenshot-provenance.ps1 is not recognized"). The app
-# never launched; PresentMon never saw its target and never exited; PRESENTMON_TIMEOUT masked
-# the real cause. The fix stages the runner's WHOLE closure together, under their original file
-# names, in one directory, so $PSScriptRoot resolves every one of them.
+# not launch it: run-release-gui-smoke.ps1 dot-sources gui-smoke-screenshot-provenance.ps1,
+# gui-smoke-color-artifact-scan.ps1 and provenance-stamp.ps1, and imports
+# gui-smoke-process-boundary.psm1, all resolved through $PSScriptRoot at runtime -- none of the
+# four was ever staged, so the runner died at its own first dot-source line
+# ("...gui-smoke-screenshot-provenance.ps1 is not recognized"). The app never launched;
+# PresentMon never saw its target and never exited; PRESENTMON_TIMEOUT masked the real cause. The
+# fix stages the runner's WHOLE closure together, under their original file names, in one
+# directory, so $PSScriptRoot resolves every one of them.
 #
 # THE CLOSURE IS AN EXPLICIT, PINNED MANIFEST -- NEVER DISCOVERED (ATTR3-SMOKE-RUNNER-DEPS-1
 # round 3, NARROW BY REDESIGN; contract restated honestly round 4, PR #144). Round 1 and round 2
@@ -24,7 +25,7 @@
 # Assert-AttrCudaClosureComplete is the generator-time REGRESSION TRIPWIRE that keeps the pinned
 # list honest -- an AST census over each manifest file's own committed text, throwing
 # ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE the moment a load site cannot be classified. It is a
-# tripwire over these four reviewed files, not a proof that covers every future edit; the runtime
+# tripwire over these five reviewed files, not a proof that covers every future edit; the runtime
 # path (playback-attr-3-cuda-job.ps1's SMOKE_RUN_FAILED branch) is the real safety property for
 # whatever it cannot see. Full contract at AttrCudaArtifacts.psm1, above the manifest.
 #
