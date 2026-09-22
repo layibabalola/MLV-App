@@ -42,13 +42,35 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ClipId,
 
-    [int]$TimeoutSec = 1800
+    # ATTR3-FOOTAGE-STAGE-1 round 6 (sol major / astra major: binding-time output). [int]$TimeoutSec
+    # used to let PowerShell's OWN parameter binder attempt the string->int conversion before this
+    # script's body ever ran -- exactly the same class of leak -ClipId's own ValidatePattern used to
+    # cause (see that parameter's own comment above), except a type-constraint conversion failure
+    # cannot be avoided by simply removing an attribute: the binder itself performs it. [string]
+    # accepts anything (an int->string conversion, the ONLY direction the binder ever performs here,
+    # never fails and never carries a leaked value); the actual int conversion and range check happen
+    # in the BODY below, where a failure is a fixed token that never echoes $TimeoutSec.
+    [string]$TimeoutSec = '1800'
 )
 
 $ErrorActionPreference = 'Stop'
 
 if ($ClipId -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
     throw 'ATTR3_FOOTAGE_STAGE_CLIP_ID_INVALID -ClipId does not match the required id pattern'
+}
+
+# ATTR3-FOOTAGE-STAGE-1 round 6 (sol blocker / astra major: sweep staleness threshold). A "sane
+# positive minimum" enforced here, in the body, rather than via a [ValidateRange] attribute on the
+# now-[string] parameter above (an attribute cannot range-check a string; it would either not fire
+# at all or reintroduce the exact binder-echo problem this parameter's own type change exists to
+# avoid). $MinAttr3FootageStageTimeoutSec is the one place both the CLI's own accepted range and the
+# staleness sweeps' floor (Attr3FootageStageJob.psm1, AttrCudaOwnerFootage.psm1) are meant to agree
+# on; a caller passing zero, a negative number, or anything not a plain integer gets a fixed token,
+# never the offending value.
+$MinAttr3FootageStageTimeoutSec = 30
+$timeoutSecValue = 0
+if (-not [int]::TryParse($TimeoutSec, [ref]$timeoutSecValue) -or $timeoutSecValue -lt $MinAttr3FootageStageTimeoutSec) {
+    throw "ATTR3_FOOTAGE_STAGE_TIMEOUT_SEC_INVALID -TimeoutSec must be an integer >= $MinAttr3FootageStageTimeoutSec"
 }
 
 # ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 1): -AgentShare and -AgentRootOnHost used to be
@@ -75,7 +97,7 @@ Import-Module (Join-Path $PSScriptRoot 'Attr3FootagePresenceJob.psm1') -Force
 # every run, before anything else, sweep it -- see Remove-AttrCudaOwnerFootageStaleAttempts
 # (AttrCudaOwnerFootage.psm1) for exactly what is and is not touched.
 $shareStageRoot = Join-Path $AgentShare 'footage-stage'
-[void](Remove-AttrCudaOwnerFootageStaleAttempts -TrustedRoot $shareStageRoot -StaleAfterSec $TimeoutSec)
+[void](Remove-AttrCudaOwnerFootageStaleAttempts -TrustedRoot $shareStageRoot -StaleAfterSec $timeoutSecValue)
 
 # ATTR3-FOOTAGE-STAGE-1 round 3 (sol BLOCKER, astra MAJOR): -RepoRoot used to be a public
 # parameter, so a caller-supplied alternate tree could supply a replacement resolver and
@@ -213,7 +235,7 @@ try {
     # Write-Host -- the Information stream (6), not this call's own success-stream return value --
     # including a "submitted <id> -> <path>" line that names a real agent-share path. `6>$null`
     # discards that stream at the call site so it never reaches this process's own console.
-    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec 6>$null
+    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $timeoutSecValue 6>$null
     $presentIndexArray = @(Get-Attr3FootagePresentPartIndexes -Stdout $presenceResult.stdout -ClipId $ClipId)
 } catch {
     # Presence is an optimization, not a correctness requirement -- if the preflight itself could
@@ -262,7 +284,7 @@ foreach ($part in $needsWork) {
 #        (round 3) means a retried invocation never collides with a retained receipt from an
 #        earlier attempt's own submission (UMRUN_JOBID_IN_USE).
 $stageOutDir = Join-Path ([IO.Path]::GetTempPath()) ("attr3-footage-stage-job-$([guid]::NewGuid().ToString('N'))")
-$job = New-Attr3FootageStageJob -ClipId $ClipId -Parts $needsWork -OutDir $stageOutDir -AgentRoot $AgentRootOnHost -StaleResidueAfterSec $TimeoutSec
+$job = New-Attr3FootageStageJob -ClipId $ClipId -Parts $needsWork -OutDir $stageOutDir -AgentRoot $AgentRootOnHost -StaleResidueAfterSec $timeoutSecValue
 $shareStageDir = Join-Path $shareStageRoot $job.jobId
 
 # --- 5+6. TRANSFER the missing parts to the agent share, then SUBMIT the pre-built job through
@@ -299,7 +321,7 @@ try {
     # (and UmRunDrop.psm1's) own Write-Host progress lines -- see the presence preflight's own
     # call above for why that stream, left unredirected, can print a real agent-share path.
     try {
-        $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec 6>$null
+        $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $timeoutSecValue 6>$null
     } catch {
         throw "ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED job could not be submitted or its result could not be retrieved"
     }

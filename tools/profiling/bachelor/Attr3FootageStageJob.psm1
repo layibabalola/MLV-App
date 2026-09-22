@@ -75,12 +75,16 @@ function New-Attr3FootageStageJob {
     TARGET_VOLUME_VERIFY_<Test-AttrCudaFootagePart status> (the same-volume partial copy failed
     verification), PLACED_VERIFY_<status> (the post-rename re-hash at the spec path failed and the
     target IT just placed was successfully removed, round 4), PLACED_VERIFY_FAILED_TARGET_RETAINED
-    (round 5: that removal itself could not be verified -- a fixed-name residue marker is left
-    beside the retained bytes so a LATER run recognises them as this tool's own known-bad residue,
-    not a stranger's file, instead of refusing forever with TARGET_CONFLICT), STAGE_SLOT_INVALID,
-    STAGED_PATH_UNSAFE (round 4: the staged file's own leaf is a reparse point) or STAGED_<status>
-    (the staged copy itself failed verification); the
-    overall result is FOOTAGE_STAGED (exit 0) when every part is PLACED or ALREADY_PRESENT, else
+    (round 5: that removal itself could not be verified -- a fixed-name residue marker recording
+    the retained bytes' own length/sha256/last-write-time/jobId, round 6, is left beside them so a
+    LATER run recognises them as this tool's own known-bad residue, not a stranger's file, ONLY
+    when the target's CURRENT identity still matches every recorded field exactly -- otherwise that
+    later run refuses TARGET_CONFLICT and leaves both files untouched, instead of trusting the
+    marker's mere presence), RESIDUE_MARKER_REMOVAL_FAILED (round 6: a later run's own recovery
+    successfully removed the retained target its marker authorized, but could not then verify the
+    marker itself was removed), STAGE_SLOT_INVALID, STAGED_PATH_UNSAFE (round 4: the staged file's
+    own leaf is a reparse point) or STAGED_<status> (the staged copy itself failed verification);
+    the overall result is FOOTAGE_STAGED (exit 0) when every part is PLACED or ALREADY_PRESENT, else
     FOOTAGE_STAGE_REFUSED (exit 1). No exception's own text ever reaches this job's output, since
     it can contain a real path.
     #>
@@ -109,6 +113,14 @@ function New-Attr3FootageStageJob {
         # could legitimately still be writing it. attr3-footage-stage.ps1 passes its own
         # -TimeoutSec (the real agent job timeout) here; the default is this function's own
         # fallback for a caller that does not.
+        # ATTR3-FOOTAGE-STAGE-1 round 6 (sol blocker / astra major): [ValidateRange] rejects zero
+        # and negative values outright -- attr3-footage-stage.ps1's own body-level TimeoutSec
+        # validation already enforces the same minimum before this ever gets called from the CLI,
+        # but this function has its own trusted-caller contract to uphold regardless of who calls
+        # it. The emitted job's own sweep ALSO floors the effective threshold independently of
+        # whatever value passes this check (see $MinStaleResidueFloorSec in the template below) --
+        # two separate defenses, not one relying on the other.
+        [ValidateRange(30, [int]::MaxValue)]
         [int]$StaleResidueAfterSec = 1800,
 
         # ATTR3-FOOTAGE-STAGE-1 round 4: a TEST-ONLY hook, never reachable from the production
@@ -138,7 +150,18 @@ function New-Attr3FootageStageJob {
         # on winning a real race. Proves the cleanup-ownership fix: since the local partial's own
         # [IO.FileMode]::CreateNew call never even runs in this branch, nothing this job did not
         # itself create may ever be deleted when this failure is reported.
-        [int]$TestHookForceLocalSourceOpenFailurePartIndex = -1
+        [int]$TestHookForceLocalSourceOpenFailurePartIndex = -1,
+
+        # ATTR3-FOOTAGE-STAGE-1 round 6: a fourth TEST-ONLY hook, same non-reachability guarantee
+        # as the three above. -1 (the default) is inert. A test that passes a real index gets a job
+        # whose emitted body SKIPS its own Remove-Item call on the residue marker during an
+        # identity-authorized recovery for that one part -- modelling a marker removal that
+        # genuinely fails (a lock, a permissions fault) the same way -TestHookForceRemovalFailure-
+        # PartIndex already models a failed TARGET removal, without depending on winning a real
+        # race or holding a cross-process lock from a test. Proves the RESIDUE_MARKER_REMOVAL_FAILED
+        # token is reported, rather than silently swallowed, when the recovery itself succeeds but
+        # the marker that authorized it does not go away.
+        [int]$TestHookForceMarkerRemovalFailurePartIndex = -1
     )
 
     if ($Parts.Count -eq 0) {
@@ -247,6 +270,9 @@ $TestHookForceRemovalFailurePartIndex = __TEST_HOOK_FORCE_REMOVAL_FAILURE_PART_I
 # Test-only hook (round 5): -1 unless a test explicitly built this job with
 # -TestHookForceLocalSourceOpenFailurePartIndex set -- see New-Attr3FootageStageJob's own header.
 $TestHookForceLocalSourceOpenFailurePartIndex = __TEST_HOOK_FORCE_LOCAL_SOURCE_OPEN_FAILURE_PART_INDEX__
+# Test-only hook (round 6): -1 unless a test explicitly built this job with
+# -TestHookForceMarkerRemovalFailurePartIndex set -- see New-Attr3FootageStageJob's own header.
+$TestHookForceMarkerRemovalFailurePartIndex = __TEST_HOOK_FORCE_MARKER_REMOVAL_FAILURE_PART_INDEX__
 $StageDir = Join-Path $AgentRoot ("footage-stage\" + $JobId)
 
 function Say([string]$Message) { Write-Output "[$JobId] $Message" }
@@ -268,19 +294,41 @@ Say "START clip=$ClipId parts=$PartCount"
 #        this same job does on its own PLACED_VERIFY failure) leaves it there forever; nothing
 #        else with a DIFFERENT jobId ever revisits that exact target directory again. Only an
 #        entry matching this tool's OWN neutral partial-name pattern for THIS part's index, and
-#        older than $StaleResidueAfterSec, is ever touched -- new enough to still be a legitimate
-#        concurrent placer's in-flight write is left alone.
+#        older than the effective threshold below, is ever touched -- new enough to still be a
+#        legitimate concurrent placer's in-flight write is left alone.
+#        ATTR3-FOOTAGE-STAGE-1 round 6 (sol blocker, astra blocker: sweep order and grammar). Three
+#        fixes, none of which the round 5 version had: (1) the target directory's OWN chain --
+#        drive root down to and including $sweepTargetDir itself -- is now proved link-free before
+#        a single entry is enumerated; a junction planted at or above it is refused, and this
+#        part's sweep is skipped entirely (the per-part loop below reports TARGET_PATH_UNSAFE for
+#        it the same way it always has), never followed. (2) the name pattern matched is now the
+#        EXACT grammar this function's own local-partial name below can ever produce --
+#        ".attr3-footage-stage-<jobId>-part<index>.partial" where <jobId> is itself
+#        "attr3-footage-stage-<clipId>-<12 lowercase hex>-<10 lowercase hex>" -- never a bare `.+`
+#        wildcard that would also match an unrelated lookalike this tool never wrote. (3) the
+#        staleness threshold floors at $MinStaleResidueFloorSec regardless of the caller-supplied
+#        $StaleResidueAfterSec (which New-Attr3FootageStageJob's own [ValidateRange] already keeps
+#        positive) -- so a small-but-technically-valid caller timeout can never make this sweep
+#        treat a still-legitimate concurrent attempt as stale.
+$MinStaleResidueFloorSec = 300
+$effectiveStaleResidueAfterSec = [Math]::Max($StaleResidueAfterSec, $MinStaleResidueFloorSec)
 foreach ($sweepPart in $RawParts) {
     $sweepIndex = [int]$sweepPart.index
     $sweepDecoded = Read-AttrCudaBase64Payload -Base64 $sweepPart.pathBase64
     $sweepTargetPath = ConvertTo-AttrCudaUtf8String -Bytes $sweepDecoded.bytes
     $sweepTargetDir = [IO.Path]::GetDirectoryName($sweepTargetPath)
     if ([string]::IsNullOrEmpty($sweepTargetDir) -or -not (Test-Path -LiteralPath $sweepTargetDir -PathType Container -ErrorAction SilentlyContinue)) { continue }
-    $staleLocalPartialPattern = '^\.attr3-footage-stage-.+-part' + $sweepIndex + '\.partial$'
+    $sweepDriveRoot = [IO.Path]::GetPathRoot($sweepTargetPath)
+    try {
+        [void](Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $sweepDriveRoot -Path $sweepTargetDir)
+    } catch {
+        continue
+    }
+    $staleLocalPartialPattern = '^\.attr3-footage-stage-attr3-footage-stage-[A-Za-z0-9][A-Za-z0-9_.-]{0,63}-[0-9a-f]{12}-[0-9a-f]{10}-part' + $sweepIndex + '\.partial$'
     $staleLocalPartials = @(Get-ChildItem -LiteralPath $sweepTargetDir -File -Force -ErrorAction SilentlyContinue |
         Where-Object {
             $_.Name -match $staleLocalPartialPattern -and
-            ((Get-Date).ToUniversalTime() - $_.LastWriteTimeUtc).TotalSeconds -gt $StaleResidueAfterSec
+            ((Get-Date).ToUniversalTime() - $_.LastWriteTimeUtc).TotalSeconds -gt $effectiveStaleResidueAfterSec
         })
     foreach ($stalePartial in $staleLocalPartials) {
         try { Remove-Item -LiteralPath $stalePartial.FullName -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
@@ -405,15 +453,47 @@ foreach ($rawPart in $RawParts) {
             Record-PartResult -Index $index -Status 'ALREADY_PRESENT' -CleanupPath $stagedPath
             continue
         }
-        # ATTR3-FOOTAGE-STAGE-1 round 5 (sol blocker, publish recovery): a mismatched target is
-        # not automatically a stranger's file to refuse forever -- if THIS tool's own fixed-name
-        # residue marker sits right next to it, an EARLIER attempt's own post-publish verify
-        # already found and tried (and failed) to remove this exact bad copy. Recognise it by
-        # that recorded identity and retry the cleanup here, rather than blocking every future
-        # run with TARGET_CONFLICT against bytes this tool itself left behind.
-        $isOwnResidue = $false
-        try { $isOwnResidue = Test-Path -LiteralPath $residueMarkerPath -PathType Leaf -ErrorAction Stop } catch { $isOwnResidue = $false }
-        if (-not $isOwnResidue) {
+        # ATTR3-FOOTAGE-STAGE-1 round 5 (sol blocker, publish recovery), round 6 (sol blocker,
+        # astra blocker: residue identity binding). A mismatched target is not automatically a
+        # stranger's file to refuse forever -- if THIS tool's own fixed-name residue marker sits
+        # right next to it, an EARLIER attempt's own post-publish verify already found and tried
+        # (and failed) to remove this exact bad copy. Round 5 recognised that residue by the
+        # marker's mere PRESENCE, which meant an owner who replaced the retained bytes with a
+        # DIFFERENT file of their own, leaving the stale marker behind, would have that different
+        # file deleted here too -- the marker proved nothing about what it sat beside. Round 6
+        # binds the marker to the retained file's own recorded identity (length, sha256 and
+        # last-write time of the bytes THIS tool retained, captured at write time below) and
+        # recovery proceeds only when the CURRENT target's identity still matches all three,
+        # exactly. Any mismatch -- a missing marker, a marker that fails to parse, or a target
+        # whose length/sha256/mtime differ from what was recorded -- refuses TARGET_CONFLICT and
+        # leaves BOTH the target and the marker untouched, never a guess.
+        $recoveryAuthorized = $false
+        $markerReadable = $false
+        try { $markerReadable = Test-Path -LiteralPath $residueMarkerPath -PathType Leaf -ErrorAction Stop } catch { $markerReadable = $false }
+        if ($markerReadable) {
+            try {
+                # ATTR3-FOOTAGE-STAGE-1 round 6 fix-forward: ConvertFrom-Json auto-converts an
+                # ISO-8601-shaped JSON STRING into a [datetime] object -- so a
+                # lastWriteTimeUtc field written as $item.LastWriteTimeUtc.ToString('o') comes
+                # back here as a [datetime], and casting THAT to [string] uses PowerShell's
+                # default (culture-dependent, second-precision) ToString(), never the original
+                # round-trip text -- silently failing to match the freshly re-read value below on
+                # every call, not just an edge case. Recorded (and compared) as raw .Ticks (an
+                # int64) instead: JSON has no notion of a "tick", so ConvertFrom-Json can never
+                # reinterpret it as anything but a plain number, and an int64 comparison is exact.
+                $markerRecord = Get-Content -LiteralPath $residueMarkerPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $currentTargetItem = Get-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+                $currentTargetSha256 = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                if ([int64]$markerRecord.length -eq [int64]$currentTargetItem.Length -and
+                    [string]$markerRecord.sha256 -eq $currentTargetSha256 -and
+                    [int64]$markerRecord.lastWriteTimeUtcTicks -eq $currentTargetItem.LastWriteTimeUtc.Ticks) {
+                    $recoveryAuthorized = $true
+                }
+            } catch {
+                $recoveryAuthorized = $false
+            }
+        }
+        if (-not $recoveryAuthorized) {
             Record-PartResult -Index $index -Status 'TARGET_CONFLICT' -CleanupPath $stagedPath
             continue
         }
@@ -424,7 +504,25 @@ foreach ($rawPart in $RawParts) {
             Record-PartResult -Index $index -Status 'PLACED_VERIFY_FAILED_TARGET_RETAINED' -CleanupPath $stagedPath
             continue
         }
-        try { Remove-Item -LiteralPath $residueMarkerPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        # ATTR3-FOOTAGE-STAGE-1 round 6 (sol blocker: verified marker removal). The recovered
+        # target is gone; the marker that authorized this recovery must go with it -- an
+        # -ErrorAction SilentlyContinue removal used to be trusted blindly here too, same as the
+        # target removal round 5 already fixed. A marker that survives is reported with its own
+        # fixed, distinct token rather than silently leaving stale identity data behind (harmless
+        # to a future PLACED, since this branch only ever runs when a target exists beside it, but
+        # never silently swallowed).
+        if ($index -ne $TestHookForceMarkerRemovalFailurePartIndex) {
+            try { Remove-Item -LiteralPath $residueMarkerPath -Force -Confirm:$false -ErrorAction Stop } catch {}
+        }
+        $markerRemoved = $true
+        try { $markerRemoved = -not (Test-Path -LiteralPath $residueMarkerPath -PathType Leaf -ErrorAction Stop) } catch { $markerRemoved = $false }
+        if (-not $markerRemoved) {
+            try { $markerRemoved = -not (Test-Path -LiteralPath $residueMarkerPath -PathType Leaf -ErrorAction Stop) } catch { $markerRemoved = $false }
+        }
+        if (-not $markerRemoved) {
+            Record-PartResult -Index $index -Status 'RESIDUE_MARKER_REMOVAL_FAILED' -CleanupPath $stagedPath
+            continue
+        }
         # Fall through: the recognised residue and its marker are both gone now, so this part
         # places exactly as it would if the target had never existed.
     }
@@ -599,7 +697,32 @@ foreach ($rawPart in $RawParts) {
             try { Remove-Item -LiteralPath $residueMarkerPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
             Record-PartResult -Index $index -Status "PLACED_VERIFY_$placedStatus" -CleanupPath $stagedPath
         } else {
-            try { [IO.File]::WriteAllText($residueMarkerPath, '') } catch {}
+            # ATTR3-FOOTAGE-STAGE-1 round 6 (sol blocker, astra blocker: residue identity
+            # binding). The marker is no longer an empty flag file -- it records the RETAINED
+            # bytes' own length, sha256 and last-write time (plus this job's id, for audit), read
+            # directly off $targetPath now, while it still holds exactly the bytes this job failed
+            # to remove. A later run's recovery (above) authorizes deletion only when the target's
+            # CURRENT identity still matches every one of these fields -- so an owner who replaces
+            # the retained bytes with a different file before that later run, leaving this marker
+            # behind, can never have that different file deleted on the strength of a marker that
+            # no longer describes it. Best-effort: if the retained file's own identity cannot be
+            # read here (a lock, a permissions fault), no marker is written at all -- a later run
+            # then finds no marker and refuses TARGET_CONFLICT, which is the safe default, never a
+            # marker that authorizes recovery of bytes it never actually recorded.
+            try {
+                $retainedItem = Get-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+                $retainedSha256 = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                # lastWriteTimeUtcTicks (an int64, not an ISO-8601 string): see the recovery
+                # read-side comment above for why -- ConvertFrom-Json would otherwise silently
+                # reinterpret a date-shaped string as a [datetime] and defeat the comparison.
+                $markerRecord = [ordered]@{
+                    length = [int64]$retainedItem.Length
+                    sha256 = $retainedSha256
+                    lastWriteTimeUtcTicks = [int64]$retainedItem.LastWriteTimeUtc.Ticks
+                    jobId = $JobId
+                }
+                [IO.File]::WriteAllText($residueMarkerPath, ($markerRecord | ConvertTo-Json -Compress))
+            } catch {}
             Record-PartResult -Index $index -Status 'PLACED_VERIFY_FAILED_TARGET_RETAINED' -CleanupPath $stagedPath
         }
         continue
@@ -646,6 +769,7 @@ exit $exitCode
         TEST_HOOK_CORRUPT_PART_INDEX = $TestHookCorruptAfterVerifyPartIndex
         TEST_HOOK_FORCE_REMOVAL_FAILURE_PART_INDEX = $TestHookForceRemovalFailurePartIndex
         TEST_HOOK_FORCE_LOCAL_SOURCE_OPEN_FAILURE_PART_INDEX = $TestHookForceLocalSourceOpenFailurePartIndex
+        TEST_HOOK_FORCE_MARKER_REMOVAL_FAILURE_PART_INDEX = $TestHookForceMarkerRemovalFailurePartIndex
     })
 
     if (-not (Test-Path -LiteralPath $OutDir)) { [void](New-Item -ItemType Directory -Path $OutDir -Force) }

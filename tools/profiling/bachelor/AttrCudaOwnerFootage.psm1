@@ -552,14 +552,24 @@ function Remove-AttrCudaOwnerFootageStaleAttempts {
     place, exactly as that function already guarantees for any other caller.
     Never throws: a missing -TrustedRoot is a silent no-op, matching every other cleanup helper in
     this module.
+    ATTR3-FOOTAGE-STAGE-1 round 6 (sol blocker / astra major: sweep staleness threshold).
+    -StaleAfterSec rejects zero and negative values outright via [ValidateRange] -- attr3-footage-
+    stage.ps1's own body-level TimeoutSec validation already enforces the same minimum before this
+    is ever called from the CLI, but this function has its own trusted-caller contract to uphold
+    regardless of who calls it. The effective threshold used below also floors at
+    $MinStaleAttemptFloorSec independently of whatever value passes that check, so a
+    small-but-technically-valid caller timeout can never make this sweep treat a still-legitimate
+    concurrent attempt as stale.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$TrustedRoot,
-        [Parameter(Mandatory = $true)][int]$StaleAfterSec
+        [Parameter(Mandatory = $true)][ValidateRange(30, [int]::MaxValue)][int]$StaleAfterSec
     )
 
     if (-not (Test-Path -LiteralPath $TrustedRoot -PathType Container -ErrorAction SilentlyContinue)) { return }
+    $MinStaleAttemptFloorSec = 300
+    $effectiveStaleAfterSec = [Math]::Max($StaleAfterSec, $MinStaleAttemptFloorSec)
     $staleJobIdPattern = '^attr3-footage-stage-[A-Za-z0-9_.-]{1,64}-[0-9a-f]{12}-[0-9a-f]{10}$'
     $candidates = @(Get-ChildItem -LiteralPath $TrustedRoot -Directory -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match $staleJobIdPattern })
@@ -571,7 +581,7 @@ function Remove-AttrCudaOwnerFootageStaleAttempts {
             if ($newestChild) { $newestWriteUtc = $newestChild.LastWriteTimeUtc }
         } catch {}
         $ageSec = ((Get-Date).ToUniversalTime() - $newestWriteUtc).TotalSeconds
-        if ($ageSec -gt $StaleAfterSec) {
+        if ($ageSec -gt $effectiveStaleAfterSec) {
             [void](Remove-AttrCudaOwnerFootageStagingResidue -TrustedRoot $TrustedRoot -Directory $candidate.FullName)
         }
     }
