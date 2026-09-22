@@ -578,6 +578,8 @@ READONLY_AUTH_STATUS = " ".join(("claude", "au" + "th", "status"))
 NA10_SETTINGS = "{REPO}/.claude/settings.json"
 NA10_HOOK_SCRIPT = "{REPO}/tools/hooks/mlv-never-authorized.py"
 NA10_VERIFIER = "{REPO}/tools/gates/verify_consented_footage.py"
+NA10_BG_HOOK = "{REPO}/tools/coordination/lane-no-background.py"
+NA10_LAUNCHER = "{REPO}/tools/coordination/Invoke-Lane.ps1"
 NA10_UNRELATED = "{REPO}/src/mlv/video_mlv.c"
 NA10_NEW_TEXT = "# rewritten by the lane this gate governs\n"
 
@@ -3370,6 +3372,36 @@ CASES = [
         "fixture": "venue_at_worktree",
     },
     {
+        # LANE-NO-BACKGROUND-END-TURN-1 round 7: the background-work hook is the fifth gate
+        # tail.  Invoke-Lane copies it from the launcher checkout into every run directory.
+        "name": "na10 lane rewrites the lane no background hook",
+        "group": "na10",
+        "tool": "Write",
+        "input": {"file_path": NA10_BG_HOOK, "content": NA10_NEW_TEXT},
+        "expect": "DENY",
+        "na": "NA-10",
+        "reason_contains": "OWN gate",
+        "fixture": "venue_at_worktree",
+    },
+    {
+        "name": "na10 lane no background hook written at the board venue",
+        "group": "na10",
+        "tool": "Write",
+        "input": {"file_path": NA10_BG_HOOK, "content": NA10_NEW_TEXT},
+        "expect": "ALLOW",
+        "fixture": "venue_at_board",
+    },
+    {
+        # Deliberately NOT a tail: lanes implement launcher PRs.  Pinned so a later widening
+        # of NA-10 to the launcher is a visible, reviewed decision rather than a drive-by.
+        "name": "na10 launcher edit in a lane worktree stays allowed",
+        "group": "na10",
+        "tool": "Write",
+        "input": {"file_path": NA10_LAUNCHER, "content": NA10_NEW_TEXT},
+        "expect": "ALLOW",
+        "fixture": "venue_at_worktree",
+    },
+    {
         # THE CONTROL.  An ordinary source edit in the same worktree at the same venue: NA-10
         # is about four files, not about a lane's right to edit code.
         "name": "na10 control unrelated worktree edit at a lane venue",
@@ -6007,9 +6039,12 @@ class MlvNeverAuthorizedHookTests(unittest.TestCase):
         # venue, the same two ALLOW at the board venue, the shell arm, and the unrelated-file
         # control that keeps it about the GATE and not about the worktree.  `na10` grew 6 -> 7
         # at NA4-OWNER-CONSENTED-FOOTAGE-1 round 3 (E): the consent verifier's DENY row.
+        # `na10` grew 7 -> 10 at LANE-NO-BACKGROUND-END-TURN-1 round 7: the background hook's
+        # DENY at a lane venue and ALLOW at the board venue, plus the ALLOW row pinning that
+        # Invoke-Lane.ps1 is deliberately NOT a tail.
         self.assertEqual(counts.get("na3"), 5, "5 NA-3 claude-auth rows")
         self.assertEqual(counts.get("na3_persistent"), 6, "6 NA-3 O129 persistent-scope rows")
-        self.assertEqual(counts.get("na10"), 7, "7 NA-10 self-edit rows")
+        self.assertEqual(counts.get("na10"), 10, "10 NA-10 self-edit rows")
         # PINNED, NEW at the thirteenth commit (S131): a NEW group, 3 rows -- the `setx.exe`
         # credential-prefix bypass, the `setx.exe` persistent-name bypass, and the fully
         # qualified `[System.Environment]::SetEnvironmentVariable` persistent-name bypass.
@@ -7801,7 +7836,10 @@ class OwnerConsentedFootageTests(unittest.TestCase):
         self.assertNotIn("tools/gates/output-budget.json", self.module.NA10_GUARDED_TAILS)
         # Round 3 (E): the content verifier IS a gate tail, and the NA-10 register row says so.
         self.assertIn("tools/gates/verify_consented_footage.py", self.module.NA10_GUARDED_TAILS)
-        na10 = [item for item in register["items"] if item["id"] == "NA-10"]
+        # LANE-NO-BACKGROUND-END-TURN-1 round 7: the background hook is a tail; the launcher is not.
+        self.assertIn("tools/coordination/lane-no-background.py", self.module.NA10_GUARDED_TAILS)
+        self.assertNotIn("tools/coordination/Invoke-Lane.ps1", self.module.NA10_GUARDED_TAILS)
+        na10 =[item for item in register["items"] if item["id"] == "NA-10"]
         self.assertIn("tools/gates/verify_consented_footage.py", na10[0]["act"])
 
 
