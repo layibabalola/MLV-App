@@ -2146,9 +2146,10 @@ class StageFixtureJobCommittedBytesWiringTests(_PwshCase):
 # hash-pinned before launch.
 # --------------------------------------------------------------------------------------------
 
-# Expected discovery order for the shared fixture repo's runner (see _make_fixture_repo): the
-# root first, then each $PSScriptRoot-relative load in the order the regex finds it on the
-# runner's own line, then the one dependency reached by recursion (through the .psm1).
+# Expected order for the shared fixture repo's runner (see _make_fixture_repo): the pinned,
+# explicit manifest order from Get-AttrCudaSmokeRunnerClosureManifest -- root first, then each
+# sibling in the order it is listed in the manifest, never mechanically discovered or scanned
+# for (ATTR3-SMOKE-RUNNER-DEPS-1 round 3, NARROW BY REDESIGN).
 SMOKE_RUNNER_CLOSURE_NAMES = (
     "run-release-gui-smoke.ps1",
     "gui-smoke-screenshot-provenance.ps1",

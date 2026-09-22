@@ -27,7 +27,8 @@ function New-V2ProvenanceFixture {
         [int]$Temperature = 6000,
         [string]$ScreenshotMethod = 'app_internal_presented_pixmap',
         [Nullable[long]]$GlWindowPresentedSerial = $null,
-        [Nullable[long]]$GlWindowPresentedSerialValid = $null
+        [Nullable[long]]$GlWindowPresentedSerialValid = $null,
+        [Nullable[long]]$GlWindowActive = $null
     )
 
     $lines = [System.Collections.Generic.List[string]]::new()
@@ -54,6 +55,9 @@ function New-V2ProvenanceFixture {
     }
     if ($null -ne $GlWindowPresentedSerialValid) {
         $screenshotLine += " gl_window_presented_serial_valid=$GlWindowPresentedSerialValid"
+    }
+    if ($null -ne $GlWindowActive) {
+        $screenshotLine += " gl_window_active=$GlWindowActive"
     }
     $lines.Add($screenshotLine)
     return @($lines)
@@ -238,6 +242,44 @@ Assert-Failure (Get-GuiSmokeScreenshotProvenance `
 # the plain app_internal_presented_pixmap method the base fixture already produces.
 Assert-True $controlledParentProof.validFresh `
     'A non-GL-window screenshot method must not be penalized for a missing/invalid gl_window_presented_serial.'
+
+# GL-window-active / non-GL-capture-method refusal (ATTR3-VISUAL-QUALITY-EVIDENCE-1 round
+# 6, sol major): a screenshot event that reports the GL window was active but was captured
+# by any method other than the GL framebuffer readback is exactly the coherence bug this
+# round fixes in MainWindow.cpp -- a fallback pixmap/viewport grab saved while the GL window
+# is what's actually on screen. Provenance must refuse it independently of the C++ fix.
+$glWindowActiveNonGlMethod = @(
+    $fresh[0],
+    $fresh[1],
+    '[INFO] interaction_trace event=gui_smoke.screenshot path="frame.png" width=1958 height=818 method=app_internal_viewport_grab gl_window_active=1'
+)
+Assert-Failure (Get-GuiSmokeScreenshotProvenance $glWindowActiveNonGlMethod) `
+    'gl-window-active-non-gl-capture-method'
+
+$glWindowActiveGlMethod = @(
+    $fresh[0],
+    $fresh[1],
+    '[INFO] interaction_trace event=gui_smoke.screenshot path="frame.png" width=1958 height=818 method=gl_window_framebuffer_readback gl_window_active=1'
+)
+$glWindowActiveGlMethodResult = Get-GuiSmokeScreenshotProvenance $glWindowActiveGlMethod
+Assert-True (-not ($glWindowActiveGlMethodResult.failures -contains 'gl-window-active-non-gl-capture-method')) `
+    'A GL-window-framebuffer capture while the GL window is active must not be flagged.'
+
+$glWindowInactiveNonGlMethod = @(
+    $fresh[0],
+    $fresh[1],
+    '[INFO] interaction_trace event=gui_smoke.screenshot path="frame.png" width=1958 height=818 method=app_internal_viewport_grab gl_window_active=0'
+)
+$glWindowInactiveNonGlMethodResult = Get-GuiSmokeScreenshotProvenance $glWindowInactiveNonGlMethod
+Assert-True (-not ($glWindowInactiveNonGlMethodResult.failures -contains 'gl-window-active-non-gl-capture-method')) `
+    'A non-GL capture method while the GL window is inactive is the expected, legitimate shape.'
+
+$glWindowActiveNonGlV2Lines = @(New-V2ProvenanceFixture `
+    -StartFrame 90 -Frames @(91, 92, 93) -TargetHash 'gl-window-active-non-gl' `
+    -ScreenshotMethod 'app_internal_viewport_grab' -GlWindowActive 1)
+Assert-Failure (Get-GuiSmokeScreenshotProvenance `
+    -OrderedLogLines $glWindowActiveNonGlV2Lines -RequestedStartFrame 90) `
+    'gl-window-active-non-gl-capture-method'
 
 $requestFrameMismatchLines = [System.Collections.Generic.List[string]]::new()
 $requestFrameMismatchLines.AddRange([string[]]$controlledParentLines)
