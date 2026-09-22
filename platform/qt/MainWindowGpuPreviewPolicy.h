@@ -234,6 +234,23 @@ inline bool mainWindowUsesGpuPlaybackReconTexturePresentation(
         && state.renderThreadUsingGpuPlaybackReconTexturePresentation;
 }
 
+// CUDA-S4-TEXTURE-ROUTE-CLAMP-1: the GPU recon texture-present route is only
+// wired for playbackScaleFactor == 1. Rather than gate every '== 1' call site
+// individually, the effective playback scale request is clamped to 1 at its
+// policy source whenever that route would otherwise be armed. requestedScale
+// is returned unchanged for every scale when the route is not eligible at
+// scale 1, and for scale 1 itself (a no-op clamp).
+inline int mainWindowClampPlaybackScaleForGpuTextureRoute(
+    int requestedScale,
+    bool gpuPlaybackReconTextureRouteEligibleAtScaleOne)
+{
+    if (requestedScale != 1 && gpuPlaybackReconTextureRouteEligibleAtScaleOne)
+    {
+        return 1;
+    }
+    return requestedScale;
+}
+
 inline bool mainWindowUsesGpuImagePresentation(
     const MainWindowGpuPreviewPolicyState &state)
 {

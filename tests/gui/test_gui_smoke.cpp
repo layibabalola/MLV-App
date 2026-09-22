@@ -636,6 +636,7 @@ private slots:
     void mainWindowGpuPreviewPolicyRequiresWidgetViewportForAmazeTexturePresent();
     void mainWindowGpuPreviewPolicyRequiresWidgetViewportForAmazeTexturePresentAtAllScales();
     void mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExplicitAndNested();
+    void mainWindowClampsPlaybackScaleForGpuTextureRouteDecisionTable();
     void mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus();
     void mainWindowGpuPreviewPolicyLabelsVisibleScopeCpuFallback();
     void dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate();
@@ -1139,6 +1140,23 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExp
     state.histogramEnabled = true;
     QVERIFY(!mainWindowAllowsGpuPlaybackReconTexturePresentation(state));
     QVERIFY(!mainWindowUsesGpuPlaybackReconTexturePresentation(state));
+}
+
+void GuiSmokeTest::mainWindowClampsPlaybackScaleForGpuTextureRouteDecisionTable()
+{
+    // CUDA-S4-TEXTURE-ROUTE-CLAMP-1: texture route eligible at scale 1 ->
+    // every non-1 request clamps to 1; scale 1 itself is a no-op.
+    QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 1, true ), 1 );
+    QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 2, true ), 1 );
+    QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 4, true ), 1 );
+    QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 8, true ), 1 );
+
+    // Texture route not eligible -> every requested scale passes through
+    // unchanged; the user-facing scale setting is never altered.
+    QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 1, false ), 1 );
+    QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 2, false ), 2 );
+    QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 4, false ), 4 );
+    QCOMPARE( mainWindowClampPlaybackScaleForGpuTextureRoute( 8, false ), 8 );
 }
 
 void GuiSmokeTest::mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus()

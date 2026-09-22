@@ -20522,7 +20522,78 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     m_playbackQualityIndicatorCacheValid = true;
 }
 
+/* CUDA-S4-TEXTURE-ROUTE-CLAMP-1: the GPU recon texture-present route
+ * (CUDA reconstruction straight to a GL texture, no per-frame CPU readback)
+ * is only wired for playbackScaleFactor == 1 -- see the '== 1' gates in
+ * RenderFrameThread.cpp and the two policy builders below. Requesting a
+ * downscale (2/4/8) while that route would otherwise be armed does NOT
+ * reduce render work; it silently reroutes to the much slower full-res
+ * float-convert + upload + CUDA AMaZE + download + wb_undo + re-upload
+ * path (gpu_recon_readback), which measured ~4-5x slower than the
+ * unscaled no-readback texture route on the same clip. Clamp the request
+ * to 1 here -- the single policy source -- instead of adding an eleventh
+ * '== 1' gate. */
+bool MainWindow::gpuPlaybackReconTextureRouteEligibleAtScaleOne( void ) const
+{
+    if( !gpuPreviewSurfaceActive() ) return false;
+
+    const bool scopeDisplayVisible = ui->dockWidgetEdit->isVisible();
+    const bool hasScopeVisualization =
+        mainWindowScopeActionConsumesPresentedPixels(
+            scopeDisplayVisible, ui->actionShowHistogram->isChecked() )
+        || mainWindowScopeActionConsumesPresentedPixels(
+            scopeDisplayVisible, ui->actionShowWaveFormMonitor->isChecked() )
+        || mainWindowScopeActionConsumesPresentedPixels(
+            scopeDisplayVisible, ui->actionShowParade->isChecked() )
+        || mainWindowScopeActionConsumesPresentedPixels(
+            scopeDisplayVisible, ui->actionShowVectorScope->isChecked() );
+    if( hasScopeVisualization ) return false;
+
+    if( !playback_recon_requested_by_environment() ) return false;
+    if( !playback_recon_texture_present_requested_by_environment() ) return false;
+    if( !gpuPreviewProcessingIsSupported( m_pProcessingObject ) ) return false;
+    if( m_gpuPreviewProcessingBackendRequest
+            == GpuPreviewProcessingBackendRequest::Cpu ) return false;
+
+    const Phase3Mode requestedPhase3Mode =
+        phase3ModeFor( playbackQualityModeFromInt( m_playbackQualityMode ) );
+    if( requestedPhase3Mode != Phase3Mode::DecodeReconProcess ) return false;
+
+    if( ui->actionCaching->isChecked() ) return false;
+
+    return true;
+}
+
 int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const
+{
+    const int requestedScale = playbackScaleFactorPolicyDecision();
+    const int effectiveScale = mainWindowClampPlaybackScaleForGpuTextureRoute(
+        requestedScale, gpuPlaybackReconTextureRouteEligibleAtScaleOne() );
+    if( effectiveScale != requestedScale )
+    {
+        static bool loggedScaleClampOnce = false;
+        if( !loggedScaleClampOnce )
+        {
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_scale_clamped_for_gpu_texture_route "
+                       "requested=%1 effective=%2" )
+                       .arg( requestedScale )
+                       .arg( effectiveScale );
+            loggedScaleClampOnce = true;
+        }
+        m_playbackScaleClampedForGpuTextureRouteActive = true;
+        m_playbackScaleClampedForGpuTextureRouteRequestedScale = requestedScale;
+    }
+    else
+    {
+        m_playbackScaleClampedForGpuTextureRouteActive = false;
+        m_playbackScaleClampedForGpuTextureRouteRequestedScale = 0;
+    }
+    return effectiveScale;
+}
+
+int MainWindow::playbackScaleFactorPolicyDecision( void ) const
 {
     const int envScale = playback_scale_factor_env_override();
     if ( envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8 )
@@ -25036,7 +25107,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "auto_headroom_capability_last=%61 "
                "auto_validated_no_readback_capability_observed=%62 "
                "auto_validated_no_readback_capability_demoted_last=%63 "
-               "present_nothing_drops=%64" )
+               "present_nothing_drops=%64 "
+               "gpu_texture_route_scale_clamp_active=%65 "
+               "gpu_texture_route_scale_clamp_requested_scale=%66" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -25112,7 +25185,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( bool01(
                    m_playbackQualityAutoCapabilityTracker.lastObservationDemotedCapability() ) )
                .arg( deltaCounter( currentPresentNothingDrops,
-                                    m_playbackSmokeStartPresentNothingDrops ) );
+                                    m_playbackSmokeStartPresentNothingDrops ) )
+               .arg( bool01( m_playbackScaleClampedForGpuTextureRouteActive ) )
+               .arg( m_playbackScaleClampedForGpuTextureRouteRequestedScale );
 
     qInfo().noquote()
         << QStringLiteral(

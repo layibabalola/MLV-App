@@ -1259,6 +1259,8 @@ private:
     bool m_playbackSmokeLastOpenMpThreadCapActive = false;
     int m_playbackSmokeLastScaleRequest = 1;
     int m_playbackSmokeLastScaleActive = 1;
+    mutable bool m_playbackScaleClampedForGpuTextureRouteActive = false;
+    mutable int m_playbackScaleClampedForGpuTextureRouteRequestedScale = 0;
     bool m_headlessPlaybackProfileUsePlaybackPolicy = false;
     bool m_headlessPlaybackProfileActive = false;
     uint64_t m_nextRenderRequestSerial = 1;
@@ -1443,6 +1445,8 @@ private:
     QString activeClipPhase3Fingerprint( void ) const;
     QStringList pinnedClipFingerprintsForPhase3( void ) const;
     int  effectivePlaybackScaleFactorForRequest( void ) const;
+    int  playbackScaleFactorPolicyDecision( void ) const;
+    bool gpuPlaybackReconTextureRouteEligibleAtScaleOne( void ) const;
     MainWindowGpuPreviewPolicyState gpuPreviewPolicyForCurrentScopeState(
         bool includeVisibleScopes ) const;
     bool visibleScopesBlockGpuTexturePlayback( void ) const;
