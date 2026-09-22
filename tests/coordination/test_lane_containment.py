@@ -138,6 +138,20 @@ if($env:MLV_FIXTURE_COMMIT_TRACKED_PATH){
   git -C $repoDir commit -q -m 'fixture lane commit' | Out-Null
   'leftover-dirty-after-commit'|Set-Content -Encoding utf8NoBOM $env:MLV_FIXTURE_COMMIT_TRACKED_PATH
 }
+# Round 8 (sol minor): simulate a lane that reaches out via its own Bash/Write grant and
+# rewrites, or deletes, the per-run hook copy AFTER the launch self-test already proved it
+# denies -- the exact tamper shape the post-run re-hash check exists to catch. The copy's path
+# is not passed to this fixture directly (env-gated, like the other MLV_FIXTURE_* blocks), so
+# it is located the same way the test itself locates it: the one *.lane-no-background.py file
+# reserved beside the receipt in the run dir.
+if($env:MLV_FIXTURE_TAMPER_HOOK_COPY){
+  $hookCopy=Get-ChildItem -Path (Join-Path $env:MLV_BOARD_ROOT 'run') -Filter '*.lane-no-background.py' | Select-Object -First 1
+  if($env:MLV_FIXTURE_TAMPER_HOOK_COPY -eq 'modify'){
+    '# tampered'|Set-Content -Encoding utf8NoBOM $hookCopy.FullName
+  } elseif($env:MLV_FIXTURE_TAMPER_HOOK_COPY -eq 'delete'){
+    Remove-Item -LiteralPath $hookCopy.FullName -Force
+  }
+}
 if($env:MLV_FIXTURE_MODE -ne 'normal'){
   $g=Start-Process pwsh.exe -ArgumentList @('-NoProfile','-NonInteractive','-File',$env:MLV_FIXTURE_GRAND_SCRIPT) -WindowStyle Hidden -PassThru
   while(-not(Test-Path $env:MLV_FIXTURE_GRAND)){Start-Sleep -Milliseconds 20}
@@ -416,6 +430,69 @@ def test_launch_refuses_when_background_gate_selftest_fails(fixture_tree):
     assert q["state"]=="failed"
     assert not q["complete"]
     assert q["failure"].startswith("background-gate-selftest-failed")
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 8 (sol major 1): the self-test must run the EXACT
+# command STRING that is written into the --settings hook entry, through the SAME shell Claude
+# Code itself spawns for a shell-form `command` hook on Windows -- Git Bash (evidence: docs/en/
+# hooks-guide.md, quoted in this round's summary.md; corroborated by tools/agent-bridge/core/
+# win_process.py's own measured `...Git\bin\..\usr\bin\bash.exe` process path on this host). This
+# breaks the registered command by baking a nonexistent path into ONLY the interpreter half of
+# $hookCommand -- the SOURCE hook script and $PYTHON_EXE the launcher would use for a direct call
+# are both untouched and correct. A self-test built as round 7's `& $PYTHON_EXE $hookCopyPath`
+# (two decomposed argv tokens, bypassing the registered string and its shell entirely) cannot see
+# this: it would still invoke the real, correct $PYTHON_EXE and pass. Only running the actual
+# registered STRING through Git Bash surfaces the break (bash: ...-does-not-exist: No such file or
+# directory, exit 127 -- never the hook script's own exit-2 deny protocol).
+def test_launch_refuses_when_registered_command_has_a_bad_interpreter_path_even_though_a_direct_interpreter_call_would_succeed(fixture_tree):
+    def break_registered_command_only(text):
+        needle = "$hookCommand = ('\"{0}\" \"{1}\"' -f $PYTHON_EXE, $hookCopyPath)"
+        assert needle in text, "Invoke-Lane.ps1's $hookCommand builder line changed shape; update this fixture's mutation to match"
+        broken = "$hookCommand = ('\"{0}-does-not-exist\" \"{1}\"' -f $PYTHON_EXE, $hookCopyPath)"
+        return text.replace(needle, broken)
+    cmd,env,receipt=prepare(fixture_tree,"normal",mutation=break_registered_command_only)
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode!=0,(r.stdout,r.stderr)
+    assert not (fixture_tree["root"]/"child.json").exists()
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="failed"
+    assert q["failure"].startswith("background-gate-selftest-failed")
+    assert "127" in q["failure"]
+    # Sanity/documentation half of the requirement: a DIRECT call against the real interpreter
+    # and the actual reserved copy -- what round 7's self-test amounted to -- still succeeds
+    # (exit 2, the correct deny). Only the registered STRING was broken; the underlying
+    # interpreter-and-script pair the old self-test tested was never the thing that broke.
+    hook_copies=list((fixture_tree["root"]/"run").glob("*.lane-no-background.py"))
+    assert len(hook_copies)==1
+    direct=run_lane_no_background_json({"tool_name":"Bash","tool_input":{"command":"echo x","run_in_background":True}})
+    assert direct.returncode==2,(direct.stdout,direct.stderr)
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 8 (sol minor): regression coverage for the post-run
+# tamper check (Invoke-Lane.ps1, ~line 1299) that round 7 shipped but never had a dedicated
+# test for. A fake provider (the fixture's child.ps1) stands in for a lane that reaches out via
+# its own Bash/Write grant mid-run and rewrites, or deletes, the per-run hook copy after the
+# launch self-test already proved it denies.
+def test_post_run_tamper_check_catches_hook_copy_rewritten_during_the_run(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env["MLV_FIXTURE_TAMPER_HOOK_COPY"]="modify"
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["authority"]["backgroundGate"]=="background-gate-tampered"
+    assert q["authority"]["backgroundGate"]!="denied-by-settings-hook"
+    assert q["authority"]["backgroundGateTamperDetail"].startswith("background-gate-tampered: sha256 was")
+
+
+def test_post_run_tamper_check_catches_hook_copy_deleted_during_the_run(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env["MLV_FIXTURE_TAMPER_HOOK_COPY"]="delete"
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["authority"]["backgroundGate"]=="background-gate-tampered"
+    assert q["authority"]["backgroundGate"]!="denied-by-settings-hook"
+    assert q["authority"]["backgroundGateTamperDetail"]=="background-gate-tampered: hook copy missing after run"
 
 
 def test_timeout_kills_owned_child_and_grandchild(fixture_tree):

@@ -65,28 +65,47 @@ script into THIS run's already-reserved, board-rooted slot
 (`<lane>-NNN.lane-no-background.py`, beside the receipt, under
 `.claude-state/fleet-runs` -- itself an NA-2 protected tail no lane can write to)
 and points the registration at that copy, never at the source. The copy is hashed
-immediately (`sha256`), and the launcher runs the exact registered
-interpreter-and-script pair against a synthetic `{"tool_name":"Bash",
-"tool_input":{"run_in_background":true}}` payload before the provider ever
-starts, requiring the fail-closed deny (exit 2) -- a launch whose self-test does
-not pass never starts the provider; the receipt records
-`failure: "background-gate-selftest-failed: ..."` instead. After the run, the
-copy is re-hashed; a lane with Bash/Edit access is not confined to `--add-dir`,
-so if the two hashes differ the receipt's `authority.backgroundGate` is
-overwritten to `'background-gate-tampered'` with a detail field, rather than
-silently continuing to claim `'denied-by-settings-hook'`. Neither the self-test
-nor the re-hash proves anything about a FUTURE launch from this same worktree if
-the lane instead rewrote the WORKTREE'S SOURCE copy of
-`tools/coordination/lane-no-background.py` (the file the next launch would copy
-from) or of `Invoke-Lane.ps1` itself (the file that performs the copy-and-wire
-step). **Known gap, not yet closed (round 7):** NA-10 in
+immediately (`sha256`). **The registered command STRING is built exactly once**
+(`$hookCommand`) and used unchanged for both the `--settings` entry and the
+launch self-test, so the two can never name different commands. **Round 8 (sol
+major 1): the self-test runs that exact string through Git Bash**
+(`C:\Program Files\Git\bin\bash.exe -c $hookCommand`, fed the same synthetic
+`{"tool_name":"Bash","tool_input":{"run_in_background":true}}` payload on
+stdin), not by invoking the pinned Python interpreter and the copy as two
+decomposed PowerShell argv tokens the way round 7 did. Claude Code's own docs
+state a shell-form `command` hook (one without an `args` field, which is what
+this launcher registers) is executed via `sh -c` on macOS/Linux, **Git Bash on
+Windows**, or PowerShell only when Git Bash is not installed
+(code.claude.com/docs/en/hooks-guide) -- Git Bash is installed on this fleet's
+hosts, so that is the shell that actually runs the registered command, and a
+self-test invoking a different shell (or bypassing the command string
+entirely) can pass while the real registration is broken by bad quoting or a
+wrong path baked into the string itself. The self-test requires the fail-closed
+deny (exit 2) -- a launch whose self-test does not pass never starts the
+provider; the receipt records `failure: "background-gate-selftest-failed: ..."`
+instead. After the run, the copy is re-hashed; a lane with Bash/Edit access is
+not confined to `--add-dir`, so if the two hashes differ the receipt's
+`authority.backgroundGate` is overwritten to `'background-gate-tampered'` with a
+detail field, rather than silently continuing to claim
+`'denied-by-settings-hook'`. **This is detection at exactly two points in
+time -- the instant the copy is written before launch, and the instant the
+provider process exits -- never continuous monitoring while the provider runs:**
+a lane that rewrites the copy mid-run and then restores the original bytes
+before its own process exits leaves the two hashes matching, and the receipt
+still claims `'denied-by-settings-hook'` with no tamper recorded, even though
+the gate was provably absent for however long the rewrite was in effect.
+Neither the self-test nor the re-hash proves anything about a FUTURE launch
+from this same worktree if the lane instead rewrote the WORKTREE'S SOURCE copy
+of `tools/coordination/lane-no-background.py` (the file the next launch would
+copy from) or of `Invoke-Lane.ps1` itself (the file that performs the
+copy-and-wire step). **Known gap, not yet closed (round 7):** NA-10 in
 `tools/hooks/mlv-never-authorized.py` is the natural place to guard both paths as
 gate tails a lane may write only at the board venue, the same way it already
 guards `.claude/settings.json` and its own script -- but `mlv-never-authorized.py`
 is itself one of NA-10's guarded tails, so a session running in a lane worktree
 (this one included) is refused by NA-10 when it tries to make that edit; it is
 attributable ONLY to the board-rooted actor. Filed for a board-venue session to
-land, not done here.
+land as card NA10-LANE-NO-BACKGROUND-TAIL-1, not done here.
 
 The hook script reads the tool-call JSON on stdin and denies the call (exit 2,
 one line on stderr -- the same fail-closed protocol

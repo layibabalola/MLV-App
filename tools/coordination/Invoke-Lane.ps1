@@ -145,6 +145,20 @@ $CODEX_EXE  = Join-Path $env:APPDATA 'npm\codex.cmd'
 $PYTHON_EXE = 'C:/Users/obabalola/AppData/Local/Python/bin/python.exe'
 $LANE_NO_BACKGROUND_HOOK = Join-Path $PSScriptRoot 'lane-no-background.py'
 
+# Round 8 (sol major 1): pinned absolute for the same reason $PYTHON_EXE is -- a hook is
+# (interpreter x script x registration), and a portable-but-wrong shell fails open silently.
+# Claude Code's own docs state exactly which shell runs a shell-form `type: "command"` hook (one
+# without an `args` field, which is what this launcher registers) on Windows: "When Claude Code
+# runs a shell-form command hook ... it spawns `sh -c` on macOS and Linux, Git Bash on Windows, or
+# PowerShell when Git Bash isn't installed by default" (code.claude.com/docs/en/hooks-guide,
+# "Hook JSON has no effect" section, fetched 2026-09-22 -- full quote and fetch evidence in this
+# round's summary.md). Git Bash is installed on this host: tools/agent-bridge/core/win_process.py
+# (~line 165) already documents a Claude-Code-spawned process resolving to exactly
+# `C:\Program Files\Git\bin\..\usr\bin\bash.exe` from live process measurement, and this repo's
+# own Bash tool runs on Git Bash. So Git Bash -- not PowerShell -- is the shell a registered hook
+# command actually runs under here, and the self-test below must use the same one.
+$GIT_BASH_EXE = 'C:\Program Files\Git\bin\bash.exe'
+
 # Every tool that either fans out to another agent (Agent, Task, Workflow, TaskCreate) or
 # promises a LATER turn a headless lane cannot receive (Monitor, ScheduleWakeup, CronCreate,
 # CronDelete, RemoteTrigger). ONE constant feeds the pre-reservation allowlist rejection, the
@@ -679,24 +693,36 @@ if ($cfg.engine -eq 'claude') {
     } catch {
         throw "background-gate-copy-failed: $($_.Exception.Message)"
     }
+    # Round 8 (sol major 1): the command STRING is built exactly ONCE, here -- both the
+    # --settings hook entry below and the self-test use this same variable, so there is no way
+    # for the string the self-test proves and the string actually registered to drift apart.
+    $hookCommand = ('"{0}" "{1}"' -f $PYTHON_EXE, $hookCopyPath)
     # Round 7 (sol major 2): a missing or wrong-path interpreter cannot be detected FROM INSIDE
     # the hook -- Claude Code treats a failed hook COMMAND as a non-blocking error and the tool
     # call proceeds, so a receipt claiming the gate denies background work could be false while
     # every route stayed open. Prove it, synchronously, before this lane is ever launched: run
-    # the EXACT registered interpreter-and-script pair against a synthetic payload naming a
-    # genuine backgrounded Bash call and require the fail-closed deny (exit 2, lane-no-
+    # the EXACT registered command STRING and require the fail-closed deny (exit 2, lane-no-
     # background.py's own protocol). A launch whose self-test does not pass never starts the
     # provider -- the throw below is caught by this script's own top-level try/catch, which
     # still writes a well-formed 'failed' receipt naming this exact reason.
+    # Round 8 (sol major 1): "the exact registered command" means invoking $hookCommand through
+    # the SAME shell Claude Code itself spawns for a shell-form `command` hook on Windows -- Git
+    # Bash ($GIT_BASH_EXE above) -- not a direct PowerShell `&` call against the interpreter and
+    # script as two separate argv tokens. Round 7's `& $PYTHON_EXE $hookCopyPath` tested only that
+    # the interpreter and script individually behave; it could not catch a broken COMMAND STRING
+    # (bad quoting, a wrong path baked into $hookCommand alone) the way running that exact string
+    # through `bash -c` can -- and a broken registered string, passing self-test only because the
+    # self-test never actually ran the registered string, is exactly the failure mode a launch
+    # self-test exists to rule out.
     $backgroundGateSelfTestPayload = '{"tool_name":"Bash","tool_input":{"command":"echo x","run_in_background":true}}'
     try {
-        $selfTestOutput = $backgroundGateSelfTestPayload | & $PYTHON_EXE $hookCopyPath 2>&1
+        $selfTestOutput = $backgroundGateSelfTestPayload | & $GIT_BASH_EXE -c $hookCommand 2>&1
         $selfTestExit = $LASTEXITCODE
     } catch {
         throw "background-gate-selftest-failed: interpreter invocation threw: $($_.Exception.Message)"
     }
     if ($selfTestExit -ne 2) {
-        throw "background-gate-selftest-failed: expected exit 2 (deny) from a synthetic background-Bash payload, got exit $selfTestExit; output: $($selfTestOutput -join ' | ')"
+        throw "background-gate-selftest-failed: expected exit 2 (deny) from the exact registered command string run through Git Bash (the shell Claude Code spawns for this hook on Windows), got exit $selfTestExit; output: $($selfTestOutput -join ' | ')"
     }
     # Matcher covers BOTH shell tools carrying `run_in_background` (round 7, sol major 1 /
     # fable major): PowerShell has the same parameter Bash does, and the sanctioned editing
@@ -712,7 +738,7 @@ if ($cfg.engine -eq 'claude') {
                     hooks   = @(
                         [ordered]@{
                             type    = 'command'
-                            command = ('"{0}" "{1}"' -f $PYTHON_EXE, $hookCopyPath)
+                            command = $hookCommand
                         }
                     )
                 }
@@ -1296,6 +1322,14 @@ if ($AllowEdits -and $cfg.engine -eq 'claude') {
 # the hash taken the instant it was written, before the child ever started. A read-only lane
 # has no Write/Edit/Bash grant at all, so this can only ever fire for an editing lane, but the
 # check is cheap and unconditional for every claude lane that got a copy.
+# Round 8 (fable minor): stated plainly because it is easy to over-read as continuous
+# monitoring -- it is NOT. This compares the copy's hash at exactly two points in time: the
+# instant it was written, before the child ever started, and the instant the provider process
+# exits. A rewrite that happens mid-run and is RESTORED to the original bytes before the
+# provider exits leaves the two hashes identical, so this check records no tamper and the
+# receipt still claims 'denied-by-settings-hook' -- even though the gate was provably absent
+# for however long the rewrite was in effect. See docs/lane-containment.md for the full
+# statement of what this does and does not detect.
 if ($cfg.engine -eq 'claude' -and $backgroundHookLaunchSha256) {
     $backgroundHookPostRunSha256 = if (Test-Path -LiteralPath $hookCopyPath) {
         (Get-FileHash -LiteralPath $hookCopyPath -Algorithm SHA256).Hash.ToLowerInvariant()
