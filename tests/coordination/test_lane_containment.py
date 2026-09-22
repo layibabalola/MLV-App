@@ -152,6 +152,21 @@ if($env:MLV_FIXTURE_TAMPER_HOOK_COPY){
     Remove-Item -LiteralPath $hookCopy.FullName -Force
   }
 }
+# Round 14 (sol major, r13): the mirror-image simulation for the INTERPRETER -- a lane that
+# reaches out via its own Bash/Write grant and rewrites, or deletes, the resolved interpreter
+# executable AFTER the launch self-test already proved it denies through that exact file. The
+# launcher's self-test already exited (and released any handle) long before this fake provider
+# process ever starts, so this is a plain file rewrite/delete, exactly like the hook-copy block
+# above. The path is read from $env:MLV_LANE_PYTHON_EXE -- the same override this fixture's
+# harness already sets to a disposable interpreter copy for these tests, never the real one.
+if($env:MLV_FIXTURE_TAMPER_INTERPRETER){
+  $interpreterPath=$env:MLV_LANE_PYTHON_EXE
+  if($env:MLV_FIXTURE_TAMPER_INTERPRETER -eq 'modify'){
+    [IO.File]::WriteAllBytes($interpreterPath,[Text.Encoding]::ASCII.GetBytes('tampered'))
+  } elseif($env:MLV_FIXTURE_TAMPER_INTERPRETER -eq 'delete'){
+    Remove-Item -LiteralPath $interpreterPath -Force
+  }
+}
 if($env:MLV_FIXTURE_MODE -ne 'normal'){
   $g=Start-Process pwsh.exe -ArgumentList @('-NoProfile','-NonInteractive','-File',$env:MLV_FIXTURE_GRAND_SCRIPT) -WindowStyle Hidden -PassThru
   while(-not(Test-Path $env:MLV_FIXTURE_GRAND)){Start-Sleep -Milliseconds 20}
@@ -475,6 +490,26 @@ def test_deny_reason_substring_matches_launcher_selftest():
     r = run_lane_no_background_json({"tool_name":"Bash","tool_input":{"command":"echo x","run_in_background":True}})
     assert r.returncode == 2, (r.stdout, r.stderr)
     assert launcher_substring in r.stderr
+    # Round 14 (fable minor 2): lane-no-background.py's own cross-reference comment above
+    # DENY_REASON drifted after round 13 deleted the shell-candidate machinery it named -- it
+    # kept citing a deleted helper and a renamed test, and docs/lane-containment.md described the
+    # comment inaccurately as a result (a comment about drift-prevention had itself drifted, and
+    # nothing checked its TEXT). Assert the comment names the one site that genuinely still
+    # hand-duplicates the substring, and never the stale names round 13 orphaned.
+    py_text = LANE_NO_BACKGROUND_SCRIPT.read_text(encoding="utf-8")
+    comment = py_text.split("DENY_REASON = (", 1)[0]
+    assert "$backgroundGateExpectedDenySubstring" in comment, (
+        "lane-no-background.py's DENY_REASON comment must name the launcher's literal site"
+    )
+    assert "test_deny_reason_substring_matches_launcher_selftest" in comment, (
+        "lane-no-background.py's DENY_REASON comment must name the current enforcement test, "
+        "not a stale one"
+    )
+    for stale in ("_bash_candidate_runs_the_hook", "test_deny_reason_substring_matches_launcher_and_test_helper"):
+        assert stale not in comment, (
+            f"lane-no-background.py's DENY_REASON comment still names {stale!r}, deleted/renamed "
+            "in round 13 -- the drift-prevention comment has drifted again"
+        )
 
 
 # LANE-NO-BACKGROUND-END-TURN-1 round 7 (sol major 2): the launcher must PROVE the gate
@@ -719,6 +754,72 @@ def test_post_run_tamper_check_catches_hook_copy_deleted_during_the_run(fixture_
     assert q["authority"]["backgroundGate"]=="background-gate-tampered"
     assert q["authority"]["backgroundGate"]!="denied-by-settings-hook"
     assert q["authority"]["backgroundGateTamperDetail"]=="background-gate-tampered: hook copy missing after run"
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 14 (sol major, r13 / fable minor 1): the interpreter
+# named as exec form's `command` got NO post-run check at all before this round -- only the hook
+# COPY did. A disposable byte-copy of this test process's own interpreter stands in for the
+# resolved python.exe: it cannot be the REAL sys.executable (this fixture deletes/corrupts it,
+# and that must never touch the interpreter actually running pytest), but a bare copy fails to
+# start on its own (CPython locates its stdlib relative to its own file path, not any install
+# registry) -- PYTHONHOME, pointed at the ORIGINAL interpreter's directory, is set alongside the
+# override so the copy runs identically to sys.executable without duplicating the whole install.
+def _disposable_interpreter_copy(root):
+    copy_path = root / "lane-python-interpreter.exe"
+    copy_path.write_bytes(Path(sys.executable).read_bytes())
+    return copy_path
+
+
+def test_post_run_tamper_check_catches_interpreter_replaced_during_the_run(fixture_tree):
+    interpreter = _disposable_interpreter_copy(fixture_tree["root"])
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env["MLV_LANE_PYTHON_EXE"]=str(interpreter)
+    env["PYTHONHOME"]=str(Path(sys.executable).parent)
+    env["MLV_FIXTURE_TAMPER_INTERPRETER"]="modify"
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"]
+    # The exact hazard sol/fable r13 described: the self-test proved the ORIGINAL bytes deny, so
+    # a naive receipt would still read as a clean denial after those bytes were replaced.
+    assert q["authority"]["backgroundGate"]=="background-gate-tampered"
+    assert q["authority"]["backgroundGate"]!="denied-by-settings-hook"
+    assert "interpreter sha256 was" in q["authority"]["backgroundGateTamperDetail"]
+    assert re.fullmatch(r"[0-9a-f]{64}", q["authority"]["backgroundGateInterpreterSha256"])
+    assert q["authority"]["backgroundGateInterpreterSha256"] == hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest()
+
+
+def test_post_run_tamper_check_catches_interpreter_deleted_during_the_run(fixture_tree):
+    interpreter = _disposable_interpreter_copy(fixture_tree["root"])
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env["MLV_LANE_PYTHON_EXE"]=str(interpreter)
+    env["PYTHONHOME"]=str(Path(sys.executable).parent)
+    env["MLV_FIXTURE_TAMPER_INTERPRETER"]="delete"
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"]
+    assert q["authority"]["backgroundGate"]=="background-gate-tampered"
+    assert q["authority"]["backgroundGate"]!="denied-by-settings-hook"
+    assert q["authority"]["backgroundGateTamperDetail"]=="background-gate-tampered: interpreter missing after run"
+
+
+# Both tampers firing in the SAME run must not let one mask the other -- the append-not-overwrite
+# behaviour the hook-copy check and workEvidence.reason already use (see Invoke-Lane.ps1).
+def test_post_run_tamper_check_reports_both_hook_copy_and_interpreter_tamper_together(fixture_tree):
+    interpreter = _disposable_interpreter_copy(fixture_tree["root"])
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env["MLV_LANE_PYTHON_EXE"]=str(interpreter)
+    env["PYTHONHOME"]=str(Path(sys.executable).parent)
+    env["MLV_FIXTURE_TAMPER_INTERPRETER"]="delete"
+    env["MLV_FIXTURE_TAMPER_HOOK_COPY"]="delete"
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["authority"]["backgroundGate"]=="background-gate-tampered"
+    detail=q["authority"]["backgroundGateTamperDetail"]
+    assert "hook copy missing after run" in detail
+    assert "interpreter missing after run" in detail
 
 
 def test_timeout_kills_owned_child_and_grandchild(fixture_tree):

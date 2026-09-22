@@ -625,6 +625,7 @@ $denyRules  = @()
 # engine test at every read site.
 $hookCopyPath = $null
 $backgroundHookLaunchSha256 = $null
+$backgroundInterpreterLaunchSha256 = $null
 $jobHandle = [IntPtr]::Zero
 $jobAssigned = $false
 $promptDelivered = $false
@@ -738,6 +739,23 @@ if ($cfg.engine -eq 'claude') {
     # enforces below, just one step earlier because there is no command to even attempt yet.
     if (-not $PYTHON_EXE) {
         throw "background-gate-interpreter-not-found: no Python interpreter resolved ($($PYTHON_EXE_RESOLUTION.Source)); an unrunnable hook command denies nothing, so the launch is refused rather than registering one that cannot run."
+    }
+    # Round 14 (sol major, r13): the hook COPY gets a launch-hash/post-run-rehash tamper check
+    # (below and at the post-run section), but the INTERPRETER named as exec form's `command` --
+    # a user-writable executable this launcher only ever proves ONCE, at self-test time -- got
+    # none. An editing lane's own allowed foreground Bash/PowerShell call can delete or replace
+    # that executable after the self-test passes; every later hook spawn then fails, which the
+    # vendor docs this PR already cites (round 7 comment above) treat as a NON-BLOCKING error, so
+    # `run_in_background: true` would proceed while the receipt still read `denied-by-settings-
+    # hook`. Same treatment as the hook copy: hash it now, before it is ever spawned, and compare
+    # again after the run (post-run section, below `background-gate-tampered` for the hook copy).
+    # Hashed BEFORE the self-test below so the recorded hash is provably of the exact bytes the
+    # self-test itself just proved deny -- not a later, possibly-already-different file at the
+    # same path.
+    try {
+        $backgroundInterpreterLaunchSha256 = (Get-FileHash -LiteralPath $PYTHON_EXE -Algorithm SHA256).Hash.ToLowerInvariant()
+    } catch {
+        throw "background-gate-interpreter-not-found: resolved interpreter $PYTHON_EXE could not be hashed: $($_.Exception.Message)"
     }
     # Round 13 (hub ruling): registered in EXEC FORM (`args` present) -- Claude Code resolves
     # `command` as an executable and spawns it directly with `args` as the argument vector, "no
@@ -906,6 +924,14 @@ if ($cfg.engine -eq 'claude') {
         backgroundGateInterpreterSource = $PYTHON_EXE_RESOLUTION.Source
         backgroundGateForm              = 'exec'
         backgroundGateHookArgs          = @($hookCopyPath)
+        # Round 14: same treatment, same field shape, as backgroundHookSha256 above -- the
+        # resolved interpreter's own hash at the instant the self-test proved it denies. Compared
+        # again post-run below; a mismatch or a now-missing interpreter overwrites
+        # backgroundGate to 'background-gate-tampered' exactly the way a hook-copy mismatch does,
+        # never a separate state -- both are "this run's proof no longer describes what could
+        # have run" and are not distinguishable in severity, so this reuses that one literal
+        # rather than inventing an 'unverified' third state that would only blur the same fact.
+        backgroundGateInterpreterSha256 = $backgroundInterpreterLaunchSha256
     }
 } else {
     $exe  = $CODEX_EXE
@@ -1431,6 +1457,31 @@ if ($cfg.engine -eq 'claude' -and $backgroundHookLaunchSha256) {
         } else {
             "background-gate-tampered: sha256 was $backgroundHookLaunchSha256, now $backgroundHookPostRunSha256"
         }
+    }
+}
+# Round 14 (sol major, r13): the SAME two-point-in-time check as directly above, now also for
+# the registered `command` executable itself -- the interpreter, hashed at self-test time
+# (above, before the provider ever started). An editing lane's own foreground Bash/PowerShell
+# grant can delete or replace a user-writable interpreter mid-run; this is the only thing that
+# can catch it after the fact. Same literal, same field, appended (not overwritten) if the hook
+# copy above ALSO tampered, so neither finding masks the other -- see workEvidence.reason above
+# for the same append-not-overwrite reasoning. Exactly two points in time here too (launch,
+# exit): a replace-then-restore inside the run leaves both hashes matching and records nothing,
+# same limitation docs/lane-containment.md already states for the hook copy.
+if ($cfg.engine -eq 'claude' -and $backgroundInterpreterLaunchSha256) {
+    $backgroundInterpreterPostRunSha256 = if (Test-Path -LiteralPath $PYTHON_EXE) {
+        (Get-FileHash -LiteralPath $PYTHON_EXE -Algorithm SHA256).Hash.ToLowerInvariant()
+    } else { $null }
+    if ($backgroundInterpreterPostRunSha256 -ne $backgroundInterpreterLaunchSha256) {
+        $authority.backgroundGate = 'background-gate-tampered'
+        $interpreterTamperDetail = if ($null -eq $backgroundInterpreterPostRunSha256) {
+            'background-gate-tampered: interpreter missing after run'
+        } else {
+            "background-gate-tampered: interpreter sha256 was $backgroundInterpreterLaunchSha256, now $backgroundInterpreterPostRunSha256"
+        }
+        $authority.backgroundGateTamperDetail = if ($authority.Contains('backgroundGateTamperDetail') -and $authority.backgroundGateTamperDetail) {
+            "$($authority.backgroundGateTamperDetail) | $interpreterTamperDetail"
+        } else { $interpreterTamperDetail }
     }
 }
 $workCompleted = ($null -eq $failure -and $null -eq $providerRefusal -and $processEnded -and $workEvidence.workCompleted -eq $true)
