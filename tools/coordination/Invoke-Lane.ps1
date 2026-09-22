@@ -207,12 +207,17 @@ function Resolve-LaneExecutable {
 }
 
 # Claude Code's own docs state exactly which shell runs a shell-form `type: "command"` hook (one
-# without an `args` field, which is what this launcher registers) on Windows: "When Claude Code
-# runs a shell-form command hook ... it spawns `sh -c` on macOS and Linux, Git Bash on Windows, or
-# PowerShell when Git Bash isn't installed by default" (code.claude.com/docs/en/hooks-guide,
-# "Hook JSON has no effect" section, fetched 2026-09-22 -- full quote and fetch evidence in round
-# 8's summary.md). So Git Bash -- not PowerShell -- is the shell a registered hook command
-# actually runs under here, and the self-test below must use the same one.
+# without an `args` field, which is what this launcher registers) on Windows: "the command string
+# is passed to a shell: sh -c on macOS and Linux, Git Bash on Windows, or PowerShell when Git Bash
+# isn't installed. Set the shell field to choose explicitly" (code.claude.com/docs/en/hooks,
+# "Exec form and shell form" section, fetched 2026-09-22 -- full quote and fetch evidence in this
+# round's summary.md; supersedes round 8/9's citation of the same fact from the hooks-guide page,
+# which does not name the `shell` field). Git Bash is the PREFERRED shell when it resolves; round
+# 10 adds PowerShell as a registered, self-tested FALLBACK -- never a launch refusal -- for a host
+# where it does not, because refusing here is stricter than the product: Claude Code itself would
+# fall back rather than fail. The `shell` field lets the registration PIN whichever one this
+# launch actually resolved and self-tested, rather than trusting Claude Code's own auto-detection
+# to agree with it independently.
 $PYTHON_EXE_RESOLUTION = Resolve-LaneExecutable -OverrideEnvName 'MLV_LANE_PYTHON_EXE' `
     -PathCommandNames @('python.exe', 'python3.exe') `
     -KnownLocations @('C:/Users/obabalola/AppData/Local/Python/bin/python.exe')
@@ -223,6 +228,17 @@ $GIT_BASH_EXE_RESOLUTION = Resolve-LaneExecutable -OverrideEnvName 'MLV_GIT_BASH
     -PathCommandNames @('bash.exe') `
     -KnownLocations @('C:\Program Files\Git\bin\bash.exe', 'C:\Program Files\Git\usr\bin\bash.exe', 'C:\Program Files (x86)\Git\bin\bash.exe')
 $GIT_BASH_EXE = $GIT_BASH_EXE_RESOLUTION.Path
+
+# Round 10 (sol major 1a): tried only when Git Bash does not resolve (selection below, ~line 766).
+# Windows PowerShell 5.1 ships at this exact System32 path on every 64-bit Windows install; it is
+# the ONE candidate, not `pwsh.exe` (PowerShell 7), because that is an optional install and the
+# vendor docs' own hook examples invoke the bare name `powershell.exe`, never `pwsh.exe` -- the
+# same "curated, verified location over PATH-order-dependent guessing" reasoning as the Git Bash
+# known locations above, applied to the one binary name the docs actually show.
+$POWERSHELL_EXE_RESOLUTION = Resolve-LaneExecutable -OverrideEnvName 'MLV_LANE_POWERSHELL_EXE' `
+    -PathCommandNames @('powershell.exe') `
+    -KnownLocations @('C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')
+$POWERSHELL_EXE = $POWERSHELL_EXE_RESOLUTION.Path
 
 # Every tool that either fans out to another agent (Agent, Task, Workflow, TaskCreate) or
 # promises a LATER turn a headless lane cannot receive (Monitor, ScheduleWakeup, CronCreate,
@@ -766,13 +782,44 @@ if ($cfg.engine -eq 'claude') {
     if (-not $PYTHON_EXE) {
         throw "background-gate-interpreter-not-found: no Python interpreter resolved ($($PYTHON_EXE_RESOLUTION.Source)); an unrunnable hook command denies nothing, so the launch is refused rather than registering one that cannot run."
     }
-    if (-not $GIT_BASH_EXE) {
-        throw "background-gate-shell-not-found: no Git Bash resolved ($($GIT_BASH_EXE_RESOLUTION.Source)); an unrunnable hook command denies nothing, so the launch is refused rather than registering a hook whose self-test can never run."
+    # Round 10 (sol major 1a): Git Bash is PREFERRED (matches Claude Code's own default), but its
+    # absence is no longer a launch refusal on its own -- PowerShell is tried as a registered,
+    # self-tested fallback, exactly mirroring what Claude Code itself would do. Refusing here
+    # whenever Git Bash is absent, as round 9 did, is STRICTER than the product itself and is a
+    # self-inflicted outage on any host without Git Bash but with PowerShell (i.e. every Windows
+    # host). Only "neither shell resolved" remains fail-closed.
+    if ($GIT_BASH_EXE) {
+        $backgroundGateShellKind = 'bash'
+        $backgroundGateShellExe = $GIT_BASH_EXE
+        $backgroundGateShellResolution = $GIT_BASH_EXE_RESOLUTION
+    } elseif ($POWERSHELL_EXE) {
+        $backgroundGateShellKind = 'powershell'
+        $backgroundGateShellExe = $POWERSHELL_EXE
+        $backgroundGateShellResolution = $POWERSHELL_EXE_RESOLUTION
+    } else {
+        throw "background-gate-shell-not-found: no Git Bash resolved ($($GIT_BASH_EXE_RESOLUTION.Source)) and no PowerShell resolved ($($POWERSHELL_EXE_RESOLUTION.Source)); an unrunnable hook command denies nothing, so the launch is refused rather than registering a hook whose self-test can never run."
     }
-    # Round 8 (sol major 1): the command STRING is built exactly ONCE, here -- both the
-    # --settings hook entry below and the self-test use this same variable, so there is no way
-    # for the string the self-test proves and the string actually registered to drift apart.
-    $hookCommand = ('"{0}" "{1}"' -f $PYTHON_EXE, $hookCopyPath)
+    # Round 8 (sol major 1) / round 10: the command STRING is built exactly ONCE per resolved
+    # shell kind, here -- both the --settings hook entry below and the self-test use this same
+    # variable, so there is no way for the string the self-test proves and the string actually
+    # registered to drift apart.
+    if ($backgroundGateShellKind -eq 'bash') {
+        $hookCommand = ('"{0}" "{1}"' -f $PYTHON_EXE, $hookCopyPath)
+    } else {
+        # Round 10: measured directly on this dev machine (full transcript in this round's
+        # summary.md). Two PowerShell-specific hazards, both load-bearing, not stylistic:
+        # (1) `powershell.exe -Command '"<path>" "<arg>"'` is a PARSE ERROR ("Unexpected token")
+        # without a leading call operator `&` -- unlike `bash -c`, PowerShell does not implicitly
+        # invoke a bare quoted string as a command. (2) even WITH `&`, a NESTED
+        # `powershell.exe -Command "& exe args"` does NOT propagate the invoked process's non-zero
+        # exit code as its OWN exit code by default -- measured: the hook's real exit 2 collapsed
+        # to exit 1 from the outer powershell.exe, with no `; exit $LASTEXITCODE` suffix. Per the
+        # vendor hooks reference's own exit-code table, exit 1 (without a blocking JSON decision)
+        # is a NON-BLOCKING error for PreToolUse -- the tool call PROCEEDS -- so a PowerShell-form
+        # command missing this suffix would silently fail OPEN in exactly the one case this
+        # fallback exists to cover.
+        $hookCommand = ('& "{0}" "{1}"; exit $LASTEXITCODE' -f $PYTHON_EXE, $hookCopyPath)
+    }
     # Round 7 (sol major 2): a missing or wrong-path interpreter cannot be detected FROM INSIDE
     # the hook -- Claude Code treats a failed hook COMMAND as a non-blocking error and the tool
     # call proceeds, so a receipt claiming the gate denies background work could be false while
@@ -781,24 +828,28 @@ if ($cfg.engine -eq 'claude') {
     # background.py's own protocol). A launch whose self-test does not pass never starts the
     # provider -- the throw below is caught by this script's own top-level try/catch, which
     # still writes a well-formed 'failed' receipt naming this exact reason.
-    # Round 8 (sol major 1): "the exact registered command" means invoking $hookCommand through
-    # the SAME shell Claude Code itself spawns for a shell-form `command` hook on Windows -- Git
-    # Bash ($GIT_BASH_EXE above) -- not a direct PowerShell `&` call against the interpreter and
-    # script as two separate argv tokens. Round 7's `& $PYTHON_EXE $hookCopyPath` tested only that
-    # the interpreter and script individually behave; it could not catch a broken COMMAND STRING
-    # (bad quoting, a wrong path baked into $hookCommand alone) the way running that exact string
-    # through `bash -c` can -- and a broken registered string, passing self-test only because the
-    # self-test never actually ran the registered string, is exactly the failure mode a launch
-    # self-test exists to rule out.
+    # Round 8 (sol major 1) / round 10: "the exact registered command" means invoking $hookCommand
+    # through the SAME shell that will actually run it -- Git Bash when resolved, PowerShell
+    # ($backgroundGateShellExe above) only as the fallback -- never a direct call against the
+    # interpreter and script as two separate, decomposed argv tokens. Round 7's
+    # `& $PYTHON_EXE $hookCopyPath` tested only that the interpreter and script individually
+    # behave; it could not catch a broken COMMAND STRING (bad quoting, a wrong path baked into
+    # $hookCommand alone) the way running that exact string through the real shell can -- and a
+    # broken registered string, passing self-test only because the self-test never actually ran
+    # the registered string, is exactly the failure mode a launch self-test exists to rule out.
     $backgroundGateSelfTestPayload = '{"tool_name":"Bash","tool_input":{"command":"echo x","run_in_background":true}}'
     try {
-        $selfTestOutput = $backgroundGateSelfTestPayload | & $GIT_BASH_EXE -c $hookCommand 2>&1
+        if ($backgroundGateShellKind -eq 'bash') {
+            $selfTestOutput = $backgroundGateSelfTestPayload | & $backgroundGateShellExe -c $hookCommand 2>&1
+        } else {
+            $selfTestOutput = $backgroundGateSelfTestPayload | & $backgroundGateShellExe -Command $hookCommand 2>&1
+        }
         $selfTestExit = $LASTEXITCODE
     } catch {
         throw "background-gate-selftest-failed: interpreter invocation threw: $($_.Exception.Message)"
     }
     if ($selfTestExit -ne 2) {
-        throw "background-gate-selftest-failed: expected exit 2 (deny) from the exact registered command string run through Git Bash (the shell Claude Code spawns for this hook on Windows), got exit $selfTestExit; output: $($selfTestOutput -join ' | ')"
+        throw "background-gate-selftest-failed: expected exit 2 (deny) from the exact registered command string run through $backgroundGateShellKind (the shell this launch registers via the settings 'shell' field), got exit $selfTestExit; output: $($selfTestOutput -join ' | ')"
     }
     # Matcher covers BOTH shell tools carrying `run_in_background` (round 7, sol major 1 /
     # fable major): PowerShell has the same parameter Bash does, and the sanctioned editing
@@ -806,6 +857,10 @@ if ($cfg.engine -eq 'claude') {
     # script's own should_deny check is now tool-name-agnostic as a second, independent gate
     # (see lane-no-background.py), so this matcher narrows WHICH calls invoke the hook at all,
     # not which calls the hook is capable of denying.
+    # Round 10 (sol major 1a): the `shell` field (docs/en/hooks, "Command hook fields": accepts
+    # "bash" or "powershell", ignored when `args` is set) PINS the shell this registration was
+    # self-tested against -- Claude Code no longer has to agree, via its own undocumented
+    # auto-detection, with what was just proven to deny.
     $settingsObj = [ordered]@{
         hooks = [ordered]@{
             PreToolUse = @(
@@ -815,6 +870,7 @@ if ($cfg.engine -eq 'claude') {
                         [ordered]@{
                             type    = 'command'
                             command = $hookCommand
+                            shell   = $backgroundGateShellKind
                         }
                     )
                 }
@@ -895,10 +951,15 @@ if ($cfg.engine -eq 'claude') {
         # Round 9: the resolved paths (never the pin) plus WHERE each came from -- override, PATH,
         # or a known location -- so a receipt can be audited against what actually ran the gate on
         # this host, not what a stale comment claims is pinned.
+        # Round 10: backgroundGateShellKind records WHICH shell won -- 'bash' (preferred) or
+        # 'powershell' (fallback, only when Git Bash did not resolve) -- alongside the same
+        # path/source pair, now naming whichever shell actually ran the self-test and is pinned
+        # via the settings hook's `shell` field.
         backgroundGateInterpreterPath   = $PYTHON_EXE
         backgroundGateInterpreterSource = $PYTHON_EXE_RESOLUTION.Source
-        backgroundGateShellPath         = $GIT_BASH_EXE
-        backgroundGateShellSource       = $GIT_BASH_EXE_RESOLUTION.Source
+        backgroundGateShellKind         = $backgroundGateShellKind
+        backgroundGateShellPath         = $backgroundGateShellExe
+        backgroundGateShellSource       = $backgroundGateShellResolution.Source
     }
 } else {
     $exe  = $CODEX_EXE

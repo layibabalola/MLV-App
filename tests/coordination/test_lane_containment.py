@@ -193,7 +193,17 @@ def prepare(tree, mode, assignment_failure=False, editing=False, allowed_tools="
       "MLV_FIXTURE_CHILD":str(root/"child.json"),"MLV_FIXTURE_GRAND":str(root/"grand.json"),
       "MLV_FIXTURE_GRAND_SCRIPT":str(tree["grand"]),"MLV_FIXTURE_ARGS":str(root/"args.json"),
       "MLV_FIXTURE_PROMPT":str(root/"prompt.txt"),"MLV_FIXTURE_EFFORT":str(root/"effort.txt"),
-      "MLV_FIXTURE_BGTASKS":str(root/"bgtasks.txt")})
+      "MLV_FIXTURE_BGTASKS":str(root/"bgtasks.txt"),
+      # Round 10 (sol major 1b): pinned here, not left to whatever Python the launcher's own
+      # known-locations/PATH search happens to find on the machine running this suite -- this
+      # test process's OWN interpreter is by definition present and working, so every fixture
+      # test that does not override MLV_LANE_PYTHON_EXE itself is deterministic regardless of
+      # whether the host has a "board Python" installed at the dev-machine known-location or on
+      # PATH at all. Deliberately NOT pinning MLV_GIT_BASH here: round 10's PowerShell fallback
+      # (Invoke-Lane.ps1, shell selection ~line 766) is what makes the Git-Bash-optional half of
+      # this requirement host-independent -- a fixture pin would hide a regression in that
+      # fallback instead of exercising it.
+      "MLV_LANE_PYTHON_EXE":sys.executable})
     cmd=[PWSH,"-NoLogo","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",str(script),"-Lane",lane,"-Prompt","fixture prompt","-WorkDir",str(root),"-RunDir",str(run),"-TimeoutSec","3" if mode=="timeout" else "30","-Card","FIXTURE","-ReasoningEffort","low"]
     if editing: cmd += ["-AllowEdits","-AllowedTools",allowed_tools]
     if allow_bulk_reads: cmd += ["-AllowBulkReads"]
@@ -298,11 +308,14 @@ def test_editing_settings_json_also_wires_lane_no_background_hook(fixture_tree):
     assert re.fullmatch(r"[0-9a-f]{64}", q["authority"]["backgroundHookSha256"])
     # Round 9: the receipt records the RESOLVED interpreter/shell paths and where each came from
     # (override/PATH/known-location) -- never a hardcoded pin -- so a receipt can be audited
-    # against what actually ran the gate on the host that produced it.
+    # against what actually ran the gate on the host that produced it. Round 10 adds
+    # backgroundGateShellKind, naming which of the two ('bash' or 'powershell') actually won.
     assert q["authority"]["backgroundGateInterpreterPath"]
     assert q["authority"]["backgroundGateInterpreterSource"]
+    assert q["authority"]["backgroundGateShellKind"] in ("bash", "powershell")
     assert q["authority"]["backgroundGateShellPath"]
     assert q["authority"]["backgroundGateShellSource"]
+    assert settings["hooks"]["PreToolUse"][0]["hooks"][0]["shell"] == q["authority"]["backgroundGateShellKind"]
 
 
 def test_codex_lane_gets_no_settings_file_or_flag(fixture_tree):
@@ -483,16 +496,29 @@ def test_launch_refuses_when_registered_command_has_a_bad_interpreter_path_even_
     assert direct.returncode==2,(direct.stdout,direct.stderr)
 
 
-# LANE-NO-BACKGROUND-END-TURN-1 round 9: root cause of the hosted-CI break this round fixes was
+# LANE-NO-BACKGROUND-END-TURN-1 round 9: root cause of the hosted-CI break that round fixed was
 # NOT the pinned Git Bash path (it resolved and ran fine on the runner -- verified against the
 # real job log, run 35758428267 job 106850299120) but the pinned $PYTHON_EXE, a per-user absolute
-# path that exists only on the dev machine. Both are now resolved at runtime: an explicit
-# per-variable override env var, then PATH, then known install locations; unresolvable is a named,
-# fail-closed launch refusal. These four tests exercise both the resolvable and the unresolvable
-# path for each variable via the override, so the outcome is deterministic regardless of whether
-# the host running the suite happens to have Git Bash at a particular path -- required because
-# that is exactly the layout difference between the dev machine and the hosted runner that broke
-# this card.
+# path that exists only on the dev machine. Both are resolved at runtime, in order: an explicit
+# per-variable override env var (authoritative -- never falls through, even to a real hit), then
+# known, curated install locations, then PATH as a last resort -- known-locations-before-PATH is
+# deliberate (Invoke-Lane.ps1 ~line 154 documents the measured WSL-stub-on-PATH hazard it avoids).
+#
+# Round 10 (sol major 1a/1b): Git Bash absence is no longer, by itself, a launch refusal --
+# PowerShell is tried as a second, registered, self-tested shell (Invoke-Lane.ps1's shell
+# selection, ~line 766), matching what Claude Code itself would do rather than refusing more
+# strictly than the product. `prepare()` above now also pins MLV_LANE_PYTHON_EXE to this test
+# process's own interpreter for EVERY fixture test, not only the ones below that touch it
+# explicitly. Scope of what this buys, stated precisely (fable round 9 minor 2): combined, these
+# two changes make the FULL fixture suite -- not merely the tests in this section -- deterministic
+# regardless of whether the host running it has Git Bash, or a "board Python" at any particular
+# known-location or PATH entry. An ordinary Claude-lane launch test now resolves Python from
+# prepare()'s pin (never PATH- or install-location-dependent) and resolves a shell from either a
+# real Git Bash (if the host has one) or the System32 PowerShell every Windows host ships (if it
+# does not) -- both outcomes launch successfully. The one residual: a host missing PowerShell
+# itself would still fail closed on the shell axis; no supported Windows configuration lacks it,
+# so this is not exercised by a skip-free test the way the four tests below exercise their own
+# specific override tiers.
 def _find_real_git_bash():
     found = shutil.which("bash")
     if found and Path(found).is_file():
@@ -518,15 +544,42 @@ def test_launch_proceeds_when_git_bash_and_python_overrides_resolve(fixture_tree
     assert r.returncode==0,(r.stdout,r.stderr)
     q=json.loads(receipt.read_text(encoding="utf-8"))
     assert q["state"]=="complete" and q["complete"]
+    assert q["authority"]["backgroundGateShellKind"]=="bash"
     assert q["authority"]["backgroundGateShellPath"]==real_bash
     assert q["authority"]["backgroundGateShellSource"]=="override:MLV_GIT_BASH"
     assert q["authority"]["backgroundGateInterpreterPath"]==sys.executable
     assert q["authority"]["backgroundGateInterpreterSource"]=="override:MLV_LANE_PYTHON_EXE"
 
 
-def test_launch_refuses_when_git_bash_override_is_unresolvable(fixture_tree):
+# Round 10 (sol major 1a): forcing Git Bash unresolvable no longer refuses the launch -- it falls
+# back to the registered, self-tested PowerShell path instead. This test replaces round 9's
+# test_launch_refuses_when_git_bash_override_is_unresolvable, whose refusal assertion this round's
+# behavior change makes false; test_launch_refuses_when_neither_git_bash_nor_powershell_resolve
+# below covers the still-fail-closed case where NEITHER shell resolves.
+def test_launch_falls_back_to_powershell_when_git_bash_override_is_unresolvable(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal")
+    env["MLV_GIT_BASH"]=str(fixture_tree["root"]/"nonexistent-bash.exe")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"]
+    assert q["authority"]["backgroundGateShellKind"]=="powershell"
+    assert q["authority"]["backgroundGateShellPath"]
+    assert q["authority"]["backgroundGateShellSource"]!="override:MLV_GIT_BASH"
+    settings=json.loads(settings_path_for(receipt).read_text(encoding="utf-8-sig"))
+    hook_entry=settings["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook_entry["shell"]=="powershell"
+    # Round 10: the PowerShell command form needs the leading call operator AND the trailing
+    # exit-code forward -- both measured load-bearing (see Invoke-Lane.ps1 ~line 800 and this
+    # round's summary.md).
+    assert hook_entry["command"].startswith('& "')
+    assert hook_entry["command"].endswith('; exit $LASTEXITCODE')
+
+
+def test_launch_refuses_when_neither_git_bash_nor_powershell_resolve(fixture_tree):
     cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
     env["MLV_GIT_BASH"]=str(fixture_tree["root"]/"nonexistent-bash.exe")
+    env["MLV_LANE_POWERSHELL_EXE"]=str(fixture_tree["root"]/"nonexistent-powershell.exe")
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
     assert r.returncode!=0,(r.stdout,r.stderr)
     assert not (fixture_tree["root"]/"child.json").exists()
@@ -536,6 +589,41 @@ def test_launch_refuses_when_git_bash_override_is_unresolvable(fixture_tree):
     assert not q["complete"]
     assert q["failure"].startswith("background-gate-shell-not-found")
     assert "override:MLV_GIT_BASH" in q["failure"]
+    assert "override:MLV_LANE_POWERSHELL_EXE" in q["failure"]
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 10 (sol minor / fable minor 1): the implemented, documented
+# order is override -> known locations -> PATH -- deliberately, to keep a WSL bash.exe launcher
+# stub on PATH from ever hijacking a default launch ahead of a curated, verified Git Bash location
+# (Invoke-Lane.ps1 ~line 154). Earlier round-9 test-file prose stated the reverse
+# ("override, then PATH, then known install locations"); this test asserts the actual winner
+# directly instead of leaving the order to comment-only documentation, which a future reader could
+# "fix" by inverting the real precedence and silently reintroducing the stub hazard.
+def test_resolve_prefers_known_location_over_path_when_both_resolve(fixture_tree):
+    real_bash = _find_real_git_bash()
+    if not real_bash:
+        pytest.skip("no Git Bash found on this test host -- cannot exercise the known-location-vs-PATH precedence path")
+    def pin_known_location_to_real_bash(text):
+        needle = "-KnownLocations @('C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\usr\\bin\\bash.exe', 'C:\\Program Files (x86)\\Git\\bin\\bash.exe')"
+        assert needle in text, "Invoke-Lane.ps1's Git Bash KnownLocations literal changed shape; update this fixture's mutation to match"
+        escaped = real_bash.replace("'", "''")
+        return text.replace(needle, "-KnownLocations @('" + escaped + "')")
+    cmd,env,receipt=prepare(fixture_tree,"normal",mutation=pin_known_location_to_real_bash)
+    # A second, DIFFERENT bash.exe on PATH, ahead of the real one, that must NEVER actually be
+    # invoked if known-location precedence holds -- this proves precedence rather than merely
+    # proving known-location resolves when it is the only candidate present.
+    path_dir = fixture_tree["root"]/"path-shadow"
+    path_dir.mkdir()
+    decoy = path_dir/"bash.exe"
+    decoy.write_bytes((Path(os.environ.get("WINDIR", r"C:\Windows"))/"System32"/"cmd.exe").read_bytes())
+    env["PATH"] = str(path_dir) + os.pathsep + env["PATH"]
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"]
+    assert q["authority"]["backgroundGateShellKind"]=="bash"
+    assert q["authority"]["backgroundGateShellPath"]==real_bash
+    assert q["authority"]["backgroundGateShellSource"]==f"known-location:{real_bash}"
 
 
 def test_launch_refuses_when_python_override_is_unresolvable(fixture_tree):

@@ -65,20 +65,55 @@ script into THIS run's already-reserved, board-rooted slot
 (`<lane>-NNN.lane-no-background.py`, beside the receipt, under
 `.claude-state/fleet-runs` -- itself an NA-2 protected tail no lane can write to)
 and points the registration at that copy, never at the source. The copy is hashed
-immediately (`sha256`). **The registered command STRING is built exactly once**
-(`$hookCommand`) and used unchanged for both the `--settings` entry and the
-launch self-test, so the two can never name different commands. **Round 8 (sol
-major 1): the self-test runs that exact string through Git Bash**, fed the
-same synthetic `{"tool_name":"Bash","tool_input":{"run_in_background":true}}`
-payload on stdin, not by invoking the interpreter and the copy as two
-decomposed PowerShell argv tokens the way round 7 did. Claude Code's own docs
-state a shell-form `command` hook (one without an `args` field, which is what
-this launcher registers) is executed via `sh -c` on macOS/Linux, **Git Bash on
-Windows**, or PowerShell only when Git Bash is not installed
-(code.claude.com/docs/en/hooks-guide), so that is the shell that actually runs
-the registered command, and a self-test invoking a different shell (or
-bypassing the command string entirely) can pass while the real registration is
-broken by bad quoting or a wrong path baked into the string itself.
+immediately (`sha256`). **The registered command STRING is built exactly once
+per resolved shell kind** (`$hookCommand`) and used unchanged for both the
+`--settings` entry and the launch self-test, so the two can never name different
+commands. **Round 8 (sol major 1): the self-test runs that exact string through
+the real shell it is registered for**, fed the same synthetic
+`{"tool_name":"Bash","tool_input":{"run_in_background":true}}` payload on stdin,
+not by invoking the interpreter and the copy as two decomposed PowerShell argv
+tokens the way round 7 did. Claude Code's own docs state a shell-form `command`
+hook (one without an `args` field, which is what this launcher registers) is
+executed via `sh -c` on macOS/Linux, **Git Bash on Windows when it is installed,
+or PowerShell as its own documented fallback otherwise** -- and a `shell` field
+lets a hook entry choose explicitly instead of relying on that auto-detection
+(code.claude.com/docs/en/hooks, "Exec form and shell form" / "Command hook
+fields"). A self-test invoking a different shell than the one actually
+registered (or bypassing the command string entirely) can pass while the real
+registration is broken by bad quoting or a wrong path baked into the string
+itself.
+
+**Round 10 (sol major 1a): Git Bash absence is a registered, self-tested
+PowerShell fallback, never a launch refusal.** Round 9 refused every Claude lane
+outright whenever Git Bash could not be resolved -- stricter than the product
+itself, since Claude Code would fall back to PowerShell rather than fail, making
+round 9's refusal a self-inflicted outage on any Windows host without Git Bash
+(every one still has PowerShell). Git Bash stays PREFERRED when it resolves,
+unchanged from round 9; only its absence now tries a second candidate --
+Windows PowerShell at its fixed System32 location or on `PATH`, resolved via the
+same override/known-location/PATH `Resolve-LaneExecutable` tiers -- before
+refusing. Whichever shell wins is named explicitly on the hook entry's `shell`
+field (`"bash"` or `"powershell"`), so Claude Code's own shell auto-detection
+never has to independently agree with what the self-test just proved denies;
+the receipt's `authority.backgroundGateShellKind` records the same value.
+**The PowerShell command form is not the Git Bash form with a different
+shell wrapped around it -- two measured PowerShell-specific hazards make it
+structurally different, both load-bearing:** (1) `powershell.exe -Command
+'"<path>" "<arg>"'` is a parse error without a leading call operator `&`,
+unlike `bash -c`, which invokes a bare quoted string directly; and (2) even
+with `&`, a *nested* `powershell.exe -Command "& exe args"` does not propagate
+the invoked process's exit code as its own -- measured directly: the hook's
+real exit 2 collapsed to exit 1 from the outer `powershell.exe` with no
+`; exit $LASTEXITCODE` suffix. Per the vendor hooks reference's own exit-code
+table, exit 1 without a blocking JSON decision is a **non-blocking error** for
+`PreToolUse` -- the tool call proceeds -- so a PowerShell-form command missing
+that suffix would silently fail OPEN in exactly the one case this fallback
+exists to cover. The registered PowerShell command is therefore
+`& "<python>" "<hook copy>"; exit $LASTEXITCODE`, and the self-test runs that
+exact string through `powershell.exe -Command`, the same way the Git Bash
+self-test runs its form through `bash -c`. Only "neither Git Bash nor
+PowerShell resolves" refuses the launch now (`background-gate-shell-not-found`,
+naming both attempted resolutions).
 
 **Round 9: both the interpreter and the shell are RESOLVED at runtime, never
 pinned.** The dev-machine-only pins broke hosted CI: the real job log (run
@@ -93,12 +128,15 @@ resort -- deliberately last, not first as a shell resolver would naturally do
 it: `Get-Command bash.exe` on the dev machine resolves to the Windows-shipped
 WSL launcher stub ahead of real Git Bash (System32 precedes Git's `bin` on
 `PATH`), which would have refused every default launch on any box with WSL
-enabled. **Nothing resolving for either variable refuses the launch before a
-hook command is ever built** (`background-gate-shell-not-found` /
-`-interpreter-not-found`) -- an unrunnable command denies nothing. The
-receipt's `authority` block records each resolved path and which tier found it
-(`backgroundGateShellPath`/`-Source`, `backgroundGateInterpreterPath`/
-`-Source`). The self-test requires the fail-closed
+enabled. **No Python interpreter resolving refuses the launch before a hook
+command is ever built** (`background-gate-interpreter-not-found`) -- an
+unrunnable command denies nothing. **Round 10: the equivalent shell refusal
+(`background-gate-shell-not-found`) now fires only when NEITHER Git Bash NOR
+PowerShell resolves** (see above) -- Git Bash alone failing to resolve is no
+longer sufficient on its own. The receipt's `authority` block records each
+resolved path, which tier found it, and (round 10) which shell kind won
+(`backgroundGateShellKind`, `backgroundGateShellPath`/`-Source`,
+`backgroundGateInterpreterPath`/`-Source`). The self-test requires the fail-closed
 deny (exit 2) -- a launch whose self-test does not pass never starts the
 provider; the receipt records `failure: "background-gate-selftest-failed: ..."`
 instead. After the run, the copy is re-hashed; a lane with Bash/Edit access is
