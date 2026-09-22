@@ -1585,7 +1585,9 @@ if ($glOutputValidationRequested) {
     }
 }
 $gpuTextureRouteReadbackRegressionFailure =
-    Get-GuiSmokeGpuTextureRouteReadbackRegressionFailure -LaunchEnv $launchEnv -GpuSummary $gpuSummary
+    Get-GuiSmokeGpuTextureRouteReadbackRegressionFailure -LaunchEnv $launchEnv `
+        -ClearedEnvironment $clearedEnvironment -GpuSummary $gpuSummary `
+        -AmbientEnvironment ([System.Environment]::GetEnvironmentVariables())
 if ($null -ne $gpuTextureRouteReadbackRegressionFailure) {
     $validationFailures += $gpuTextureRouteReadbackRegressionFailure
 }
