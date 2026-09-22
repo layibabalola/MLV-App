@@ -332,8 +332,16 @@ $shareStageDir = Join-Path $shareStageRoot $job.jobId
 # entry in the directory regardless of which attempt actually wrote it.
 $createdSharePaths = New-Object System.Collections.Generic.List[string]
 function Remove-Attr3FootageStageAttemptResidue {
+    # ATTR3-FOOTAGE-STAGE-1 round 10 (path disclosure): Remove-AttrCudaPartialFile
+    # (AttrCudaArtifacts.psm1) Write-Warnings the real path on a refused removal
+    # (ATTRCUDA_PARTIAL_OUTSIDE_TRUSTED_ROOT / ATTRCUDA_PARTIAL_NOT_A_FILE) -- suppressed here the
+    # same way Attr3FootageStageJob.psm1's own Record-PartResult already suppresses it, and a
+    # refusal is reported with a fixed token instead, never the path or the return value alone.
     foreach ($createdPath in $createdSharePaths) {
-        [void](Remove-AttrCudaPartialFile -TrustedRoot $shareStageRoot -Path $createdPath)
+        $partialRemoved = Remove-AttrCudaPartialFile -TrustedRoot $shareStageRoot -Path $createdPath -WarningAction SilentlyContinue
+        if (-not $partialRemoved) {
+            Write-Output 'ATTR3_STAGE_RESIDUE_LEFT_IN_PLACE a created part slot could not be removed and was left in place'
+        }
     }
     # Every created part slot is already gone (or was never this attempt's), so $shareStageDir
     # itself is removed only if that leaves it empty. Re-proves the chain link-free first (the

@@ -1231,6 +1231,50 @@ class NoPathInAnyBranchTests(unittest.TestCase):
         self.assertNotIn(str(occupied), proc.stdout + proc.stderr)
         self.assertTrue(occupied.is_dir(), "a directory occupying the slot must be left in place, not deleted")
 
+    # ---- round 10 (path disclosure): the real call site never leaks a created-slot path -------
+
+    def test_attempt_residue_removal_refusal_never_leaks_the_path_through_the_real_call_site(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 10 (hub-verified path disclosure). Unlike the direct-against-
+        # the-shared-helper proof above (test_cleanup_warning_is_suppressed_and_never_reaches_output,
+        # which drives Remove-AttrCudaPartialFile itself with -WarningAction supplied at the call
+        # site by the TEST), this drives the REAL Remove-Attr3FootageStageAttemptResidue function --
+        # extracted via AST from the tracked generator, exactly like the round 9 tests above -- with
+        # $createdSharePaths populated with a path Remove-AttrCudaPartialFile will refuse (a
+        # directory occupying the would-be part slot, ATTRCUDA_PARTIAL_NOT_A_FILE). Before round 10
+        # the function's own call to Remove-AttrCudaPartialFile carried no -WarningAction, so the
+        # helper's Write-Warning (naming $createdPath in full) reached this process's own streams
+        # uncaught. Fixed: the call is suppressed and a refusal is reported via a fixed
+        # ATTR3_STAGE_RESIDUE_LEFT_IN_PLACE token, never the path.
+        share_stage_root = self.tmp / "share-stage-root-refused"
+        share_stage_dir = share_stage_root / "attempt-1"
+        occupied_slot = share_stage_dir / "part-0"
+        occupied_slot.mkdir(parents=True)
+
+        script = (
+            f"$genText = [IO.File]::ReadAllText('{GENERATOR}'); "
+            "$t=$null; $e=$null; "
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput($genText, [ref]$t, [ref]$e); "
+            "$fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+            "$n.Name -eq 'Remove-Attr3FootageStageAttemptResidue' }, $true) | Select-Object -First 1; "
+            "if (-not $fn) { throw 'FUNCTION_NOT_FOUND' }; "
+            f"Import-Module '{ARTIFACTS_MODULE}' -Force; "
+            f"$shareStageRoot = '{share_stage_root}'; "
+            f"$shareStageDir = '{share_stage_dir}'; "
+            f"$createdSharePaths = @('{occupied_slot}'); "
+            "Invoke-Expression $fn.Extent.Text; "
+            "Remove-Attr3FootageStageAttemptResidue"
+        )
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("ATTR3_STAGE_RESIDUE_LEFT_IN_PLACE", combined)
+        self.assertNotIn(str(occupied_slot), combined)
+        self.assertNotIn("ATTRCUDA_PARTIAL_NOT_A_FILE", combined)
+        self.assertTrue(occupied_slot.is_dir(), "a directory occupying the slot must be left in place, not deleted")
+
     # ---- round 9 (astra major): empty-only attempt-dir removal --------------------------------
 
     def test_attempt_dir_cleanup_leaves_a_non_empty_directory_in_place_with_a_fixed_token(self) -> None:
