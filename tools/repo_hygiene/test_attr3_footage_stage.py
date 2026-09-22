@@ -321,35 +321,42 @@ class FootageStageJobTests(unittest.TestCase):
         # by construction, whatever it is named.
         # ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 1): -AgentShare and -AgentRootOnHost are
         # gone too -- both are now fixed constants inside the script, not parameters at all.
+        # ATTR3-FOOTAGE-STAGE-1 round 9 (sol + astra major: no parameter binding at all). There is
+        # no `param()` block and no `[CmdletBinding()]` any more -- a plain script like this gets
+        # no parameter binder of its own, so Get-Command's own .Parameters is an EMPTY dictionary
+        # (proven separately: not $null, just zero entries -- a plain script still gets a
+        # Parameters property, it is simply unpopulated with nothing to bind). -ClipId and
+        # -TimeoutSec are parsed from $args in the body instead (see the script's own header
+        # comment on this round); asserting emptiness here is what makes "no binder at all" a
+        # structural property of the checked-in script, not just a claim in a comment.
         script = (
-            f"(Get-Command -CommandType ExternalScript '{GENERATOR}').Parameters.Keys | "
-            "Where-Object { @('Verbose','Debug','ErrorAction','WarningAction','InformationAction',"
-            "'ErrorVariable','WarningVariable','InformationVariable','OutVariable','OutBuffer',"
-            "'PipelineVariable','Confirm','WhatIf','ProgressAction') -notcontains $_ } | ConvertTo-Json -Compress"
+            f"$c = Get-Command -CommandType ExternalScript '{GENERATOR}'; "
+            "Write-Output ('IsNull=' + ($null -eq $c.Parameters)); "
+            "Write-Output ('Count=' + (@($c.Parameters.Keys).Count))"
         )
         proc = _run(["-Command", script])
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        names = json.loads(proc.stdout.strip())
-        if isinstance(names, str):
-            names = [names]
-        # ATTR3-FOOTAGE-STAGE-1 round 8 (sol major: binder echo). Remainder is a
-        # ValueFromRemainingArguments capture, not a caller-facing knob -- it exists solely so a
-        # surplus positional argument reaches this script's own body-level refusal instead of
-        # PowerShell's own binder, which would otherwise echo the offending value verbatim.
-        self.assertEqual(set(names), {"ClipId", "TimeoutSec", "Remainder"})
-        self.assertNotIn("RepoRoot", names)
-        self.assertNotIn("AgentShare", names)
-        self.assertNotIn("AgentRootOnHost", names)
+        self.assertIn("IsNull=False", proc.stdout)
+        self.assertIn("Count=0", proc.stdout)
+        # The top-level script scope -- everything before its first nested `function` definition
+        # (ConvertTo-Attr3FootageStageSafeOutput's own `[CmdletBinding()]`/`param()` is a NESTED
+        # function's business, not this script's own) -- has neither, as ACTUAL statements (never
+        # mind mentions inside this round's own explanatory comments).
+        top_level_lines = GENERATOR.read_text(encoding="utf-8").split("\nfunction ", 1)[0].splitlines()
+        code_lines = [line for line in top_level_lines if not line.strip().startswith("#")]
+        code_text = "\n".join(code_lines)
+        self.assertNotRegex(code_text, r"(?m)^\s*param\s*\(")
+        self.assertNotIn("[CmdletBinding()]", code_text)
+        self.assertNotIn("[Parameter(", code_text)
 
     def test_agent_share_is_no_longer_a_parameter_at_all(self) -> None:
         # ATTR3-FOOTAGE-STAGE-1 round 3 gave -AgentShare a ValidatePattern refusing a deeper
         # caller-chosen subpath; round 4 (sol BLOCKER 1) removes the parameter entirely -- a
         # caller cannot even NAME an alternate share any more, let alone a deeper subpath under
-        # the real one. ATTR3-FOOTAGE-STAGE-1 round 8 (sol major: binder echo): since -Remainder's
-        # ValueFromRemainingArguments now absorbs every unbound argument (named-looking or not),
-        # this no longer surfaces as PowerShell's own "parameter cannot be found" error naming
-        # "AgentShare" -- it is swept into the SAME fixed-token surplus-argument refusal as an
-        # ordinary positional surplus, never echoing the caller's own text either.
+        # the real one. ATTR3-FOOTAGE-STAGE-1 round 9 (sol + astra major: no binding at all): with
+        # no param() block at all, -AgentShare is just another token the body's own arg-parsing
+        # loop does not recognize as -ClipId or -TimeoutSec -- refused by the SAME fixed-token
+        # path as any other unsupported argument, never echoing the caller's own text.
         proc = _run(["-File", str(GENERATOR), "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE",
                      "-AgentShare", r"\\bachelor\mlv-agent\deeper\subpath"])
         self.assertNotEqual(proc.returncode, 0)
@@ -359,8 +366,8 @@ class FootageStageJobTests(unittest.TestCase):
         self.assertNotIn(r"\\bachelor\mlv-agent\deeper\subpath", combined)
 
     def test_agent_root_on_host_is_no_longer_a_parameter_at_all(self) -> None:
-        # Same closure as above (round 4, sol BLOCKER 1; round 8, sol major), for the other
-        # formerly-public parameter.
+        # Same closure as above (round 4, sol BLOCKER 1; round 9, sol + astra major), for the
+        # other formerly-public parameter.
         proc = _run(["-File", str(GENERATOR), "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE",
                      "-AgentRootOnHost", r"C:\caller-chosen-root"])
         self.assertNotEqual(proc.returncode, 0)
@@ -1224,6 +1231,84 @@ class NoPathInAnyBranchTests(unittest.TestCase):
         self.assertNotIn(str(occupied), proc.stdout + proc.stderr)
         self.assertTrue(occupied.is_dir(), "a directory occupying the slot must be left in place, not deleted")
 
+    # ---- round 9 (astra major): empty-only attempt-dir removal --------------------------------
+
+    def test_attempt_dir_cleanup_leaves_a_non_empty_directory_in_place_with_a_fixed_token(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 9 (astra major). Remove-Attr3FootageStageAttemptResidue's
+        # own final directory removal used to be a plain `Remove-Item -Force -Confirm:$false`:
+        # without -Recurse, Remove-Item on a NON-EMPTY directory normally refuses via an
+        # interactive confirmation prompt -- but -Confirm:$false suppresses exactly that prompt,
+        # and once suppressed Remove-Item silently RECURSES and deletes the directory's contents
+        # anyway, which is exactly the un-owned-content deletion this function exists to avoid
+        # (only what THIS ATTEMPT itself created -- see the function's own header). Extracted via
+        # AST, the same technique this file already uses for ConvertTo-Attr3FootageStageSafeOutput
+        # and the outer catch block: a leftover child this attempt's own $createdSharePaths never
+        # tracked must keep the directory in place, never prompt (a prompt would hang this
+        # -NonInteractive process rather than pass), and be reported with a fixed token that never
+        # names the directory or the leftover file.
+        share_stage_root = self.tmp / "share-stage-root"
+        share_stage_dir = share_stage_root / "attempt-1"
+        share_stage_dir.mkdir(parents=True)
+        leftover = share_stage_dir / "an-untracked-leftover-file.raw"
+        leftover.write_bytes(b"bytes this attempt never created and must never delete")
+
+        script = (
+            f"$genText = [IO.File]::ReadAllText('{GENERATOR}'); "
+            "$t=$null; $e=$null; "
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput($genText, [ref]$t, [ref]$e); "
+            "$fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+            "$n.Name -eq 'Remove-Attr3FootageStageAttemptResidue' }, $true) | Select-Object -First 1; "
+            "if (-not $fn) { throw 'FUNCTION_NOT_FOUND' }; "
+            f"Import-Module '{ARTIFACTS_MODULE}' -Force; "
+            f"$shareStageRoot = '{share_stage_root}'; "
+            f"$shareStageDir = '{share_stage_dir}'; "
+            "$createdSharePaths = @(); "
+            "Invoke-Expression $fn.Extent.Text; "
+            "Remove-Attr3FootageStageAttemptResidue"
+        )
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("ATTR3_FOOTAGE_STAGE_ATTEMPT_RESIDUE_LEFT", combined)
+        self.assertTrue(share_stage_dir.is_dir())
+        self.assertEqual(leftover.read_bytes(), b"bytes this attempt never created and must never delete")
+        self.assertNotIn(str(share_stage_dir), combined)
+        self.assertNotIn(str(leftover), combined)
+
+    def test_attempt_dir_cleanup_removes_a_now_empty_directory(self) -> None:
+        # The other half of the same rule: an attempt directory with nothing left inside it (every
+        # created slot already removed) is deleted cleanly by the same non-recursive primitive --
+        # this round's fix narrows what gets deleted, it does not stop the ordinary empty-dir case
+        # from working.
+        share_stage_root = self.tmp / "share-stage-root-empty"
+        share_stage_dir = share_stage_root / "attempt-1"
+        share_stage_dir.mkdir(parents=True)
+
+        script = (
+            f"$genText = [IO.File]::ReadAllText('{GENERATOR}'); "
+            "$t=$null; $e=$null; "
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput($genText, [ref]$t, [ref]$e); "
+            "$fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+            "$n.Name -eq 'Remove-Attr3FootageStageAttemptResidue' }, $true) | Select-Object -First 1; "
+            "if (-not $fn) { throw 'FUNCTION_NOT_FOUND' }; "
+            f"Import-Module '{ARTIFACTS_MODULE}' -Force; "
+            f"$shareStageRoot = '{share_stage_root}'; "
+            f"$shareStageDir = '{share_stage_dir}'; "
+            "$createdSharePaths = @(); "
+            "Invoke-Expression $fn.Extent.Text; "
+            "Remove-Attr3FootageStageAttemptResidue"
+        )
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("ATTR3_FOOTAGE_STAGE_ATTEMPT_RESIDUE_LEFT", proc.stdout + proc.stderr)
+        self.assertFalse(share_stage_dir.exists())
+
     def test_a_non_throwing_submission_result_carrying_a_sentinel_path_never_forwards_it(self) -> None:
         # ATTR3-FOOTAGE-STAGE-1 round 4 (sol MAJOR, astra 4: path-free output). The submitted
         # job's own stdout/stderr are never forwarded verbatim -- this drives
@@ -1607,14 +1692,17 @@ class Attr3FootageStageCliEndToEndTests(unittest.TestCase):
         self.assertNotIn("Cannot convert", combined)
         self.assertNotIn("ParameterBindingArgumentTransformationException", combined)
 
-    # ---- round 8: surplus positional argument never reaches the binder's own echo -------------
+    # ---- round 8/9: surplus positional argument never reaches the binder's own echo -----------
 
     def test_a_surplus_positional_argument_never_reaches_output_via_binder_echo(self) -> None:
         # ATTR3-FOOTAGE-STAGE-1 round 8 (sol major: binder echo). sol's exact repro: a valid
         # ClipId, a valid TimeoutSec, and one additional synthetic path-shaped positional argument.
         # Before the round-8 fix the body never started -- PowerShell's own binder refused the
-        # surplus argument and echoed it verbatim in its own error text. ValueFromRemainingArguments
-        # now absorbs it, so the body's own fixed-token refusal is what runs instead.
+        # surplus argument and echoed it verbatim in its own error text. ATTR3-FOOTAGE-STAGE-1
+        # round 9 (sol + astra major: no binding at all): there is no PowerShell parameter binder
+        # of any kind on this script any more (not even the round-8 ValueFromRemainingArguments
+        # catch-all) -- every token, including this one, lands in $args and the body's own
+        # arg-parsing loop refuses it with the same fixed token.
         hostile = r"C:\%s\real-owner-footage.raw" % TOKEN
         proc = subprocess.run(
             [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path),
@@ -1628,6 +1716,60 @@ class Attr3FootageStageCliEndToEndTests(unittest.TestCase):
         self.assertNotIn(TOKEN, combined)
         self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
         self.assertNotIn("does not match the pattern", combined)
+
+    def test_a_path_shaped_error_action_value_never_reaches_output(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 9 (sol + astra major: common-parameter binder echo). Before
+        # this round, [CmdletBinding()] made this script an "advanced" one, so PowerShell's own
+        # binder auto-added -ErrorAction (and every other common parameter) and bound it itself,
+        # before the body ever ran -- a caller-supplied value for it never even reached $args. With
+        # no param()/[CmdletBinding()] at all, -ErrorAction is not special: it is just a token the
+        # body's own arg-parsing loop does not recognize as -ClipId or -TimeoutSec, refused by the
+        # same fixed token before its own value (a real-path-shaped sentinel here) is ever touched.
+        hostile = r"C:\%s\real-owner-footage.raw" % TOKEN
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path),
+             "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE-ERRORACTION", "-ErrorAction", hostile],
+            capture_output=True, text=True,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT", combined)
+        self.assertNotIn(hostile, combined)
+        self.assertNotIn(TOKEN, combined)
+        self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
+
+    def test_a_path_shaped_verbose_colon_value_never_reaches_output(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 9: `-Verbose:<value>` colon syntax is tokenized by
+        # PowerShell's own script-argument parser into two SEPARATE $args entries (`-Verbose` and
+        # the value) even with no parameter binder present at all (proven directly against a
+        # param()-less probe script before writing this test) -- so this sentinel value lands as
+        # its own $args element, immediately following a name the body's loop does not recognize,
+        # and is refused before ever being compared to anything.
+        hostile = r"C:\%s\real-owner-footage.raw" % TOKEN
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path),
+             "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE-VERBOSE", ("-Verbose:%s" % hostile)],
+            capture_output=True, text=True,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT", combined)
+        self.assertNotIn(hostile, combined)
+        self.assertNotIn(TOKEN, combined)
+        self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
+
+    def test_an_unknown_switch_is_refused_by_the_same_fixed_token(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 9: a switch this script never declared at all (never a
+        # common parameter, never -ClipId/-TimeoutSec) is refused the same way as everything else.
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path),
+             "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE-UNKNOWNSWITCH", "-Force"],
+            capture_output=True, text=True,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT", combined)
+        self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
 
     # ---- round 5: source link check (astra major) -------------------------------------------
 

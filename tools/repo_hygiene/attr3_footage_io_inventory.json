@@ -503,7 +503,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 131,
+      "line": 142,
       "kind": "cmdlet",
       "name": "Resolve-Path",
       "text": "Resolve-Path (Join-Path $PSScriptRoot '..\\..\\..')",
@@ -513,7 +513,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 191,
+      "line": 202,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $ResolverPath -PathType Leaf",
@@ -523,7 +523,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 223,
+      "line": 234,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $emitPath -PathType Leaf",
@@ -533,7 +533,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 226,
+      "line": 237,
       "kind": "static-method",
       "name": "ReadAllBytes",
       "text": "[IO.File]::ReadAllBytes($emitPath)",
@@ -543,7 +543,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 228,
+      "line": 239,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $emitPath",
@@ -553,7 +553,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 228,
+      "line": 239,
       "kind": "cmdlet",
       "name": "Remove-Item",
       "text": "Remove-Item -LiteralPath $emitPath -Force",
@@ -563,7 +563,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "Remove-Attr3FootageStageAttemptResidue",
-      "line": 338,
+      "line": 359,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $shareStageDir -PathType Container -ErrorAction SilentlyContinue",
@@ -573,12 +573,12 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "Remove-Attr3FootageStageAttemptResidue",
-      "line": 339,
-      "kind": "cmdlet",
-      "name": "Remove-Item",
-      "text": "Remove-Item -LiteralPath $shareStageDir -Force -Confirm:$false -ErrorAction SilentlyContinue",
+      "line": 363,
+      "kind": "static-method",
+      "name": "Delete",
+      "text": "[IO.Directory]::Delete($shareStageDir, $false)",
       "disposition": "boundary-root-asserted",
-      "note": "$shareStageDir's own chain is proved link-free by Assert-AttrCudaNoLinkBelowRoot immediately above, in the same function; no -Recurse, so a reparse point here only ever unlinks itself"
+      "note": "$shareStageDir's own chain is proved link-free by Assert-AttrCudaNoLinkBelowRoot immediately above, in the same function; ATTR3-FOOTAGE-STAGE-1 round 9: non-recursive, non-prompting .NET primitive replacing a Remove-Item whose own -Confirm:$false suppressed the prompt that used to be the only thing stopping it from silently recursing into a non-empty directory"
     }
   ]
 }

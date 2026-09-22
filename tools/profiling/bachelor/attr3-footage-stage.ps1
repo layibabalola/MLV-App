@@ -30,54 +30,78 @@
 # Idempotent: a clip already fully present on Bachelor at its spec path transfers nothing new and
 # still reports FOOTAGE_STAGED (every part lands ALREADY_PRESENT).
 
-[CmdletBinding()]
-param(
-    # ATTR3-FOOTAGE-STAGE-1 round 5 (sol/astra: ClipId validation failure prints a fixed token).
-    # A [ValidatePattern(...)] attribute here would be enforced by PowerShell's OWN parameter
-    # binder, BEFORE this script's body ever runs -- and its auto-generated binding-failure
-    # message echoes the offending value VERBATIM ("...does not match the pattern..."), which is
-    # exactly the path leak this whole script exists to prevent if a caller passes a real path
-    # where a clip id belongs. Validated in the BODY instead (below), where the failure message is
-    # a fixed token that never echoes $ClipId.
-    [Parameter(Mandatory = $true)]
-    [string]$ClipId,
-
-    # ATTR3-FOOTAGE-STAGE-1 round 6 (sol major / astra major: binding-time output). [int]$TimeoutSec
-    # used to let PowerShell's OWN parameter binder attempt the string->int conversion before this
-    # script's body ever ran -- exactly the same class of leak -ClipId's own ValidatePattern used to
-    # cause (see that parameter's own comment above), except a type-constraint conversion failure
-    # cannot be avoided by simply removing an attribute: the binder itself performs it. [string]
-    # accepts anything (an int->string conversion, the ONLY direction the binder ever performs here,
-    # never fails and never carries a leaked value); the actual int conversion and range check happen
-    # in the BODY below, where a failure is a fixed token that never echoes $TimeoutSec.
-    [string]$TimeoutSec = '1800',
-
-    # ATTR3-FOOTAGE-STAGE-1 round 8 (sol major: binder echo). Without a parameter declared to
-    # absorb them, a surplus positional argument is a BINDING failure -- PowerShell's own binder
-    # refuses it before this script's body ever runs, and its auto-generated error echoes the
-    # offending value VERBATIM, the same class of leak -ClipId's own ValidatePattern used to cause
-    # (see that parameter's own comment above). ValueFromRemainingArguments instead captures every
-    # surplus argument here, so the binder always succeeds and control reaches the body-level
-    # check below, where the refusal is a fixed token that never echoes $Remainder.
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$Remainder
-)
-
 $ErrorActionPreference = 'Stop'
 
-if ($Remainder -and $Remainder.Count -gt 0) {
-    throw 'ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT an unexpected additional argument was supplied'
+# ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary). Everything from the argument parsing
+# below through this script's own final `exit 0` runs inside ONE try/catch -- most notably the
+# two job-emission calls (New-Attr3FootagePresenceJob, New-Attr3FootageStageJob) that were
+# previously the only two statements in this script's whole body with no try/catch of their own
+# at all. Every throw site between here and the bottom of this script already follows this
+# script's own established contract -- a FIXED, all-caps TOKEN followed by a path-free
+# description (ATTR3_FOOTAGE_STAGE_*, and the ATTR3_PRESENCE_*/ATTR3_STAGE_* tokens the two job
+# builders throw on their own) -- so the catch below forwards a message already shaped that way
+# VERBATIM, preserving every existing refusal token's own text and exit behaviour. Anything NOT
+# shaped that way is an exception this script never anticipated -- a raw .NET exception surfaced
+# through an untried code path, whose own .Message can carry a real footage path -- and is never
+# forwarded: only the exception's TYPE NAME (never its .Message) is reported.
+try {
+
+# ATTR3-FOOTAGE-STAGE-1 round 9 (sol + astra major: no PowerShell parameter binding at all). This
+# script has no `param()` block and no `[CmdletBinding()]` -- a plain script (never an "advanced"
+# one) gets no parameter binder of its own at all, so PowerShell never intercepts a common
+# parameter (-ErrorAction, -Verbose, -Debug, ...) on its own behalf, and there is no auto-generated
+# binding-failure message that could ever echo a caller-supplied value verbatim (the exact class of
+# leak every prior round's own [ValidatePattern]/typed-parameter removal already worked around one
+# parameter at a time -- see this file's git history). Every element PowerShell hands this script
+# lands, untouched and in order, in $args; parsed here, in the body, where every refusal is a
+# FIXED token, never $args itself. Two named arguments are accepted, matched case-insensitively:
+# -ClipId (mandatory) and -TimeoutSec (optional). Anything else at all -- an unknown name, a
+# missing value, a duplicate, a bare/unnamed surplus token, or a common-parameter name like
+# -ErrorAction/-Verbose (which PowerShell tokenizes into its own -Name/value pair at the language
+# level even with no binder present, per this round's own probe) -- is refused by the SAME fixed
+# token below, before the offending token is ever compared to anything but a fixed literal name.
+$ClipId = $null
+$TimeoutSec = '1800'
+$sawClipId = $false
+$sawTimeoutSec = $false
+$argCursor = 0
+while ($argCursor -lt $args.Count) {
+    $argToken = [string]$args[$argCursor]
+    if ($argToken -ieq '-ClipId' -and -not $sawClipId) {
+        if (($argCursor + 1) -ge $args.Count) {
+            throw 'ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT an unsupported or unexpected argument was supplied'
+        }
+        $ClipId = [string]$args[$argCursor + 1]
+        $sawClipId = $true
+        $argCursor += 2
+        continue
+    }
+    if ($argToken -ieq '-TimeoutSec' -and -not $sawTimeoutSec) {
+        if (($argCursor + 1) -ge $args.Count) {
+            throw 'ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT an unsupported or unexpected argument was supplied'
+        }
+        $TimeoutSec = [string]$args[$argCursor + 1]
+        $sawTimeoutSec = $true
+        $argCursor += 2
+        continue
+    }
+    throw 'ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT an unsupported or unexpected argument was supplied'
+}
+if (-not $sawClipId) {
+    throw 'ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT an unsupported or unexpected argument was supplied'
 }
 
+# ATTR3-FOOTAGE-STAGE-1 round 5 (sol/astra: ClipId validation failure prints a fixed token). A
+# caller-typed value that fails this pattern -- e.g. a real path where a clip id belongs -- gets
+# only a fixed token, never $ClipId itself.
 if ($ClipId -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
     throw 'ATTR3_FOOTAGE_STAGE_CLIP_ID_INVALID -ClipId does not match the required id pattern'
 }
 
-# ATTR3-FOOTAGE-STAGE-1 round 6 (sol blocker / astra major: sweep staleness threshold). A "sane
-# positive minimum" enforced here, in the body, rather than via a [ValidateRange] attribute on the
-# now-[string] parameter above (an attribute cannot range-check a string; it would either not fire
-# at all or reintroduce the exact binder-echo problem this parameter's own type change exists to
-# avoid). $MinAttr3FootageStageTimeoutSec is the one place both the CLI's own accepted range and the
+# ATTR3-FOOTAGE-STAGE-1 round 6 (sol blocker / astra major: sweep staleness threshold), still
+# body-validated post-round-9 for the same reason: a [ValidateRange] attribute cannot range-check
+# a string, and there is no parameter attribute of any kind on this script any more regardless.
+# $MinAttr3FootageStageTimeoutSec is the one place both the CLI's own accepted range and the
 # staleness sweeps' floor (Attr3FootageStageJob.psm1, AttrCudaOwnerFootage.psm1) are meant to agree
 # on; a caller passing zero, a negative number, or anything not a plain integer gets a fixed token,
 # never the offending value.
@@ -100,19 +124,6 @@ if (-not [int]::TryParse($TimeoutSec, [ref]$timeoutSecValue) -or $timeoutSecValu
 $AgentShare = '\\bachelor\mlv-agent'
 $AgentRootOnHost = 'C:\mlvtmp\mlv-agent'
 
-# ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary). Everything from the module imports
-# below through this script's own final `exit 0` runs inside ONE try/catch -- most notably the
-# two job-emission calls (New-Attr3FootagePresenceJob, New-Attr3FootageStageJob) that were
-# previously the only two statements in this script's whole body with no try/catch of their own
-# at all. Every throw site between here and the bottom of this script already follows this
-# script's own established contract -- a FIXED, all-caps TOKEN followed by a path-free
-# description (ATTR3_FOOTAGE_STAGE_*, and the ATTR3_PRESENCE_*/ATTR3_STAGE_* tokens the two job
-# builders throw on their own) -- so the catch below forwards a message already shaped that way
-# VERBATIM, preserving every existing refusal token's own text and exit behaviour. Anything NOT
-# shaped that way is an exception this script never anticipated -- a raw .NET exception surfaced
-# through an untried code path, whose own .Message can carry a real footage path -- and is never
-# forwarded: only the exception's TYPE NAME (never its .Message) is reported.
-try {
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaOwnerFootage.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Attr3FootageStageJob.psm1') -Force
@@ -325,20 +336,34 @@ function Remove-Attr3FootageStageAttemptResidue {
         [void](Remove-AttrCudaPartialFile -TrustedRoot $shareStageRoot -Path $createdPath)
     }
     # Every created part slot is already gone (or was never this attempt's), so $shareStageDir
-    # itself is removed only if that leaves it empty -- Remove-Item without -Recurse refuses a
-    # non-empty directory outright, so nothing but this attempt's own now-empty directory is ever
-    # at risk. Re-proves the chain link-free first (the individual removals above already did,
-    # for each created path, but only when $createdSharePaths is non-empty).
+    # itself is removed only if that leaves it empty. Re-proves the chain link-free first (the
+    # individual removals above already did, for each created path, but only when
+    # $createdSharePaths is non-empty).
+    #
+    # ATTR3-FOOTAGE-STAGE-1 round 9 (astra major): a plain `Remove-Item -Force -Confirm:$false`
+    # here used to be trusted to behave like "delete only if empty" because Remove-Item without
+    # -Recurse normally REFUSES a non-empty directory via an interactive confirmation prompt --
+    # but -Confirm:$false suppresses exactly that prompt, and once suppressed Remove-Item silently
+    # recurses into and deletes the directory's contents anyway, which is precisely the
+    # un-owned-content deletion this whole function exists to avoid (see its own header: only what
+    # THIS ATTEMPT created). [IO.Directory]::Delete($path, $false) is the non-recursive,
+    # non-prompting .NET primitive instead: it deletes ONLY an already-empty directory and throws
+    # -- never recurses, never prompts -- if anything (this attempt's own untracked residue, or
+    # another attempt's) is still inside. A non-empty directory is left exactly where it is and
+    # reported with a fixed token, never its own path.
     try {
         [void](Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $shareStageRoot -Path $shareStageDir)
     } catch {
         return
     }
+    if (-not (Test-Path -LiteralPath $shareStageDir -PathType Container -ErrorAction SilentlyContinue)) {
+        return
+    }
     try {
-        if (Test-Path -LiteralPath $shareStageDir -PathType Container -ErrorAction SilentlyContinue) {
-            Remove-Item -LiteralPath $shareStageDir -Force -Confirm:$false -ErrorAction SilentlyContinue
-        }
-    } catch {}
+        [IO.Directory]::Delete($shareStageDir, $false)
+    } catch {
+        Write-Output 'ATTR3_FOOTAGE_STAGE_ATTEMPT_RESIDUE_LEFT the attempt staging directory was left in place (not empty)'
+    }
 }
 
 # --- 5+6. TRANSFER the missing parts to the agent share, then SUBMIT the pre-built job through
