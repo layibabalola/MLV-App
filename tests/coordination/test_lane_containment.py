@@ -222,10 +222,14 @@ def test_read_only_argv_json_stdin_and_tool_denial(fixture_tree):
 
 
 # LANE-NO-BACKGROUND-END-TURN-1 round 6 (swarm ruling): --disallowedTools cannot reach
-# `run_in_background` -- it is a parameter of the Bash tool call, not a separate tool name --
-# so a per-lane Claude Code settings file now wires tools/coordination/lane-no-background.py
-# as a PreToolUse hook on the `Bash` matcher for every Claude-engine lane, read-only and
-# editing alike. No env-var mechanism, no NA-3 change: see docs/lane-containment.md.
+# `run_in_background` -- it is a parameter of a tool call, not a separate tool name -- so a
+# per-lane Claude Code settings file now wires a per-run COPY of
+# tools/coordination/lane-no-background.py as a PreToolUse hook for every Claude-engine lane,
+# read-only and editing alike. No env-var mechanism, no NA-3 change: see
+# docs/lane-containment.md.
+# Round 7 (sol major 1 / fable major): the matcher now covers PowerShell too, which carries
+# the same run_in_background parameter and is granted to every editing lane by
+# docs/Start-EditingLane.ps1.
 def test_read_only_settings_json_wires_lane_no_background_hook(fixture_tree):
     cmd,env,receipt=prepare(fixture_tree,"normal")
     r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
@@ -236,13 +240,24 @@ def test_read_only_settings_json_wires_lane_no_background_hook(fixture_tree):
     assert argv[i+1]==str(settings_path_for(receipt))
     pre=settings["hooks"]["PreToolUse"]
     assert len(pre)==1
-    assert pre[0]["matcher"]=="Bash"
+    assert pre[0]["matcher"]=="Bash|PowerShell"
     hook=pre[0]["hooks"]
     assert len(hook)==1 and hook[0]["type"]=="command"
     assert "lane-no-background.py" in hook[0]["command"]
     # The Read deny rules stay conditional on -AllowBulkReads exactly as before this round --
     # a read-only lane without -AllowBulkReads still gets them, alongside the new hook.
     assert settings["permissions"]["deny"]
+    # Round 7 (sol major 3): the registered command must name a COPY reserved beside this run's
+    # receipt, never the source script beside Invoke-Lane.ps1 itself (which sits inside a
+    # writable worktree for every editing lane -- docs/Start-EditingLane.ps1 runs Invoke-
+    # Lane.ps1 FROM $WorkDir). The copy must actually exist and byte-match the source.
+    hook_copy_path = hook[0]["command"].split('"')[3]
+    source_bytes = (fixture_tree["root"]/"lane-no-background.py").read_bytes()
+    assert Path(hook_copy_path) != fixture_tree["root"]/"lane-no-background.py"
+    assert Path(hook_copy_path).read_bytes() == source_bytes
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert re.fullmatch(r"[0-9a-f]{64}", q["authority"]["backgroundHookSha256"])
+    assert q["authority"]["backgroundHookSha256"] == hashlib.sha256(source_bytes).hexdigest()
 
 
 def test_bulk_reads_lane_still_gets_the_hook_without_the_deny_rules(fixture_tree):
@@ -251,6 +266,7 @@ def test_bulk_reads_lane_still_gets_the_hook_without_the_deny_rules(fixture_tree
     assert r.returncode==0,(r.stdout,r.stderr)
     settings=json.loads(settings_path_for(receipt).read_text(encoding="utf-8-sig"))
     assert "permissions" not in settings
+    assert settings["hooks"]["PreToolUse"][0]["matcher"]=="Bash|PowerShell"
     assert "lane-no-background.py" in settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
 
 
@@ -261,10 +277,11 @@ def test_editing_settings_json_also_wires_lane_no_background_hook(fixture_tree):
     argv=json.loads((fixture_tree["root"]/"args.json").read_text(encoding="utf-8-sig"))
     assert "--settings" in argv
     settings=json.loads(settings_path_for(receipt).read_text(encoding="utf-8-sig"))
-    assert settings["hooks"]["PreToolUse"][0]["matcher"]=="Bash"
+    assert settings["hooks"]["PreToolUse"][0]["matcher"]=="Bash|PowerShell"
     assert "lane-no-background.py" in settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     q=json.loads(receipt.read_text(encoding="utf-8"))
-    assert q["authority"]["backgroundBash"]=="denied-by-settings-hook"
+    assert q["authority"]["backgroundGate"]=="denied-by-settings-hook"
+    assert re.fullmatch(r"[0-9a-f]{64}", q["authority"]["backgroundHookSha256"])
 
 
 def test_codex_lane_gets_no_settings_file_or_flag(fixture_tree):
@@ -275,39 +292,130 @@ def test_codex_lane_gets_no_settings_file_or_flag(fixture_tree):
     assert "--settings" not in argv
     assert not settings_path_for(receipt).exists()
     q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert "backgroundGate" not in q["authority"]
     assert "backgroundBash" not in q["authority"]
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 7 (sol major 3): a live end-to-end proof that an
+# editing lane cannot defeat its OWN gate by rewriting the source Invoke-Lane.ps1 copies
+# from -- the launcher must have already reserved and hashed its per-run copy before the
+# child (which is what would edit the source) ever starts, and the copy must be the one
+# actually registered.
+def test_hook_copy_is_reserved_in_run_dir_not_resolved_from_worktree(fixture_tree):
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    run_dir=fixture_tree["root"]/"run"
+    copies=list(run_dir.glob("*.lane-no-background.py"))
+    assert len(copies)==1, f"expected exactly one reserved hook copy in {run_dir}, found {copies}"
+    assert copies[0].parent==run_dir
 
 
 LANE_NO_BACKGROUND_SCRIPT = ROOT / "tools" / "coordination" / "lane-no-background.py"
 
 
-def run_lane_no_background(payload):
+def run_lane_no_background(payload_text):
     return subprocess.run(
         [sys.executable, str(LANE_NO_BACKGROUND_SCRIPT)],
-        input=json.dumps(payload), text=True, capture_output=True, timeout=10)
+        input=payload_text, text=True, capture_output=True, timeout=10)
 
 
+def run_lane_no_background_json(payload):
+    return run_lane_no_background(json.dumps(payload))
+
+
+# Round 7 (sol major 1 / fable major, and sol major 2): the deny protocol is now exit 2 with
+# one stderr line -- the SAME fail-closed protocol tools/hooks/mlv-never-authorized.py uses --
+# instead of round 6's exit-0-plus-stdout-JSON, so a launcher self-test can prove the gate
+# with one exit-code check. The deny check itself is now tool-name-agnostic (any tool_name
+# with a truthy run_in_background), not limited to Bash.
 def test_lane_no_background_script_denies_backgrounded_bash():
-    r=run_lane_no_background({"tool_name":"Bash","tool_input":{"command":"x","run_in_background":True}})
-    assert r.returncode==0,(r.stdout,r.stderr)
-    out=json.loads(r.stdout)
-    decision=out["hookSpecificOutput"]
-    assert decision["permissionDecision"]=="deny"
-    assert decision["hookEventName"]=="PreToolUse"
-    assert "headless lane" in decision["permissionDecisionReason"]
-    assert "later turn" in decision["permissionDecisionReason"]
+    r=run_lane_no_background_json({"tool_name":"Bash","tool_input":{"command":"x","run_in_background":True}})
+    assert r.returncode==2,(r.stdout,r.stderr)
+    assert r.stdout==""
+    assert "headless lane" in r.stderr
+    assert "later turn" in r.stderr
+
+
+def test_lane_no_background_script_denies_backgrounded_powershell():
+    r=run_lane_no_background_json({"tool_name":"PowerShell","tool_input":{"command":"x","run_in_background":True}})
+    assert r.returncode==2,(r.stdout,r.stderr)
+    assert "headless lane" in r.stderr
+
+
+def test_lane_no_background_script_denies_any_tool_with_the_flag():
+    # Round 7 required case: an UNKNOWN tool name carrying the flag must still be denied --
+    # the registration matcher narrows which calls reach the script at all, but the script's
+    # own check must not assume the matcher is the only thing standing in the way.
+    r=run_lane_no_background_json({"tool_name":"SomeFutureTool","tool_input":{"run_in_background":True}})
+    assert r.returncode==2,(r.stdout,r.stderr)
+    assert "headless lane" in r.stderr
 
 
 def test_lane_no_background_script_allows_bash_without_the_flag():
-    r=run_lane_no_background({"tool_name":"Bash","tool_input":{"command":"x"}})
+    r=run_lane_no_background_json({"tool_name":"Bash","tool_input":{"command":"x"}})
     assert r.returncode==0,(r.stdout,r.stderr)
-    assert r.stdout==""
+    assert r.stdout=="" and r.stderr==""
 
 
-def test_lane_no_background_script_allows_non_bash_tools():
-    r=run_lane_no_background({"tool_name":"Write","tool_input":{"file_path":"x","run_in_background":True}})
+def test_lane_no_background_script_allows_false_flag():
+    r=run_lane_no_background_json({"tool_name":"Bash","tool_input":{"command":"x","run_in_background":False}})
     assert r.returncode==0,(r.stdout,r.stderr)
-    assert r.stdout==""
+    assert r.stdout=="" and r.stderr==""
+
+
+def test_lane_no_background_script_allows_other_tools_without_the_flag():
+    r=run_lane_no_background_json({"tool_name":"Write","tool_input":{"file_path":"x"}})
+    assert r.returncode==0,(r.stdout,r.stderr)
+    assert r.stdout=="" and r.stderr==""
+
+
+# Round 7 (sol major 2): fail CLOSED on malformed/missing/non-JSON stdin, never allow.
+def test_lane_no_background_script_denies_empty_stdin():
+    r=run_lane_no_background("")
+    assert r.returncode==2,(r.stdout,r.stderr)
+    assert "hook-error" in r.stderr
+
+
+def test_lane_no_background_script_denies_non_json_stdin():
+    r=run_lane_no_background("not json{{{")
+    assert r.returncode==2,(r.stdout,r.stderr)
+    assert "hook-error" in r.stderr
+
+
+def test_lane_no_background_script_denies_non_object_json_stdin():
+    r=run_lane_no_background("[1, 2, 3]")
+    assert r.returncode==2,(r.stdout,r.stderr)
+    assert "hook-error" in r.stderr
+
+
+def test_lane_no_background_script_denies_non_object_tool_input():
+    r=run_lane_no_background_json({"tool_name":"Bash","tool_input":"x"})
+    assert r.returncode==2,(r.stdout,r.stderr)
+    assert "hook-error" in r.stderr
+
+
+# LANE-NO-BACKGROUND-END-TURN-1 round 7 (sol major 2): the launcher must PROVE the gate
+# before ever starting the provider -- run the exact registered command against a synthetic
+# background-Bash payload and require the fail-closed deny (exit 2). A self-test that does
+# not pass refuses the launch and records why, rather than trusting an unproven hook.
+def test_launch_refuses_when_background_gate_selftest_fails(fixture_tree):
+    def install_broken_hook(text):
+        return text  # Invoke-Lane.ps1 itself is untouched; the SOURCE hook script is broken below.
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit",
+                             mutation=install_broken_hook)
+    # Overwrite the SOURCE the launcher copies from (written by prepare() before the launcher
+    # runs) with a script that always allows, simulating a gate that would fail open.
+    (fixture_tree["root"]/"lane-no-background.py").write_text(
+        "import sys\nsys.exit(0)\n", encoding="ascii")
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode!=0,(r.stdout,r.stderr)
+    assert not (fixture_tree["root"]/"child.json").exists()
+    assert not (fixture_tree["root"]/"args.json").exists()
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="failed"
+    assert not q["complete"]
+    assert q["failure"].startswith("background-gate-selftest-failed")
 
 
 def test_timeout_kills_owned_child_and_grandchild(fixture_tree):
@@ -884,6 +992,56 @@ def test_post_exit_git_capture_failure_is_unavailable_and_never_claims_clean(fix
     assert q["dirtyCheck"]=="unavailable"
     assert "post-exit snapshot" in q["dirtyCheckReason"]
     assert q["workEvidence"]["reason"]!="dirty-worktree-no-commit"
+
+
+# Round 7 (sol minor): a failing pre- or post- `git rev-parse HEAD` must surface as the same
+# 'unavailable' state as a status/hash-object capture failure, not as 'not-applicable' (which
+# the old uncaptured-failure code path produced by reading a failed call and a legitimately
+# inapplicable gate as the same falsy $BaseSha). Same marker-based pre/post injection as the
+# status-capture failure tests above, keyed on GitArgs[0] -eq 'rev-parse' instead of 'status'.
+def _inject_git_revparse_failure(text):
+    marker = "function Invoke-GitCaptureUtf8([string]$WorkDir, [string[]]$GitArgs) {\n"
+    assert text.count(marker) == 1, "Invoke-GitCaptureUtf8 signature not found or not unique"
+    injected = marker + (
+        "    if ($env:MLV_FIXTURE_GIT_FAIL_MODE -and $GitArgs.Count -gt 0 -and $GitArgs[0] -eq 'rev-parse') {\n"
+        "        $childStarted = Test-Path -LiteralPath $env:MLV_FIXTURE_CHILD\n"
+        "        if ((($env:MLV_FIXTURE_GIT_FAIL_MODE -eq 'pre') -and -not $childStarted) -or "
+        "(($env:MLV_FIXTURE_GIT_FAIL_MODE -eq 'post') -and $childStarted)) {\n"
+        "            return [ordered]@{ ok = $false; stdout = $null; exitCode = $null; error = 'fixture-injected-git-revparse-failure' }\n"
+        "        }\n"
+        "    }\n"
+    )
+    return text.replace(marker, injected)
+
+
+def test_pre_launch_revparse_head_failure_is_unavailable_not_not_applicable(fixture_tree):
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit",
+                             mutation=_inject_git_revparse_failure)
+    env["MLV_FIXTURE_GIT_FAIL_MODE"]="pre"
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"] is True
+    assert q["dirtyCheck"]=="unavailable"
+    assert "pre-launch rev-parse HEAD failed" in q["dirtyCheckReason"]
+    assert q["baseSha"] is None
+
+
+def test_post_exit_revparse_head_failure_is_unavailable_not_head_moved(fixture_tree):
+    root=fixture_tree["root"]
+    _seed_git_repo(root)
+    cmd,env,receipt=prepare(fixture_tree,"normal",editing=True,allowed_tools="Read,Write,Edit",
+                             mutation=_inject_git_revparse_failure)
+    env["MLV_FIXTURE_GIT_FAIL_MODE"]="post"
+    r=subprocess.run(cmd,env=env,text=True,capture_output=True,timeout=20)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    q=json.loads(receipt.read_text(encoding="utf-8"))
+    assert q["state"]=="complete" and q["complete"] is True
+    assert q["dirtyCheck"]=="unavailable"
+    assert "post-exit rev-parse HEAD failed" in q["dirtyCheckReason"]
+    assert q["baseSha"] is not None
 
 
 def test_further_edit_of_pre_dirty_binary_tracked_file_is_ended_incomplete(fixture_tree):

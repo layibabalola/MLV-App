@@ -445,10 +445,20 @@ if ($AllowEdits) {
         throw ("hook-not-enforced: worktree hook sha256={0} != receipt hookSha256={1}" -f $WorkDirHookSha256, $receiptHookSha256)
     }
 }
-$BaseSha = try {
-    (& git -C $WorkDir rev-parse HEAD 2>$null | Select-Object -First 1)
-} catch { $null }
-if ([string]::IsNullOrWhiteSpace($BaseSha)) { $BaseSha = $null }
+# Round 7 (sol minor): routed through Invoke-GitCaptureUtf8 instead of a bare `& git ...`
+# catch, so a failed rev-parse is distinguishable from "this gate does not apply to this
+# lane" downstream -- the old form read a failed call and a legitimately-inapplicable gate
+# as the same falsy $BaseSha, which the post-exit block then misclassified as 'not-applicable'
+# instead of 'unavailable' (or, at post-exit, as "HEAD moved").
+$BaseShaCapture = Invoke-GitCaptureUtf8 -WorkDir $WorkDir -GitArgs @('rev-parse', 'HEAD')
+$BaseSha = $null
+$BaseShaCaptureFailureReason = $null
+if ($BaseShaCapture.ok) {
+    $trimmed = $BaseShaCapture.stdout.Trim()
+    if (-not [string]::IsNullOrWhiteSpace($trimmed)) { $BaseSha = $trimmed }
+} else {
+    $BaseShaCaptureFailureReason = "pre-launch rev-parse HEAD failed: $($BaseShaCapture.error)"
+}
 # LANE-NO-BACKGROUND-END-TURN-1 round 2 (sol major 1 / fable minor 3): the dirty-no-commit
 # override below applies ONLY to editing Claude lanes, and only to tracked dirt the LANE
 # ITSELF introduced. Snapshot a per-path CONTENT IDENTITY (round 3: sol minor / fable minor 2 --
@@ -465,7 +475,7 @@ $InitialTrackedDirt = $null
 # post-exit block below can distinguish "captured, empty" from "never captured" without
 # inspecting map contents.
 $InitialTrackedDirtUnavailableReason = $null
-if ($AllowEdits -and $LANES[$Lane].engine -eq 'claude' -and $BaseSha) {
+if ($AllowEdits -and $LANES[$Lane].engine -eq 'claude' -and -not $BaseShaCaptureFailureReason -and $BaseSha) {
     $preSnapshot = Get-TrackedDirtyContentIdentity -WorkDir $WorkDir
     if ($preSnapshot.ok) {
         $InitialTrackedDirt = $preSnapshot.map
@@ -558,6 +568,11 @@ $dispatchLedgerReservationId = $null
 $stdout = ''
 $authority  =[ordered]@{ permissionMode = 'unset'; allowedTools = 'unset'; sandbox = 'unset'; writableRoot = $null }
 $denyRules  = @()
+# LANE-NO-BACKGROUND-END-TURN-1 round 7: set here so a codex lane (which never enters the
+# claude branch below) can be checked against $null under Set-StrictMode without a separate
+# engine test at every read site.
+$hookCopyPath = $null
+$backgroundHookLaunchSha256 = $null
 $jobHandle = [IntPtr]::Zero
 $jobAssigned = $false
 $promptDelivered = $false
@@ -650,15 +665,54 @@ if ($cfg.engine -eq 'claude') {
     # only a non-bulk-reads lane did -- because it is now also how the lane-no-background
     # PreToolUse hook is wired; the Read deny rules stay conditional on -AllowBulkReads exactly
     # as before.
+    # Round 7 (sol major 3): docs/Start-EditingLane.ps1 resolves and runs Invoke-Lane.ps1 FROM
+    # $WorkDir for every editing lane, so $PSScriptRoot -- and $LANE_NO_BACKGROUND_HOOK beside
+    # it -- is INSIDE the lane's own writable worktree; an editing lane keeps Write/Edit/Bash
+    # for its whole session and could alter its own gate script before ever calling Bash. Copy
+    # the source into THIS run's reserved, board-rooted slot (never $WorkDir, unlike
+    # $PSScriptRoot) before it is ever registered, and point the registration at the copy, not
+    # at the source. Hashed immediately so the receipt records exactly what shipped.
+    $hookCopyPath = "$base.lane-no-background.py"
+    try {
+        Copy-Item -LiteralPath $LANE_NO_BACKGROUND_HOOK -Destination $hookCopyPath -Force -ErrorAction Stop
+        $backgroundHookLaunchSha256 = (Get-FileHash -LiteralPath $hookCopyPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    } catch {
+        throw "background-gate-copy-failed: $($_.Exception.Message)"
+    }
+    # Round 7 (sol major 2): a missing or wrong-path interpreter cannot be detected FROM INSIDE
+    # the hook -- Claude Code treats a failed hook COMMAND as a non-blocking error and the tool
+    # call proceeds, so a receipt claiming the gate denies background work could be false while
+    # every route stayed open. Prove it, synchronously, before this lane is ever launched: run
+    # the EXACT registered interpreter-and-script pair against a synthetic payload naming a
+    # genuine backgrounded Bash call and require the fail-closed deny (exit 2, lane-no-
+    # background.py's own protocol). A launch whose self-test does not pass never starts the
+    # provider -- the throw below is caught by this script's own top-level try/catch, which
+    # still writes a well-formed 'failed' receipt naming this exact reason.
+    $backgroundGateSelfTestPayload = '{"tool_name":"Bash","tool_input":{"command":"echo x","run_in_background":true}}'
+    try {
+        $selfTestOutput = $backgroundGateSelfTestPayload | & $PYTHON_EXE $hookCopyPath 2>&1
+        $selfTestExit = $LASTEXITCODE
+    } catch {
+        throw "background-gate-selftest-failed: interpreter invocation threw: $($_.Exception.Message)"
+    }
+    if ($selfTestExit -ne 2) {
+        throw "background-gate-selftest-failed: expected exit 2 (deny) from a synthetic background-Bash payload, got exit $selfTestExit; output: $($selfTestOutput -join ' | ')"
+    }
+    # Matcher covers BOTH shell tools carrying `run_in_background` (round 7, sol major 1 /
+    # fable major): PowerShell has the same parameter Bash does, and the sanctioned editing
+    # dispatch (docs/Start-EditingLane.ps1) grants PowerShell to every editing lane. The
+    # script's own should_deny check is now tool-name-agnostic as a second, independent gate
+    # (see lane-no-background.py), so this matcher narrows WHICH calls invoke the hook at all,
+    # not which calls the hook is capable of denying.
     $settingsObj = [ordered]@{
         hooks = [ordered]@{
             PreToolUse = @(
                 [ordered]@{
-                    matcher = 'Bash'
+                    matcher = 'Bash|PowerShell'
                     hooks   = @(
                         [ordered]@{
                             type    = 'command'
-                            command = ('"{0}" "{1}"' -f $PYTHON_EXE, $LANE_NO_BACKGROUND_HOOK)
+                            command = ('"{0}" "{1}"' -f $PYTHON_EXE, $hookCopyPath)
                         }
                     )
                 }
@@ -726,10 +780,16 @@ if ($cfg.engine -eq 'claude') {
         disallowedTools = $DENIED_TOOLS_DISPLAY
         capabilityNotice = if ($AllowEdits) { $null } else { $capabilityNotice }
         # Round 6 (swarm ruling): --disallowedTools cannot reach run_in_background -- it is a
-        # parameter of the Bash tool, not a separate tool name -- so the settings-file
+        # parameter of a tool call, not a separate tool name -- so the settings-file
         # PreToolUse hook wired above is the actual mechanism, with the dirty-no-commit receipt
         # check as the after-the-fact backstop. See docs/lane-containment.md.
-        backgroundBash = 'denied-by-settings-hook'
+        # Round 7: renamed from backgroundBash now that the matcher and the hook's own check
+        # both cover PowerShell (and, for the hook's own check, any tool) alongside Bash. The
+        # self-test above already proved the copy denies before this lane ever started;
+        # backgroundHookSha256 is the copy's hash at that instant -- compared again after the
+        # run below, where a mismatch overwrites this value with 'background-gate-tampered'.
+        backgroundGate       = 'denied-by-settings-hook'
+        backgroundHookSha256 = $backgroundHookLaunchSha256
     }
 } else {
     $exe  = $CODEX_EXE
@@ -1175,37 +1235,77 @@ try {
 # manufacture a false 'ended-incomplete' (git was merely unreachable, not evidence of a dirty
 # tree) NOR silently fall back to a false claim of 'clean' (an unavailable check has no basis to
 # claim the tree is clean either).
+# Round 7 (sol minor): a failed PRE-launch rev-parse ($BaseShaCaptureFailureReason) and a
+# failed POST-exit rev-parse are now both surfaced as 'unavailable' with a reason naming
+# exactly which call failed and why, instead of collapsing into 'not-applicable' (pre-launch
+# failure) or the misleading 'HEAD moved' (post-exit failure) the way a bare, uncaptured
+# `$null -ne $BaseSha` comparison did.
 $dirtyCheck = 'not-applicable'
 $dirtyCheckReason = $null
-if ($AllowEdits -and $cfg.engine -eq 'claude' -and $BaseSha) {
-    $headAfter = try { (& git -C $WorkDir rev-parse HEAD 2>$null | Select-Object -First 1) } catch { $null }
-    if ($headAfter -ne $BaseSha) {
-        $dirtyCheck = 'not-applicable'
-        $dirtyCheckReason = 'HEAD moved: a commit landed, so pre-commit leftover dirt is out of scope for this check'
+if ($AllowEdits -and $cfg.engine -eq 'claude') {
+    if ($BaseShaCaptureFailureReason) {
+        $dirtyCheck = 'unavailable'
+        $dirtyCheckReason = $BaseShaCaptureFailureReason
     } elseif ($InitialTrackedDirtUnavailableReason) {
         $dirtyCheck = 'unavailable'
         $dirtyCheckReason = "pre-launch snapshot: $InitialTrackedDirtUnavailableReason"
+    } elseif (-not $BaseSha) {
+        $dirtyCheck = 'not-applicable'
+        $dirtyCheckReason = 'no base sha: pre-launch rev-parse HEAD succeeded but returned nothing'
     } else {
-        $postSnapshot = Get-TrackedDirtyContentIdentity -WorkDir $WorkDir
-        if (-not $postSnapshot.ok) {
+        $headAfterCapture = Invoke-GitCaptureUtf8 -WorkDir $WorkDir -GitArgs @('rev-parse', 'HEAD')
+        if (-not $headAfterCapture.ok) {
             $dirtyCheck = 'unavailable'
-            $dirtyCheckReason = "post-exit snapshot: $($postSnapshot.reason)"
+            $dirtyCheckReason = "post-exit rev-parse HEAD failed: $($headAfterCapture.error)"
         } else {
-            $trackedDirtyAfter = $postSnapshot.map
-            $introducedPaths = @($trackedDirtyAfter.Keys | Where-Object {
-                -not $InitialTrackedDirt.Contains($_) -or $InitialTrackedDirt[$_] -ne $trackedDirtyAfter[$_]
-            })
-            if ($introducedPaths.Count -gt 0) {
-                $dirtyCheck = 'dirty'
-                $dirtyCheckReason = "lane-introduced tracked dirt: $($introducedPaths -join ', ')"
-                $workEvidence.workCompleted = $false
-                # Preserve any existing reason (e.g. a subtype-* classification from a partially
-                # successful envelope) by appending rather than overwriting it -- sol/fable round 1
-                # noted an unconditional overwrite can mask the original failure reason.
-                $workEvidence.reason = if ($workEvidence.reason) { "$($workEvidence.reason) | dirty-worktree-no-commit" } else { 'dirty-worktree-no-commit' }
+            $headAfter = $headAfterCapture.stdout.Trim()
+            if ($headAfter -ne $BaseSha) {
+                $dirtyCheck = 'not-applicable'
+                $dirtyCheckReason = 'HEAD moved: a commit landed, so pre-commit leftover dirt is out of scope for this check'
             } else {
-                $dirtyCheck = 'clean'
+                $postSnapshot = Get-TrackedDirtyContentIdentity -WorkDir $WorkDir
+                if (-not $postSnapshot.ok) {
+                    $dirtyCheck = 'unavailable'
+                    $dirtyCheckReason = "post-exit snapshot: $($postSnapshot.reason)"
+                } else {
+                    $trackedDirtyAfter = $postSnapshot.map
+                    $introducedPaths = @($trackedDirtyAfter.Keys | Where-Object {
+                        -not $InitialTrackedDirt.Contains($_) -or $InitialTrackedDirt[$_] -ne $trackedDirtyAfter[$_]
+                    })
+                    if ($introducedPaths.Count -gt 0) {
+                        $dirtyCheck = 'dirty'
+                        $dirtyCheckReason = "lane-introduced tracked dirt: $($introducedPaths -join ', ')"
+                        $workEvidence.workCompleted = $false
+                        # Preserve any existing reason (e.g. a subtype-* classification from a partially
+                        # successful envelope) by appending rather than overwriting it -- sol/fable round 1
+                        # noted an unconditional overwrite can mask the original failure reason.
+                        $workEvidence.reason = if ($workEvidence.reason) { "$($workEvidence.reason) | dirty-worktree-no-commit" } else { 'dirty-worktree-no-commit' }
+                    } else {
+                        $dirtyCheck = 'clean'
+                    }
+                }
             }
+        }
+    }
+}
+# LANE-NO-BACKGROUND-END-TURN-1 round 7 (sol major 3): the copy this lane's hook actually ran
+# against sits in the per-run reserved slot specifically so it is outside the lane's own
+# writable worktree -- but an editing lane keeps Bash for its whole session, and Bash is not
+# confined to --add-dir, so the lane could still reach out and rewrite the copy after its
+# self-test-proven launch. Detection, not prevention: re-hash the copy now and compare against
+# the hash taken the instant it was written, before the child ever started. A read-only lane
+# has no Write/Edit/Bash grant at all, so this can only ever fire for an editing lane, but the
+# check is cheap and unconditional for every claude lane that got a copy.
+if ($cfg.engine -eq 'claude' -and $backgroundHookLaunchSha256) {
+    $backgroundHookPostRunSha256 = if (Test-Path -LiteralPath $hookCopyPath) {
+        (Get-FileHash -LiteralPath $hookCopyPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    } else { $null }
+    if ($backgroundHookPostRunSha256 -ne $backgroundHookLaunchSha256) {
+        $authority.backgroundGate = 'background-gate-tampered'
+        $authority.backgroundGateTamperDetail = if ($null -eq $backgroundHookPostRunSha256) {
+            'background-gate-tampered: hook copy missing after run'
+        } else {
+            "background-gate-tampered: sha256 was $backgroundHookLaunchSha256, now $backgroundHookPostRunSha256"
         }
     }
 }

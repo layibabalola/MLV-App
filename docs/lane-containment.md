@@ -44,35 +44,93 @@ card NA3-CHILD-ENV-SCOPE-1 -- whether NA-3's prefix rule covers a launcher setti
 child process's environment in code is a governance interpretation that PR does not
 decide here.
 
-**Blocking `run_in_background` (round 6, swarm ruling, 2026-09-22).** Every
-Claude-engine lane -- read-only and editing alike, previously only a non-bulk-reads
-read-only lane got a `--settings` file at all -- now receives a per-run
+**Blocking `run_in_background` (round 6, swarm ruling, 2026-09-22; matcher, fail-
+closed protocol, launch self-test and tamper detection added round 7).** Every
+Claude-engine lane -- read-only and editing alike -- now receives a per-run
 `--settings` JSON written beside its receipt (`<lane>-NNN.settings.json`) that
-registers `tools/coordination/lane-no-background.py` as a `PreToolUse` hook on the
-`Bash` matcher, invoked with the same absolute per-user Python interpreter
-`.claude/settings.json` pins its own `mlv-never-authorized.py` gate to (a hook is
-`interpreter x script x registration`; a portable-but-wrong command fails open
-silently -- proven cost, 2026-08-09). The hook reads the tool-call JSON on stdin
-and denies the call (`hookSpecificOutput.permissionDecision: "deny"`) exactly when
-`tool_input.run_in_background` is `true`, with reason text naming that a headless
-lane has no later turn to receive the callback; every other input -- the flag
-absent or false, any non-`Bash` tool, malformed stdin -- allows silently (exit 0,
-no output). It is pure: no side effects, no network, no filesystem access beyond
-stdin/stdout. The Read deny rules for the manifest-surface paths stay conditional
-on `-AllowBulkReads` exactly as before this round; the hook is unconditional. This
-is a Claude-CLI-only mechanism (`--settings` and its hook keys are claude-specific),
-so Codex lanes get neither the settings file nor the hook. The receipt's authority
-block records `backgroundBash = 'denied-by-settings-hook'` for every Claude lane.
-Containment of background work now rests on three things: the `--disallowedTools`
-deny list above (nested-agent and callback-promising CLI tools by name), this
-settings-file hook (the one mechanism that actually denies `run_in_background` on
-the tool call that would start it), and the dirty-no-commit receipt below as an
-after-the-fact backstop for anything that reaches a background shell by some other
-route -- auto-backgrounding by the harness, if any, would not necessarily carry the
-`run_in_background` flag this hook keys on. Arbitrary shell descendants remain
-confined to the owning Windows job unless an independently authorized external
-service starts them (see the job-object section above); the job closes them, it
-does not prevent them from being started.
+registers a hook on the `Bash|PowerShell` matcher (round 7: widened from `Bash`
+alone -- `PowerShell` carries the same `run_in_background` parameter and is
+granted to every editing lane by `docs/Start-EditingLane.ps1`). **This is not a
+new grant of a `--settings` file: before round 6, a non-bulk-reads lane of
+EITHER kind -- read-only or `-AllowEdits` -- already received one carrying only
+the `Read` deny rules, gated on `-not $AllowBulkReads` alone, never on
+`-AllowEdits`.** Round 6 made the file unconditional (every Claude lane gets one,
+bulk-reads or not) and added the hook registration to it; round 7 widened the
+hook's matcher.
+
+The hook script is `tools/coordination/lane-no-background.py`, but the command
+`--settings` registers is never a path inside the lane's own writable worktree
+(round 7, sol major 3): before argv is built, the launcher copies the source
+script into THIS run's already-reserved, board-rooted slot
+(`<lane>-NNN.lane-no-background.py`, beside the receipt, under
+`.claude-state/fleet-runs` -- itself an NA-2 protected tail no lane can write to)
+and points the registration at that copy, never at the source. The copy is hashed
+immediately (`sha256`), and the launcher runs the exact registered
+interpreter-and-script pair against a synthetic `{"tool_name":"Bash",
+"tool_input":{"run_in_background":true}}` payload before the provider ever
+starts, requiring the fail-closed deny (exit 2) -- a launch whose self-test does
+not pass never starts the provider; the receipt records
+`failure: "background-gate-selftest-failed: ..."` instead. After the run, the
+copy is re-hashed; a lane with Bash/Edit access is not confined to `--add-dir`,
+so if the two hashes differ the receipt's `authority.backgroundGate` is
+overwritten to `'background-gate-tampered'` with a detail field, rather than
+silently continuing to claim `'denied-by-settings-hook'`. Neither the self-test
+nor the re-hash proves anything about a FUTURE launch from this same worktree if
+the lane instead rewrote the WORKTREE'S SOURCE copy of
+`tools/coordination/lane-no-background.py` (the file the next launch would copy
+from) or of `Invoke-Lane.ps1` itself (the file that performs the copy-and-wire
+step). **Known gap, not yet closed (round 7):** NA-10 in
+`tools/hooks/mlv-never-authorized.py` is the natural place to guard both paths as
+gate tails a lane may write only at the board venue, the same way it already
+guards `.claude/settings.json` and its own script -- but `mlv-never-authorized.py`
+is itself one of NA-10's guarded tails, so a session running in a lane worktree
+(this one included) is refused by NA-10 when it tries to make that edit; it is
+attributable ONLY to the board-rooted actor. Filed for a board-venue session to
+land, not done here.
+
+The hook script reads the tool-call JSON on stdin and denies the call (exit 2,
+one line on stderr -- the same fail-closed protocol
+`tools/hooks/mlv-never-authorized.py` uses, not round 6's exit-0-plus-stdout-JSON
+protocol) whenever `tool_input.run_in_background` is truthy, for ANY
+`tool_name` -- round 7 made the script's own check tool-name-agnostic as a second,
+independent gate beneath the matcher, so a future tool carrying the same
+parameter is refused on the same basis without a second wiring change. Every
+other input -- the flag absent or false, no `tool_input.run_in_background` key --
+allows silently (exit 0, no output). **Fail-closed on the input itself (round 7,
+sol major 2):** missing or empty stdin, non-JSON stdin, a top-level JSON value
+that is not an object, or a present `tool_input` that is not an object, all DENY
+(exit 2) rather than allow -- a hook that cannot read its own input has no basis
+to conclude the call is safe. It remains pure: no side effects, no network, no
+filesystem access beyond stdin/stdout/stderr. The Read deny rules for the
+manifest-surface paths stay conditional on `-AllowBulkReads` exactly as before
+round 6; the hook registration is unconditional. This is a Claude-CLI-only
+mechanism (`--settings` and its hook keys are claude-specific), so Codex lanes
+get neither the settings file nor the hook. The receipt's authority block
+records `backgroundGate = 'denied-by-settings-hook'` (round 7: renamed from
+`backgroundBash`, now that the matcher and the script's own check both cover
+PowerShell, and any tool, alongside Bash) and `backgroundHookSha256` (the copy's
+hash at launch, proven-denying by the self-test) for every Claude lane.
+
+Containment of background work now rests on three things, with a fourth filed
+and not yet landed: the `--disallowedTools` deny list above (nested-agent and
+callback-promising CLI tools by name); this settings-file hook, proven by a
+launch-time self-test and checked for tamper after the run (the mechanism that
+actually denies `run_in_background` on the `Bash`/`PowerShell` tool call that
+would start it); and the dirty-no-commit receipt below as an after-the-fact
+backstop for anything that reaches a background shell by some other route --
+auto-backgrounding by the
+harness, if any, would not necessarily carry the `run_in_background` flag this
+hook keys on. **Residual routes, stated honestly:** a shell built-in that
+backgrounds work WITHOUT setting the `run_in_background` parameter -- `Start-Job`,
+or `&` at the end of an otherwise-foreground PowerShell command, or `nohup ... &`
+in Bash -- is invisible to this hook, which inspects only the tool-call
+parameter, never the command text; such a job still ends when the command that
+started it returns control to the CLI turn, so it does not survive past the
+lane's last turn the way `run_in_background: true` does, but it is not covered by
+denial here. Arbitrary shell descendants remain confined to the owning Windows
+job unless an independently authorized external service starts them (see the
+job-object section above); the job closes them, it does not prevent them from
+being started.
 
 A receipt is also never marked `complete` (or state `ended-incomplete` is forced)
 when an EDITING Claude lane's own worktree is still at the lane's starting sha and
@@ -121,6 +179,15 @@ evidence of a dirty tree) and never falls back to claiming `dirtyCheck: 'clean'`
 (an unavailable check has no basis to claim the tree was actually verified).
 `dirtyCheck` also records `'not-applicable'` (the gate did not apply to this lane,
 or HEAD moved) and `'clean'`/`'dirty'` for a check that actually ran to completion.
+Round 7 (sol minor): the pre-launch and post-exit `git rev-parse HEAD` calls the
+gate takes its base and comparison shas from are routed through the same
+`Invoke-GitCaptureUtf8` and are held to the same standard -- a failed rev-parse is
+now distinguishable from a legitimately inapplicable gate (no base sha because the
+prior call succeeded and simply returned nothing) instead of both collapsing into
+the same falsy-`$BaseSha` reading, which previously misclassified a failed
+pre-launch rev-parse as `'not-applicable'` and a failed post-exit rev-parse as the
+misleading `'HEAD moved'`. Both now record `dirtyCheck: 'unavailable'` with
+`dirtyCheckReason` naming exactly which rev-parse call failed and why.
 
 `-ReasoningEffort low` explicitly requests low effort for one invocation. Codex
 receives its normal reasoning configuration argument. Claude receives
