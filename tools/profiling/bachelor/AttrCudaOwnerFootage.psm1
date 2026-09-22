@@ -67,7 +67,11 @@ Set-StrictMode -Version Latest
 # leaves an already-loaded caller's copy alone and still satisfies a caller who loads only this
 # module.
 if (-not (Get-Command -Name 'Test-AttrCudaFootagePart' -ErrorAction SilentlyContinue)) {
-    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop
+    # ATTR3-FOOTAGE-STAGE-1 round 11: -Verbose:$false so this fallback import (unreachable from
+    # the production CLI, which always loads AttrCudaArtifacts.psm1 first) never depends on a
+    # caller's ambient $VerbosePreference either, the same defense-in-depth
+    # attr3-footage-stage.ps1's own four Import-Module calls now carry.
+    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop -Verbose:$false
 }
 
 function Get-AttrCudaOwnerFootageStagingName {

@@ -1466,6 +1466,55 @@ class NoPathInAnyBranchTests(unittest.TestCase):
         self.assertIn("ATTR3_FOOTAGE_STAGE_RESOLVE_REFUSED synthetic refusal for this test only", combined)
         self.assertNotIn("CLASS=", combined)
 
+    # ---- round 11 (astra major: inherited verbose diagnostics disclose full paths) -------------
+
+    def test_real_cli_under_ambient_continue_preferences_emits_no_path(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 11. Reproduces astra's round-10 repro exactly: the REAL CLI
+        # (never a harness that only replays its outer catch), invoked with -ClipId SYNTHETIC and
+        # -TimeoutSec 30, under a caller environment that already set VerbosePreference,
+        # DebugPreference, InformationPreference and WarningPreference to 'Continue' BEFORE this
+        # script ever ran -- exactly the ambient condition astra's real-CLI probe produced four
+        # path-bearing VerboseRecords under. Get-Command is shadowed ONLY for python.exe/py.exe (to
+        # force the supported no-interpreter refusal before the resolver, real footage, or the
+        # real resolver child process is ever reached) and delegates every other lookup to the
+        # original cmdlet, so this exercises the real Import-Module calls this script actually
+        # makes, not a stand-in. Every PowerShell stream is folded into the wrapper's own output via
+        # `*>&1`; the fixed-token refusal itself goes through [Console]::Error.WriteLine, which
+        # writes directly to this process's own OS-level stderr regardless of that redirection, so
+        # capturing the wrapper PROCESS's stdout+stderr (not a PowerShell-level stream capture)
+        # catches both.
+        wrapper = self.tmp / "ambient-continue-probe.ps1"
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            "$VerbosePreference = 'Continue'\n"
+            "$DebugPreference = 'Continue'\n"
+            "$InformationPreference = 'Continue'\n"
+            "$WarningPreference = 'Continue'\n"
+            "function Get-Command {\n"
+            "    $nameArg = $null\n"
+            "    foreach ($a in $args) {\n"
+            "        if ($a -is [string] -and $a -notlike '-*') { $nameArg = $a; break }\n"
+            "    }\n"
+            "    if ($nameArg -eq 'python.exe' -or $nameArg -eq 'py.exe') { return $null }\n"
+            "    Microsoft.PowerShell.Core\\Get-Command @args\n"
+            "}\n"
+            f"& '{GENERATOR}' -ClipId SYNTHETIC -TimeoutSec 30 *>&1 | ForEach-Object {{ \"$_\" }}\n"
+            "exit $LASTEXITCODE\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+            capture_output=True, text=True,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0, combined)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_NO_PYTHON", combined)
+        bachelor_dir = str(GENERATOR.parent)
+        self.assertNotIn(bachelor_dir, combined)
+        for module_path in (GENERATOR, STAGE_MODULE, PRESENCE_MODULE, OWNER_FOOTAGE_MODULE, ARTIFACTS_MODULE):
+            self.assertNotIn(str(module_path), combined)
+            self.assertNotIn(module_path.name, combined)
+
 
 @unittest.skipIf(PWSH is None, "pwsh is not on PATH")
 @unittest.skipUnless(os.name == "nt", "the emitted job and agent target a Windows host")

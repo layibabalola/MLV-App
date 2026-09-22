@@ -38,7 +38,11 @@ Set-StrictMode -Version Latest
 # AttrCudaArtifacts.psm1 globally first -- it strips the caller's existing global copy instead
 # of reusing it.
 if (-not (Get-Command -Name 'Assert-AttrCudaSafeArtifactName' -ErrorAction SilentlyContinue)) {
-    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop
+    # ATTR3-FOOTAGE-STAGE-1 round 11: -Verbose:$false so this fallback import (unreachable from
+    # the production CLI, which always loads AttrCudaArtifacts.psm1 first) never depends on a
+    # caller's ambient $VerbosePreference either, the same defense-in-depth
+    # attr3-footage-stage.ps1's own four Import-Module calls now carry.
+    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop -Verbose:$false
 }
 
 function New-Attr3FootagePresenceJob {
@@ -154,6 +158,20 @@ function New-Attr3FootagePresenceJob {
     #     environment into the emitted script) -------------------------------------------------
     $template = @'
 $ErrorActionPreference = 'Stop'
+# ATTR3-FOOTAGE-STAGE-1 round 11 (astra major: inherited verbose diagnostics disclose full
+# paths). This probe runs on Bachelor under the submitting agent's OWN ambient preferences, not
+# this generator's -- pinned here, first, for the same reason and by the same mechanism as
+# attr3-footage-stage.ps1's own top-of-file pin and Attr3FootageStageJob.psm1's own template pin
+# (see either's own comment): every cmdlet and embedded function call below resolves these five
+# preference variables by scope lookup from this job's own top-level scope unless overridden
+# again, and the embedded verifiers below read real footage-path files before this probe ever
+# reports a PASS/NOT_FOUND/etc token, where an ambient Continue diagnostic stream is exactly what
+# could carry one of those paths out.
+$VerbosePreference = 'SilentlyContinue'
+$DebugPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
 $JobId = '__JOB_ID__'
 $ClipId = '__CLIP_ID__'
 $PartsJson = '__PARTS_JSON__'

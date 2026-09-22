@@ -32,6 +32,30 @@
 
 $ErrorActionPreference = 'Stop'
 
+# ATTR3-FOOTAGE-STAGE-1 round 11 (astra major: inherited verbose diagnostics disclose full
+# paths). Pinned FIRST, before anything else in this script runs -- including the Import-Module
+# calls below, whose own Write-Verbose logging ("Loading module from path '...'") names this
+# checkout's absolute path once a caller's ambient $VerbosePreference is Continue, and which this
+# script's own outer catch and per-call output filtering (ConvertTo-Attr3FootageStageSafeOutput,
+# the cleanup WarningAction suppression) never touched, because they operate on THIS script's own
+# success-stream text, never on a PowerShell diagnostic stream a cmdlet writes to directly. A
+# script-scoped preference variable is read by dynamic scope lookup -- every cmdlet this script
+# calls directly, every function it defines, and every already-loaded module function it calls
+# (proven empirically: an Import-Module invoked from inside a module function still honours a
+# caller-set $VerbosePreference several scopes up, since neither PowerShell's own module-loading
+# cmdlet nor these repository modules override it locally) -- all resolve these five preference
+# variables from this scope unless something between here and the call overrides them again. This
+# is the SAME boundary this script's own header already claims ("NO PATH EVER REACHES THIS
+# SCRIPT'S OWN OUTPUT") -- these five diagnostic streams are part of that boundary, not separate
+# from it. $ProgressPreference is included even though no progress record has been observed here;
+# Write-Progress records can carry arbitrary caller-supplied activity text and cost nothing to
+# suppress alongside the other four.
+$VerbosePreference = 'SilentlyContinue'
+$DebugPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
+
 # ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary). Everything from the argument parsing
 # below through this script's own final `exit 0` runs inside ONE try/catch -- most notably the
 # two job-emission calls (New-Attr3FootagePresenceJob, New-Attr3FootageStageJob) that were
@@ -124,10 +148,14 @@ if (-not [int]::TryParse($TimeoutSec, [ref]$timeoutSecValue) -or $timeoutSecValu
 $AgentShare = '\\bachelor\mlv-agent'
 $AgentRootOnHost = 'C:\mlvtmp\mlv-agent'
 
-Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'AttrCudaOwnerFootage.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'Attr3FootageStageJob.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'Attr3FootagePresenceJob.psm1') -Force
+# ATTR3-FOOTAGE-STAGE-1 round 11: -Verbose:$false belt-and-suspenders over the script-scoped
+# $VerbosePreference pin above -- an explicit -Verbose:$false always wins over ambient preference
+# regardless of how a future caller's environment sets it, so this line does not depend on the
+# pin above staying in place, or staying first, to keep these four imports path-free.
+Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force -Verbose:$false
+Import-Module (Join-Path $PSScriptRoot 'AttrCudaOwnerFootage.psm1') -Force -Verbose:$false
+Import-Module (Join-Path $PSScriptRoot 'Attr3FootageStageJob.psm1') -Force -Verbose:$false
+Import-Module (Join-Path $PSScriptRoot 'Attr3FootagePresenceJob.psm1') -Force -Verbose:$false
 
 # ATTR3-FOOTAGE-STAGE-1 round 8 (scope cut): the round 5 start-of-run stale-attempt sweep was
 # removed here -- see Attr3FootageStageJob.psm1's own header CHANGELOG note. A failed attempt's

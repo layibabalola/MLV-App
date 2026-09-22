@@ -61,7 +61,11 @@ Set-StrictMode -Version Latest
 # AttrCudaArtifacts.psm1 globally first (attr3-footage-stage.ps1 does exactly that before
 # importing this module) -- it strips the caller's existing global copy instead of reusing it.
 if (-not (Get-Command -Name 'Assert-AttrCudaSafeArtifactName' -ErrorAction SilentlyContinue)) {
-    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop
+    # ATTR3-FOOTAGE-STAGE-1 round 11: -Verbose:$false so this fallback import (unreachable from
+    # the production CLI, which always loads AttrCudaArtifacts.psm1 first -- see this comment's
+    # own paragraph above) never depends on a caller's ambient $VerbosePreference either, the same
+    # defense-in-depth attr3-footage-stage.ps1's own four Import-Module calls now carry.
+    Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Global -ErrorAction Stop -Verbose:$false
 }
 
 function New-Attr3FootageStageJob {
@@ -264,6 +268,19 @@ function New-Attr3FootageStageJob {
     #     environment into the emitted script) -------------------------------------------------
     $template = @'
 $ErrorActionPreference = 'Stop'
+# ATTR3-FOOTAGE-STAGE-1 round 11 (astra major: inherited verbose diagnostics disclose full
+# paths). This job runs on Bachelor under the submitting agent's OWN ambient preferences, not
+# this generator's -- pinned here, first, for the same reason and by the same mechanism as
+# attr3-footage-stage.ps1's own top-of-file pin (see that script's own comment): every cmdlet and
+# embedded function call below resolves these five preference variables by scope lookup from this
+# job's own top-level scope unless overridden again, and several of the embedded verifiers below
+# open, copy and dispose real footage-path file streams under $ErrorActionPreference = 'Stop',
+# where an ambient Continue diagnostic stream is exactly what could carry one of those paths out.
+$VerbosePreference = 'SilentlyContinue'
+$DebugPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
 $JobId = '__JOB_ID__'
 $ClipId = '__CLIP_ID__'
 $AgentRoot = '__AGENT_ROOT__'

@@ -3,7 +3,7 @@
     {
       "source": "Attr3FootagePresenceJob.psm1",
       "function": "New-Attr3FootagePresenceJob",
-      "line": 280,
+      "line": 298,
       "kind": "cmdlet",
       "name": "New-Item",
       "text": "New-Item -ItemType Directory -Path $OutDir -Force",
@@ -13,7 +13,7 @@
     {
       "source": "Attr3FootagePresenceJob.psm1",
       "function": "New-Attr3FootagePresenceJob",
-      "line": 280,
+      "line": 298,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $OutDir",
@@ -23,7 +23,7 @@
     {
       "source": "Attr3FootagePresenceJob.psm1",
       "function": "New-Attr3FootagePresenceJob",
-      "line": 281,
+      "line": 299,
       "kind": "cmdlet",
       "name": "Resolve-Path",
       "text": "Resolve-Path -LiteralPath $OutDir",
@@ -33,7 +33,7 @@
     {
       "source": "Attr3FootagePresenceJob.psm1",
       "function": "New-Attr3FootagePresenceJob",
-      "line": 283,
+      "line": 301,
       "kind": "static-method",
       "name": "WriteAllText",
       "text": "[IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))",
@@ -43,7 +43,7 @@
     {
       "source": "Attr3FootageStageJob.psm1",
       "function": "New-Attr3FootageStageJob",
-      "line": 683,
+      "line": 700,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $OutDir",
@@ -53,7 +53,7 @@
     {
       "source": "Attr3FootageStageJob.psm1",
       "function": "New-Attr3FootageStageJob",
-      "line": 683,
+      "line": 700,
       "kind": "cmdlet",
       "name": "New-Item",
       "text": "New-Item -ItemType Directory -Path $OutDir -Force",
@@ -63,7 +63,7 @@
     {
       "source": "Attr3FootageStageJob.psm1",
       "function": "New-Attr3FootageStageJob",
-      "line": 684,
+      "line": 701,
       "kind": "cmdlet",
       "name": "Resolve-Path",
       "text": "Resolve-Path -LiteralPath $OutDir",
@@ -73,7 +73,7 @@
     {
       "source": "Attr3FootageStageJob.psm1",
       "function": "New-Attr3FootageStageJob",
-      "line": 686,
+      "line": 703,
       "kind": "static-method",
       "name": "WriteAllText",
       "text": "[IO.File]::WriteAllText($jobPath, $text, [Text.UTF8Encoding]::new($false))",
@@ -83,7 +83,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 155,
+      "line": 168,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $targetPath -PathType Leaf -ErrorAction Stop",
@@ -93,7 +93,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 241,
+      "line": 254,
       "kind": "static-method",
       "name": "Open",
       "text": "[IO.File]::Open($stagedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
@@ -103,7 +103,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 248,
+      "line": 261,
       "kind": "static-method",
       "name": "Open",
       "text": "[IO.File]::Open($localPartialPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)",
@@ -113,7 +113,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 258,
+      "line": 271,
       "kind": "instance-method",
       "name": "CopyTo",
       "text": "$localSrcStream.CopyTo($localDstStream)",
@@ -123,7 +123,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 259,
+      "line": 272,
       "kind": "instance-method",
       "name": "Flush",
       "text": "$localDstStream.Flush()",
@@ -133,7 +133,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 271,
+      "line": 284,
       "kind": "instance-method",
       "name": "Dispose",
       "text": "$localSrcStream.Dispose()",
@@ -143,7 +143,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 281,
+      "line": 294,
       "kind": "instance-method",
       "name": "Dispose",
       "text": "$localDstStream.Dispose()",
@@ -153,7 +153,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 292,
+      "line": 305,
       "kind": "cmdlet",
       "name": "Remove-Item",
       "text": "Remove-Item -LiteralPath $localPartialPath -Force -Confirm:$false -ErrorAction SilentlyContinue",
@@ -163,7 +163,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 300,
+      "line": 313,
       "kind": "cmdlet",
       "name": "Remove-Item",
       "text": "Remove-Item -LiteralPath $localPartialPath -Force -Confirm:$false -ErrorAction SilentlyContinue",
@@ -173,7 +173,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 309,
+      "line": 322,
       "kind": "static-method",
       "name": "Open",
       "text": "[IO.File]::Open($localPartialPath, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::None)",
@@ -183,7 +183,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 310,
+      "line": 323,
       "kind": "instance-method",
       "name": "WriteByte",
       "text": "$corruptStream.WriteByte(0)",
@@ -193,7 +193,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 310,
+      "line": 323,
       "kind": "instance-method",
       "name": "Dispose",
       "text": "$corruptStream.Dispose()",
@@ -203,7 +203,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 320,
+      "line": 333,
       "kind": "cmdlet",
       "name": "Remove-Item",
       "text": "Remove-Item -LiteralPath $localPartialPath -Force -Confirm:$false -ErrorAction SilentlyContinue",
@@ -213,7 +213,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 354,
+      "line": 367,
       "kind": "cmdlet",
       "name": "Remove-Item",
       "text": "Remove-Item -LiteralPath $targetPath -Force -Confirm:$false -ErrorAction Stop",
@@ -223,7 +223,7 @@
     {
       "source": "Attr3FootageStageJob.psm1::template",
       "function": "<top-level>",
-      "line": 357,
+      "line": 370,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $targetPath -PathType Leaf -ErrorAction Stop",
@@ -233,7 +233,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 164,
+      "line": 168,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $StagingDirectory -PathType Container -ErrorAction Stop",
@@ -243,7 +243,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 165,
+      "line": 169,
       "kind": "cmdlet",
       "name": "New-Item",
       "text": "New-Item -ItemType Directory -Path $StagingDirectory -Force -ErrorAction Stop",
@@ -253,7 +253,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 177,
+      "line": 181,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $finalPath -PathType Leaf -ErrorAction Stop",
@@ -263,7 +263,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 198,
+      "line": 202,
       "kind": "static-method",
       "name": "Open",
       "text": "[IO.File]::Open($SourcePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
@@ -273,7 +273,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 203,
+      "line": 207,
       "kind": "static-method",
       "name": "Open",
       "text": "[IO.File]::Open($partialPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)",
@@ -283,7 +283,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 211,
+      "line": 215,
       "kind": "instance-method",
       "name": "CopyTo",
       "text": "$sourceStream.CopyTo($destStream)",
@@ -293,7 +293,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 212,
+      "line": 216,
       "kind": "instance-method",
       "name": "Flush",
       "text": "$destStream.Flush()",
@@ -303,7 +303,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 221,
+      "line": 225,
       "kind": "instance-method",
       "name": "Dispose",
       "text": "$sourceStream.Dispose()",
@@ -313,7 +313,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 233,
+      "line": 237,
       "kind": "instance-method",
       "name": "Dispose",
       "text": "$destStream.Dispose()",
@@ -323,7 +323,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 239,
+      "line": 243,
       "kind": "instance-method",
       "name": "Dispose",
       "text": "$destStream.Dispose()",
@@ -333,27 +333,27 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 240,
+      "line": 244,
       "kind": "instance-method",
       "name": "Dispose",
       "text": "$sourceStream.Dispose()",
       "disposition": "boundary-root-asserted",
       "note": "releases a stream opened from the already-asserted StagingDirectory"
-    },
-    {
-      "source": "AttrCudaOwnerFootage.psm1",
-      "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 242,
-      "kind": "cmdlet",
-      "name": "Remove-Item",
-      "text": "Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue",
-      "disposition": "boundary-root-asserted",
-      "note": "partialPath is a direct child of the already-asserted StagingDirectory"
     },
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
       "line": 246,
+      "kind": "cmdlet",
+      "name": "Remove-Item",
+      "text": "Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue",
+      "disposition": "boundary-root-asserted",
+      "note": "partialPath is a direct child of the already-asserted StagingDirectory"
+    },
+    {
+      "source": "AttrCudaOwnerFootage.psm1",
+      "function": "Send-AttrCudaOwnerFootagePartToStaging",
+      "line": 250,
       "kind": "instance-method",
       "name": "Dispose",
       "text": "$sourceStream.Dispose()",
@@ -363,7 +363,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 247,
+      "line": 251,
       "kind": "instance-method",
       "name": "Dispose",
       "text": "$destStream.Dispose()",
@@ -373,7 +373,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 254,
+      "line": 258,
       "kind": "cmdlet",
       "name": "Remove-Item",
       "text": "Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue",
@@ -383,22 +383,12 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 259,
+      "line": 263,
       "kind": "static-method",
       "name": "Move",
       "text": "[IO.File]::Move($partialPath, $finalPath, $false)",
       "disposition": "boundary-root-asserted",
       "note": "both paths are direct children of the already-asserted StagingDirectory"
-    },
-    {
-      "source": "AttrCudaOwnerFootage.psm1",
-      "function": "Send-AttrCudaOwnerFootagePartToStaging",
-      "line": 264,
-      "kind": "cmdlet",
-      "name": "Remove-Item",
-      "text": "Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue",
-      "disposition": "boundary-root-asserted",
-      "note": "partialPath is a direct child of the already-asserted StagingDirectory"
     },
     {
       "source": "AttrCudaOwnerFootage.psm1",
@@ -412,8 +402,18 @@
     },
     {
       "source": "AttrCudaOwnerFootage.psm1",
+      "function": "Send-AttrCudaOwnerFootagePartToStaging",
+      "line": 272,
+      "kind": "cmdlet",
+      "name": "Remove-Item",
+      "text": "Remove-Item -LiteralPath $partialPath -Force -Confirm:$false -ErrorAction SilentlyContinue",
+      "disposition": "boundary-root-asserted",
+      "note": "partialPath is a direct child of the already-asserted StagingDirectory"
+    },
+    {
+      "source": "AttrCudaOwnerFootage.psm1",
       "function": "Get-AttrCudaFileIdentity",
-      "line": 387,
+      "line": 391,
       "kind": "static-method",
       "name": "CreateFileW",
       "text": "[AttrCudaWin32.NativeMethods]::CreateFileW( $Path, $genericRead, $shareAll, [IntPtr]::Zero, $openExisting, $backupSemant",
@@ -423,7 +423,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Get-AttrCudaFileIdentity",
-      "line": 394,
+      "line": 398,
       "kind": "static-method",
       "name": "GetFileInformationByHandle",
       "text": "[AttrCudaWin32.NativeMethods]::GetFileInformationByHandle($handle, [ref]$info)",
@@ -433,7 +433,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Get-AttrCudaFileIdentity",
-      "line": 405,
+      "line": 409,
       "kind": "static-method",
       "name": "CloseHandle",
       "text": "[AttrCudaWin32.NativeMethods]::CloseHandle($handle)",
@@ -443,7 +443,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "New-AttrCudaOwnerFootageLink",
-      "line": 443,
+      "line": 447,
       "kind": "cmdlet",
       "name": "New-Item",
       "text": "New-Item -ItemType HardLink -Path $linkPath -Value $SourcePath -ErrorAction Stop",
@@ -453,7 +453,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Open-AttrCudaReadOnlyHandle",
-      "line": 474,
+      "line": 478,
       "kind": "static-method",
       "name": "Open",
       "text": "[IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
@@ -463,7 +463,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Close-AttrCudaOwnerFootageWorkspace",
-      "line": 498,
+      "line": 502,
       "kind": "instance-method",
       "name": "Dispose",
       "text": "$handle.Dispose()",
@@ -473,7 +473,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Close-AttrCudaOwnerFootageWorkspace",
-      "line": 501,
+      "line": 505,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $Directory",
@@ -483,7 +483,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Close-AttrCudaOwnerFootageWorkspace",
-      "line": 504,
+      "line": 508,
       "kind": "cmdlet",
       "name": "Get-ChildItem",
       "text": "Get-ChildItem -LiteralPath $Directory -File -ErrorAction SilentlyContinue",
@@ -493,7 +493,7 @@
     {
       "source": "AttrCudaOwnerFootage.psm1",
       "function": "Close-AttrCudaOwnerFootageWorkspace",
-      "line": 518,
+      "line": 522,
       "kind": "cmdlet",
       "name": "Remove-Item",
       "text": "Remove-Item -LiteralPath $entry.FullName -Force -Confirm:$false -ErrorAction Stop",
@@ -503,7 +503,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 142,
+      "line": 170,
       "kind": "cmdlet",
       "name": "Resolve-Path",
       "text": "Resolve-Path (Join-Path $PSScriptRoot '..\\..\\..')",
@@ -513,7 +513,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 202,
+      "line": 230,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $ResolverPath -PathType Leaf",
@@ -523,7 +523,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 234,
+      "line": 262,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $emitPath -PathType Leaf",
@@ -533,7 +533,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 237,
+      "line": 265,
       "kind": "static-method",
       "name": "ReadAllBytes",
       "text": "[IO.File]::ReadAllBytes($emitPath)",
@@ -543,7 +543,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 239,
+      "line": 267,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $emitPath",
@@ -553,7 +553,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "<top-level>",
-      "line": 239,
+      "line": 267,
       "kind": "cmdlet",
       "name": "Remove-Item",
       "text": "Remove-Item -LiteralPath $emitPath -Force",
@@ -563,7 +563,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "Remove-Attr3FootageStageAttemptResidue",
-      "line": 367,
+      "line": 395,
       "kind": "cmdlet",
       "name": "Test-Path",
       "text": "Test-Path -LiteralPath $shareStageDir -PathType Container -ErrorAction SilentlyContinue",
@@ -573,7 +573,7 @@
     {
       "source": "attr3-footage-stage.ps1",
       "function": "Remove-Attr3FootageStageAttemptResidue",
-      "line": 371,
+      "line": 399,
       "kind": "static-method",
       "name": "Delete",
       "text": "[IO.Directory]::Delete($shareStageDir, $false)",
