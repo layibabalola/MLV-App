@@ -2016,6 +2016,180 @@ QByteArray gpuPreviewProcessingPackLookupTextureRgba16(const QByteArray & source
     return packed;
 }
 
+bool gpuPreviewProcessingEnsureDisplayProgram(QOpenGLShaderProgram *& program,
+                                              QObject * shaderParent)
+{
+    if ( program ) return true;
+
+    const QByteArray vertexShader = gpuPreviewProcessingVertexShaderSource();
+    const QByteArray fragmentShader = gpuPreviewProcessingDisplayFragmentShaderSource();
+
+    program = new QOpenGLShaderProgram(shaderParent);
+    if ( !program->addShaderFromSourceCode(QOpenGLShader::Vertex, vertexShader)
+      || !program->addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentShader)
+      || !program->link() )
+    {
+        qWarning() << "GPU preview-processing display shader setup failed:" << program->log();
+        delete program;
+        program = nullptr;
+        return false;
+    }
+    return true;
+}
+
+QOpenGLTexture * gpuPreviewProcessingCreateOrResizeLookupTexture(QOpenGLTexture * texture,
+                                                                 int width,
+                                                                 int height)
+{
+    if ( texture && texture->width() == width && texture->height() == height )
+    {
+        return texture;
+    }
+
+    delete texture;
+    texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    texture->setFormat(QOpenGLTexture::RGBA16_UNorm);
+    texture->setSize(width, height);
+    texture->setMipLevels(1);
+    texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+    return texture;
+}
+
+void gpuPreviewProcessingDestroyLutTextureSet(GpuPreviewProcessingLutTextureSet & set)
+{
+    delete set.levels;
+    delete set.matrixR;
+    delete set.matrixG;
+    delete set.matrixB;
+    delete set.gamma;
+    set.levels = nullptr;
+    set.matrixR = nullptr;
+    set.matrixG = nullptr;
+    set.matrixB = nullptr;
+    set.gamma = nullptr;
+    set.signature = 0;
+    set.signatureValid = false;
+}
+
+void gpuPreviewProcessingUpdateLutTextureSet(GpuPreviewProcessingLutTextureSet & set,
+                                             const GpuPreviewProcessingConfig & config)
+{
+    if ( !config.enabled )
+    {
+        gpuPreviewProcessingDestroyLutTextureSet(set);
+        return;
+    }
+    if ( set.signatureValid
+      && set.signature == config.signature
+      && set.levels && set.matrixR && set.matrixG && set.matrixB && set.gamma )
+    {
+        return;
+    }
+    if ( config.levelsLut.size() < static_cast<int>(65536u * sizeof(uint16_t))
+      || config.matrixLutR.size() < static_cast<int>(65536u * sizeof(uint16_t))
+      || config.matrixLutG.size() < static_cast<int>(65536u * sizeof(uint16_t))
+      || config.matrixLutB.size() < static_cast<int>(65536u * sizeof(uint16_t))
+      || config.gammaLut.size() < static_cast<int>(65536u * sizeof(uint16_t)) )
+    {
+        gpuPreviewProcessingDestroyLutTextureSet(set);
+        return;
+    }
+
+    const QByteArray levelsBytes = gpuPreviewProcessingPackLookupTextureRgba16(config.levelsLut);
+    const QByteArray matrixRBytes = gpuPreviewProcessingPackLookupTextureRgba16(config.matrixLutR);
+    const QByteArray matrixGBytes = gpuPreviewProcessingPackLookupTextureRgba16(config.matrixLutG);
+    const QByteArray matrixBBytes = gpuPreviewProcessingPackLookupTextureRgba16(config.matrixLutB);
+    const QByteArray gammaBytes = gpuPreviewProcessingPackLookupTextureRgba16(config.gammaLut);
+
+    set.levels = gpuPreviewProcessingCreateOrResizeLookupTexture(set.levels, kLutTextureEdge, kLutTextureEdge);
+    set.matrixR = gpuPreviewProcessingCreateOrResizeLookupTexture(set.matrixR, kLutTextureEdge, kLutTextureEdge);
+    set.matrixG = gpuPreviewProcessingCreateOrResizeLookupTexture(set.matrixG, kLutTextureEdge, kLutTextureEdge);
+    set.matrixB = gpuPreviewProcessingCreateOrResizeLookupTexture(set.matrixB, kLutTextureEdge, kLutTextureEdge);
+    set.gamma = gpuPreviewProcessingCreateOrResizeLookupTexture(set.gamma, kLutTextureEdge, kLutTextureEdge);
+
+    set.levels->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, levelsBytes.constData());
+    set.matrixR->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, matrixRBytes.constData());
+    set.matrixG->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, matrixGBytes.constData());
+    set.matrixB->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, matrixBBytes.constData());
+    set.gamma->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gammaBytes.constData());
+
+    set.signature = config.signature;
+    set.signatureValid = true;
+}
+
+bool gpuPreviewProcessingLutTextureSetReady(const GpuPreviewProcessingLutTextureSet & set,
+                                            const GpuPreviewProcessingConfig & config)
+{
+    return config.enabled
+        && set.levels && set.matrixR && set.matrixG && set.matrixB && set.gamma;
+}
+
+void gpuPreviewProcessingBindDisplayUniformsAndTextures(
+    QOpenGLShaderProgram * program,
+    const GpuPreviewProcessingConfig & config,
+    const GpuPreviewProcessingLutTextureSet & lutSet,
+    const GpuPreviewProcessingDisplayUniforms & uniforms,
+    bool lutsReady)
+{
+    if ( !program ) return;
+
+    program->setUniformValue("textureSize", uniforms.textureSize);
+    program->setUniformValue("frameTextureMode", uniforms.frameTextureMode);
+    program->setUniformValue("samplingMode", uniforms.samplingMode);
+    program->setUniformValue("zebraEnabled", uniforms.zebraEnabled ? 1.0f : 0.0f);
+    program->setUniformValue("zebraUnderThreshold", uniforms.zebraUnderThreshold);
+    program->setUniformValue("zebraOverThreshold", uniforms.zebraOverThreshold);
+    program->setUniformValue("previewProcessingEnabled", lutsReady ? 1.0f : 0.0f);
+    program->setUniformValue("previewUseCameraMatrix", config.useCameraMatrix ? 1.0f : 0.0f);
+    program->setUniformValue("previewApplyGamutCompression", config.applyGamutCompression ? 1.0f : 0.0f);
+    program->setUniformValue("previewProperWbRow0",
+                             QVector3D(config.properWbMatrix[0], config.properWbMatrix[1], config.properWbMatrix[2]));
+    program->setUniformValue("previewProperWbRow1",
+                             QVector3D(config.properWbMatrix[3], config.properWbMatrix[4], config.properWbMatrix[5]));
+    program->setUniformValue("previewProperWbRow2",
+                             QVector3D(config.properWbMatrix[6], config.properWbMatrix[7], config.properWbMatrix[8]));
+    program->setUniformValue("previewRgbToY",
+                             QVector3D(config.rgbToY[0], config.rgbToY[1], config.rgbToY[2]));
+
+    if ( lutsReady && lutSet.levels )
+    {
+        program->setUniformValue("levelsLut", 1);
+        lutSet.levels->bind(1);
+    }
+    if ( lutsReady && lutSet.matrixR )
+    {
+        program->setUniformValue("matrixLutR", 2);
+        lutSet.matrixR->bind(2);
+    }
+    if ( lutsReady && lutSet.matrixG )
+    {
+        program->setUniformValue("matrixLutG", 3);
+        lutSet.matrixG->bind(3);
+    }
+    if ( lutsReady && lutSet.matrixB )
+    {
+        program->setUniformValue("matrixLutB", 4);
+        lutSet.matrixB->bind(4);
+    }
+    if ( lutsReady && lutSet.gamma )
+    {
+        program->setUniformValue("gammaLut", 5);
+        lutSet.gamma->bind(5);
+    }
+}
+
+void gpuPreviewProcessingReleaseDisplayTextures(const GpuPreviewProcessingLutTextureSet & lutSet,
+                                                bool lutsReady)
+{
+    if ( lutsReady && lutSet.levels ) lutSet.levels->release();
+    if ( lutsReady && lutSet.matrixR ) lutSet.matrixR->release();
+    if ( lutsReady && lutSet.matrixG ) lutSet.matrixG->release();
+    if ( lutsReady && lutSet.matrixB ) lutSet.matrixB->release();
+    if ( lutsReady && lutSet.gamma ) lutSet.gamma->release();
+}
+
 bool gpuPreviewProcessingRendererIsSoftware(const QString & rendererDescription)
 {
     const QString normalized = rendererDescription.trimmed().toLower();

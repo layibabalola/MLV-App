@@ -198,6 +198,7 @@ bool GpuDisplayWindow::presentGpuPlaybackReconAmazePostWbTextureIfActive(
     const llrpGpuPlaybackReconState_t *state,
     int blackLevel,
     const double wbMultipliers[3],
+    const GpuDisplayViewport::PresentationOptions &options,
     QString *reason,
     llrpGpuPlaybackReconTiming_t *timing,
     QString *handoffMode,
@@ -227,6 +228,7 @@ bool GpuDisplayWindow::presentGpuPlaybackReconAmazePostWbTextureIfActive(
         state,
         blackLevel,
         wbMultipliers,
+        options,
         reason,
         timing,
         handoffMode,
@@ -263,6 +265,7 @@ bool GpuDisplayWindow::readGpuReconSourceBayer16TextureIfActive(
 GpuDisplayWindow::GpuDisplayWindow(QWindow *parent)
     : QOpenGLWindow(QOpenGLWindow::NoPartialUpdate, parent)
     , m_program(nullptr)
+    , m_previewProcessingProgram(nullptr)
     , m_texture(nullptr)
     , m_gpuReconSourceTexture(nullptr)
     , m_pendingTextureWidth(0)
@@ -306,8 +309,11 @@ GpuDisplayWindow::~GpuDisplayWindow()
     {
         makeCurrent();
         destroyTexture();
+        gpuPreviewProcessingDestroyLutTextureSet(m_lutSet);
         delete m_program;
         m_program = nullptr;
+        delete m_previewProcessingProgram;
+        m_previewProcessingProgram = nullptr;
         doneCurrent();
     }
 }
@@ -378,6 +384,7 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
     const llrpGpuPlaybackReconState_t *state,
     int blackLevel,
     const double wbMultipliers[3],
+    const GpuDisplayViewport::PresentationOptions &options,
     QString *reason,
     llrpGpuPlaybackReconTiming_t *timing,
     QString *handoffMode,
@@ -402,6 +409,29 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
     if ( !state || !state->valid || state->width <= 0 || state->height <= 0 || !wbMultipliers )
     {
         return fail(QStringLiteral("GPU window playback recon texture-present input is invalid"));
+    }
+
+    // FAIL CLOSED (GPU-TEXNR-S1-DARK-GREEN-1): this texture is the post-WB-undo linear
+    // camera RGB output of AMaZE -- it is NOT display-referred, and drawing it straight
+    // through a passthrough shader (or through the processing shader with the LUTs
+    // missing/disabled) is exactly the dark grey-green regression this fix exists to
+    // close. Refuse the present up front, before any GL work, rather than ever showing
+    // that linear content on screen; the caller's existing fallback (CPU/readback route,
+    // or simply not presenting this frame via the no-readback texture route) takes over.
+    const GpuPreviewProcessingConfig &previewProcessing = options.previewProcessing;
+    const bool previewProcessingOptionsUsable =
+        previewProcessing.enabled
+        && previewProcessing.levelsLut.size() >= static_cast<int>(65536u * sizeof(uint16_t))
+        && previewProcessing.matrixLutR.size() >= static_cast<int>(65536u * sizeof(uint16_t))
+        && previewProcessing.matrixLutG.size() >= static_cast<int>(65536u * sizeof(uint16_t))
+        && previewProcessing.matrixLutB.size() >= static_cast<int>(65536u * sizeof(uint16_t))
+        && previewProcessing.gammaLut.size() >= static_cast<int>(65536u * sizeof(uint16_t));
+    if ( !previewProcessingOptionsUsable )
+    {
+        return fail(QStringLiteral(
+            "GPU window playback recon texture-present refused: preview-processing options/LUTs "
+            "are not ready for a linear post-WB-undo texture "
+            "(trace=gpu_window_recon_missing_processing_options)"));
     }
 
     const int texWidth = state->width;
@@ -447,11 +477,19 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
     contextMs = elapsedMs() - contextStartMs;
 
     const double setupStartMs = elapsedMs();
-    ensureProgram();
-    if ( !m_program )
+    ensurePreviewProcessingProgram();
+    if ( !m_previewProcessingProgram )
     {
         if ( madeCurrent ) doneCurrent();
         return fail(QStringLiteral("GPU window texture-present shader setup failed"));
+    }
+    gpuPreviewProcessingUpdateLutTextureSet(m_lutSet, previewProcessing);
+    if ( !gpuPreviewProcessingLutTextureSetReady(m_lutSet, previewProcessing) )
+    {
+        if ( madeCurrent ) doneCurrent();
+        return fail(QStringLiteral(
+            "GPU window playback recon texture-present refused: LUT texture upload failed "
+            "for a linear post-WB-undo texture (trace=gpu_window_recon_lut_upload_failed)"));
     }
 
     if ( !m_texture
@@ -684,6 +722,9 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
     m_textureFromGpuRecon = true;
     m_textureDirty = false;
     m_texturePresentationActive = false;
+    // Captured for paintGL(), which draws this texture through the shared preview-
+    // processing shader (see the fail-closed gate above) and runs later than this call.
+    m_reconPresentationOptions = options;
     // This texture is already fully written (the AMaZE render above drew straight into
     // it), unlike the QImage route where the upload is deferred to updateTextureIfNeeded().
     // The presentation serial is still only promoted to m_presentedSerial by paintGL()
@@ -921,6 +962,17 @@ void GpuDisplayWindow::ensureProgram()
     }
 }
 
+void GpuDisplayWindow::ensurePreviewProcessingProgram()
+{
+    // Deliberately no bindAttributeLocation() pre-binding here (unlike ensureProgram()
+    // above): this links the shared shader (GpuPreviewProcessing.h) exactly as
+    // GpuDisplayViewport does, which queries "position"/"texCoord" locations via
+    // attributeLocation() AFTER linking (see paintGL()) rather than pre-binding fixed
+    // indices -- pre-binding after gpuPreviewProcessingEnsureDisplayProgram() has
+    // already linked would be a no-op and silently diverge from the viewport's plan.
+    gpuPreviewProcessingEnsureDisplayProgram(m_previewProcessingProgram, this);
+}
+
 void GpuDisplayWindow::destroyTexture()
 {
     if ( m_texture || m_gpuReconSourceTexture )
@@ -1029,7 +1081,22 @@ void GpuDisplayWindow::paintGL()
     // so it promotes pending state exactly as any other paint would (see the header doc
     // comment on grabPresentedFramebufferIfActive for the owner-visible effect).
     updateTextureIfNeeded();
-    if ( !m_texture || !m_program || width() <= 0 || height() <= 0 )
+
+    // A GPU-recon texture (post-WB-undo linear camera RGB) must ALWAYS draw through the
+    // shared preview-processing shader with its LUTs bound -- never the plain passthrough
+    // program, which is only correct for already display-referred content (the QImage
+    // route). setPresentedGpuPlaybackReconAmazePostWbTexture already refuses to accept a
+    // recon texture whose processing options/LUTs are not usable, but that is re-checked
+    // here rather than trusted, so a texture that somehow reached this point with its
+    // LUTs torn down (e.g. destroyTexture() racing a paint) is refused rather than ever
+    // shown through passthrough (GPU-TEXNR-S1-DARK-GREEN-1).
+    const bool presentingReconTexture = m_textureFromGpuRecon;
+    const bool reconLutsReady = presentingReconTexture
+        && gpuPreviewProcessingLutTextureSetReady(m_lutSet, m_reconPresentationOptions.previewProcessing);
+    const bool reconRefused = presentingReconTexture && !reconLutsReady;
+    QOpenGLShaderProgram *activeProgram = presentingReconTexture ? m_previewProcessingProgram : m_program;
+
+    if ( !m_texture || !activeProgram || width() <= 0 || height() <= 0 || reconRefused )
     {
         m_texturePresentationActive = false;
         m_presentedSerialValid = false;
@@ -1062,18 +1129,42 @@ void GpuDisplayWindow::paintGL()
          sx, -sy, 1.0f, 1.0f,
     };
 
-    m_program->bind();
+    activeProgram->bind();
     m_texture->bind(0);
-    m_program->setUniformValue("frameTexture", 0);
-    m_program->enableAttributeArray(0);
-    m_program->enableAttributeArray(1);
-    m_program->setAttributeArray(0, GL_FLOAT, verts, 2, 4 * sizeof(float));
-    m_program->setAttributeArray(1, GL_FLOAT, verts + 2, 2, 4 * sizeof(float));
+    activeProgram->setUniformValue("frameTexture", 0);
+    if ( presentingReconTexture )
+    {
+        GpuPreviewProcessingDisplayUniforms displayUniforms;
+        displayUniforms.textureSize = QVector2D(static_cast<float>(m_texture->width()),
+                                                static_cast<float>(m_texture->height()));
+        displayUniforms.frameTextureMode = 0;   // already-debayered RGBA16 post-WB-undo texture
+        displayUniforms.samplingMode = static_cast<int>(m_reconPresentationOptions.samplingMode);
+        displayUniforms.zebraEnabled = m_reconPresentationOptions.showZebras;
+        displayUniforms.zebraUnderThreshold = m_reconPresentationOptions.zebraUnderThreshold;
+        displayUniforms.zebraOverThreshold = m_reconPresentationOptions.zebraOverThreshold;
+        gpuPreviewProcessingBindDisplayUniformsAndTextures(
+            activeProgram, m_reconPresentationOptions.previewProcessing, m_lutSet,
+            displayUniforms, reconLutsReady);
+    }
+    // attributeLocation() (not hardcoded 0/1) works for both programs: the passthrough
+    // program's locations were pre-bound to 0/1 before linking (see ensureProgram()), and
+    // the shared preview-processing program's were left to driver auto-assignment and are
+    // looked up the same way GpuDisplayViewport::paintGL() does.
+    const int posLoc = activeProgram->attributeLocation("position");
+    const int texLoc = activeProgram->attributeLocation("texCoord");
+    activeProgram->enableAttributeArray(posLoc);
+    activeProgram->enableAttributeArray(texLoc);
+    activeProgram->setAttributeArray(posLoc, GL_FLOAT, verts, 2, 4 * sizeof(float));
+    activeProgram->setAttributeArray(texLoc, GL_FLOAT, verts + 2, 2, 4 * sizeof(float));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    m_program->disableAttributeArray(0);
-    m_program->disableAttributeArray(1);
+    activeProgram->disableAttributeArray(posLoc);
+    activeProgram->disableAttributeArray(texLoc);
     m_texture->release();
-    m_program->release();
+    if ( presentingReconTexture )
+    {
+        gpuPreviewProcessingReleaseDisplayTextures(m_lutSet, reconLutsReady);
+    }
+    activeProgram->release();
     m_texturePresentationActive = true;
 
     // Promote whichever route (QImage upload or GPU-recon texture) most recently

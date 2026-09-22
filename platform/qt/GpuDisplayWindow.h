@@ -30,6 +30,8 @@
 #include <QOpenGLShaderProgram>
 #include <QOpenGLTexture>
 #include <QOpenGLWindow>
+#include "GpuDisplayViewport.h"
+#include "GpuPreviewProcessing.h"
 #include "../../src/mlv/llrawproc/llrawproc.h"
 #include <cstddef>
 #include <cstdint>
@@ -64,6 +66,7 @@ public:
         const llrpGpuPlaybackReconState_t *state,
         int blackLevel,
         const double wbMultipliers[3],
+        const GpuDisplayViewport::PresentationOptions &options,
         QString *reason = nullptr,
         llrpGpuPlaybackReconTiming_t *timing = nullptr,
         QString *handoffMode = nullptr,
@@ -119,6 +122,7 @@ public:
         const llrpGpuPlaybackReconState_t *state,
         int blackLevel,
         const double wbMultipliers[3],
+        const GpuDisplayViewport::PresentationOptions &options,
         QString *reason,
         llrpGpuPlaybackReconTiming_t *timing,
         QString *handoffMode,
@@ -140,11 +144,22 @@ protected:
 
 private:
     void ensureProgram(void);
+    void ensurePreviewProcessingProgram(void);
     void updateTextureIfNeeded(void);
     void destroyTexture(void);
     void applySamplingMode(void);
 
     QOpenGLShaderProgram *m_program;
+    // Shared with GpuDisplayViewport (GpuPreviewProcessing.h): the display shader +
+    // LUT set used to render recon/preview textures (post-WB-undo linear camera RGB)
+    // through the SAME processing path the viewport uses, instead of passthrough.
+    QOpenGLShaderProgram *m_previewProcessingProgram;
+    GpuPreviewProcessingLutTextureSet m_lutSet;
+    // Presentation options captured at the most recent recon-texture submit; consumed
+    // by paintGL() when it draws that texture (paintGL runs later / can run twice --
+    // see grabPresentedFramebufferIfActive -- so the options must outlive the submit
+    // call that produced them).
+    GpuDisplayViewport::PresentationOptions m_reconPresentationOptions;
     QOpenGLTexture *m_texture;
     QOpenGLTexture *m_gpuReconSourceTexture;
     QImage m_pendingImage;

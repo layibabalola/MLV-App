@@ -614,6 +614,7 @@ private slots:
     void gpuDisplayWindowGrabsPresentedFramebufferReadback();
     void gpuDisplayWindowCapturePresentsPendingFrameAsRealPaint();
     void gpuDisplayWindowCaptureIgnoresFailedReconTextureSubmit();
+    void gpuDisplayWindowRefusesReconTextureWithoutProcessingOptions();
     void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
@@ -629,6 +630,8 @@ private slots:
     void gpuViewportZebraProcessingMatchesCpuReference();
     void gpuViewportPreviewProcessingMatchesCpuReference();
     void gpuViewportPreviewProcessingWithZebrasMatchesCpuReference();
+    void gpuPreviewProcessingLutReadinessMatchesForBothPresenters();
+    void gpuPreviewProcessingCpuReferenceCorrectsPostWbUndoGreenCast();
     void histogramRegressionMatchesGolden();
     void vectorScopeRegressionMatchesGolden();
     void waveformRegressionMatchesGolden();
@@ -2056,13 +2059,21 @@ void GuiSmokeTest::gpuDisplayWindowCaptureIgnoresFailedReconTextureSubmit()
     memset(&reconTiming, 0, sizeof(reconTiming));
     QString reconHandoffMode;
     const quint64 serialRecon = 222;
+    // Usable preview-processing options: this test's failure must come from the stub
+    // AMaZE backend (asserted below via reconReason), never from the fail-closed
+    // missing-processing-options gate GPU-TEXNR-S1-DARK-GREEN-1 added ahead of it.
+    GpuDisplayViewport::PresentationOptions reconOptions;
+    reconOptions.previewProcessing = make_synthetic_preview_processing_config();
     const bool reconPresented =
         GpuDisplayWindow::presentGpuPlaybackReconAmazePostWbTextureIfActive(
-            rawInput, 4, &reconState, 0, wbMultipliers,
+            rawInput, 4, &reconState, 0, wbMultipliers, reconOptions,
             &reconReason, &reconTiming, &reconHandoffMode,
             false, nullptr, 0, 0, 0, 0, serialRecon);
     QVERIFY(!reconPresented);
     QVERIFY(!reconReason.isEmpty());
+    QVERIFY2(!reconReason.contains(QStringLiteral("missing_processing_options")),
+             qPrintable(QStringLiteral("Expected the stub AMaZE backend to fail this submit, not the "
+                                        "fail-closed processing-options gate; reason=%1").arg(reconReason)));
 
     // The failed submit must leave the previously-presented frame A completely intact --
     // never a stale-but-valid serial bound to content that never actually presented, and
@@ -2087,6 +2098,53 @@ void GuiSmokeTest::gpuDisplayWindowCaptureIgnoresFailedReconTextureSubmit()
                                             "frame A untouched; center pixel was rgb(%1,%2,%3)")
                             .arg(center.red()).arg(center.green()).arg(center.blue())));
     }
+
+    host.reset();
+    QVERIFY(!GpuDisplayWindow::isActive());
+    qunsetenv(GpuDisplayWindow::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuDisplayWindowRefusesReconTextureWithoutProcessingOptions()
+{
+    // GPU-TEXNR-S1-DARK-GREEN-1: the original defect was MainWindow.cpp calling the GL-
+    // window recon-texture present API with NO preview-processing options at all, so a
+    // linear post-WB-undo texture got drawn through the plain passthrough shader (flat
+    // dark grey-green). Default-constructed PresentationOptions has
+    // previewProcessing.enabled == false -- exactly that shape -- and must now be
+    // refused up front rather than ever presented.
+    MLV_SKIP_OR_FAIL_IF_OFFSCREEN("GL window texture-present refusal needs a platform plugin that can create an OpenGL context");
+
+    qputenv(GpuDisplayWindow::environmentVariableName(), QByteArrayLiteral("1"));
+
+    auto host = std::make_unique<QWidget>();
+    auto *layout = new QVBoxLayout(host.get());
+    auto *view = new QGraphicsView(host.get());
+    layout->addWidget(view);
+    host->resize(64, 64);
+
+    QVERIFY(GpuDisplayWindow::installInPreview(view));
+    host->show();
+    QApplication::processEvents();
+    static_cast<void>(QTest::qWaitForWindowExposed(host.get()));
+
+    const uint16_t rawInput[] = { 1024, 2048, 3072, 4096 };
+    llrpGpuPlaybackReconState_t reconState;
+    memset(&reconState, 0, sizeof(reconState));
+    reconState.valid = 1;
+    reconState.width = 2;
+    reconState.height = 2;
+    const double wbMultipliers[3] = { 1.0, 1.0, 1.0 };
+    QString reason;
+    const GpuDisplayViewport::PresentationOptions defaultOptions;
+    QVERIFY(!defaultOptions.previewProcessing.enabled);
+    const bool presented =
+        GpuDisplayWindow::presentGpuPlaybackReconAmazePostWbTextureIfActive(
+            rawInput, 4, &reconState, 0, wbMultipliers, defaultOptions, &reason);
+
+    QVERIFY(!presented);
+    QVERIFY2(reason.contains(QStringLiteral("gpu_window_recon_missing_processing_options")),
+             qPrintable(QStringLiteral("Expected the fail-closed gate to refuse a recon texture with no "
+                                        "usable preview-processing options; reason=%1").arg(reason)));
 
     host.reset();
     QVERIFY(!GpuDisplayWindow::isActive());
@@ -2307,6 +2365,98 @@ void GuiSmokeTest::gpuViewportPreviewProcessingWithZebrasMatchesCpuReference()
 
     GpuDisplayViewport::clearPresentedImage(view.get(), item);
     qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuPreviewProcessingLutReadinessMatchesForBothPresenters()
+{
+    // GPU-TEXNR-S1-DARK-GREEN-1 requirement 4 (plan parity): GpuDisplayWindow and
+    // GpuDisplayViewport must reach the SAME decision -- draw a recon/preview texture
+    // through the shared preview-processing shader with its LUTs bound, or refuse --
+    // for the same options. Both routes now call this exact function
+    // (gpuPreviewProcessingLutTextureSetReady) from their own paintGL(), so this is
+    // not a simulation of their logic, it IS their logic, exercised directly. The
+    // function only null-checks the texture pointers and never dereferences them, so
+    // uncreated QOpenGLTexture placeholders are safe stand-ins here and this needs no
+    // live GL context (runs under the offscreen platform too).
+    const GpuPreviewProcessingConfig config = make_synthetic_preview_processing_config();
+
+    GpuPreviewProcessingLutTextureSet completeSet;
+    completeSet.levels = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    completeSet.matrixR = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    completeSet.matrixG = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    completeSet.matrixB = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    completeSet.gamma = new QOpenGLTexture(QOpenGLTexture::Target2D);
+
+    QVERIFY(gpuPreviewProcessingLutTextureSetReady(completeSet, config));
+
+    GpuPreviewProcessingLutTextureSet missingGammaSet = completeSet;
+    missingGammaSet.gamma = nullptr;
+    QVERIFY(!gpuPreviewProcessingLutTextureSetReady(missingGammaSet, config));
+
+    GpuPreviewProcessingConfig disabledConfig = config;
+    disabledConfig.enabled = false;
+    QVERIFY(!gpuPreviewProcessingLutTextureSetReady(completeSet, disabledConfig));
+
+    delete completeSet.levels;
+    delete completeSet.matrixR;
+    delete completeSet.matrixG;
+    delete completeSet.matrixB;
+    delete completeSet.gamma;
+}
+
+void GuiSmokeTest::gpuPreviewProcessingCpuReferenceCorrectsPostWbUndoGreenCast()
+{
+    // GPU-TEXNR-S1-DARK-GREEN-1 root cause: the GL-window texture route was drawing the
+    // CUDA AMaZE post-WB-undo texture -- linear camera RGB, WB undone and black re-added
+    // by k_pack_rgb16_to_rgba16_post_wb_undo -- through a passthrough shader instead of
+    // the preview-processing shader's levels/matrix/WB/gamma LUT math, which produced a
+    // flat dark grey-green picture ("floor 32/255 = 14-bit black 2048; G~B>R = pre-WB
+    // camera green" per the root-cause note). gpuPreviewProcessingApplyCpuReference is
+    // the CPU ground truth for the exact LUT/WB math the shared display shader runs (see
+    // gpuViewportPreviewProcessingMatchesCpuReference), so this proves that math, driven
+    // by a WB-correcting config, actually turns a synthetic pre-WB-green post-WB-undo
+    // pixel into a red-dominant/neutral one -- the correction GpuDisplayWindow's
+    // recon-texture route was previously skipping entirely.
+    const int width = 2;
+    const int height = 2;
+    // 14-bit black level 2048, rescaled into the 16-bit space these buffers use.
+    const uint16_t black16 = static_cast<uint16_t>(std::lround((2048.0 / 16383.0) * 65535.0));
+    std::vector<uint16_t> inputRgb16(static_cast<std::size_t>(width) * height * 3u, 0);
+    for (int i = 0; i < width * height; ++i) {
+        inputRgb16[static_cast<std::size_t>(i) * 3 + 0] = black16;                                 // R: at the black floor
+        inputRgb16[static_cast<std::size_t>(i) * 3 + 1] = static_cast<uint16_t>(black16 + 12000);  // G: strong pre-WB green
+        inputRgb16[static_cast<std::size_t>(i) * 3 + 2] = static_cast<uint16_t>(black16 + 6000);   // B: mid pre-WB
+    }
+    QVERIFY2(inputRgb16[1] > inputRgb16[0],
+             "fixture sanity: the synthetic post-WB-undo pixel must itself show a green cast");
+
+    GpuPreviewProcessingConfig config;
+    config.enabled = true;
+    config.useCameraMatrix = true;
+    config.applyGamutCompression = false;
+    config.levelsLut = make_identity_lut_bytes();
+    config.matrixLutR = make_identity_lut_bytes();
+    config.matrixLutG = make_identity_lut_bytes();
+    config.matrixLutB = make_identity_lut_bytes();
+    config.gammaLut = make_identity_lut_bytes();
+    // A WB correction that boosts red and suppresses green relative to blue, isolating
+    // the WB-row effect (the LUTs above are all identity).
+    config.properWbMatrix[0] = 1.6f; config.properWbMatrix[1] = 0.0f;  config.properWbMatrix[2] = 0.0f;
+    config.properWbMatrix[3] = 0.0f; config.properWbMatrix[4] = 0.55f; config.properWbMatrix[5] = 0.0f;
+    config.properWbMatrix[6] = 0.0f; config.properWbMatrix[7] = 0.0f;  config.properWbMatrix[8] = 1.0f;
+    config.signature = 1;
+
+    std::vector<uint16_t> outputRgb16(inputRgb16.size(), 0);
+    gpuPreviewProcessingApplyCpuReference(config, inputRgb16.data(), outputRgb16.data(), width, height);
+
+    for (int i = 0; i < width * height; ++i) {
+        const int r = outputRgb16[static_cast<std::size_t>(i) * 3 + 0];
+        const int g = outputRgb16[static_cast<std::size_t>(i) * 3 + 1];
+        QVERIFY2(r > g,
+                 qPrintable(QStringLiteral("Expected the WB-correcting CPU reference to turn a pre-WB green "
+                                            "cast into red > green (the corrected picture, not the dark-green "
+                                            "regression); got r=%1 g=%2").arg(r).arg(g)));
+    }
 }
 
 void GuiSmokeTest::histogramRegressionMatchesGolden()

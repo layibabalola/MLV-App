@@ -213,26 +213,6 @@ bool viewportAbPrimeEnabled()
     return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_PRIME"));
 }
 
-QOpenGLTexture * createOrResizeLookupTexture(QOpenGLTexture * texture, int width, int height)
-{
-    if ( texture
-      && texture->width() == width
-      && texture->height() == height )
-    {
-        return texture;
-    }
-
-    delete texture;
-    texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
-    texture->setFormat(QOpenGLTexture::RGBA16_UNorm);
-    texture->setSize(width, height);
-    texture->setMipLevels(1);
-    texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16);
-    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
-    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
-    return texture;
-}
-
 bool rowLooksLikeUniformTopMagentaBandRgb16(const uint16_t *row, int width)
 {
     if( !row || width <= 0 )
@@ -399,16 +379,9 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
     , m_fallbackItem(nullptr)
     , m_pendingTextureWidth(0)
     , m_pendingTextureHeight(0)
-    , m_processingTextureSignature(0)
-    , m_processingTextureSignatureValid(false)
     , m_program(nullptr)
     , m_texture(nullptr)
     , m_gpuReconSourceTexture(nullptr)
-    , m_levelsLutTexture(nullptr)
-    , m_matrixLutRTexture(nullptr)
-    , m_matrixLutGTexture(nullptr)
-    , m_matrixLutBTexture(nullptr)
-    , m_gammaLutTexture(nullptr)
 {
     QSurfaceFormat requestedFormat = format();
     requestedFormat.setSwapInterval(0);
@@ -1073,66 +1046,20 @@ void GpuDisplayViewport::paintGL()
 
     m_program->bind();
     const bool previewProcessingReady =
-        m_presentationOptions.previewProcessing.enabled
-        && m_levelsLutTexture
-        && m_matrixLutRTexture
-        && m_matrixLutGTexture
-        && m_matrixLutBTexture
-        && m_gammaLutTexture;
+        gpuPreviewProcessingLutTextureSetReady(m_lutSet, m_presentationOptions.previewProcessing);
     m_program->setUniformValue("frameTexture", 0);
-    m_program->setUniformValue("textureSize",
-                               QVector2D(static_cast<float>(pendingWidth()),
-                                         static_cast<float>(pendingHeight())));
-    m_program->setUniformValue("frameTextureMode", m_textureIsBayer16 ? 1 : 0);
-    m_program->setUniformValue("samplingMode", static_cast<int>(m_presentationOptions.samplingMode));
-    m_program->setUniformValue("zebraEnabled", m_presentationOptions.showZebras ? 1.0f : 0.0f);
-    m_program->setUniformValue("zebraUnderThreshold", m_presentationOptions.zebraUnderThreshold);
-    m_program->setUniformValue("zebraOverThreshold", m_presentationOptions.zebraOverThreshold);
-    m_program->setUniformValue("previewProcessingEnabled", previewProcessingReady ? 1.0f : 0.0f);
-    m_program->setUniformValue("previewUseCameraMatrix", m_presentationOptions.previewProcessing.useCameraMatrix ? 1.0f : 0.0f);
-    m_program->setUniformValue("previewApplyGamutCompression", m_presentationOptions.previewProcessing.applyGamutCompression ? 1.0f : 0.0f);
-    m_program->setUniformValue("previewProperWbRow0",
-                               QVector3D(m_presentationOptions.previewProcessing.properWbMatrix[0],
-                                         m_presentationOptions.previewProcessing.properWbMatrix[1],
-                                         m_presentationOptions.previewProcessing.properWbMatrix[2]));
-    m_program->setUniformValue("previewProperWbRow1",
-                               QVector3D(m_presentationOptions.previewProcessing.properWbMatrix[3],
-                                         m_presentationOptions.previewProcessing.properWbMatrix[4],
-                                         m_presentationOptions.previewProcessing.properWbMatrix[5]));
-    m_program->setUniformValue("previewProperWbRow2",
-                               QVector3D(m_presentationOptions.previewProcessing.properWbMatrix[6],
-                                         m_presentationOptions.previewProcessing.properWbMatrix[7],
-                                         m_presentationOptions.previewProcessing.properWbMatrix[8]));
-    m_program->setUniformValue("previewRgbToY",
-                               QVector3D(m_presentationOptions.previewProcessing.rgbToY[0],
-                                         m_presentationOptions.previewProcessing.rgbToY[1],
-                                         m_presentationOptions.previewProcessing.rgbToY[2]));
+    GpuPreviewProcessingDisplayUniforms displayUniforms;
+    displayUniforms.textureSize = QVector2D(static_cast<float>(pendingWidth()),
+                                            static_cast<float>(pendingHeight()));
+    displayUniforms.frameTextureMode = m_textureIsBayer16 ? 1 : 0;
+    displayUniforms.samplingMode = static_cast<int>(m_presentationOptions.samplingMode);
+    displayUniforms.zebraEnabled = m_presentationOptions.showZebras;
+    displayUniforms.zebraUnderThreshold = m_presentationOptions.zebraUnderThreshold;
+    displayUniforms.zebraOverThreshold = m_presentationOptions.zebraOverThreshold;
     m_texture->bind(0);
-    if ( previewProcessingReady && m_levelsLutTexture )
-    {
-        m_program->setUniformValue("levelsLut", 1);
-        m_levelsLutTexture->bind(1);
-    }
-    if ( previewProcessingReady && m_matrixLutRTexture )
-    {
-        m_program->setUniformValue("matrixLutR", 2);
-        m_matrixLutRTexture->bind(2);
-    }
-    if ( previewProcessingReady && m_matrixLutGTexture )
-    {
-        m_program->setUniformValue("matrixLutG", 3);
-        m_matrixLutGTexture->bind(3);
-    }
-    if ( previewProcessingReady && m_matrixLutBTexture )
-    {
-        m_program->setUniformValue("matrixLutB", 4);
-        m_matrixLutBTexture->bind(4);
-    }
-    if ( previewProcessingReady && m_gammaLutTexture )
-    {
-        m_program->setUniformValue("gammaLut", 5);
-        m_gammaLutTexture->bind(5);
-    }
+    gpuPreviewProcessingBindDisplayUniformsAndTextures(
+        m_program, m_presentationOptions.previewProcessing, m_lutSet,
+        displayUniforms, previewProcessingReady);
 
     const int posLoc = m_program->attributeLocation("position");
     const int texLoc = m_program->attributeLocation("texCoord");
@@ -1146,11 +1073,7 @@ void GpuDisplayViewport::paintGL()
     m_program->disableAttributeArray(posLoc);
     m_program->disableAttributeArray(texLoc);
     m_texture->release();
-    if ( previewProcessingReady && m_levelsLutTexture ) m_levelsLutTexture->release();
-    if ( previewProcessingReady && m_matrixLutRTexture ) m_matrixLutRTexture->release();
-    if ( previewProcessingReady && m_matrixLutGTexture ) m_matrixLutGTexture->release();
-    if ( previewProcessingReady && m_matrixLutBTexture ) m_matrixLutBTexture->release();
-    if ( previewProcessingReady && m_gammaLutTexture ) m_gammaLutTexture->release();
+    gpuPreviewProcessingReleaseDisplayTextures(m_lutSet, previewProcessingReady);
     m_program->release();
     m_texturePresentationActive = true;
 
@@ -1996,20 +1919,7 @@ void GpuDisplayViewport::updateTextureIfNeeded()
 
 void GpuDisplayViewport::ensureProgram()
 {
-    if ( m_program ) return;
-    const QByteArray vertexShader = gpuPreviewProcessingVertexShaderSource();
-    const QByteArray fragmentShader = gpuPreviewProcessingDisplayFragmentShaderSource();
-
-    m_program = new QOpenGLShaderProgram(this);
-    if ( !m_program->addShaderFromSourceCode(QOpenGLShader::Vertex, vertexShader)
-      || !m_program->addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentShader)
-      || !m_program->link() )
-    {
-        qWarning() << "Experimental GPU viewport shader setup failed:"
-                   << m_program->log();
-        delete m_program;
-        m_program = nullptr;
-    }
+    gpuPreviewProcessingEnsureDisplayProgram(m_program, this);
 }
 
 void GpuDisplayViewport::destroyTexture()
@@ -2038,33 +1948,7 @@ void GpuDisplayViewport::destroyTexture()
 
 void GpuDisplayViewport::destroyProcessingTextures()
 {
-    if ( m_levelsLutTexture )
-    {
-        delete m_levelsLutTexture;
-        m_levelsLutTexture = nullptr;
-    }
-    if ( m_matrixLutRTexture )
-    {
-        delete m_matrixLutRTexture;
-        m_matrixLutRTexture = nullptr;
-    }
-    if ( m_matrixLutGTexture )
-    {
-        delete m_matrixLutGTexture;
-        m_matrixLutGTexture = nullptr;
-    }
-    if ( m_matrixLutBTexture )
-    {
-        delete m_matrixLutBTexture;
-        m_matrixLutBTexture = nullptr;
-    }
-    if ( m_gammaLutTexture )
-    {
-        delete m_gammaLutTexture;
-        m_gammaLutTexture = nullptr;
-    }
-    m_processingTextureSignature = 0;
-    m_processingTextureSignatureValid = false;
+    gpuPreviewProcessingDestroyLutTextureSet(m_lutSet);
 }
 
 void GpuDisplayViewport::setPresentationOptions(const PresentationOptions &options)
@@ -2090,72 +1974,7 @@ void GpuDisplayViewport::updateProcessingTexturesIfNeeded()
         return;
     }
 
-    if ( !m_presentationOptions.previewProcessing.enabled )
-    {
-        destroyProcessingTextures();
-        m_processingTexturesDirty = false;
-        return;
-    }
-
-    if ( m_processingTextureSignatureValid
-      && m_processingTextureSignature
-            == m_presentationOptions.previewProcessing.signature
-      && m_levelsLutTexture
-      && m_matrixLutRTexture
-      && m_matrixLutGTexture
-      && m_matrixLutBTexture
-      && m_gammaLutTexture )
-    {
-        m_processingTexturesDirty = false;
-        return;
-    }
-
-    const QByteArray & levelsLut = m_presentationOptions.previewProcessing.levelsLut;
-    const QByteArray & matrixLutR = m_presentationOptions.previewProcessing.matrixLutR;
-    const QByteArray & matrixLutG = m_presentationOptions.previewProcessing.matrixLutG;
-    const QByteArray & matrixLutB = m_presentationOptions.previewProcessing.matrixLutB;
-    const QByteArray & gammaLut = m_presentationOptions.previewProcessing.gammaLut;
-    if ( levelsLut.size() < static_cast<int>(65536u * sizeof(uint16_t))
-      || matrixLutR.size() < static_cast<int>(65536u * sizeof(uint16_t))
-      || matrixLutG.size() < static_cast<int>(65536u * sizeof(uint16_t))
-      || matrixLutB.size() < static_cast<int>(65536u * sizeof(uint16_t))
-      || gammaLut.size() < static_cast<int>(65536u * sizeof(uint16_t)) )
-    {
-        destroyProcessingTextures();
-        m_processingTexturesDirty = false;
-        return;
-    }
-
-    const QByteArray levelsBytes = gpuPreviewProcessingPackLookupTextureRgba16(levelsLut);
-    const QByteArray matrixRBytes = gpuPreviewProcessingPackLookupTextureRgba16(matrixLutR);
-    const QByteArray matrixGBytes = gpuPreviewProcessingPackLookupTextureRgba16(matrixLutG);
-    const QByteArray matrixBBytes = gpuPreviewProcessingPackLookupTextureRgba16(matrixLutB);
-    const QByteArray gammaBytes = gpuPreviewProcessingPackLookupTextureRgba16(gammaLut);
-
-    m_levelsLutTexture = createOrResizeLookupTexture(m_levelsLutTexture, 256, 256);
-    m_matrixLutRTexture = createOrResizeLookupTexture(m_matrixLutRTexture, 256, 256);
-    m_matrixLutGTexture = createOrResizeLookupTexture(m_matrixLutGTexture, 256, 256);
-    m_matrixLutBTexture = createOrResizeLookupTexture(m_matrixLutBTexture, 256, 256);
-    m_gammaLutTexture = createOrResizeLookupTexture(m_gammaLutTexture, 256, 256);
-
-    m_levelsLutTexture->setData(QOpenGLTexture::RGBA,
-                                QOpenGLTexture::UInt16,
-                                levelsBytes.constData());
-    m_matrixLutRTexture->setData(QOpenGLTexture::RGBA,
-                                 QOpenGLTexture::UInt16,
-                                 matrixRBytes.constData());
-    m_matrixLutGTexture->setData(QOpenGLTexture::RGBA,
-                                 QOpenGLTexture::UInt16,
-                                 matrixGBytes.constData());
-    m_matrixLutBTexture->setData(QOpenGLTexture::RGBA,
-                                 QOpenGLTexture::UInt16,
-                                 matrixBBytes.constData());
-    m_gammaLutTexture->setData(QOpenGLTexture::RGBA,
-                               QOpenGLTexture::UInt16,
-                               gammaBytes.constData());
-    m_processingTextureSignature =
-        m_presentationOptions.previewProcessing.signature;
-    m_processingTextureSignatureValid = true;
+    gpuPreviewProcessingUpdateLutTextureSet(m_lutSet, m_presentationOptions.previewProcessing);
     m_processingTexturesDirty = false;
 }
 

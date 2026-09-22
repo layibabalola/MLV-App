@@ -5027,6 +5027,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                         &gpuReconState,
                         readyFrame.gpuPlaybackReconTextureBlackLevel,
                         readyFrame.gpuPlaybackReconTextureWbMultipliers.data(),
+                        task.gpuPresentationOptions,
                         &texturePresentReason,
                         &texturePresentTiming,
                         &texturePresentHandoffMode,
