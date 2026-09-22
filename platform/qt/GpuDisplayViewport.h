@@ -208,17 +208,13 @@ private:
     int m_pendingTextureWidth;
     int m_pendingTextureHeight;
     PresentationOptions m_presentationOptions;
-    uint64_t m_processingTextureSignature;
-    bool m_processingTextureSignatureValid;
     QString m_rendererDescription;
     QOpenGLShaderProgram *m_program;
     QOpenGLTexture *m_texture;
     QOpenGLTexture *m_gpuReconSourceTexture;
-    QOpenGLTexture *m_levelsLutTexture;
-    QOpenGLTexture *m_matrixLutRTexture;
-    QOpenGLTexture *m_matrixLutGTexture;
-    QOpenGLTexture *m_matrixLutBTexture;
-    QOpenGLTexture *m_gammaLutTexture;
+    // Shared with GpuDisplayWindow (GpuPreviewProcessing.h) so both routes draw
+    // through the identical display shader and LUT upload/bind path.
+    GpuPreviewProcessingLutTextureSet m_lutSet;
 };
 
 #endif // GPUDISPLAYVIEWPORT_H
