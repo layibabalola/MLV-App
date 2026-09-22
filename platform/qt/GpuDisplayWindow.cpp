@@ -851,6 +851,7 @@ bool GpuDisplayWindow::grabPresentedFramebufferIfActive(QImage *outImage,
     if ( presentedSerial ) *presentedSerial = 0;
     if ( presentedSerialValid ) *presentedSerialValid = false;
 
+    QMutexLocker lock(&g_activeMutex);
     GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
     if ( !win )
     {

@@ -9304,13 +9304,27 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             {
                 screenshot = QPixmap::fromImage( glWindowFrame );
                 screenshotMethod = QStringLiteral("gl_window_framebuffer_readback");
-                // The identity of the frame actually captured -- bound at the last real
-                // paintGL()+swap, never a frame promoted just for this capture. May
-                // legitimately differ from screenshotSerial (the most recently QUEUED
-                // frame) when a screenshot is requested before that frame's real paint
-                // event has run; provenance should bind to this value, not screenshotSerial.
+                // The identity of the frame actually captured. Since round 5 (capture-by-
+                // real-present), the capture itself IS a real, synchronous paintGL()+swap:
+                // if a frame was pending and Qt's own event loop had not yet painted it, this
+                // call promotes and captures it right here, one paint earlier than Qt would
+                // have otherwise. So this may legitimately differ from screenshotSerial (the
+                // most recently QUEUED frame) exactly in that case; provenance should bind to
+                // this value, not screenshotSerial.
                 glWindowPresentedSerial = static_cast<qulonglong>( capturedSerial );
                 glWindowPresentedSerialValid = capturedSerialValid;
+            }
+            else
+            {
+                // The GL window is what's actually on screen. A failed framebuffer
+                // readback must never silently fall through to a pixmap/viewport
+                // capture -- that would save content from a different presentation
+                // surface than the one the user (and the coherence gate) is looking
+                // at, and the resulting screenshot would look plausible while being
+                // wrong. Fail the capture outright instead.
+                err << "[GUI-SMOKE] ERROR: gl_window_readback_required_but_failed: "
+                    << glWindowReadbackReason << "\n";
+                return 12;
             }
         }
         if( screenshot.isNull()
@@ -9363,8 +9377,9 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
         logInteractionEvent(
             QStringLiteral("gui_smoke.screenshot"),
-            QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4 bytes=%5 sha256=%6 frame=%7 serial=%8 "
-                            "generation=%9 gl_window_active=%10 gl_window_readback_reason=\"%11\" "
+            QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4 bytes=%5 sha256=%6 "
+                            "frame=%7 serial=%8 generation=%9 gl_window_active=%10 "
+                            "gl_window_readback_reason=\"%11\" "
                             "gl_window_presented_serial=%12 gl_window_presented_serial_valid=%13")
                 .arg( screenshotInfo.absoluteFilePath() )
                 .arg( screenshot.width() )

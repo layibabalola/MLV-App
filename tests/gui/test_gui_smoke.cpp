@@ -61,6 +61,21 @@
         } \
     } while (0)
 
+// A framebuffer-capture attempt can still fail at runtime on a platform that DID create a
+// GL context (so MLV_SKIP_OR_FAIL_IF_OFFSCREEN above already passed) -- e.g. a transient
+// readback error. Under MLV_REQUIRE_GL_TESTS=1 (a hosted pilot on real hardware that is
+// supposed to have a working GL capture path) that must be a hard failure too, not a silent
+// skip that could mask a real regression.
+#define MLV_SKIP_OR_FAIL_IF_READBACK_FAILED(reason) \
+    do { \
+        if (qEnvironmentVariable("MLV_REQUIRE_GL_TESTS") == QStringLiteral("1")) { \
+            QTest::qFail(reason, __FILE__, __LINE__); \
+            return; \
+        } \
+        QTest::qSkip(reason, __FILE__, __LINE__); \
+        return; \
+    } while (0)
+
 namespace {
 
 QImage presenter_expected_orientation(const QImage &submitted)
@@ -1850,7 +1865,7 @@ void GuiSmokeTest::gpuDisplayWindowGrabsPresentedFramebufferReadback()
     QString reason;
     const bool ok = GpuDisplayWindow::grabPresentedFramebufferIfActive(&grabbed, &reason);
     if (!ok || grabbed.isNull()) {
-        QSKIP("OpenGL framebuffer capture is unavailable in this environment");
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("OpenGL framebuffer capture is unavailable in this environment");
     }
     QVERIFY(reason.isEmpty());
     QVERIFY(grabbed.width() > 0);
@@ -1905,7 +1920,7 @@ void GuiSmokeTest::gpuDisplayWindowCapturePresentsPendingFrameAsRealPaint()
     const bool okA = GpuDisplayWindow::grabPresentedFramebufferIfActive(
         &grabbedA, &reasonA, &capturedSerialA, &capturedSerialValidA);
     if (!okA || grabbedA.isNull()) {
-        QSKIP("OpenGL framebuffer capture is unavailable in this environment");
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("OpenGL framebuffer capture is unavailable in this environment");
     }
     QVERIFY(capturedSerialValidA);
     QCOMPARE(capturedSerialA, serialA);
@@ -2039,7 +2054,7 @@ void GuiSmokeTest::gpuDisplayWindowCaptureIgnoresFailedReconTextureSubmit()
     const bool okA = GpuDisplayWindow::grabPresentedFramebufferIfActive(
         &grabbedA, &reasonA, &capturedSerialA, &capturedSerialValidA);
     if (!okA || grabbedA.isNull()) {
-        QSKIP("OpenGL framebuffer capture is unavailable in this environment");
+        MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("OpenGL framebuffer capture is unavailable in this environment");
     }
     QVERIFY(capturedSerialValidA);
     QCOMPARE(capturedSerialA, serialA);

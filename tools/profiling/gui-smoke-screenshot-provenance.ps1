@@ -76,10 +76,17 @@ function Get-GuiSmokeScreenshotProvenanceV1 {
     $screenshotLine = if ($screenshotIndex -ge 0) { $OrderedLogLines[$screenshotIndex] } else { $null }
     $present = if ($presentLine) { Convert-GuiSmokeProvenanceLogLineToObject $presentLine } else { $null }
     $manifest = if ($manifestLine) { Convert-GuiSmokeProvenanceLogLineToObject $manifestLine } else { $null }
+    $screenshot = if ($screenshotLine) { Convert-GuiSmokeProvenanceLogLineToObject $screenshotLine } else { $null }
 
     $failures = [System.Collections.Generic.List[string]]::new()
     if ($screenshotIndex -lt 0) {
         $failures.Add('missing-screenshot-event')
+    }
+    $screenshotMethod = Get-GuiSmokeObjectPropertyValue $screenshot 'method'
+    $glWindowActive = Get-GuiSmokeObjectPropertyValue $screenshot 'gl_window_active'
+    if ($null -ne $glWindowActive -and [long]$glWindowActive -ne 0 -and
+        [string]$screenshotMethod -ne 'gl_window_framebuffer_readback') {
+        $failures.Add('gl-window-active-non-gl-capture-method')
     }
     if ($presentIndex -lt 0) {
         $failures.Add('missing-present-content-before-screenshot')
@@ -226,6 +233,11 @@ function Get-GuiSmokeScreenshotProvenanceV2 {
     }
     if ($null -eq $screenshotHeight -or [long]$screenshotHeight -le 0) {
         $failures.Add('missing-screenshot-height')
+    }
+    $glWindowActive = Get-GuiSmokeObjectPropertyValue $screenshot 'gl_window_active'
+    if ($null -ne $glWindowActive -and [long]$glWindowActive -ne 0 -and
+        [string]$screenshotMethod -ne 'gl_window_framebuffer_readback') {
+        $failures.Add('gl-window-active-non-gl-capture-method')
     }
 
     $searchEnd = if ($screenshotIndex -ge 0) { $screenshotIndex - 1 } else { $OrderedLogLines.Count - 1 }
