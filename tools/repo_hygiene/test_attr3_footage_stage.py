@@ -235,6 +235,22 @@ class FootageStageJobTests(unittest.TestCase):
         )
         return _run(["-Command", script])
 
+    def build_with_corrupt_and_removal_failure_hooks(self, corrupt_index: int, removal_failure_index: int) -> subprocess.CompletedProcess:
+        # ATTR3-FOOTAGE-STAGE-1 round 5: -TestHookForceRemovalFailurePartIndex is a second
+        # test-only parameter, same non-reachability guarantee as the one above -- see
+        # New-Attr3FootageStageJob's own header.
+        parts_json_path = self.tmp / f"parts-hook2-{id(self.parts_payload)}.json"
+        parts_json_path.write_text(json.dumps(self.parts_payload), encoding="utf-8")
+        script = (
+            f"Import-Module '{STAGE_MODULE}' -Force; "
+            f"$parts = @(Get-Content -LiteralPath '{parts_json_path}' -Raw | ConvertFrom-Json); "
+            f"New-Attr3FootageStageJob -ClipId '{self.clip_id}' -Parts $parts "
+            f"-OutDir '{self.out}' -AgentRoot '{self.agent_root}' "
+            f"-TestHookCorruptAfterVerifyPartIndex {corrupt_index} "
+            f"-TestHookForceRemovalFailurePartIndex {removal_failure_index}"
+        )
+        return _run(["-Command", script])
+
     def job_path(self, proc: subprocess.CompletedProcess) -> Path:
         jobs = sorted(self.out.glob("*.job.ps1"))
         self.assertEqual(len(jobs), 1, proc.stdout + proc.stderr)
@@ -330,7 +346,12 @@ class FootageStageJobTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         combined = proc.stdout + proc.stderr
         self.assertIn("ATTR3_FOOTAGE_STAGE_RESOLVE_REFUSED", combined)
-        self.assertIn("UNKNOWN_ID", combined)
+        # ATTR3-FOOTAGE-STAGE-1 round 5 (sol/astra: resolver failure output mapped to a fixed
+        # token, never interpolated): the resolver's own raw JSON summary text (which would have
+        # carried its "UNKNOWN_ID" status word) is never folded into this script's own message
+        # any more -- only the clip id (already ValidatePattern-shaped) and the exit code are.
+        self.assertNotIn("UNKNOWN_ID", combined)
+        self.assertNotIn('"status"', combined)
         self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
         self.assertNotIn("TRANSFER PART", combined)
 
@@ -637,6 +658,113 @@ class FootageStageJobTests(unittest.TestCase):
         self.assertIn("PART=1 STATUS=ALREADY_PRESENT", second_run.stdout)
         for target, content in zip(self.targets, self.content):
             self.assertEqual(target.read_bytes(), content)
+
+    # ---- round 5: cleanup ownership (astra major) -- only delete what THIS attempt created -----
+
+    def test_local_source_open_failure_never_deletes_an_unrelated_pre_existing_file_at_the_partial_slot(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 5 (astra major): before this round, "the share-side staged
+        # copy could not be opened for reading" and "this attempt's own CreateNew of the
+        # target-volume partial failed for some other reason" were BOTH folded into the same
+        # $localCopyFailed flag, and the cleanup handler deleted $localPartialPath unconditionally
+        # whenever that flag was set -- even though, in the open-failure branch, THIS ATTEMPT never
+        # created (or even attempted to create) that file at all. -TestHookForceLocalSourceOpen-
+        # FailurePartIndex models exactly that branch deterministically (see this hook's own
+        # header on why the real race it stands in for cannot be won reliably from a test).
+        parts_json_path = self.tmp / f"parts-hook3-{id(self.parts_payload)}.json"
+        parts_json_path.write_text(json.dumps(self.parts_payload), encoding="utf-8")
+        script = (
+            f"Import-Module '{STAGE_MODULE}' -Force; "
+            f"$parts = @(Get-Content -LiteralPath '{parts_json_path}' -Raw | ConvertFrom-Json); "
+            f"New-Attr3FootageStageJob -ClipId '{self.clip_id}' -Parts $parts "
+            f"-OutDir '{self.out}' -AgentRoot '{self.agent_root}' "
+            f"-TestHookForceLocalSourceOpenFailurePartIndex 0"
+        )
+        proc = _run(["-Command", script])
+        job = self.job_path(proc)
+        job_id = job.name[: -len(".job.ps1")]
+        stage_dir = self.stage_dir(job_id)
+        self.stage_all_parts(stage_dir)
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        unrelated_partial = self.target_dir / f".attr3-footage-stage-{job_id}-part0.partial"
+        unrelated_partial.write_bytes(b"bytes this attempt never created and must never delete")
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("PART=0 STATUS=TARGET_VOLUME_COPY_FAILED", run.stdout)
+        self.assertEqual(unrelated_partial.read_bytes(), b"bytes this attempt never created and must never delete")
+        self.assertFalse(self.targets[0].exists())
+        # Part 1 (never hooked) still places cleanly in the SAME run.
+        self.assertIn("PART=1 STATUS=PLACED", run.stdout)
+        self.assertTrue(self.targets[1].is_file())
+
+    # ---- round 5: publish recovery (sol blocker) -- verified removal, residue recognition -------
+
+    def test_removal_failure_after_publish_verify_fails_reports_a_distinct_token_and_retains_the_target(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 5 (sol blocker): when this job cannot verify that it
+        # actually removed the corrupt bytes IT JUST PLACED, it must report a status DISTINCT
+        # from the ordinary PLACED_VERIFY_<status> (removal succeeded) case, and must leave a
+        # fixed-name residue marker beside the retained bytes.
+        proc = self.build_with_corrupt_and_removal_failure_hooks(corrupt_index=0, removal_failure_index=0)
+        job = self.job_path(proc)
+        stage_dir = self.stage_dir(job.name[: -len(".job.ps1")])
+        self.stage_all_parts(stage_dir)
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("PART=0 STATUS=PLACED_VERIFY_FAILED_TARGET_RETAINED", run.stdout)
+        self.assertNotIn("PART=0 STATUS=PLACED_VERIFY_LENGTH_MISMATCH", run.stdout)
+        # The corrupt bytes THIS job placed are still there -- removal was never actually skipped
+        # silently; the retained-target token means exactly what it says.
+        self.assertTrue(self.targets[0].is_file())
+        self.assertNotEqual(self.targets[0].read_bytes(), self.content[0])
+        marker = Path(str(self.targets[0]) + ".attr3-footage-stage-verify-failed")
+        self.assertTrue(marker.is_file(), "a residue marker must be left beside the retained target")
+        # Part 1 (never corrupted, never hooked) still places cleanly in the SAME run.
+        self.assertIn("PART=1 STATUS=PLACED", run.stdout)
+        self.assertTrue(self.targets[1].is_file())
+
+    def test_a_later_run_recognises_its_own_residue_marker_and_places_cleanly_instead_of_target_conflict(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 5 (sol blocker): a LATER, otherwise-ordinary run for the
+        # SAME target must recognise the marker left by the round above as ITS OWN known-bad
+        # residue -- clean it up and place fresh bytes -- rather than refusing forever with
+        # TARGET_CONFLICT against bytes this tool itself left behind.
+        first_proc = self.build_with_corrupt_and_removal_failure_hooks(corrupt_index=0, removal_failure_index=0)
+        first_job = self.job_path(first_proc)
+        first_stage_dir = self.stage_dir(first_job.name[: -len(".job.ps1")])
+        self.stage_all_parts(first_stage_dir)
+        first_run = self.run_job(first_job)
+        self.assertEqual(first_run.returncode, 1, first_run.stdout + first_run.stderr)
+        self.assertIn("PART=0 STATUS=PLACED_VERIFY_FAILED_TARGET_RETAINED", first_run.stdout)
+        marker = Path(str(self.targets[0]) + ".attr3-footage-stage-verify-failed")
+        self.assertTrue(marker.is_file())
+        first_job.unlink()
+
+        second_proc = self.build()
+        second_job = self.job_path(second_proc)
+        second_stage_dir = self.stage_dir(second_job.name[: -len(".job.ps1")])
+        self.stage_all_parts(second_stage_dir)
+        second_run = self.run_job(second_job)
+        self.assertEqual(second_run.returncode, 0, second_run.stdout + second_run.stderr)
+        self.assertNotIn("TARGET_CONFLICT", second_run.stdout)
+        self.assertIn("PART=0 STATUS=PLACED", second_run.stdout)
+        self.assertIn("PART=1 STATUS=ALREADY_PRESENT", second_run.stdout)
+        for target, content in zip(self.targets, self.content):
+            self.assertEqual(target.read_bytes(), content)
+        self.assertFalse(marker.exists(), "the residue marker must be cleaned up once its target is recovered")
+
+    def test_a_genuinely_foreign_conflicting_target_without_the_marker_still_refuses(self) -> None:
+        # The residue-recognition path must never launder an UNRELATED stranger's file at the
+        # spec path -- only a target with the fixed-name marker BESIDE it is ever touched.
+        proc = self.build()
+        job = self.job_path(proc)
+        job_id = self.job_path(proc).name[: -len(".job.ps1")]
+        stage_dir = self.stage_dir(job_id)
+        self.stage_all_parts(stage_dir)
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        self.targets[0].write_bytes(b"a stranger's file, no marker beside it")
+        run = self.run_job(job)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("PART=0 STATUS=TARGET_CONFLICT", run.stdout)
+        self.assertEqual(self.targets[0].read_bytes(), b"a stranger's file, no marker beside it")
+        self.assertIn("PART=1 STATUS=PLACED", run.stdout)
 
     def test_a_symlink_as_the_staged_file_leaf_is_refused_before_hashing(self) -> None:
         # ATTR3-FOOTAGE-STAGE-1 round 4 (astra 3, link checks on read paths): the per-job staging
@@ -1113,6 +1241,406 @@ class NoPathInAnyBranchTests(unittest.TestCase):
         self.assertIn("PART=0 STATUS=PLACED", proc.stdout)
         self.assertIn("PART=1 STATUS=STAGED_NOT_FOUND", proc.stdout)
         self.assertIn("SUBMITTER RESULT=FOOTAGE_STAGE_REFUSED PARTS=2", proc.stdout)
+
+
+@unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+@unittest.skipUnless(os.name == "nt", "the emitted job and agent target a Windows host")
+class StaleAttemptSweepTests(unittest.TestCase):
+    """AttrCudaOwnerFootage.psm1's Remove-AttrCudaOwnerFootageStaleAttempts (ATTR3-FOOTAGE-STAGE-1
+    round 5, sol minor / astra major: interrupted-attempt residue) -- the CLI-side sweep attr3-
+    footage-stage.ps1 now runs at the start of every invocation, tested directly against the
+    module function rather than through the CLI (whose AgentShare is a fixed constant this suite
+    may not point at real infrastructure)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="attr3stalesweep-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.share_root = self.tmp / "footage-stage"
+        self.share_root.mkdir()
+
+    def sweep(self, stale_after_sec: int) -> subprocess.CompletedProcess:
+        script = (
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force; "
+            f"Remove-AttrCudaOwnerFootageStaleAttempts -TrustedRoot '{self.share_root}' -StaleAfterSec {stale_after_sec}"
+        )
+        return _run(["-Command", script])
+
+    def _age(self, path: Path, seconds_old: int) -> None:
+        script = (
+            f"(Get-Item -LiteralPath '{path}' -Force).LastWriteTimeUtc = "
+            f"(Get-Date).ToUniversalTime().AddSeconds(-{seconds_old})"
+        )
+        proc = _run(["-Command", script])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_a_stale_owned_attempt_directory_is_removed(self) -> None:
+        stale_dir = self.share_root / "attr3-footage-stage-FIX-SWEEP-0001-abcdef012345-0123456789"
+        stale_dir.mkdir()
+        part = stale_dir / "part-0"
+        part.write_bytes(b"stale owned partial")
+        self._age(part, 4000)
+        self._age(stale_dir, 4000)
+        proc = self.sweep(stale_after_sec=1800)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(stale_dir.exists(), "a stale owned attempt directory must be removed")
+
+    def test_a_fresh_owned_attempt_directory_is_kept(self) -> None:
+        fresh_dir = self.share_root / "attr3-footage-stage-FIX-SWEEP-0002-abcdef012345-9876543210"
+        fresh_dir.mkdir()
+        part = fresh_dir / "part-0"
+        part.write_bytes(b"fresh in-flight partial")
+        proc = self.sweep(stale_after_sec=1800)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(fresh_dir.is_dir(), "a fresh, still-within-timeout attempt must survive the sweep")
+        self.assertEqual(part.read_bytes(), b"fresh in-flight partial")
+
+    def test_a_non_matching_directory_name_is_never_touched_regardless_of_age(self) -> None:
+        foreign_dir = self.share_root / "some-other-unrelated-directory"
+        foreign_dir.mkdir()
+        part = foreign_dir / "part-0"
+        part.write_bytes(b"not this tool's naming convention at all")
+        self._age(part, 4000)
+        self._age(foreign_dir, 4000)
+        proc = self.sweep(stale_after_sec=1800)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(foreign_dir.is_dir(), "a directory not matching this tool's own jobId shape must never be touched")
+        self.assertEqual(part.read_bytes(), b"not this tool's naming convention at all")
+
+
+@unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+@unittest.skipUnless(os.name == "nt", "the emitted job targets a Windows measurement host")
+class StageJobStaleResidueSweepTests(unittest.TestCase):
+    """Attr3FootageStageJob.psm1's own emitted-job start-of-run sweep of a target-volume local
+    partial left behind by an interrupted earlier attempt (ATTR3-FOOTAGE-STAGE-1 round 5, sol
+    minor / astra major: interrupted-attempt residue)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="attr3stagesweep-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(os.path.realpath(self._tmp.name))
+        self.agent_root = self.tmp / "agent"
+        self.agent_root.mkdir()
+        self.out = self.tmp / "out"
+        self.out.mkdir()
+        self.target_dir = self.agent_root / "spec" / "FIX-STAGE-SWEEP-0001"
+        self.content = b"synthetic sweep-test part zero " * 41
+        self.parts_payload = [
+            {"index": 0, "path": str(self.target_dir / "part0.raw"), "length": len(self.content), "sha256": _sha256(self.content)}
+        ]
+
+    def build(self, stale_after_sec: int) -> Path:
+        parts_json_path = self.tmp / "parts.json"
+        parts_json_path.write_text(json.dumps(self.parts_payload), encoding="utf-8")
+        script = (
+            f"Import-Module '{STAGE_MODULE}' -Force; "
+            f"$parts = @(Get-Content -LiteralPath '{parts_json_path}' -Raw | ConvertFrom-Json); "
+            f"New-Attr3FootageStageJob -ClipId 'FIX-STAGE-SWEEP-0001' -Parts $parts "
+            f"-OutDir '{self.out}' -AgentRoot '{self.agent_root}' -StaleResidueAfterSec {stale_after_sec}"
+        )
+        proc = _run(["-Command", script])
+        jobs = sorted(self.out.glob("*.job.ps1"))
+        self.assertEqual(len(jobs), 1, proc.stdout + proc.stderr)
+        return jobs[0]
+
+    def run_job(self, job: Path) -> subprocess.CompletedProcess:
+        return _run(["-File", str(job)])
+
+    def _age(self, path: Path, seconds_old: int) -> None:
+        script = (
+            f"(Get-Item -LiteralPath '{path}' -Force).LastWriteTimeUtc = "
+            f"(Get-Date).ToUniversalTime().AddSeconds(-{seconds_old})"
+        )
+        proc = _run(["-Command", script])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_a_stale_owned_local_partial_from_an_interrupted_attempt_is_removed_and_a_fresh_placement_still_succeeds(self) -> None:
+        job = self.build(stale_after_sec=1800)
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        stale_partial = self.target_dir / ".attr3-footage-stage-attr3-footage-stage-FIX-STAGE-SWEEP-0001-deadbeef0000-aaaaaaaaaa-part0.partial"
+        stale_partial.write_bytes(b"an earlier, interrupted attempt's own bytes")
+        self._age(stale_partial, 4000)
+        # No staged copy is placed for this run -- the point of this test is only the SWEEP, which
+        # must run and remove the stale partial before this job's own STAGE_NOT_FOUND refusal.
+        run = self.run_job(job)
+        self.assertFalse(stale_partial.exists(), "a stale owned local partial must be swept at job start")
+        self.assertIn("PART=0 STATUS=STAGED_NOT_FOUND", run.stdout, run.stdout + run.stderr)
+
+    def test_a_fresh_local_partial_is_kept_and_a_non_matching_file_is_kept(self) -> None:
+        job = self.build(stale_after_sec=1800)
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        fresh_partial = self.target_dir / ".attr3-footage-stage-attr3-footage-stage-FIX-STAGE-SWEEP-0001-deadbeef0000-bbbbbbbbbb-part0.partial"
+        fresh_partial.write_bytes(b"a concurrent placer's still-in-flight bytes")
+        non_matching = self.target_dir / "some-unrelated-file.txt"
+        non_matching.write_bytes(b"not this tool's naming convention at all")
+        run = self.run_job(job)
+        self.assertTrue(fresh_partial.is_file(), "a fresh, still-within-timeout local partial must survive the sweep")
+        self.assertEqual(fresh_partial.read_bytes(), b"a concurrent placer's still-in-flight bytes")
+        self.assertTrue(non_matching.is_file(), "a file not matching this tool's own partial-name pattern must never be touched")
+        self.assertEqual(non_matching.read_bytes(), b"not this tool's naming convention at all")
+        self.assertIn("PART=0 STATUS=STAGED_NOT_FOUND", run.stdout, run.stdout + run.stderr)
+
+
+@unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+@unittest.skipUnless(os.name == "nt", "the emitted job and agent target a Windows host")
+class Attr3FootageStageCliEndToEndTests(unittest.TestCase):
+    """ATTR3-FOOTAGE-STAGE-1 round 5 (hub-reproduced blocker): drives the REAL, tracked
+    attr3-footage-stage.ps1 entry point end to end -- not the underlying functions directly --
+    because the blocker this round closes lives in the CLI's OWN orchestration code (the
+    presence-preflight array handling between um-run and the transfer/verify steps, at this
+    script's own line ~183 before the round-5 fix), which no existing test exercised: every other
+    test in this file calls Attr3FootagePresenceJob.psm1/Attr3FootageStageJob.psm1/AttrCudaOwner-
+    Footage.psm1 functions directly, the exact split whose coverage gap let this blocker ship.
+
+    THE ONE DELIBERATE SUBSTITUTION, twice over, both narrowly scoped and both already this
+    repository's own sanctioned seams -- never a fake of the code path actually under test.
+
+    (1) $AgentShare/$AgentRootOnHost are FIXED CONSTANTS baked into the tracked script's own text
+    (round 4, sol BLOCKER 1) specifically so no caller -- test or production -- can redirect them.
+    Testing the literal value (\\bachelor\\mlv-agent) would mean either touching real production
+    infrastructure or fabricating an SMB server; neither is this suite's to do. A byte-for-byte
+    copy of the tracked script has ONLY those two constant lines rewritten to point at a
+    throwaway local directory -- verified by exact-single-occurrence substring replacement, so
+    any future edit to those two lines fails this fixture loudly instead of silently no-opping.
+    Every other line, including the exact orchestration code this round fixed, is untouched.
+
+    (2) the resolver (tools/gates/resolve_consented_clip.py) always resolves against a real git
+    ref and the hook's real frozen consent table, with no CLI-level seam for a test id -- so the
+    copied CLI's own tools/gates/resolve_consented_clip.py is a thin wrapper that imports the
+    REAL, tracked resolver module (unmodified, from its real path, never copied) and monkeypatches
+    only `resolve()` -- the exact seam test_resolve_consented_clip.py already uses via its own
+    `spec_bytes=`/`table=` test parameters -- never a fake resolver CLI contract, never fabricated
+    consent data, never real footage.
+
+    Everything else -- all four Import-Module'd tools/profiling/bachelor/*.psm1 files,
+    tools/profiling/um-run.ps1 and tools/profiling/UmRunDrop.psm1 -- is copied byte-for-byte from
+    the tracked checkout, unmodified. The agent is the REAL tools/profiling/ultra-magnus-agent.ps1,
+    run locally against a throwaway share -- the same technique EndToEndTransferIdempotenceTests
+    above already uses, just now submitting through the real CLI's own two um-run call sites
+    instead of a test driving the underlying functions.
+    """
+
+    AGENT_SHARE_CONST = "\\\\bachelor\\mlv-agent"
+    AGENT_ROOT_CONST = "C:\\mlvtmp\\mlv-agent"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="attr3clie2e-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(os.path.realpath(self._tmp.name))
+
+        fixture_bachelor = self.tmp / "fixture-repo" / "tools" / "profiling" / "bachelor"
+        fixture_bachelor.mkdir(parents=True)
+        fixture_gates = self.tmp / "fixture-repo" / "tools" / "gates"
+        fixture_gates.mkdir(parents=True)
+        fixture_profiling = self.tmp / "fixture-repo" / "tools" / "profiling"
+
+        for name in ("Attr3FootagePresenceJob.psm1", "Attr3FootageStageJob.psm1", "AttrCudaArtifacts.psm1", "AttrCudaOwnerFootage.psm1"):
+            shutil.copy2(ROOT / "tools" / "profiling" / "bachelor" / name, fixture_bachelor / name)
+        shutil.copy2(UM_RUN, fixture_profiling / "um-run.ps1")
+        shutil.copy2(ROOT / "tools" / "profiling" / "UmRunDrop.psm1", fixture_profiling / "UmRunDrop.psm1")
+
+        self.share = self.tmp / "share"
+        self.share.mkdir()
+        self.agent_root_on_host = self.tmp / "agent-root-on-host"
+        self.agent_root_on_host.mkdir()
+
+        cli_text = GENERATOR.read_text(encoding="utf-8")
+        old_share_line = "$AgentShare = '%s'" % self.AGENT_SHARE_CONST
+        old_root_line = "$AgentRootOnHost = '%s'" % self.AGENT_ROOT_CONST
+        self.assertEqual(cli_text.count(old_share_line), 1, "attr3-footage-stage.ps1's AgentShare constant line changed shape")
+        self.assertEqual(cli_text.count(old_root_line), 1, "attr3-footage-stage.ps1's AgentRootOnHost constant line changed shape")
+        cli_text = cli_text.replace(old_share_line, "$AgentShare = '%s'" % str(self.share), 1)
+        cli_text = cli_text.replace(old_root_line, "$AgentRootOnHost = '%s'" % str(self.agent_root_on_host), 1)
+        self.cli_path = fixture_bachelor / "attr3-footage-stage.ps1"
+        self.cli_path.write_text(cli_text, encoding="utf-8")
+
+        self.fixture_json = fixture_gates / "resolve_consented_clip.fixture.json"
+        self.fixture_json.write_text("{}", encoding="utf-8")
+        real_resolver = str(ROOT / "tools" / "gates" / "resolve_consented_clip.py")
+        wrapper = (
+            "import sys, json, importlib.util\n"
+            f"REAL_RESOLVER = {real_resolver!r}\n"
+            f"FIXTURE_JSON = {str(self.fixture_json)!r}\n"
+            "spec = importlib.util.spec_from_file_location('attr3_e2e_real_resolver', REAL_RESOLVER)\n"
+            "rcc = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(rcc)\n"
+            "def _fake_resolve(clip_id, repo_root, ref=rcc.DEFAULT_REF, spec_bytes=None, table=None):\n"
+            "    with open(FIXTURE_JSON, 'r', encoding='utf-8') as fh:\n"
+            "        fixtures = json.load(fh)\n"
+            "    if clip_id not in fixtures:\n"
+            "        raise rcc.UnknownClipError(clip_id)\n"
+            "    return [rcc.ResolvedPart(index=p['index'], path=p['path'], length=p['length'], sha256=p['sha256'], status=rcc.PASS) for p in fixtures[clip_id]]\n"
+            "rcc.resolve = _fake_resolve\n"
+            "sys.exit(rcc.main(sys.argv[1:]))\n"
+        )
+        (fixture_gates / "resolve_consented_clip.py").write_text(wrapper, encoding="utf-8")
+
+        self.agent_proc = subprocess.Popen(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(AGENT_SCRIPT),
+             "-Root", str(self.share), "-PollSeconds", "1"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(self._stop_agent)
+        heartbeat = self.share / "heartbeat.txt"
+        deadline = time.time() + 20
+        while time.time() < deadline and not heartbeat.exists():
+            time.sleep(0.2)
+        if not heartbeat.exists():
+            self.skipTest("local ultra-magnus-agent.ps1 double did not start in time")
+
+    def _stop_agent(self) -> None:
+        try:
+            self.agent_proc.terminate()
+            self.agent_proc.wait(timeout=10)
+        except Exception:
+            try:
+                self.agent_proc.kill()
+            except Exception:
+                pass
+
+    def set_fixture_parts(self, clip_id: str, parts: list) -> None:
+        existing = json.loads(self.fixture_json.read_text(encoding="utf-8"))
+        existing[clip_id] = parts
+        self.fixture_json.write_text(json.dumps(existing), encoding="utf-8")
+
+    def run_cli(self, clip_id: str, timeout_sec: int = 60) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path),
+             "-ClipId", clip_id, "-TimeoutSec", str(timeout_sec)],
+            capture_output=True, text=True,
+        )
+
+    def _no_console_leak(self, combined: str) -> None:
+        # ATTR3-FOOTAGE-STAGE-1 round 5 (sol/astra: output channels). Every scenario below submits
+        # at least the presence preflight through um-run.ps1 -- its own (and UmRunDrop.psm1's)
+        # Write-Host progress lines, including "submitted <id> -> <path>" naming a real share
+        # path, must never reach this process's own console once `6>$null` is applied at the call
+        # site.
+        self.assertNotIn("submitted ", combined)
+        self.assertNotIn("side-file placed", combined)
+        self.assertNotIn(str(self.share), combined)
+
+    # ---- the hub-reproduced blocker: 0, 1 and N PASS indexes through the REAL entry point -------
+
+    def test_no_parts_present_reaches_a_clean_typed_refusal_not_a_crash(self) -> None:
+        clip_id = "FIX-E2E-CLI-NONE-0001"
+        target_dir = self.tmp / "spec" / clip_id
+        content = (b"e2e cli none part zero " * 53, b"e2e cli none part one " * 5)
+        parts = [
+            {"index": i, "path": str(target_dir / f"part{i}.raw"), "length": len(c), "sha256": hashlib.sha256(c).hexdigest()}
+            for i, c in enumerate(content)
+        ]
+        self.set_fixture_parts(clip_id, parts)
+        # Neither part exists anywhere -- presence preflight must honestly report 0 PASS indexes
+        # for a 2-part clip, the exact "zero" repro the hub found crashing every normal run.
+        proc = self.run_cli(clip_id)
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("RESOLVED clip=%s parts=2" % clip_id, combined)
+        self.assertNotIn("PRESENCE PREFLIGHT=INCONCLUSIVE", combined, "the real presence preflight must have run and returned, not fallen back")
+        self.assertIn("ATTR3_FOOTAGE_STAGE_SOURCE_VERIFY_FAILED", combined)
+        # The regression proof: no raw PowerShell type-conversion exception, anywhere.
+        self.assertNotIn("Cannot convert", combined)
+        self.assertNotIn("System.Object[]", combined)
+        self.assertNotIn("TRANSFER PART", combined)
+        self._no_console_leak(combined)
+
+    def test_one_of_two_present_filters_needswork_via_the_real_presence_job(self) -> None:
+        clip_id = "FIX-E2E-CLI-ONE-0001"
+        target_dir = self.tmp / "spec" / clip_id
+        target_dir.mkdir(parents=True)
+        content = (b"e2e cli one part zero " * 53, b"e2e cli one part one " * 5)
+        targets = [target_dir / "part0.raw", target_dir / "part1.raw"]
+        parts = [
+            {"index": i, "path": str(t), "length": len(c), "sha256": hashlib.sha256(c).hexdigest()}
+            for i, (t, c) in enumerate(zip(targets, content))
+        ]
+        self.set_fixture_parts(clip_id, parts)
+        # Part 0 already sits, byte-exact, at its resolver-designated spec path -- presence must
+        # report exactly ONE PASS index (the "one of two" repro) and exclude it from needsWork.
+        targets[0].write_bytes(content[0])
+        proc = self.run_cli(clip_id)
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("PRESENCE PREFLIGHT=INCONCLUSIVE", combined)
+        # Part 0 was correctly excluded from needsWork: never re-verified as a source part.
+        self.assertNotIn("SOURCE PART=0", combined)
+        self.assertIn("SOURCE PART=1 STATUS=", combined)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_SOURCE_VERIFY_FAILED", combined)
+        self.assertIn("part 1", combined)
+        self.assertNotIn("Cannot convert", combined)
+        self.assertNotIn("System.Object[]", combined)
+        self._no_console_leak(combined)
+
+    def test_all_present_reports_footage_staged_without_transferring(self) -> None:
+        clip_id = "FIX-E2E-CLI-ALL-0001"
+        target_dir = self.tmp / "spec" / clip_id
+        target_dir.mkdir(parents=True)
+        content = (b"e2e cli all part zero " * 53, b"e2e cli all part one " * 5)
+        targets = [target_dir / "part0.raw", target_dir / "part1.raw"]
+        parts = [
+            {"index": i, "path": str(t), "length": len(c), "sha256": hashlib.sha256(c).hexdigest()}
+            for i, (t, c) in enumerate(zip(targets, content))
+        ]
+        self.set_fixture_parts(clip_id, parts)
+        for t, c in zip(targets, content):
+            t.write_bytes(c)
+        # Both parts already correct at their spec paths -- presence must report 2 PASS indexes
+        # for a 2-part clip (the "many" repro) and the run must exit clean without transferring.
+        proc = self.run_cli(clip_id)
+        combined = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, combined)
+        self.assertIn("RESULT=FOOTAGE_STAGED", combined)
+        self.assertIn("ALREADY_PRESENT=true", combined)
+        self.assertNotIn("SOURCE PART", combined)
+        self.assertNotIn("TRANSFER PART", combined)
+        self.assertNotIn("Cannot convert", combined)
+        self.assertNotIn("System.Object[]", combined)
+        self._no_console_leak(combined)
+        for t, c in zip(targets, content):
+            self.assertEqual(t.read_bytes(), c)
+
+    # ---- round 5: ClipId validation failure prints a fixed token, never the raw value -----------
+
+    def test_an_invalid_clip_id_shaped_like_a_path_never_reaches_output(self) -> None:
+        hostile = r"C:\%s\real-owner-footage.raw" % TOKEN
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path), "-ClipId", hostile],
+            capture_output=True, text=True,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_CLIP_ID_INVALID", combined)
+        self.assertNotIn(hostile, combined)
+        self.assertNotIn(TOKEN, combined)
+
+    # ---- round 5: source link check (astra major) -------------------------------------------
+
+    def test_a_junction_above_a_source_part_is_refused_before_verification(self) -> None:
+        clip_id = "FIX-E2E-CLI-LINK-0001"
+        real_container = self.tmp / "link-real-container"
+        real_container.mkdir()
+        content = b"e2e cli link-check content " * 31
+        real_file = real_container / "part0.raw"
+        real_file.write_bytes(content)
+        linked_container = self.tmp / "link-junction-container"
+        made = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+             f"New-Item -ItemType Junction -Path '{linked_container}' -Target '{real_container}' | Out-Null"],
+            capture_output=True, text=True,
+        )
+        if made.returncode != 0 or not linked_container.exists():
+            self.skipTest(f"cannot create a junction here: {made.stderr}")
+        linked_path = linked_container / "part0.raw"
+        parts = [{"index": 0, "path": str(linked_path), "length": len(content), "sha256": hashlib.sha256(content).hexdigest()}]
+        self.set_fixture_parts(clip_id, parts)
+        proc = self.run_cli(clip_id)
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_SOURCE_PATH_UNSAFE", combined)
+        self.assertIn("SOURCE PART=0 STATUS=SOURCE_PATH_UNSAFE", combined)
+        self.assertNotIn("TRANSFER PART", combined)
+        self.assertEqual(real_file.read_bytes(), content)
 
 
 if __name__ == "__main__":

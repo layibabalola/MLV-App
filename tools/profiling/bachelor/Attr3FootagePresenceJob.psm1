@@ -294,6 +294,18 @@ function Get-Attr3FootagePresentPartIndexes {
     mlvapp.attr3-footage-presence.v1 schema is trusted (a real job's stdout carries exactly one);
     a clip id mismatch, a missing or malformed payload, or no matching line at all all return an
     EMPTY set -- never a guess that could skip transferring a part that is not actually there.
+    ATTR3-FOOTAGE-STAGE-1 round 5 (hub-reproduced blocker, one clear return shape): every branch
+    returns a PLAIN array via `@(...)`, never the `,@(...)` unrolling-suppression idiom. The
+    production caller (attr3-footage-stage.ps1) always wraps this function's own call in its own
+    `@(...)` -- exactly like every test in this file already does -- and `@(Get-Foo)` already
+    forces array-ness (0, 1 or many elements alike) around whatever this function enumerates onto
+    the pipeline. Returning `,@(...)` here used to make this function itself ALSO emit a single
+    already-array-shaped object; the caller's own `@(...)` then wrapped THAT one object again,
+    producing a 1-element array whose lone element was an Object[] -- so `[int]$presentIndex` in
+    attr3-footage-stage.ps1's own foreach threw for zero, one AND many PASS indexes alike, every
+    time, outside any try/catch. One shape, no double-wrapping: this function returns a plain
+    array; callers that need array-ness from a possibly-empty/singleton result supply their own
+    `@(...)`, exactly once.
     #>
     [CmdletBinding()]
     param(
@@ -302,23 +314,23 @@ function Get-Attr3FootagePresentPartIndexes {
     )
 
     $present = New-Object 'System.Collections.Generic.HashSet[int]'
-    if ([string]::IsNullOrEmpty($Stdout)) { return , @() }
+    if ([string]::IsNullOrEmpty($Stdout)) { return @() }
 
     $lines = @($Stdout -split "`r?`n" | Where-Object { $_ })
     $jsonLine = $lines | Where-Object { $_ -match '"schema"\s*:\s*"mlvapp\.attr3-footage-presence\.v1"' } | Select-Object -Last 1
-    if (-not $jsonLine) { return , @() }
+    if (-not $jsonLine) { return @() }
 
     try {
         $payload = $jsonLine | ConvertFrom-Json
     } catch {
-        return , @()
+        return @()
     }
-    if ($payload.clipId -cne $ClipId) { return , @() }
+    if ($payload.clipId -cne $ClipId) { return @() }
 
     foreach ($part in @($payload.parts)) {
         if ([string]$part.status -eq 'PASS') { [void]$present.Add([int]$part.index) }
     }
-    return , @($present | Sort-Object)
+    return @($present | Sort-Object)
 }
 
 Export-ModuleMember -Function New-Attr3FootagePresenceJob, Get-Attr3FootagePresentPartIndexes

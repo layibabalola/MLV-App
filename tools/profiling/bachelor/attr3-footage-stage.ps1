@@ -32,14 +32,24 @@
 
 [CmdletBinding()]
 param(
+    # ATTR3-FOOTAGE-STAGE-1 round 5 (sol/astra: ClipId validation failure prints a fixed token).
+    # A [ValidatePattern(...)] attribute here would be enforced by PowerShell's OWN parameter
+    # binder, BEFORE this script's body ever runs -- and its auto-generated binding-failure
+    # message echoes the offending value VERBATIM ("...does not match the pattern..."), which is
+    # exactly the path leak this whole script exists to prevent if a caller passes a real path
+    # where a clip id belongs. Validated in the BODY instead (below), where the failure message is
+    # a fixed token that never echoes $ClipId.
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')]
     [string]$ClipId,
 
     [int]$TimeoutSec = 1800
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($ClipId -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+    throw 'ATTR3_FOOTAGE_STAGE_CLIP_ID_INVALID -ClipId does not match the required id pattern'
+}
 
 # ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 1): -AgentShare and -AgentRootOnHost used to be
 # public parameters -- the id-only interface's actual remaining authority boundary, since a
@@ -57,6 +67,15 @@ Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'AttrCudaOwnerFootage.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Attr3FootageStageJob.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Attr3FootagePresenceJob.psm1') -Force
+
+# ATTR3-FOOTAGE-STAGE-1 round 5 (sol minor / astra major: interrupted-attempt residue). Every
+# attempt's own per-job share staging directory is named from a fresh random jobId (round 3), so a
+# process killed before its own cleanup (the catch block around steps 5-6 below) ever runs leaves
+# that ENTIRE directory behind forever -- nothing else ever revisits an old jobId. At the start of
+# every run, before anything else, sweep it -- see Remove-AttrCudaOwnerFootageStaleAttempts
+# (AttrCudaOwnerFootage.psm1) for exactly what is and is not touched.
+$shareStageRoot = Join-Path $AgentShare 'footage-stage'
+[void](Remove-AttrCudaOwnerFootageStaleAttempts -TrustedRoot $shareStageRoot -StaleAfterSec $TimeoutSec)
 
 # ATTR3-FOOTAGE-STAGE-1 round 3 (sol BLOCKER, astra MAJOR): -RepoRoot used to be a public
 # parameter, so a caller-supplied alternate tree could supply a replacement resolver and
@@ -137,12 +156,22 @@ $py = Resolve-Attr3StagePython
 $emitPath = Join-Path ([IO.Path]::GetTempPath()) ("attr3-footage-stage-resolve-$([guid]::NewGuid().ToString('N')).json")
 try {
     $resolverArgs = @($py.PrefixArgs) + @($ResolverPath, '--clip-id', $ClipId, '--repo-root', $RepoRoot, '--emit-json', $emitPath)
-    $summaryLines = @(& $py.Exe @resolverArgs 2>&1)
-    $resolverExit = $LASTEXITCODE
+    # ATTR3-FOOTAGE-STAGE-1 round 5 (sol/astra: resolver failure output mapped to a fixed token,
+    # never interpolated). The resolver's own CLI contract says its stdout/stderr never carries a
+    # part path -- but this script no longer trusts that contract by folding the raw text into its
+    # own thrown message (the same "don't trust an inner contract, however documented" standard
+    # ConvertTo-Attr3FootageStageSafeOutput below already applies to the submitted job's output).
+    # The resolver's own text is still READ (so $resolverExit is meaningful), just never echoed.
+    try {
+        $null = @(& $py.Exe @resolverArgs 2>&1)
+        $resolverExit = $LASTEXITCODE
+    } catch {
+        # A launch failure (not a nonzero exit -- the child never even started) throws a raw
+        # PowerShell exception whose own message can name this host's interpreter path.
+        throw 'ATTR3_FOOTAGE_STAGE_RESOLVER_LAUNCH_FAILED the resolver could not be started'
+    }
     if ($resolverExit -ne 0) {
-        # $summaryLines is the resolver's own path-free JSON summary line (its CLI contract never
-        # prints a part path), so folding it into this message is safe.
-        throw "ATTR3_FOOTAGE_STAGE_RESOLVE_REFUSED clip '$ClipId' was refused by the resolver (exit $resolverExit): $($summaryLines -join ' ')"
+        throw "ATTR3_FOOTAGE_STAGE_RESOLVE_REFUSED clip '$ClipId' was refused by the resolver (exit $resolverExit)"
     }
     if (-not (Test-Path -LiteralPath $emitPath -PathType Leaf)) {
         throw 'ATTR3_FOOTAGE_STAGE_EMIT_MISSING resolver exited 0 but wrote no --emit-json file'
@@ -179,7 +208,12 @@ $presenceOutDir = Join-Path ([IO.Path]::GetTempPath()) ("attr3-footage-stage-pre
 $presenceJob = New-Attr3FootagePresenceJob -ClipId $ClipId -Parts $parts -OutDir $presenceOutDir
 $presentIndexArray = @()
 try {
-    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec
+    # ATTR3-FOOTAGE-STAGE-1 round 5 (sol/astra: output channels). um-run.ps1 itself (and
+    # UmRunDrop.psm1 underneath it) reports side-file placement and submission progress via
+    # Write-Host -- the Information stream (6), not this call's own success-stream return value --
+    # including a "submitted <id> -> <path>" line that names a real agent-share path. `6>$null`
+    # discards that stream at the call site so it never reaches this process's own console.
+    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec 6>$null
     $presentIndexArray = @(Get-Attr3FootagePresentPartIndexes -Stdout $presenceResult.stdout -ClipId $ClipId)
 } catch {
     # Presence is an optimization, not a correctness requirement -- if the preflight itself could
@@ -200,6 +234,21 @@ if ($needsWork.Count -eq 0) {
 # --- 3. VERIFY only the parts the preflight found missing or mismatched, before anything is sent
 #        anywhere -----------------------------------------------------------------------------
 foreach ($part in $needsWork) {
+    # ATTR3-FOOTAGE-STAGE-1 round 5 (astra major, source link check): the resolver's own
+    # cross-check proves this path's BYTES agree with the frozen consent table -- it says nothing
+    # about whether the path itself is a reparse point planted since. Every EXISTING ancestor of
+    # -SourcePath, down to and including the leaf, is proved link-free BEFORE a single byte is
+    # read or hashed here -- the same target-chain check Attr3FootagePresenceJob.psm1's own probe
+    # and Attr3FootageStageJob.psm1's own target-path check already apply on their own sides.
+    # This gates step 5's own transfer too: that loop below only ever processes a part already
+    # proved link-free by this same check, since both loops iterate the same $needsWork list.
+    $sourceDriveRoot = [IO.Path]::GetPathRoot([string]$part.path)
+    try {
+        [void](Assert-AttrCudaNoLinkBelowRoot -TrustedRoot $sourceDriveRoot -Path $part.path)
+    } catch {
+        Write-Output "SOURCE PART=$($part.index) STATUS=SOURCE_PATH_UNSAFE"
+        throw "ATTR3_FOOTAGE_STAGE_SOURCE_PATH_UNSAFE part $($part.index) source path chain contains a reparse point"
+    }
     $status = Test-AttrCudaFootagePart -Path $part.path -ExpectedLength ([int64]$part.length) -ExpectedSha256 ([string]$part.sha256)
     Write-Output "SOURCE PART=$($part.index) STATUS=$status"
     if ($status -ne 'PASS') {
@@ -213,8 +262,7 @@ foreach ($part in $needsWork) {
 #        (round 3) means a retried invocation never collides with a retained receipt from an
 #        earlier attempt's own submission (UMRUN_JOBID_IN_USE).
 $stageOutDir = Join-Path ([IO.Path]::GetTempPath()) ("attr3-footage-stage-job-$([guid]::NewGuid().ToString('N'))")
-$job = New-Attr3FootageStageJob -ClipId $ClipId -Parts $needsWork -OutDir $stageOutDir -AgentRoot $AgentRootOnHost
-$shareStageRoot = Join-Path $AgentShare 'footage-stage'
+$job = New-Attr3FootageStageJob -ClipId $ClipId -Parts $needsWork -OutDir $stageOutDir -AgentRoot $AgentRootOnHost -StaleResidueAfterSec $TimeoutSec
 $shareStageDir = Join-Path $shareStageRoot $job.jobId
 
 # --- 5+6. TRANSFER the missing parts to the agent share, then SUBMIT the pre-built job through
@@ -247,8 +295,11 @@ try {
     # throws (a dead-agent heartbeat path, a missing script path, a poll timeout naming the result
     # file) carries an operational path in its own text -- converted to a fixed token before it can
     # ever reach this script's own output.
+    # ATTR3-FOOTAGE-STAGE-1 round 5 (sol/astra: output channels): `6>$null` discards um-run.ps1's
+    # (and UmRunDrop.psm1's) own Write-Host progress lines -- see the presence preflight's own
+    # call above for why that stream, left unredirected, can print a real agent-share path.
     try {
-        $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec
+        $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $TimeoutSec 6>$null
     } catch {
         throw "ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED job could not be submitted or its result could not be retrieved"
     }

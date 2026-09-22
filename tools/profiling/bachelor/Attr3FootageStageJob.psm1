@@ -73,8 +73,11 @@ function New-Attr3FootageStageJob {
     TARGET_VOLUME_PARTIAL_EXISTS (round 4: the target-volume partial slot is already occupied --
     refused, untouched, never this job's to delete), TARGET_VOLUME_COPY_FAILED,
     TARGET_VOLUME_VERIFY_<Test-AttrCudaFootagePart status> (the same-volume partial copy failed
-    verification), PLACED_VERIFY_<status> (the post-rename re-hash at the spec path failed -- this
-    job removes the target IT just placed in this case, round 4), STAGE_SLOT_INVALID,
+    verification), PLACED_VERIFY_<status> (the post-rename re-hash at the spec path failed and the
+    target IT just placed was successfully removed, round 4), PLACED_VERIFY_FAILED_TARGET_RETAINED
+    (round 5: that removal itself could not be verified -- a fixed-name residue marker is left
+    beside the retained bytes so a LATER run recognises them as this tool's own known-bad residue,
+    not a stranger's file, instead of refusing forever with TARGET_CONFLICT), STAGE_SLOT_INVALID,
     STAGED_PATH_UNSAFE (round 4: the staged file's own leaf is a reparse point) or STAGED_<status>
     (the staged copy itself failed verification); the
     overall result is FOOTAGE_STAGED (exit 0) when every part is PLACED or ALREADY_PRESENT, else
@@ -99,6 +102,15 @@ function New-Attr3FootageStageJob {
         [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
         [string]$AgentRoot = 'C:\mlvtmp\mlv-agent',
 
+        # ATTR3-FOOTAGE-STAGE-1 round 5 (sol minor / astra major: interrupted-attempt residue).
+        # The threshold the emitted job's own start-of-run sweep (below) uses to decide a
+        # target-volume local partial from an EARLIER, interrupted attempt for the same part is
+        # safe to remove -- old enough that no attempt still within its own agent-job timeout
+        # could legitimately still be writing it. attr3-footage-stage.ps1 passes its own
+        # -TimeoutSec (the real agent job timeout) here; the default is this function's own
+        # fallback for a caller that does not.
+        [int]$StaleResidueAfterSec = 1800,
+
         # ATTR3-FOOTAGE-STAGE-1 round 4: a TEST-ONLY hook, never reachable from the production
         # CLI (attr3-footage-stage.ps1 never passes it -- see that script's own header on the
         # resolver being the only way it obtains parts). -1 (the default) never matches any real
@@ -107,7 +119,26 @@ function New-Attr3FootageStageJob {
         # the same-volume publish rename -- proving the POST-RENAME re-hash, not the pre-rename
         # check, is what gates a PLACED report, and that a target this job's own rename just
         # created is removed by this same job when that re-hash fails.
-        [int]$TestHookCorruptAfterVerifyPartIndex = -1
+        [int]$TestHookCorruptAfterVerifyPartIndex = -1,
+
+        # ATTR3-FOOTAGE-STAGE-1 round 5: a second TEST-ONLY hook, same non-reachability guarantee
+        # as the one above. -1 (the default) is inert. A test that passes a real index gets a job
+        # whose emitted body SKIPS its own Remove-Item call on a post-rename-verify-failed target
+        # for that one part -- modelling a removal that genuinely fails (a lock, a permissions
+        # fault) without needing to fabricate one at the OS level -- so the removal-verification
+        # branch (PLACED_VERIFY_FAILED_TARGET_RETAINED, the residue marker) can be proven directly.
+        [int]$TestHookForceRemovalFailurePartIndex = -1,
+
+        # ATTR3-FOOTAGE-STAGE-1 round 5: a third TEST-ONLY hook, same non-reachability guarantee.
+        # -1 (the default) is inert. A test that passes a real index gets a job whose emitted body
+        # treats opening the SHARE-side staged copy for reading as having failed for that one part
+        # WITHOUT ever attempting it -- modelling the genuine race this job's own local-partial
+        # cleanup must survive (the staged copy passes this job's OWN pre-check moments earlier,
+        # then something else removes or locks it before this job's own re-open) without depending
+        # on winning a real race. Proves the cleanup-ownership fix: since the local partial's own
+        # [IO.FileMode]::CreateNew call never even runs in this branch, nothing this job did not
+        # itself create may ever be deleted when this failure is reported.
+        [int]$TestHookForceLocalSourceOpenFailurePartIndex = -1
     )
 
     if ($Parts.Count -eq 0) {
@@ -206,9 +237,16 @@ $JobId = '__JOB_ID__'
 $ClipId = '__CLIP_ID__'
 $AgentRoot = '__AGENT_ROOT__'
 $PartsJson = '__PARTS_JSON__'
+$StaleResidueAfterSec = __STALE_RESIDUE_AFTER_SEC__
 # Test-only hook (round 4): -1 unless a test explicitly built this job with
 # -TestHookCorruptAfterVerifyPartIndex set -- see New-Attr3FootageStageJob's own header.
 $TestHookCorruptPartIndex = __TEST_HOOK_CORRUPT_PART_INDEX__
+# Test-only hook (round 5): -1 unless a test explicitly built this job with
+# -TestHookForceRemovalFailurePartIndex set -- see New-Attr3FootageStageJob's own header.
+$TestHookForceRemovalFailurePartIndex = __TEST_HOOK_FORCE_REMOVAL_FAILURE_PART_INDEX__
+# Test-only hook (round 5): -1 unless a test explicitly built this job with
+# -TestHookForceLocalSourceOpenFailurePartIndex set -- see New-Attr3FootageStageJob's own header.
+$TestHookForceLocalSourceOpenFailurePartIndex = __TEST_HOOK_FORCE_LOCAL_SOURCE_OPEN_FAILURE_PART_INDEX__
 $StageDir = Join-Path $AgentRoot ("footage-stage\" + $JobId)
 
 function Say([string]$Message) { Write-Output "[$JobId] $Message" }
@@ -221,6 +259,33 @@ $RawParts = @($PartsJson | ConvertFrom-Json | Sort-Object { [int]$_.index })
 $PartCount = $RawParts.Count
 
 Say "START clip=$ClipId parts=$PartCount"
+
+# --- 0. SWEEP: remove THIS part's own stale target-volume partial left behind by an interrupted
+#        earlier attempt, before touching anything else. ATTR3-FOOTAGE-STAGE-1 round 5 (sol minor
+#        / astra major: interrupted-attempt residue). Every attempt's local partial name carries
+#        that attempt's own jobId (round 3's fresh-random-component fix) -- so a process killed
+#        before it could clean up its own partial (Record-PartResult's cleanup, or the removal
+#        this same job does on its own PLACED_VERIFY failure) leaves it there forever; nothing
+#        else with a DIFFERENT jobId ever revisits that exact target directory again. Only an
+#        entry matching this tool's OWN neutral partial-name pattern for THIS part's index, and
+#        older than $StaleResidueAfterSec, is ever touched -- new enough to still be a legitimate
+#        concurrent placer's in-flight write is left alone.
+foreach ($sweepPart in $RawParts) {
+    $sweepIndex = [int]$sweepPart.index
+    $sweepDecoded = Read-AttrCudaBase64Payload -Base64 $sweepPart.pathBase64
+    $sweepTargetPath = ConvertTo-AttrCudaUtf8String -Bytes $sweepDecoded.bytes
+    $sweepTargetDir = [IO.Path]::GetDirectoryName($sweepTargetPath)
+    if ([string]::IsNullOrEmpty($sweepTargetDir) -or -not (Test-Path -LiteralPath $sweepTargetDir -PathType Container -ErrorAction SilentlyContinue)) { continue }
+    $staleLocalPartialPattern = '^\.attr3-footage-stage-.+-part' + $sweepIndex + '\.partial$'
+    $staleLocalPartials = @(Get-ChildItem -LiteralPath $sweepTargetDir -File -Force -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -match $staleLocalPartialPattern -and
+            ((Get-Date).ToUniversalTime() - $_.LastWriteTimeUtc).TotalSeconds -gt $StaleResidueAfterSec
+        })
+    foreach ($stalePartial in $staleLocalPartials) {
+        try { Remove-Item -LiteralPath $stalePartial.FullName -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    }
+}
 
 # ATTR3-FOOTAGE-STAGE-1 round 3 (astra PR #148 MAJOR, containment): prove the ENTIRE staging
 # chain under $AgentRoot -- down to and including $StageDir itself -- carries no reparse point
@@ -315,6 +380,13 @@ foreach ($rawPart in $RawParts) {
         continue
     }
 
+    # ATTR3-FOOTAGE-STAGE-1 round 5 (sol blocker, publish recovery): a FIXED-name sidecar --
+    # never job-id-scoped, so it is recognisable across separate attempts/runs for this exact
+    # target -- this job writes ONLY when it could not verify that it successfully removed bytes
+    # IT ITSELF just placed and failed to re-hash (see the post-rename verify block below). Its
+    # mere presence beside a mismatched target is this job's own "I left this behind" record.
+    $residueMarkerPath = "$targetPath.attr3-footage-stage-verify-failed"
+
     # Already present: a byte-identical target is a no-op PASS, a different one is refused --
     # never overwritten -- and either way the staged copy is no longer needed. Wrapped (round 3,
     # no path in any branch): under $ErrorActionPreference = 'Stop' an unwrapped Test-Path call
@@ -331,10 +403,30 @@ foreach ($rawPart in $RawParts) {
         $existingStatus = Test-AttrCudaFootagePart -Path $targetPath -ExpectedLength $expectedLength -ExpectedSha256 $expectedSha256
         if ($existingStatus -eq 'PASS') {
             Record-PartResult -Index $index -Status 'ALREADY_PRESENT' -CleanupPath $stagedPath
-        } else {
-            Record-PartResult -Index $index -Status 'TARGET_CONFLICT' -CleanupPath $stagedPath
+            continue
         }
-        continue
+        # ATTR3-FOOTAGE-STAGE-1 round 5 (sol blocker, publish recovery): a mismatched target is
+        # not automatically a stranger's file to refuse forever -- if THIS tool's own fixed-name
+        # residue marker sits right next to it, an EARLIER attempt's own post-publish verify
+        # already found and tried (and failed) to remove this exact bad copy. Recognise it by
+        # that recorded identity and retry the cleanup here, rather than blocking every future
+        # run with TARGET_CONFLICT against bytes this tool itself left behind.
+        $isOwnResidue = $false
+        try { $isOwnResidue = Test-Path -LiteralPath $residueMarkerPath -PathType Leaf -ErrorAction Stop } catch { $isOwnResidue = $false }
+        if (-not $isOwnResidue) {
+            Record-PartResult -Index $index -Status 'TARGET_CONFLICT' -CleanupPath $stagedPath
+            continue
+        }
+        try { Remove-Item -LiteralPath $targetPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        $residueStillThere = $true
+        try { $residueStillThere = Test-Path -LiteralPath $targetPath -PathType Leaf -ErrorAction Stop } catch { $residueStillThere = $true }
+        if ($residueStillThere) {
+            Record-PartResult -Index $index -Status 'PLACED_VERIFY_FAILED_TARGET_RETAINED' -CleanupPath $stagedPath
+            continue
+        }
+        try { Remove-Item -LiteralPath $residueMarkerPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        # Fall through: the recognised residue and its marker are both gone now, so this part
+        # places exactly as it would if the target had never existed.
     }
 
     # Create the target's own directory chain -- one level at a time, so New-AttrCudaDirectory's
@@ -389,15 +481,28 @@ foreach ($rawPart in $RawParts) {
     $localCopyFailed = $false
     $localSrcStream = $null
     $localDstStream = $null
+    # ATTR3-FOOTAGE-STAGE-1 round 5 (astra major, cleanup ownership): becomes $true ONLY once THIS
+    # attempt's own [IO.FileMode]::CreateNew call for $localPartialPath actually succeeds -- never
+    # assumed from $localCopyFailed alone. $localCopyFailed can ALSO become $true because opening
+    # the SHARE-side $stagedPath for READING failed, in which case $localPartialPath was never
+    # created by this attempt at all (the CreateNew call is skipped entirely in that branch, a few
+    # lines below) -- so the "copy failed, clean up" handler below must never delete it unless this
+    # flag says this attempt is the one that brought it into existence.
+    $weCreatedLocalPartial = $false
     try {
-        try {
-            $localSrcStream = [IO.File]::Open($stagedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-        } catch {
+        if ($index -eq $TestHookForceLocalSourceOpenFailurePartIndex) {
             $localCopyFailed = $true
+        } else {
+            try {
+                $localSrcStream = [IO.File]::Open($stagedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            } catch {
+                $localCopyFailed = $true
+            }
         }
         if (-not $localCopyFailed) {
             try {
                 $localDstStream = [IO.File]::Open($localPartialPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                $weCreatedLocalPartial = $true
             } catch [IO.IOException] {
                 $localPartialExists = $true
             } catch {
@@ -423,7 +528,9 @@ foreach ($rawPart in $RawParts) {
         continue
     }
     if ($localCopyFailed) {
-        try { Remove-Item -LiteralPath $localPartialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        if ($weCreatedLocalPartial) {
+            try { Remove-Item -LiteralPath $localPartialPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        }
         Record-PartResult -Index $index -Status 'TARGET_VOLUME_COPY_FAILED' -CleanupPath $stagedPath
         continue
     }
@@ -472,8 +579,29 @@ foreach ($rawPart in $RawParts) {
         # leaving a corrupt file at the spec path under a PLACED-shaped status. A rerun's own
         # ALREADY_PRESENT check then sees a clean absence, never a false TARGET_CONFLICT against
         # bytes this job itself left broken.
-        try { Remove-Item -LiteralPath $targetPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-        Record-PartResult -Index $index -Status "PLACED_VERIFY_$placedStatus" -CleanupPath $stagedPath
+        # ATTR3-FOOTAGE-STAGE-1 round 5 (sol blocker, publish recovery): -ErrorAction
+        # SilentlyContinue on that removal used to be trusted blindly -- if it actually failed
+        # (a lock, a permissions fault), the corrupt bytes stayed at the spec path and every
+        # LATER run's own "already exists, different bytes" check refused it as TARGET_CONFLICT
+        # forever, indistinguishable from a genuine stranger's file. The removal is now VERIFIED
+        # (the target must actually be gone afterwards); on success this reports the same
+        # PLACED_VERIFY_$placedStatus as before, but on failure it reports the distinct
+        # PLACED_VERIFY_FAILED_TARGET_RETAINED token AND leaves the fixed-name residue marker
+        # beside the retained bytes, so the target-exists check above recognises this exact
+        # mismatch as its own known-bad residue on the very next run, instead of refusing it
+        # forever as a stranger's conflict.
+        if ($index -ne $TestHookForceRemovalFailurePartIndex) {
+            try { Remove-Item -LiteralPath $targetPath -Force -Confirm:$false -ErrorAction Stop } catch {}
+        }
+        $targetRemoved = $true
+        try { $targetRemoved = -not (Test-Path -LiteralPath $targetPath -PathType Leaf -ErrorAction Stop) } catch { $targetRemoved = $false }
+        if ($targetRemoved) {
+            try { Remove-Item -LiteralPath $residueMarkerPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+            Record-PartResult -Index $index -Status "PLACED_VERIFY_$placedStatus" -CleanupPath $stagedPath
+        } else {
+            try { [IO.File]::WriteAllText($residueMarkerPath, '') } catch {}
+            Record-PartResult -Index $index -Status 'PLACED_VERIFY_FAILED_TARGET_RETAINED' -CleanupPath $stagedPath
+        }
         continue
     }
     # The rename already relocated the local partial -- nothing left there to clean -- but
@@ -513,8 +641,11 @@ exit $exitCode
         CLIP_ID = $ClipId
         AGENT_ROOT = $AgentRoot
         PARTS_JSON = $partsJson
+        STALE_RESIDUE_AFTER_SEC = $StaleResidueAfterSec
         EMBEDDED_FUNCTIONS = $embeddedFunctions
         TEST_HOOK_CORRUPT_PART_INDEX = $TestHookCorruptAfterVerifyPartIndex
+        TEST_HOOK_FORCE_REMOVAL_FAILURE_PART_INDEX = $TestHookForceRemovalFailurePartIndex
+        TEST_HOOK_FORCE_LOCAL_SOURCE_OPEN_FAILURE_PART_INDEX = $TestHookForceLocalSourceOpenFailurePartIndex
     })
 
     if (-not (Test-Path -LiteralPath $OutDir)) { [void](New-Item -ItemType Directory -Path $OutDir -Force) }

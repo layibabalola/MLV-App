@@ -530,10 +530,58 @@ function Remove-AttrCudaOwnerFootageStagingResidue {
     } catch {}
 }
 
+function Remove-AttrCudaOwnerFootageStaleAttempts {
+    <#
+    .SYNOPSIS
+    At the start of a run, sweep only this tool's OWN stale per-attempt share staging directories
+    -- never anything else -- out of -TrustedRoot. ATTR3-FOOTAGE-STAGE-1 round 5 (sol minor /
+    astra major: interrupted-attempt residue).
+    .DESCRIPTION
+    Every attempt's own per-job share staging directory is named from a fresh random jobId (round
+    3's New-Attr3FootageStageJob fix) -- "attr3-footage-stage-<clip>-<hash12>-<nonce10>" -- so a
+    process killed before it could run its own cleanup (attr3-footage-stage.ps1's own catch block,
+    or Remove-AttrCudaOwnerFootageStagingResidue on a normal failure path) leaves that ENTIRE
+    directory behind forever; nothing else ever revisits an old jobId to clean it up. Only an
+    entry directly under -TrustedRoot whose NAME matches that exact jobId shape, and whose newest
+    write (the directory's own, or its newest file's, whichever is later) is older than
+    -StaleAfterSec, is ever considered -- old enough that no attempt still within its own agent-job
+    timeout could legitimately still be mid-flight. Removal itself is delegated to
+    Remove-AttrCudaOwnerFootageStagingResidue, so only the neutral part-<n>/part-<n>.partial
+    entries it already knows how to remove are ever touched, and the directory itself only once
+    left empty -- an unrecognised file inside a matching, stale-enough directory is still left in
+    place, exactly as that function already guarantees for any other caller.
+    Never throws: a missing -TrustedRoot is a silent no-op, matching every other cleanup helper in
+    this module.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$TrustedRoot,
+        [Parameter(Mandatory = $true)][int]$StaleAfterSec
+    )
+
+    if (-not (Test-Path -LiteralPath $TrustedRoot -PathType Container -ErrorAction SilentlyContinue)) { return }
+    $staleJobIdPattern = '^attr3-footage-stage-[A-Za-z0-9_.-]{1,64}-[0-9a-f]{12}-[0-9a-f]{10}$'
+    $candidates = @(Get-ChildItem -LiteralPath $TrustedRoot -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $staleJobIdPattern })
+    foreach ($candidate in $candidates) {
+        $newestWriteUtc = $candidate.LastWriteTimeUtc
+        try {
+            $newestChild = Get-ChildItem -LiteralPath $candidate.FullName -File -Force -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+            if ($newestChild) { $newestWriteUtc = $newestChild.LastWriteTimeUtc }
+        } catch {}
+        $ageSec = ((Get-Date).ToUniversalTime() - $newestWriteUtc).TotalSeconds
+        if ($ageSec -gt $StaleAfterSec) {
+            [void](Remove-AttrCudaOwnerFootageStagingResidue -TrustedRoot $TrustedRoot -Directory $candidate.FullName)
+        }
+    }
+}
+
 Export-ModuleMember -Function `
     Get-AttrCudaOwnerFootageStagingName, `
     Send-AttrCudaOwnerFootagePartToStaging, `
     Remove-AttrCudaOwnerFootageStagingResidue, `
+    Remove-AttrCudaOwnerFootageStaleAttempts, `
     Get-AttrCudaOwnerFootageNeutralName, `
     Assert-AttrCudaOwnerPartsNaming, `
     Get-AttrCudaFileIdentity, `
