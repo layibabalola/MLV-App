@@ -40,7 +40,25 @@ struct PlaybackFramePopulation
  *  clip/timeline actually offered over the measured window, tracked by
  *  MainWindow::m_playbackTimelineSourceFramesOffered independent of request
  *  activity) and partitions it into four named, non-overlapping buckets that
- *  are PROVEN -- not assumed -- to sum back to it; see partitionSound. */
+ *  are PROVEN -- not assumed -- to sum back to it; see partitionSound.
+ *
+ *  CUDA-ATTRIBUTION-BASELINE-1 round 6 (astra major, "Request-event
+ *  subtraction still certifies incorrect never-requested versus
+ *  requested-then-skipped attribution"): the four buckets below are now
+ *  derived from source-frame-OCCURRENCE IDENTITY sets (see
+ *  PlaybackPresentedFrameIdentityTracker), not from subtracting a
+ *  presented-frame count off a request-EVENT count. An event count
+ *  overcounts "requested" whenever the same source frame is re-requested
+ *  without advancing (e.g. drop-frame mode's m_frameChanged firing every
+ *  timer tick regardless of whether the computed position crossed a
+ *  whole-frame boundary), which used to misattribute those duplicate-event
+ *  occurrences as requestedThenSkippedTargetFrames when they were in fact
+ *  never-distinctly-requested. Bucket membership is now decided by one rule
+ *  a test can name directly: an occurrence is presented if it is a member of
+ *  either presented-occurrence set; requested-then-skipped/discarded if it
+ *  is a member of the corresponding requested-occurrence set but not
+ *  presented; never-requested if it is not a member of either
+ *  requested-occurrence set. */
 struct PlaybackSourceFramePopulation
 {
     uint64_t offeredSourceFrames = 0;
@@ -49,18 +67,27 @@ struct PlaybackSourceFramePopulation
     uint64_t requestedThenSkippedTargetFrames = 0;
     uint64_t presentedViaTargetFrames = 0;
     uint64_t presentedViaLookaheadFrames = 0;
+    /*! CUDA-ATTRIBUTION-BASELINE-1 round 6 (astra BLOCKER, "Summing
+     *  per-origin unique counts double-counts overlapping source
+     *  identities"): the UNION of the target- and lookahead-presented
+     *  occurrence sets, not their sum -- a source frame reaching
+     *  presentation via both origins is one fact (one picture the user
+     *  saw), not two. presentedViaTargetFrames/presentedViaLookaheadFrames
+     *  above remain per-origin diagnostics only; this field, not their sum,
+     *  is what the four-bucket partition and the loss ratio use. */
     uint64_t presentedFrames = 0;
-    /*! True iff none of the three internal non-negative-delta clamps below
-     *  had to fire -- i.e. neverRequestedSourceFrames +
-     *  requestedThenDiscardedLookaheadFrames + requestedThenSkippedTargetFrames
-     *  + presentedFrames == offeredSourceFrames is not just numerically true
-     *  (the clamps make that trivially true whenever they fire, by
-     *  construction) but SOUND: every input counter behaved the way the
-     *  bucket definitions assume. False means one of those assumptions broke
-     *  (for example more presentations were classified against a request
-     *  class than that class ever issued) and the partition, while it still
-     *  sums, should be treated as UNKNOWN attribution rather than trusted --
-     *  the third-state rule this card also applies to timing. */
+    /*! True iff every source-frame occurrence requested (via either origin)
+     *  was requested via exactly one of {target-only, lookahead-only, both}
+     *  in a way the four buckets can account for without double-counting --
+     *  i.e. offeredSourceFrames >= the distinct requested-occurrence count,
+     *  AND presentedFrames + requestedThenDiscardedLookaheadFrames +
+     *  requestedThenSkippedTargetFrames == that same distinct
+     *  requested-occurrence count. False means one of those assumptions
+     *  broke (for example a single occurrence was genuinely requested via
+     *  BOTH origins and never presented via either, so it is counted once
+     *  in each skip/discard bucket) and the partition should be treated as
+     *  UNKNOWN attribution rather than trusted -- the third-state rule this
+     *  card also applies to timing. */
     bool partitionSound = false;
 };
 
@@ -114,56 +141,67 @@ public:
      *         units of elapsed playback time (see its declaration comment).
      *  \param timelineSourceFramesOfferedStart that accumulator's value when
      *         the smoke session started.
-     *  \param requestedTargetFramesBySerialThisSession the session's target-
-     *         request EVENT count (PlaybackFramePopulation::
-     *         requestedTargetFramesBySerial) -- every drawFrame() call issues
-     *         exactly one, including duplicates re-requesting a source frame
-     *         a prior call already requested (this can and does happen: drop-
-     *         frame mode sets m_frameChanged on every timer tick regardless
-     *         of whether the computed source position crossed a whole-frame
-     *         boundary since the previous tick).
-     *  \param reusedLookaheadTargetFramesThisSession CUDA-ATTRIBUTION-
-     *         BASELINE-1 round 4 (astra major, round-3 PARTIAL): of the
-     *         target-request events above, how many took drawFrame()'s
-     *         lookahead-reuse early return (MainWindow.cpp
-     *         playbackLookaheadCoversCurrent branch) instead of issuing a
-     *         genuinely new render demand. m_nextTargetRenderRequestSerial
-     *         advances BEFORE that branch is evaluated, so those events are
-     *         not a distinct source-frame demand at all -- they are the same
-     *         source frame the lookahead already requested, and they
-     *         present (if at all) through the lookahead path, not the target
-     *         path. Left in requestedTargetFramesBySerialThisSession, they
-     *         inflate genuine target demand by exactly the reuse count,
-     *         which then reads as requestedThenSkippedTargetFrames even
-     *         though every one of those attempts was satisfied.
-     *  \param lookaheadRequestsBySerialThisSession the session's speculative-
-     *         lookahead request EVENT count (PlaybackFramePopulation::
-     *         lookaheadRequestsBySerial).
+     *  \param requestedOccurrenceUnionCount CUDA-ATTRIBUTION-BASELINE-1
+     *         round 6 (astra major, "Request identities must be reconciled
+     *         too"): PlaybackPresentedFrameIdentityTracker::
+     *         requestedOccurrenceUnionCount() -- the count of DISTINCT
+     *         (loop epoch, displayFrame) occurrences ever asked for, by
+     *         either the target path or a lookahead path, this session. A
+     *         request-EVENT count cannot serve this role: the same source
+     *         frame can be re-requested without advancing (drop-frame mode
+     *         sets m_frameChanged on every timer tick regardless of whether
+     *         the computed position actually crossed a whole-frame boundary
+     *         since the previous tick), which inflated this figure with
+     *         duplicate events that were never a distinct demand -- and a
+     *         lookahead-covers-current reuse attempt
+     *         (MainWindow::drawFrame()'s playbackLookaheadCoversCurrent
+     *         branch) issues no new request at all, so it is simply never a
+     *         member of this set; no separate reuse back-out parameter is
+     *         needed any more (round 4's reusedLookaheadTargetFramesThisSession
+     *         is gone).
      *  \param presentedViaTargetFramesThisSession CUDA-ATTRIBUTION-BASELINE-1
      *         round 5 (sol BLOCKER, was PARTIAL through round 4): the count
-     *         of DISTINCT source-frame (displayFrame) indices presented this
-     *         session whose PresentationContext::playbackLookaheadRequest
-     *         was false -- a set size, not a presentation-event count.
-     *         Nothing upstream of notePlaybackSmokePresentedFrame() dedups
-     *         by displayFrame, so an event count here could not distinguish
-     *         N distinct source frames presented once each from 1 source
-     *         frame presented N times; both used to read as "N frames
-     *         accounted for", silently hiding the other N-1 as neither
-     *         skipped nor never-requested. See its caller for how the set is
-     *         built and why it is bounded.
+     *         of DISTINCT source-frame occurrences presented this session
+     *         whose PresentationContext::playbackLookaheadRequest was
+     *         false -- PlaybackPresentedFrameIdentityTracker::
+     *         distinctTargetPresentedCount(). Per-origin diagnostic only;
+     *         see presentedOccurrenceUnionCount for the figure the loss
+     *         computation actually uses.
      *  \param presentedViaLookaheadFramesThisSession the same distinct-count
      *         semantics as presentedViaTargetFramesThisSession above, for
      *         presentations whose PresentationContext::
      *         playbackLookaheadRequest was true.
+     *  \param presentedOccurrenceUnionCount CUDA-ATTRIBUTION-BASELINE-1
+     *         round 6 (astra BLOCKER, "Summing per-origin unique counts
+     *         double-counts overlapping source identities"):
+     *         PlaybackPresentedFrameIdentityTracker::
+     *         presentedOccurrenceUnionCount() -- the union of the two
+     *         per-origin presented sets. A source-frame occurrence
+     *         presented via both origins is one fact, not two; summing the
+     *         two per-origin counts instead of taking their union let a
+     *         session with heavy target/lookahead overlap pass a loss gate
+     *         it should have failed.
+     *  \param requestedThenSkippedTargetOccurrenceCount
+     *         PlaybackPresentedFrameIdentityTracker::
+     *         requestedThenSkippedTargetCount() -- occurrences a genuine
+     *         target request was issued for that never reached presentation
+     *         via either origin, computed as a QSet difference against the
+     *         SAME identity a presentation would have used, not by
+     *         subtracting mismatched-basis counts.
+     *  \param requestedThenDiscardedLookaheadOccurrenceCount the same
+     *         set-difference semantics as
+     *         requestedThenSkippedTargetOccurrenceCount above, for the
+     *         lookahead-requested set.
      */
     static PlaybackSourceFramePopulation computeSourceFramePopulation(
         double timelineSourceFramesOfferedNow,
         double timelineSourceFramesOfferedStart,
-        uint64_t requestedTargetFramesBySerialThisSession,
-        uint64_t reusedLookaheadTargetFramesThisSession,
-        uint64_t lookaheadRequestsBySerialThisSession,
+        uint64_t requestedOccurrenceUnionCount,
         uint64_t presentedViaTargetFramesThisSession,
-        uint64_t presentedViaLookaheadFramesThisSession )
+        uint64_t presentedViaLookaheadFramesThisSession,
+        uint64_t presentedOccurrenceUnionCount,
+        uint64_t requestedThenSkippedTargetOccurrenceCount,
+        uint64_t requestedThenDiscardedLookaheadOccurrenceCount )
     {
         PlaybackSourceFramePopulation result;
         const double rawOffered =
@@ -174,52 +212,34 @@ public:
                 : 0;
         result.presentedViaTargetFrames = presentedViaTargetFramesThisSession;
         result.presentedViaLookaheadFrames = presentedViaLookaheadFramesThisSession;
-        result.presentedFrames =
-            presentedViaTargetFramesThisSession + presentedViaLookaheadFramesThisSession;
-
-        /* A reuse attempt is not a distinct source-frame demand -- back it
-         * out of the target-request count before deriving skip/demand
-         * buckets from it. If reuse ever exceeds the raw request count
-         * (an invariant violation elsewhere), that is itself an unsoundness
-         * signal, not something to clamp silently. */
-        const bool reuseAccountingSound =
-            requestedTargetFramesBySerialThisSession
-                >= reusedLookaheadTargetFramesThisSession;
-        const uint64_t genuineTargetRequests =
-            reuseAccountingSound
-                ? requestedTargetFramesBySerialThisSession
-                      - reusedLookaheadTargetFramesThisSession
-                : 0;
-
-        const bool targetBucketSound =
-            genuineTargetRequests >= presentedViaTargetFramesThisSession;
-        result.requestedThenSkippedTargetFrames =
-            targetBucketSound
-                ? genuineTargetRequests - presentedViaTargetFramesThisSession
-                : 0;
-
-        const bool lookaheadBucketSound =
-            lookaheadRequestsBySerialThisSession >= presentedViaLookaheadFramesThisSession;
+        result.presentedFrames = presentedOccurrenceUnionCount;
+        result.requestedThenSkippedTargetFrames = requestedThenSkippedTargetOccurrenceCount;
         result.requestedThenDiscardedLookaheadFrames =
-            lookaheadBucketSound
-                ? lookaheadRequestsBySerialThisSession - presentedViaLookaheadFramesThisSession
-                : 0;
+            requestedThenDiscardedLookaheadOccurrenceCount;
 
-        const uint64_t accountedFor =
+        /* By construction (PlaybackPresentedFrameIdentityTracker's skip/
+         * discard counts are each a QSet difference against the presented
+         * union), this sum equals requestedOccurrenceUnionCount exactly
+         * UNLESS a single occurrence was genuinely requested via BOTH the
+         * target and the lookahead path and never presented via either --
+         * then it is a member of both difference sets and is counted twice
+         * here. That is a real double-attribution the partition must
+         * surface as unsound, not silently absorb. */
+        const uint64_t accountedForByRequestBuckets =
             result.presentedFrames
             + result.requestedThenDiscardedLookaheadFrames
             + result.requestedThenSkippedTargetFrames;
-        const bool offeredBucketSound = result.offeredSourceFrames >= accountedFor;
+        const bool requestBucketsSound =
+            accountedForByRequestBuckets == requestedOccurrenceUnionCount;
+
+        const bool offeredBucketSound =
+            result.offeredSourceFrames >= requestedOccurrenceUnionCount;
         result.neverRequestedSourceFrames =
             offeredBucketSound
-                ? result.offeredSourceFrames - accountedFor
+                ? result.offeredSourceFrames - requestedOccurrenceUnionCount
                 : 0;
 
-        result.partitionSound =
-            reuseAccountingSound
-            && targetBucketSound
-            && lookaheadBucketSound
-            && offeredBucketSound;
+        result.partitionSound = offeredBucketSound && requestBucketsSound;
         return result;
     }
 };

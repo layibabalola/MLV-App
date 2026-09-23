@@ -1991,6 +1991,7 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
 #include "GpuTexturePresentAvailabilityPolicy.h"
 #include "MainWindowGpuPreviewPolicy.h"
 #include "PlaybackFramePopulationPolicy.h"
+#include "PlaybackLookaheadLoopPositionPolicy.h"
 #include "PlaybackQualityPolicy.h"
 #include "PlaybackScaling.h"
 #include "ZebraThresholds.h"
@@ -3793,11 +3794,21 @@ void MainWindow::queuePlaybackLookaheadRequests(
     for( int offset = 1; offset <= depth; ++offset )
     {
         int lookaheadFrame = requestedFrame + offset;
+        /* CUDA-ATTRIBUTION-BASELINE-1 round 6 (sol + astra BLOCKER): a
+         * lookahead can be requested for a position past cut-out, i.e. in a
+         * LATER lap than requestedFrame's own -- see PresentationContext::
+         * playbackSmokeLoopEpoch's declaration comment and
+         * PlaybackLookaheadLoopPositionPolicy.h (extracted so this
+         * arithmetic is unit-tested without the GUI). */
+        uint64_t lookaheadLoopEpoch = baseContext.playbackSmokeLoopEpoch;
         if( lookaheadFrame > cutOutFrame )
         {
             if( !ui->actionLoop->isChecked() || loopSpan <= 0 ) break;
-            lookaheadFrame =
-                cutInFrame + ( ( lookaheadFrame - cutInFrame ) % loopSpan );
+            const PlaybackLookaheadLoopPosition wrapped =
+                PlaybackLookaheadLoopPositionPolicy::wrap(
+                    lookaheadFrame, cutInFrame, loopSpan );
+            lookaheadLoopEpoch += wrapped.lapsAhead;
+            lookaheadFrame = wrapped.wrappedFrame;
         }
         if( lookaheadFrame < 0 || lookaheadFrame >= totalFrames ) break;
         if( lookaheadFrame == requestedFrame ) continue;
@@ -3828,6 +3839,15 @@ void MainWindow::queuePlaybackLookaheadRequests(
             static_cast<uint32_t>( qMax( 0, requestedFrame ) );
         lookaheadContext.playbackLookaheadDepth = offset;
         lookaheadContext.dropFramePlaybackActive = false;
+        lookaheadContext.playbackSmokeLoopEpoch = lookaheadLoopEpoch;
+
+        if( m_playbackSmokeActive && m_playbackSmokeFrameTelemetry )
+        {
+            m_playbackSmokePresentedFrameIdentity.noteRequestedFrame(
+                lookaheadLoopEpoch,
+                static_cast<uint64_t>( lookaheadFrame ),
+                /*viaLookahead=*/true );
+        }
 
         queuePresentationRequest( lookaheadContext );
         m_pRenderThread->renderFrame( static_cast<uint32_t>( lookaheadFrame ),
@@ -6518,6 +6538,11 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
             ? m_playbackScaleClampedForGpuTextureRouteRequestedScale
             : requestContext.playbackScaleFactor;
     requestContext.playbackQualityMode = m_playbackQualityMode;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 6 (sol + astra BLOCKER): capture
+     * which lap this request's requestedFrame belongs to, synchronously,
+     * like playbackScaleFactor above -- see PresentationContext::
+     * playbackSmokeLoopEpoch's declaration comment. */
+    requestContext.playbackSmokeLoopEpoch = m_playbackSmokeLoopWrapCount;
 
     RenderFrameThread::PresentationPreparationOptions presentationPreparation;
     presentationPreparation.fastPlaybackScale = requestContext.fastPlaybackScaleEligible;
@@ -6605,13 +6630,13 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
          * (before playbackLookaheadCoversCurrent could be evaluated), but
          * this attempt is being satisfied by an EXISTING lookahead request
          * rather than issuing a new one -- it is not a distinct source-frame
-         * demand. Record it so computeSourceFramePopulation() can back it
-         * out of genuine target demand instead of double-counting it as a
-         * skip once it presents via the lookahead bucket. */
-        if( m_playbackSmokeActive )
-        {
-            ++m_playbackSmokeReusedLookaheadTargetFrames;
-        }
+         * demand.
+         * Round 6 (sol + astra major, "Request identities must be
+         * reconciled too"): this attempt therefore does NOT reach
+         * m_playbackSmokePresentedFrameIdentity.noteRequestedFrame() below
+         * -- the exclusion round 4 achieved by subtracting a reuse counter
+         * is now structural: the call site that would record a genuine
+         * target request is simply never reached for a reuse attempt. */
         const bool playbackLookaheadReady =
             m_pRenderThread->hasReadyPlaybackLookaheadFrame(
                 static_cast<uint32_t>( requestedFrame ),
@@ -6644,6 +6669,21 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
             m_playbackTimelineAdvancePending = false;
         }
         return;
+    }
+
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 6 (sol + astra major, "Request
+     * identities must be reconciled too"): reaching this point means the
+     * reuse branch above did NOT return early, so this is a genuinely new
+     * target request. Gated on m_playbackSmokeFrameTelemetry, not merely
+     * m_playbackSmokeActive -- see PlaybackPresentedFrameIdentityTracker.h's
+     * bounding note (round 6 sol + astra major, "the growing identity
+     * tracker runs during ordinary GUI playback"). */
+    if( m_playbackSmokeActive && m_playbackSmokeFrameTelemetry )
+    {
+        m_playbackSmokePresentedFrameIdentity.noteRequestedFrame(
+            requestContext.playbackSmokeLoopEpoch,
+            static_cast<uint64_t>( requestedFrame ),
+            /*viaLookahead=*/false );
     }
 
     if( interactiveTraceEnabled() )
@@ -22559,7 +22599,6 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeStartTargetRequestSerial = m_nextTargetRenderRequestSerial;
     m_playbackSmokeStartTimelineSourceFramesOffered = m_playbackTimelineSourceFramesOffered;
     m_playbackSmokePresentedFrameIdentity.reset();
-    m_playbackSmokeReusedLookaheadTargetFrames = 0;
     m_playbackSmokeStartDecodeRequestsIssued =
         m_pRenderThread ? m_pRenderThread->decodeRequestsIssuedCount() : 0;
     m_playbackSmokeStartPrepStaleDrops =
@@ -22885,9 +22924,20 @@ void MainWindow::notePlaybackSmokePresentedFrame(
      * Round 5 (sol BLOCKER): record the DISTINCT displayFrame, not a raw
      * event tick -- a duplicate presentation of a source frame already in
      * the set is not new information and must not inflate the "presented"
-     * bucket computeSourceFramePopulation() derives loss from. */
-    m_playbackSmokePresentedFrameIdentity.notePresentedFrame(
-        displayFrame, requestContext.playbackLookaheadRequest );
+     * bucket computeSourceFramePopulation() derives loss from.
+     * Round 6 (sol + astra BLOCKER, round 5 INVERTED): identity is now
+     * (loop epoch, displayFrame), not displayFrame alone -- see
+     * PlaybackPresentedFrameIdentityTracker.h. Gated on
+     * m_playbackSmokeFrameTelemetry, not merely m_playbackSmokeActive
+     * (round 6 sol + astra major, "the growing identity tracker runs during
+     * ordinary GUI playback"). */
+    if( m_playbackSmokeFrameTelemetry )
+    {
+        m_playbackSmokePresentedFrameIdentity.notePresentedFrame(
+            requestContext.playbackSmokeLoopEpoch,
+            displayFrame,
+            requestContext.playbackLookaheadRequest );
+    }
     const auto avgSmokeMs = [this]( double sum ) -> double
     {
         return m_playbackSmokePresentedFrames > 0
@@ -25303,21 +25353,30 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
      * playback_smoke.source_frame_population below and its use in
      * run-release-gui-smoke.ps1.
      * Round 5 (sol BLOCKER): the two presented-count arguments below are
-     * distinct-displayFrame-index counts, not event counts -- a source
-     * frame presented N times over the session contributes 1, not N, so a
+     * distinct-occurrence counts, not event counts -- a source frame
+     * presented N times over the session contributes 1, not N, so a
      * duplicate presentation can no longer masquerade as N distinct frames
-     * accounted for. See m_playbackSmokePresentedFrameIdentity's
+     * accounted for.
+     * Round 6 (sol + astra BLOCKER, round 5 INVERTED, "Request identities
+     * must be reconciled too"): identity is (loop epoch, displayFrame), not
+     * displayFrame alone, so a healthy repeated LAP no longer collapses onto
+     * the same identities; requested-side identities (not just presented)
+     * now feed this too, so a duplicate REQUEST event without a distinct
+     * demand can no longer misattribute as a skip; and the two presented
+     * counts are unioned, not summed, so an occurrence presentable via both
+     * origins is not double-counted. See m_playbackSmokePresentedFrameIdentity's
      * declaration comment and PlaybackPresentedFrameIdentityTracker.h for
-     * why the underlying sets are safely bounded. */
+     * the full rationale and why the underlying sets are safely bounded. */
     const PlaybackSourceFramePopulation sourceFramePopulation =
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             m_playbackTimelineSourceFramesOffered,
             m_playbackSmokeStartTimelineSourceFramesOffered,
-            requestedTargetFramesBySerial,
-            static_cast<uint64_t>( qMax( 0, m_playbackSmokeReusedLookaheadTargetFrames ) ),
-            lookaheadRequestsBySerial,
+            m_playbackSmokePresentedFrameIdentity.requestedOccurrenceUnionCount(),
             m_playbackSmokePresentedFrameIdentity.distinctTargetPresentedCount(),
-            m_playbackSmokePresentedFrameIdentity.distinctLookaheadPresentedCount() );
+            m_playbackSmokePresentedFrameIdentity.distinctLookaheadPresentedCount(),
+            m_playbackSmokePresentedFrameIdentity.presentedOccurrenceUnionCount(),
+            m_playbackSmokePresentedFrameIdentity.requestedThenSkippedTargetCount(),
+            m_playbackSmokePresentedFrameIdentity.requestedThenDiscardedLookaheadCount() );
     const double sourceFrameLossRatio =
         sourceFramePopulation.offeredSourceFrames > 0
             ? static_cast<double>(
@@ -25588,17 +25647,25 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
      * AUTHORITATIVE gate figure (source_frame_loss_ratio); see
      * run-release-gui-smoke.ps1's use of it.
      * Round 5 (sol BLOCKER): presented_via_target_frames/
-     * presented_via_lookahead_frames are now distinct-source-frame counts
-     * (QSet<displayFrame>.size()), not presentation-event counts -- the only
-     * consumers of these two fields (run-release-gui-smoke.ps1's
-     * presentedViaTargetFrames/presentedViaLookaheadFrames passthrough into
-     * clipResults, and this line's own presented_frames/loss-ratio math) use
-     * them exclusively for source-frame-loss accounting, never as a
-     * presentation-cadence/workload figure -- m_playbackSmokePresentedFrames
+     * presented_via_lookahead_frames are distinct-occurrence counts, not
+     * presentation-event counts -- the only consumers of these two fields
+     * (run-release-gui-smoke.ps1's presentedViaTargetFrames/
+     * presentedViaLookaheadFrames passthrough into clipResults) use them
+     * exclusively as origin diagnostics, never as a presentation-cadence/
+     * workload figure or as the loss basis -- m_playbackSmokePresentedFrames
      * (playback_smoke.frame_population's presented_frames) remains the
-     * event-count total for that purpose, unchanged. No dual-field export
-     * needed: repurposing this field name completes the fix these two
-     * fields exist for rather than colliding with a different one. */
+     * event-count total for cadence, unchanged.
+     * Round 6 (sol + astra BLOCKER, round 5 INVERTED): identity is (loop
+     * epoch, displayFrame), not displayFrame alone (a healthy repeated lap
+     * no longer collapses onto lap 1's identities), the requested side is
+     * now identity-based too (a duplicate request EVENT without a distinct
+     * demand no longer misattributes as a skip), and presented_frames is
+     * the UNION of the two per-origin sets, not their sum (an occurrence
+     * presentable via both origins is one fact, not two -- see astra's
+     * overlap finding). Every insertion into these sets is gated on
+     * MLVAPP_PLAYBACK_SMOKE_TELEMETRY; a session without that env var set
+     * reports presented_frames=0 and this whole line is not meaningful for
+     * it -- see PlaybackPresentedFrameIdentityTracker.h. */
     qInfo().noquote()
         << QStringLiteral(
                "playback_smoke.source_frame_population session=%1 "
@@ -25610,7 +25677,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "partition_sound=%9 source_frame_loss_ratio=%10 "
                "population_basis=\"offered_source_frames is "
                "MainWindow::m_playbackTimelineSourceFramesOffered's session "
-               "delta -- real elapsed playback time converted to frame units "
+               "delta -- real elapsed playback time converted to frame units, "
+               "counting every lap of a looping session, "
                "at the exact sites playbackHandling() advances the position, "
                "using the raw pre-wrap-subtraction delta so a loop wrap never "
                "loses distance travelled. It is independent of whether any "
@@ -25618,14 +25686,18 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "figure on this line's companion playback_smoke."
                "frame_population -- this is the fix for the source-frame "
                "loss those figures cannot see: a frame drop-frame catch-up "
-               "skips over before issuing a request for it. "
-               "presented_via_target_frames/presented_via_lookahead_frames "
-               "count DISTINCT displayFrame indices reaching presentation "
-               "(round 5), not presentation events -- the same source frame "
-               "presented repeatedly contributes once, so a duplicate "
-               "re-presentation cannot masquerade as covering the source "
-               "frames it did not advance to. The four named buckets "
-               "(never_requested_source_frames, "
+               "skips over before issuing a request for it. Every other "
+               "figure on this line is keyed by the SAME (loop epoch, "
+               "displayFrame) occurrence identity as offered_source_frames "
+               "(round 6), so a healthy repeated lap is not mistaken for "
+               "loss and a duplicate request/presentation event within one "
+               "lap does not inflate its bucket. presented_frames is the "
+               "union of the target- and lookahead-presented occurrence "
+               "sets, not their sum -- an occurrence presentable via both "
+               "origins is one fact. Only present when "
+               "MLVAPP_PLAYBACK_SMOKE_TELEMETRY is set; presented_frames=0 "
+               "on a session without it, not evidence of loss. The four "
+               "named buckets (never_requested_source_frames, "
                "requested_then_discarded_lookahead_frames, "
                "requested_then_skipped_target_frames, presented_frames) sum "
                "exactly to offered_source_frames whenever partition_sound is "

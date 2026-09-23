@@ -211,6 +211,23 @@ public:
             double playbackTimelineAdvanceIssueStageTime = 0.0;
             double playbackTimelineSourceFrameReadyEmitStageTime = 0.0;
             double playbackTimelineSourceDrawBeginStageTime = 0.0;
+            /* CUDA-ATTRIBUTION-BASELINE-1 round 6 (sol + astra BLOCKER): which
+             * loop lap this request's frameNumber belongs to
+             * (MainWindow::m_playbackSmokeLoopWrapCount at the moment this
+             * request was issued -- 0 for the first pass through the cut
+             * range, 1 after the first loop wrap, and so on). Captured
+             * synchronously with the request, like playbackScaleFactor above,
+             * because a lookahead request issued near the loop boundary can
+             * legitimately belong to a later lap than the request that
+             * spawned it -- see queuePlaybackLookaheadRequests(). Combined
+             * with frameNumber this is the SOURCE-FRAME OCCURRENCE identity:
+             * two presentations of frameNumber 5 in two different laps are
+             * two distinct occurrences (both real, both should count), while
+             * two presentations of frameNumber 5 in the SAME lap are the same
+             * occurrence (a stale re-present, must not inflate the presented
+             * count). Raw frameNumber alone cannot distinguish these two
+             * cases; see PlaybackPresentedFrameIdentityTracker.h. */
+            uint64_t playbackSmokeLoopEpoch = 0;
         };
 
         const uint8_t *rawImage8 = nullptr;

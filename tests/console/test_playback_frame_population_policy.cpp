@@ -76,6 +76,19 @@ TEST(PlaybackFramePopulationPolicy, DeltaNeverGoesNegativeAcrossCounterReset)
     ASSERT_EQ(uint64_t(0), PlaybackFramePopulationPolicy::nonNegativeDelta(5, 10));
 }
 
+// CUDA-ATTRIBUTION-BASELINE-1 round 6 (sol + astra BLOCKER, round 5
+// INVERTED): computeSourceFramePopulation() no longer takes raw
+// request-EVENT counters at all -- every "requested"/"presented" argument
+// is now a distinct-OCCURRENCE count produced by
+// PlaybackPresentedFrameIdentityTracker, fed exactly the way
+// MainWindow::drawFrame()/queuePlaybackLookaheadRequests()/
+// notePlaybackSmokePresentedFrame() feed it (noteRequestedFrame() at the
+// genuine-request call sites, notePresentedFrame() at the presentation call
+// site). Building each scenario below through the tracker, rather than
+// synthesizing precomputed counts by hand, exercises the SAME call pattern
+// production uses, not just the arithmetic in isolation -- see this round's
+// producer brief major finding 2.
+
 // CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
 // RESOLVED): astra's own repro -- "advance approximately three source frames
 // per target request and present all 20 issued requests across 60
@@ -90,26 +103,36 @@ TEST(PlaybackFramePopulationPolicy, AstraRepro_SkippedSourceFramesSurfaceAsNever
 {
     const double offeredNow = 60.0;
     const double offeredStart = 0.0;
-    const uint64_t targetRequests = 20;
-    const uint64_t lookaheadRequests = 0;
     const uint64_t presentedViaTarget = 20;
-    const uint64_t presentedViaLookahead = 0;
 
     // The OLD (round 2) gate figure: every target request was presented, so
     // this reads zero loss -- exactly the false pass astra proved.
     const PlaybackFramePopulation legacyPopulation = PlaybackFramePopulationPolicy::compute(
-        /*nextRenderRequestSerial=*/targetRequests,
+        /*nextRenderRequestSerial=*/presentedViaTarget,
         /*startRequestSerial=*/0,
-        /*nextTargetRenderRequestSerial=*/targetRequests,
+        /*nextTargetRenderRequestSerial=*/presentedViaTarget,
         /*startTargetRequestSerial=*/0,
         presentedViaTarget );
     ASSERT_EQ(uint64_t(0), legacyPopulation.skippedOrUnpresentedByTargetSerial);
 
+    // Only 20 of the 60 offered source frames ever became a request at all
+    // (frames 0..19); all 20 were presented.
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t f = 0; f < 20; ++f)
+    {
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+    }
+
     const PlaybackSourceFramePopulation population =
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             offeredNow, offeredStart,
-            targetRequests, /*reusedLookaheadTargetFrames=*/0, lookaheadRequests,
-            presentedViaTarget, presentedViaLookahead );
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
 
     ASSERT_EQ(uint64_t(60), population.offeredSourceFrames);
     ASSERT_EQ(uint64_t(40), population.neverRequestedSourceFrames);
@@ -136,15 +159,23 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_NoLossIsFullyAccountedFor)
 {
     // Normal (non-drop-frame) mode: every offered source frame is requested
     // and presented one at a time -- no skip is possible by construction.
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t f = 0; f < 20; ++f)
+    {
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+    }
+
     const PlaybackSourceFramePopulation population =
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             /*timelineSourceFramesOfferedNow=*/25.0,
             /*timelineSourceFramesOfferedStart=*/5.0,
-            /*requestedTargetFramesBySerialThisSession=*/20,
-            /*reusedLookaheadTargetFramesThisSession=*/0,
-            /*lookaheadRequestsBySerialThisSession=*/0,
-            /*presentedViaTargetFramesThisSession=*/20,
-            /*presentedViaLookaheadFramesThisSession=*/0 );
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
 
     ASSERT_EQ(uint64_t(20), population.offeredSourceFrames);
     ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
@@ -156,21 +187,32 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_NoLossIsFullyAccountedFor)
 
 TEST(PlaybackFramePopulationPolicy, SourcePopulation_DiscardedLookaheadAndSkippedTargetBothCounted)
 {
-    // 100 offered source frames; 70 got a target request but only 50 of
-    // those were presented (20 genuinely skipped); 20 speculative lookahead
-    // requests were issued, of which 5 were the ones actually presented
-    // (15 discarded); the remaining 10 offered frames never got any request
-    // at all (70 target + 20 lookahead = 90 request-touches, leaving 10 of
-    // the 100 offered frames untouched by either).
+    // 100 offered source frames; 70 got a genuine target request (frames
+    // 0..69) but only 50 of those were presented (0..49; 50..69 genuinely
+    // skipped); 20 speculative lookahead requests were issued for a
+    // disjoint range (frames 70..89), of which only 5 were presented
+    // (70..74; 75..89 discarded); the remaining 10 offered frames (90..99)
+    // never got any request at all from either origin.
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t f = 0; f < 70; ++f)
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+    for (uint64_t f = 0; f < 50; ++f)
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+    for (uint64_t f = 70; f < 90; ++f)
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/true);
+    for (uint64_t f = 70; f < 75; ++f)
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/true);
+
     const PlaybackSourceFramePopulation population =
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             /*timelineSourceFramesOfferedNow=*/100.0,
             /*timelineSourceFramesOfferedStart=*/0.0,
-            /*requestedTargetFramesBySerialThisSession=*/70,
-            /*reusedLookaheadTargetFramesThisSession=*/0,
-            /*lookaheadRequestsBySerialThisSession=*/20,
-            /*presentedViaTargetFramesThisSession=*/50,
-            /*presentedViaLookaheadFramesThisSession=*/5 );
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
 
     ASSERT_EQ(uint64_t(100), population.offeredSourceFrames);
     ASSERT_EQ(uint64_t(20), population.requestedThenSkippedTargetFrames);
@@ -185,76 +227,379 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_DiscardedLookaheadAndSkippe
               + population.presentedFrames);
 }
 
+// CUDA-ATTRIBUTION-BASELINE-1 round 6 (astra major, "Summing per-origin
+// unique counts double-counts overlapping source identities and can falsely
+// pass the source-loss gate"): 60 offered; 40 target-request events and 20
+// lookahead-request events all resolve to the SAME 20 distinct source-frame
+// identities, all presented via both origins. Summing the two per-origin
+// presented counts (20+20=40) reports 33.3% loss and passes a 50% gate; the
+// TRUE loss is 66.7% (only 20 of 60 offered source frames were ever shown,
+// regardless of how many origins showed them).
+TEST(PlaybackFramePopulationPolicy, SourcePopulation_OverlappingOriginsAreOneFactNotTwo)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    // 40 target-request EVENTS, all landing on one of 20 distinct indices.
+    for (uint64_t i = 0; i < 40; ++i)
+        identity.noteRequestedFrame(/*loopEpoch=*/0, i % 20, /*viaLookahead=*/false);
+    for (uint64_t f = 0; f < 20; ++f)
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+    // 20 lookahead-request events, the same 20 indices, also presented.
+    for (uint64_t f = 0; f < 20; ++f)
+    {
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/true);
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/true);
+    }
+
+    ASSERT_EQ(uint64_t(20), identity.distinctTargetPresentedCount());
+    ASSERT_EQ(uint64_t(20), identity.distinctLookaheadPresentedCount());
+    // The union, not the sum (40), is the true count of distinct source
+    // frames actually shown.
+    ASSERT_EQ(uint64_t(20), identity.presentedOccurrenceUnionCount());
+
+    const PlaybackSourceFramePopulation population =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            /*timelineSourceFramesOfferedNow=*/60.0,
+            /*timelineSourceFramesOfferedStart=*/0.0,
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
+
+    ASSERT_EQ(uint64_t(60), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(20), population.presentedFrames);
+    ASSERT_EQ(uint64_t(40), population.neverRequestedSourceFrames);
+    ASSERT_EQ(uint64_t(0), population.requestedThenSkippedTargetFrames);
+    ASSERT_EQ(uint64_t(0), population.requestedThenDiscardedLookaheadFrames);
+    ASSERT_TRUE(population.partitionSound);
+    const double lossRatio =
+        static_cast<double>( population.offeredSourceFrames - population.presentedFrames )
+        / static_cast<double>( population.offeredSourceFrames );
+    // The sum-based computation would have reported 33.3% and passed a 50%
+    // gate; the correct union-based figure must fail it.
+    ASSERT_TRUE(lossRatio > 0.5);
+}
+
+// CUDA-ATTRIBUTION-BASELINE-1 round 6 (astra major, "Request-event
+// subtraction still certifies incorrect never-requested versus
+// requested-then-skipped attribution"): 60 offered, single lap; 60 target
+// REQUEST EVENTS but only 20 distinct source-frame identities are ever the
+// subject of one (drop-frame mode's m_frameChanged firing every tick
+// regardless of whether the position actually advanced). All 20 distinct
+// requested identities are presented. Astra's correct interpretation: 40
+// source frames were never requested at all (0 skipped); the pre-round-6
+// event-count subtraction instead reported 40 requested-then-skipped and 0
+// never-requested -- backwards.
+TEST(PlaybackFramePopulationPolicy, AstraRepro_DuplicateRequestEventsAreNeverRequestedNotSkipped)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t i = 0; i < 60; ++i)
+    {
+        const uint64_t f = i % 20; // only 20 distinct source frames ever asked for
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+    }
+    ASSERT_EQ(uint64_t(20), identity.requestedOccurrenceUnionCount());
+
+    const PlaybackSourceFramePopulation population =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            /*timelineSourceFramesOfferedNow=*/60.0,
+            /*timelineSourceFramesOfferedStart=*/0.0,
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
+
+    ASSERT_EQ(uint64_t(60), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(20), population.presentedFrames);
+    // All 20 distinctly-requested identities were presented: nothing was
+    // genuinely skipped.
+    ASSERT_EQ(uint64_t(0), population.requestedThenSkippedTargetFrames);
+    // The other 40 offered source frames were never the subject of any
+    // request at all -- not "requested then skipped".
+    ASSERT_EQ(uint64_t(40), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+}
+
 // CUDA-ATTRIBUTION-BASELINE-1 round 3: if a presentation is ever classified
 // against a request class that issued fewer requests than were presented
 // from it (an invariant violation elsewhere, not something this policy can
 // happen on its own), the clamp must fire and partitionSound must go false
 // -- the third-state/UNKNOWN rule -- rather than silently reporting a
-// partition that merely sums by construction.
+// partition that merely sums by construction. Exercised directly against
+// the policy (not the tracker) since a normal tracker usage cannot produce
+// more presented than requested identities by construction.
 TEST(PlaybackFramePopulationPolicy, SourcePopulation_UnsoundInputsAreFlaggedNotHidden)
 {
     const PlaybackSourceFramePopulation population =
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             /*timelineSourceFramesOfferedNow=*/50.0,
             /*timelineSourceFramesOfferedStart=*/0.0,
-            /*requestedTargetFramesBySerialThisSession=*/10,
-            /*reusedLookaheadTargetFramesThisSession=*/0,
-            /*lookaheadRequestsBySerialThisSession=*/0,
+            /*requestedOccurrenceUnionCount=*/10,
             /*presentedViaTargetFramesThisSession=*/15, // more presented than requested
-            /*presentedViaLookaheadFramesThisSession=*/0 );
+            /*presentedViaLookaheadFramesThisSession=*/0,
+            /*presentedOccurrenceUnionCount=*/15,
+            /*requestedThenSkippedTargetOccurrenceCount=*/0,
+            /*requestedThenDiscardedLookaheadOccurrenceCount=*/0 );
 
     ASSERT_TRUE(!population.partitionSound);
 }
 
-TEST(PlaybackFramePopulationPolicy, SourcePopulation_OfferedAccumulatorIsWrapImmune)
+// CUDA-ATTRIBUTION-BASELINE-1 round 6 (sol + astra major, new failure mode
+// enabled by identity-based request accounting): a single source-frame
+// occurrence genuinely requested via BOTH the target and the lookahead path
+// and never presented via either is a member of both skip/discard
+// difference sets -- counted twice in accountedForByRequestBuckets against
+// a requestedOccurrenceUnionCount of only 1. The partition must surface
+// this as unsound rather than silently reporting a plausible-looking
+// (wrong) never-requested figure.
+TEST(PlaybackFramePopulationPolicy, SourcePopulation_DualOriginNeverPresentedOccurrenceIsFlaggedNotHidden)
 {
-    // A loop wrap only ever moves m_newPosDropMode; the RAW per-tick advance
-    // added to m_playbackTimelineSourceFramesOffered is captured before that
-    // subtraction, so the accumulator itself never decreases and a session
-    // spanning several wraps still reports the true cumulative offered count.
+    PlaybackPresentedFrameIdentityTracker identity;
+    identity.noteRequestedFrame(/*loopEpoch=*/0, /*displayFrame=*/5, /*viaLookahead=*/false);
+    identity.noteRequestedFrame(/*loopEpoch=*/0, /*displayFrame=*/5, /*viaLookahead=*/true);
+    // Never presented via either origin.
+
+    ASSERT_EQ(uint64_t(1), identity.requestedOccurrenceUnionCount());
+    ASSERT_EQ(uint64_t(1), identity.requestedThenSkippedTargetCount());
+    ASSERT_EQ(uint64_t(1), identity.requestedThenDiscardedLookaheadCount());
+
+    const PlaybackSourceFramePopulation population =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            /*timelineSourceFramesOfferedNow=*/30.0,
+            /*timelineSourceFramesOfferedStart=*/0.0,
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
+
+    ASSERT_TRUE(!population.partitionSound);
+}
+
+// CUDA-ATTRIBUTION-BASELINE-1 round 5 (sol BLOCKER) / round 6 (sol + astra
+// BLOCKER, round 5 INVERTED): sol's headline scenario, made mechanistically
+// faithful under the identity-based request model -- 60 offered source
+// frames spanning a single lap, each genuinely and distinctly REQUESTED
+// (frames 0..59, one request per source frame, matching offered exactly),
+// but the presentation path is stuck showing only frames 0..19 in a cycle
+// instead of the frame that was actually requested. Presentation identity
+// dedup alone (round 5) is not enough to catch this -- it must be compared
+// against REQUEST identity (round 6) to see that frames 20..59 were asked
+// for but never actually shown.
+TEST(PlaybackFramePopulationPolicy, SolRepro_StaleRepresentationWithinOneLapStillCountsAsLoss)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t f = 0; f < 60; ++f)
+    {
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+        // Stuck presentation: always shows one of the first 20 frames,
+        // never the one actually requested once f reaches 20.
+        identity.notePresentedFrame(/*loopEpoch=*/0, f % 20, /*viaLookahead=*/false);
+    }
+    ASSERT_EQ(uint64_t(60), identity.requestedOccurrenceUnionCount());
+    ASSERT_EQ(uint64_t(20), identity.distinctTargetPresentedCount());
+
+    const PlaybackSourceFramePopulation population =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            /*timelineSourceFramesOfferedNow=*/60.0,
+            /*timelineSourceFramesOfferedStart=*/0.0,
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
+
+    ASSERT_EQ(uint64_t(60), population.offeredSourceFrames);
+    // Only 20 distinct source frames actually reached presentation -- the
+    // repeated re-presentations of the same 20 are not new information and
+    // must not inflate this bucket to 60.
+    ASSERT_EQ(uint64_t(20), population.presentedFrames);
+    // The other 40 offered source frames: genuinely, distinctly requested
+    // (frames 20..59), never actually shown.
+    ASSERT_EQ(uint64_t(40), population.requestedThenSkippedTargetFrames);
+    ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+    ASSERT_EQ(population.offeredSourceFrames,
+              population.neverRequestedSourceFrames
+              + population.requestedThenDiscardedLookaheadFrames
+              + population.requestedThenSkippedTargetFrames
+              + population.presentedFrames);
+    // The true loss -- 66.7% -- is now visible.
+    const double lossRatio =
+        static_cast<double>(population.offeredSourceFrames - population.presentedFrames)
+        / static_cast<double>(population.offeredSourceFrames);
+    ASSERT_TRUE(lossRatio > 0.5);
+}
+
+// CUDA-ATTRIBUTION-BASELINE-1 round 6 (sol + astra BLOCKER, "round 5
+// INVERTED the defect"): sol's wrap repro, made executable -- three
+// complete, healthy laps of a 24-frame span. Every one of the 72
+// occurrences (24 frames x 3 laps) is genuinely requested and presented.
+// Keying identity by raw displayFrame alone (round 5) collapses all three
+// laps onto the same 24 identities and reports 66.7% loss on a session that
+// lost nothing; keying identity by (loop epoch, displayFrame) instead
+// (round 6) keeps all 72 occurrences distinct, because a presentation in
+// lap 1 and a presentation in lap 2 are different pairs.
+TEST(PlaybackFramePopulationPolicy, SourcePopulation_HealthyRepeatedLapsAreNotLoss)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t lap = 0; lap < 3; ++lap)
+    {
+        for (uint64_t f = 0; f < 24; ++f)
+        {
+            identity.noteRequestedFrame(lap, f, /*viaLookahead=*/false);
+            identity.notePresentedFrame(lap, f, /*viaLookahead=*/false);
+        }
+    }
+    // All 72 occurrences are distinct identities -- a raw-displayFrame-only
+    // tracker would report 24 here instead (sol's exact blocker repro).
+    ASSERT_EQ(uint64_t(72), identity.requestedOccurrenceUnionCount());
+    ASSERT_EQ(uint64_t(72), identity.distinctTargetPresentedCount());
+    ASSERT_EQ(uint64_t(72), identity.presentedOccurrenceUnionCount());
+
     const double beforeWraps = 1000.0;
     const double afterThreeLapsOf24Frames = beforeWraps + ( 24.0 * 3.0 );
 
     const PlaybackSourceFramePopulation population =
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             afterThreeLapsOf24Frames, beforeWraps,
-            /*requestedTargetFramesBySerialThisSession=*/72,
-            /*reusedLookaheadTargetFramesThisSession=*/0,
-            /*lookaheadRequestsBySerialThisSession=*/0,
-            /*presentedViaTargetFramesThisSession=*/72,
-            /*presentedViaLookaheadFramesThisSession=*/0 );
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
 
     ASSERT_EQ(uint64_t(72), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(72), population.presentedFrames);
     ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
+    ASSERT_EQ(uint64_t(0), population.requestedThenSkippedTargetFrames);
     ASSERT_TRUE(population.partitionSound);
+    const double lossRatio =
+        static_cast<double>(population.offeredSourceFrames - population.presentedFrames)
+        / static_cast<double>(population.offeredSourceFrames);
+    ASSERT_TRUE(lossRatio == 0.0);
 }
 
-// CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra major, round-3 PARTIAL):
-// astra's own repro -- offered=60, target attempts=20 (all satisfied by
-// reusing an already-ready lookahead), lookahead requests=20, target
-// presentations=0, lookahead presentations=20. Round-3 code (reuse count
-// folded into genuine target demand) reported never_requested=20 and
-// requested_then_skipped_target=20 -- 20 phantom "skips" for target attempts
-// that were in fact all satisfied, and 20 source frames wrongly hidden from
-// never_requested. The reuse count must be backed out so a reused attempt
-// lands in exactly one real bucket (here: fully absorbed by the lookahead
-// presentation it rode on) rather than manufacturing a fictitious skip.
+// A stale re-presentation WITHIN a single lap must still collapse (the
+// round-5 fix stays intact): three complete, healthy laps, but lap 1
+// re-presents frame 0 twice before advancing (a genuine stuck-frame
+// blip within that lap only). That lap's presented set gains no new
+// identity from the duplicate, so it reads as one fewer presentation than
+// requested for that lap specifically, while the other two laps remain
+// fully healthy.
+TEST(PlaybackFramePopulationPolicy, SourcePopulation_WithinLapDuplicateStillCollapses)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t lap = 0; lap < 3; ++lap)
+    {
+        for (uint64_t f = 0; f < 24; ++f)
+            identity.noteRequestedFrame(lap, f, /*viaLookahead=*/false);
+    }
+    for (uint64_t f = 0; f < 24; ++f)
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+    identity.notePresentedFrame(/*loopEpoch=*/0, /*displayFrame=*/0, /*viaLookahead=*/false); // stale repeat, lap 0
+    for (uint64_t f = 0; f < 24; ++f)
+        identity.notePresentedFrame(/*loopEpoch=*/1, f, /*viaLookahead=*/false);
+    // Lap 2 (epoch 2) never actually presents frame 23 -- one genuine skip.
+    for (uint64_t f = 0; f < 23; ++f)
+        identity.notePresentedFrame(/*loopEpoch=*/2, f, /*viaLookahead=*/false);
+
+    ASSERT_EQ(uint64_t(72), identity.requestedOccurrenceUnionCount());
+    // 24 (lap 0, dedup'd) + 24 (lap 1) + 23 (lap 2) = 71.
+    ASSERT_EQ(uint64_t(71), identity.presentedOccurrenceUnionCount());
+    ASSERT_EQ(uint64_t(1), identity.requestedThenSkippedTargetCount());
+}
+
+// The identity tracker must also keep target- and lookahead-origin
+// presentations in separate per-origin sets for diagnostics, even though
+// the union (not the sum) is what feeds the loss computation -- the same
+// (loop epoch, displayFrame) presented once via each origin is two
+// distinct facts about HOW it was delivered, even though it is one fact
+// about WHETHER it was shown.
+TEST(PlaybackFramePopulationPolicy, IdentityTracker_TargetAndLookaheadOriginsAreCountedIndependently)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    identity.notePresentedFrame(/*loopEpoch=*/0, /*displayFrame=*/7, /*viaLookahead=*/false);
+    identity.notePresentedFrame(/*loopEpoch=*/0, /*displayFrame=*/7, /*viaLookahead=*/true);
+    identity.notePresentedFrame(/*loopEpoch=*/0, /*displayFrame=*/7, /*viaLookahead=*/false); // duplicate, same origin
+
+    ASSERT_EQ(uint64_t(1), identity.distinctTargetPresentedCount());
+    ASSERT_EQ(uint64_t(1), identity.distinctLookaheadPresentedCount());
+    // But it is one fact about whether frame 7 was shown at all.
+    ASSERT_EQ(uint64_t(1), identity.presentedOccurrenceUnionCount());
+}
+
+// Two presentations of the same displayFrame in DIFFERENT laps are two
+// distinct occurrences -- the round-6 fix, exercised directly on the
+// tracker rather than through the policy.
+TEST(PlaybackFramePopulationPolicy, IdentityTracker_SameDisplayFrameDifferentLapIsTwoOccurrences)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    identity.notePresentedFrame(/*loopEpoch=*/0, /*displayFrame=*/7, /*viaLookahead=*/false);
+    identity.notePresentedFrame(/*loopEpoch=*/1, /*displayFrame=*/7, /*viaLookahead=*/false);
+
+    ASSERT_EQ(uint64_t(2), identity.distinctTargetPresentedCount());
+}
+
+// reset() must fully clear all four sets (requested/presented x
+// target/lookahead) -- a stale entry surviving into the next
+// playback-smoke session would misattribute that session's loss.
+TEST(PlaybackFramePopulationPolicy, IdentityTracker_ResetClearsEverything)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    identity.noteRequestedFrame(/*loopEpoch=*/0, /*displayFrame=*/1, /*viaLookahead=*/false);
+    identity.noteRequestedFrame(/*loopEpoch=*/0, /*displayFrame=*/2, /*viaLookahead=*/true);
+    identity.notePresentedFrame(/*loopEpoch=*/0, /*displayFrame=*/1, /*viaLookahead=*/false);
+    identity.notePresentedFrame(/*loopEpoch=*/0, /*displayFrame=*/2, /*viaLookahead=*/true);
+    identity.reset();
+
+    ASSERT_EQ(uint64_t(0), identity.distinctTargetPresentedCount());
+    ASSERT_EQ(uint64_t(0), identity.distinctLookaheadPresentedCount());
+    ASSERT_EQ(uint64_t(0), identity.requestedOccurrenceUnionCount());
+    ASSERT_EQ(uint64_t(0), identity.presentedOccurrenceUnionCount());
+
+    identity.notePresentedFrame(/*loopEpoch=*/0, /*displayFrame=*/1, /*viaLookahead=*/false);
+    ASSERT_EQ(uint64_t(1), identity.distinctTargetPresentedCount());
+}
+
+// A reused lookahead-covers-current target attempt is now structurally
+// excluded (round 6): MainWindow never calls noteRequestedFrame() for it at
+// all, rather than recording then subtracting a separate reuse count
+// (round 4). Simulated here by simply never issuing the target-side
+// noteRequestedFrame() call for the reused identities.
 TEST(PlaybackFramePopulationPolicy, SourcePopulation_ReusedLookaheadTargetAttemptsAreNotSkips)
 {
+    PlaybackPresentedFrameIdentityTracker identity;
+    // 20 target attempts, all reuse -- none reach noteRequestedFrame(target).
+    // 20 lookahead requests for the same 20 identities, all presented via
+    // lookahead (the reused attempts ride on these presentations).
+    for (uint64_t f = 0; f < 20; ++f)
+    {
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/true);
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/true);
+    }
+
     const PlaybackSourceFramePopulation population =
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             /*timelineSourceFramesOfferedNow=*/60.0,
             /*timelineSourceFramesOfferedStart=*/0.0,
-            /*requestedTargetFramesBySerialThisSession=*/20,
-            /*reusedLookaheadTargetFramesThisSession=*/20,
-            /*lookaheadRequestsBySerialThisSession=*/20,
-            /*presentedViaTargetFramesThisSession=*/0,
-            /*presentedViaLookaheadFramesThisSession=*/20 );
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
 
     ASSERT_EQ(uint64_t(60), population.offeredSourceFrames);
-    // Astra's correct attribution: all 20 target attempts were reuse, so
-    // genuine target demand is zero -- nothing was skipped on the target
-    // side.
+    // No genuine target demand was ever recorded, so nothing was skipped on
+    // the target side.
     ASSERT_EQ(uint64_t(0), population.requestedThenSkippedTargetFrames);
     ASSERT_EQ(uint64_t(0), population.requestedThenDiscardedLookaheadFrames);
     ASSERT_EQ(uint64_t(20), population.presentedFrames);
@@ -270,22 +615,28 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_ReusedLookaheadTargetAttemp
               + population.presentedFrames);
 }
 
-// Same successful-reuse scenario, but with offered=20 instead of 60. Round-3
-// code produced partition_sound=false here (accountedFor overshot offered)
-// even though nothing was actually wrong -- a false failure caused by the
-// same bug that produced a false pass in the offered=60 case above. Both
-// must resolve consistently once reuse is backed out correctly.
+// Same successful-reuse scenario, but with offered=20 instead of 60 --
+// must resolve consistently regardless of how much of the clip's total
+// span the reused identities represent.
 TEST(PlaybackFramePopulationPolicy, SourcePopulation_ReusedLookaheadTargetAttemptsStaySoundAtSmallerOfferedCount)
 {
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t f = 0; f < 20; ++f)
+    {
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/true);
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/true);
+    }
+
     const PlaybackSourceFramePopulation population =
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             /*timelineSourceFramesOfferedNow=*/20.0,
             /*timelineSourceFramesOfferedStart=*/0.0,
-            /*requestedTargetFramesBySerialThisSession=*/20,
-            /*reusedLookaheadTargetFramesThisSession=*/20,
-            /*lookaheadRequestsBySerialThisSession=*/20,
-            /*presentedViaTargetFramesThisSession=*/0,
-            /*presentedViaLookaheadFramesThisSession=*/20 );
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
 
     ASSERT_EQ(uint64_t(20), population.offeredSourceFrames);
     ASSERT_EQ(uint64_t(0), population.requestedThenSkippedTargetFrames);
@@ -293,149 +644,4 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_ReusedLookaheadTargetAttemp
     ASSERT_EQ(uint64_t(20), population.presentedFrames);
     ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
     ASSERT_TRUE(population.partitionSound);
-}
-
-// If reuse accounting itself is broken (more reuse claimed than target
-// requests issued -- an invariant violation this policy cannot cause on its
-// own but must not hide), the third-state/UNKNOWN rule applies: fail closed
-// rather than silently clamping to a plausible-looking number.
-TEST(PlaybackFramePopulationPolicy, SourcePopulation_ReuseCountExceedingRequestsIsFlaggedNotHidden)
-{
-    const PlaybackSourceFramePopulation population =
-        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
-            /*timelineSourceFramesOfferedNow=*/30.0,
-            /*timelineSourceFramesOfferedStart=*/0.0,
-            /*requestedTargetFramesBySerialThisSession=*/10,
-            /*reusedLookaheadTargetFramesThisSession=*/15, // more reuse than requests
-            /*lookaheadRequestsBySerialThisSession=*/0,
-            /*presentedViaTargetFramesThisSession=*/0,
-            /*presentedViaLookaheadFramesThisSession=*/0 );
-
-    ASSERT_TRUE(!population.partitionSound);
-}
-
-// CUDA-ATTRIBUTION-BASELINE-1 round 5 (sol BLOCKER, made executable): sol's
-// repro, verbatim -- 60 offered source frames, 60 presentation ATTEMPTS
-// (target requests), but the frames actually shown touch only 20 distinct
-// displayFrame indices (each one presented 3 times, as a drop-frame
-// catch-up silently re-presenting a stale frame instead of advancing would
-// produce). Nothing upstream of notePlaybackSmokePresentedFrame() dedups by
-// displayFrame before it counts a presentation, so a plain event count
-// cannot tell this apart from 60 distinct frames shown once each.
-//
-// This test reproduces the FALSE PASS by feeding computeSourceFramePopulation
-// the raw event count (60) exactly as pre-round-5 MainWindow did -- no
-// identity tracking involved. It offered=60, presented=60, 0% loss,
-// partition_sound=true: sol's blocker, confirmed live on this policy.
-TEST(PlaybackFramePopulationPolicy, SolRepro_RawPresentationEventCountFalselyReportsZeroLoss)
-{
-    const uint64_t offered = 60;
-    const uint64_t targetRequests = 60;
-    const uint64_t rawPresentationEventCount = 60; // NOT deduped by source-frame identity
-
-    const PlaybackSourceFramePopulation population =
-        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
-            /*timelineSourceFramesOfferedNow=*/static_cast<double>(offered),
-            /*timelineSourceFramesOfferedStart=*/0.0,
-            targetRequests,
-            /*reusedLookaheadTargetFramesThisSession=*/0,
-            /*lookaheadRequestsBySerialThisSession=*/0,
-            rawPresentationEventCount,
-            /*presentedViaLookaheadFramesThisSession=*/0 );
-
-    ASSERT_EQ(uint64_t(60), population.presentedFrames);
-    ASSERT_EQ(uint64_t(0), population.requestedThenSkippedTargetFrames);
-    ASSERT_TRUE(population.partitionSound);
-    const double lossRatio =
-        static_cast<double>(population.offeredSourceFrames - population.presentedFrames)
-        / static_cast<double>(population.offeredSourceFrames);
-    ASSERT_TRUE(lossRatio == 0.0);
-}
-
-// Same 60-offered/60-attempt session as above, but this time the presented
-// count going into the policy comes from PlaybackPresentedFrameIdentityTracker
-// -- the round-5 fix -- fed the same 60 presentation events, 20 of them
-// distinct, exactly as notePlaybackSmokePresentedFrame() now does via
-// MainWindow::m_playbackSmokePresentedFrameIdentity. The other 40 offered
-// source frames must come back accounted for as genuinely unaccounted
-// (requested_then_skipped_target_frames), not silently folded into
-// "presented". Reversing the mechanism (feeding the raw event count, as in
-// the test above, instead of the tracker's deduped count) makes every
-// assertion below fail -- verified by hand per this round's standing check.
-TEST(PlaybackFramePopulationPolicy, SolRepro_DistinctFrameIdentityTrackerSurfacesTheDuplicatePresentationLoss)
-{
-    PlaybackPresentedFrameIdentityTracker identity;
-    for (uint64_t i = 0; i < 60; ++i)
-    {
-        const uint64_t displayFrame = i % 20; // only 20 distinct source frames, each shown 3x
-        identity.notePresentedFrame(displayFrame, /*viaLookahead=*/false);
-    }
-    ASSERT_EQ(uint64_t(20), identity.distinctTargetPresentedCount());
-    ASSERT_EQ(uint64_t(0), identity.distinctLookaheadPresentedCount());
-
-    const uint64_t offered = 60;
-    const uint64_t targetRequests = 60;
-
-    const PlaybackSourceFramePopulation population =
-        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
-            /*timelineSourceFramesOfferedNow=*/static_cast<double>(offered),
-            /*timelineSourceFramesOfferedStart=*/0.0,
-            targetRequests,
-            /*reusedLookaheadTargetFramesThisSession=*/0,
-            /*lookaheadRequestsBySerialThisSession=*/0,
-            identity.distinctTargetPresentedCount(),
-            identity.distinctLookaheadPresentedCount() );
-
-    ASSERT_EQ(uint64_t(60), population.offeredSourceFrames);
-    // Only 20 distinct source frames actually reached presentation -- the
-    // repeated re-presentations of the same 20 are not new information and
-    // must not inflate this bucket to 60.
-    ASSERT_EQ(uint64_t(20), population.presentedFrames);
-    // The other 40 offered source frames: 60 target attempts, only 20
-    // distinct ones ever shown, so 40 come back requested-then-skipped.
-    ASSERT_EQ(uint64_t(40), population.requestedThenSkippedTargetFrames);
-    ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
-    ASSERT_TRUE(population.partitionSound);
-    ASSERT_EQ(population.offeredSourceFrames,
-              population.neverRequestedSourceFrames
-              + population.requestedThenDiscardedLookaheadFrames
-              + population.requestedThenSkippedTargetFrames
-              + population.presentedFrames);
-    // The true loss -- 66.7%, matching sol's repro -- is now visible, where
-    // the raw-event-count test above reported 0%.
-    const double lossRatio =
-        static_cast<double>(population.offeredSourceFrames - population.presentedFrames)
-        / static_cast<double>(population.offeredSourceFrames);
-    ASSERT_TRUE(lossRatio > 0.5);
-}
-
-// The identity tracker must also keep target- and lookahead-origin
-// presentations in separate sets -- the same displayFrame value presented
-// once via each origin is two distinct pieces of information (a target
-// request and a lookahead both reached that source frame), not one.
-TEST(PlaybackFramePopulationPolicy, IdentityTracker_TargetAndLookaheadOriginsAreCountedIndependently)
-{
-    PlaybackPresentedFrameIdentityTracker identity;
-    identity.notePresentedFrame(/*displayFrame=*/7, /*viaLookahead=*/false);
-    identity.notePresentedFrame(/*displayFrame=*/7, /*viaLookahead=*/true);
-    identity.notePresentedFrame(/*displayFrame=*/7, /*viaLookahead=*/false); // duplicate, same origin
-
-    ASSERT_EQ(uint64_t(1), identity.distinctTargetPresentedCount());
-    ASSERT_EQ(uint64_t(1), identity.distinctLookaheadPresentedCount());
-}
-
-// reset() must fully clear both origin sets -- a stale entry surviving into
-// the next playback-smoke session would undercount that session's loss.
-TEST(PlaybackFramePopulationPolicy, IdentityTracker_ResetClearsBothOriginSets)
-{
-    PlaybackPresentedFrameIdentityTracker identity;
-    identity.notePresentedFrame(/*displayFrame=*/1, /*viaLookahead=*/false);
-    identity.notePresentedFrame(/*displayFrame=*/2, /*viaLookahead=*/true);
-    identity.reset();
-
-    ASSERT_EQ(uint64_t(0), identity.distinctTargetPresentedCount());
-    ASSERT_EQ(uint64_t(0), identity.distinctLookaheadPresentedCount());
-
-    identity.notePresentedFrame(/*displayFrame=*/1, /*viaLookahead=*/false);
-    ASSERT_EQ(uint64_t(1), identity.distinctTargetPresentedCount());
 }

@@ -1612,6 +1612,14 @@ function New-PlaybackCompare {
     [pscustomobject]@{
         presentedFps = New-MetricDelta -BaselineValue $BaselineSummary.presentedFps -CandidateValue $CandidateSummary.presentedFps
         timelineFps = New-MetricDelta -BaselineValue $BaselineSummary.timelineFps -CandidateValue $CandidateSummary.timelineFps
+        # CUDA-ATTRIBUTION-BASELINE-1 round 6 (astra minor, round 4/round-3
+        # PARTIAL): the per-leg summary already carries timelineFpsAuthoritative
+        # (line ~837), but this delta dropped it when it was built -- a
+        # comparison of two non-authoritative legs read as an ordinary,
+        # unqualified delta. Authoritative only when BOTH legs are; fails
+        # closed to $false (via PowerShell's -and short-circuit on $null)
+        # the same way the per-leg field does.
+        timelineFpsAuthoritative = ($BaselineSummary.timelineFpsAuthoritative -and $CandidateSummary.timelineFpsAuthoritative)
         guiStatusFps = New-MetricDelta -BaselineValue $BaselineSummary.guiStatusFps -CandidateValue $CandidateSummary.guiStatusFps
         visibleGuiFps = New-MetricDelta -BaselineValue $BaselineSummary.visibleGuiFps -CandidateValue $CandidateSummary.visibleGuiFps
         avgPresentIntervalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPresentIntervalMs -CandidateValue $CandidateSummary.avgPresentIntervalMs

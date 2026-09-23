@@ -1051,23 +1051,28 @@ private:
      * source frame presented three times inflated this exactly as much as
      * three distinct frames presented once each, so a drop-frame catch-up
      * that quietly re-presented a stale frame instead of advancing could
-     * read as zero loss. This tracks the distinct displayFrame indices
-     * actually reaching notePlaybackSmokePresentedFrame(), split by origin
-     * the same way the event counters used to be; its distinct*Count()s are
-     * what feed PlaybackFramePopulationPolicy::computeSourceFramePopulation()'s
-     * presentedViaTargetFramesThisSession/presentedViaLookaheadFramesThisSession.
-     * See PlaybackPresentedFrameIdentityTracker.h for the bounded-memory
-     * argument. Cleared at playback start alongside the other smoke
-     * counters. */
+     * read as zero loss.
+     * Round 6 (sol + astra BLOCKER, round 5 INVERTED): keying identity by
+     * raw displayFrame alone instead collapsed every LAP of a looping
+     * session onto the same identities, since offeredSourceFrames counts
+     * every lap as elapsed playback time. This now tracks distinct (loop
+     * epoch, displayFrame) OCCURRENCES -- see PlaybackPresentedFrameIdentityTracker.h
+     * -- split by both request origin (target vs. lookahead, as before) AND
+     * event (requested vs. presented, new this round: round 6 astra major,
+     * "Request identities must be reconciled too" -- see the class's
+     * noteRequestedFrame()). Its distinct/union count methods are what feed
+     * PlaybackFramePopulationPolicy::computeSourceFramePopulation(). Every
+     * insertion is gated on m_playbackSmokeFrameTelemetry, not merely
+     * m_playbackSmokeActive (round 6 sol + astra major, "the growing
+     * identity tracker runs during ordinary GUI playback") -- see the call
+     * sites in drawFrame(), queuePlaybackLookaheadRequests(), and
+     * notePlaybackSmokePresentedFrame(). Cleared at playback start alongside
+     * the other smoke counters. round 4's separate
+     * m_playbackSmokeReusedLookaheadTargetFrames back-out counter is gone:
+     * a lookahead-covers-current reuse attempt now simply never reaches the
+     * noteRequestedFrame() call site, so the exclusion is structural rather
+     * than arithmetic. */
     PlaybackPresentedFrameIdentityTracker m_playbackSmokePresentedFrameIdentity;
-    /* CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra major, round-3 PARTIAL):
-     * count of target requests (m_nextTargetRenderRequestSerial advances)
-     * that took drawFrame()'s lookahead-reuse early return instead of
-     * issuing a genuinely new render demand -- see its increment site and
-     * PlaybackFramePopulationPolicy::computeSourceFramePopulation's
-     * reusedLookaheadTargetFramesThisSession parameter. Reset at playback
-     * start alongside the other smoke counters. */
-    int m_playbackSmokeReusedLookaheadTargetFrames = 0;
     uint64_t m_playbackSmokeStartDecodeRequestsIssued = 0;
     uint64_t m_playbackSmokeStartPrepStaleDrops = 0;
     uint64_t m_playbackSmokeStartPrepGenerationDrops = 0;
