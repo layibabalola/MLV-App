@@ -706,6 +706,74 @@ TEST(PlaybackFramePopulationPolicy, IdentityTracker_ResetClearsOfferedCeiling)
     ASSERT_EQ(uint64_t(1), identity.requestedOccurrenceUnionCount());
 }
 
+// CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "the telemetry-off
+// session reports a CONFIDENT 100% loss"): with frameTelemetryMeasured=false
+// (MLVAPP_PLAYBACK_SMOKE_TELEMETRY off), every identity-tracker input is a
+// vacuous zero -- the pre-round-7 arithmetic would report presented=0,
+// never_requested=offered, partition_sound=true and loss=1.0, exactly
+// astra's "confident 100% loss" defect. The unmeasured session must instead
+// report attributionMeasured=false and partitionSound=false
+// unconditionally, and every bucket except offeredSourceFrames must be 0 --
+// UNMEASURED, not 100% loss.
+TEST(PlaybackFramePopulationPolicy, AstraRepro_TelemetryOffReportsUnmeasuredNotTotalLoss)
+{
+    // No identity tracker insertions at all -- exactly what an unmeasured
+    // session produces (every MainWindow insertion call site is gated on
+    // m_playbackSmokeFrameTelemetry).
+    PlaybackPresentedFrameIdentityTracker identity;
+
+    const PlaybackSourceFramePopulation population =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            /*timelineSourceFramesOfferedNow=*/60.0,
+            /*timelineSourceFramesOfferedStart=*/0.0,
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount(),
+            /*frameTelemetryMeasured=*/false );
+
+    ASSERT_TRUE(!population.attributionMeasured);
+    ASSERT_TRUE(!population.partitionSound);
+    // offeredSourceFrames is real, telemetry-independent data -- it is
+    // reported even when unmeasured (only the identity-derived buckets are
+    // meaningless).
+    ASSERT_EQ(uint64_t(60), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
+    ASSERT_EQ(uint64_t(0), population.requestedThenDiscardedLookaheadFrames);
+    ASSERT_EQ(uint64_t(0), population.requestedThenSkippedTargetFrames);
+    ASSERT_EQ(uint64_t(0), population.presentedFrames);
+}
+
+// The default parameter value (frameTelemetryMeasured=true) keeps every
+// pre-round-7 call site -- including every other test in this file --
+// behaving exactly as before.
+TEST(PlaybackFramePopulationPolicy, FrameTelemetryMeasuredDefaultsToTrue)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t f = 0; f < 20; ++f)
+    {
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+    }
+
+    const PlaybackSourceFramePopulation population =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            /*timelineSourceFramesOfferedNow=*/20.0,
+            /*timelineSourceFramesOfferedStart=*/0.0,
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
+
+    ASSERT_TRUE(population.attributionMeasured);
+    ASSERT_TRUE(population.partitionSound);
+    ASSERT_EQ(uint64_t(20), population.presentedFrames);
+}
+
 // Same successful-reuse scenario, but with offered=20 instead of 60 --
 // must resolve consistently regardless of how much of the clip's total
 // span the reused identities represent.

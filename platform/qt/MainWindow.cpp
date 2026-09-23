@@ -25407,8 +25407,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
             m_playbackSmokePresentedFrameIdentity.distinctLookaheadPresentedCount(),
             m_playbackSmokePresentedFrameIdentity.presentedOccurrenceUnionCount(),
             m_playbackSmokePresentedFrameIdentity.requestedThenSkippedTargetCount(),
-            m_playbackSmokePresentedFrameIdentity.requestedThenDiscardedLookaheadCount() );
-    const double sourceFrameLossRatio =
+            m_playbackSmokePresentedFrameIdentity.requestedThenDiscardedLookaheadCount(),
+            m_playbackSmokeFrameTelemetry );
+    const double sourceFrameLossRatioValue =
         sourceFramePopulation.offeredSourceFrames > 0
             ? static_cast<double>(
                   sourceFramePopulation.offeredSourceFrames
@@ -25418,6 +25419,17 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                       : 0 )
               / static_cast<double>( sourceFramePopulation.offeredSourceFrames )
             : 0.0;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "the telemetry-off
+     * session reports a CONFIDENT 100% loss"): a session with telemetry off
+     * has no measurement at all -- emit the literal string "unmeasured", not
+     * a numeric ratio, so no consumer can misread this as either 0% or 100%
+     * loss. Guarded on attributionMeasured, not the raw
+     * m_playbackSmokeFrameTelemetry flag, so this always agrees with what
+     * partition_sound/every other field on this line actually did. */
+    const QString sourceFrameLossRatioText =
+        sourceFramePopulation.attributionMeasured
+            ? QString::number( sourceFrameLossRatioValue, 'f', 6 )
+            : QStringLiteral( "unmeasured" );
     const double presentedFps =
         elapsedSeconds > 0.0
             ? static_cast<double>( m_playbackSmokePresentedFrames )
@@ -25706,6 +25718,7 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "presented_via_target_frames=%6 "
                "presented_via_lookahead_frames=%7 presented_frames=%8 "
                "partition_sound=%9 source_frame_loss_ratio=%10 "
+               "source_frame_attribution_measured=%11 "
                "population_basis=\"offered_source_frames is "
                "MainWindow::m_playbackTimelineSourceFramesOffered's session "
                "delta -- real elapsed playback time converted to frame units, "
@@ -25739,7 +25752,19 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "playback-quality gate figure, replacing "
                "skipped_or_unpresented_frames_by_target_serial's ratio on "
                "playback_smoke.frame_population above -- see that field's "
-               "own comment for why it can pass while this fails\"" )
+               "own comment for why it can pass while this fails. "
+               "source_frame_attribution_measured is false whenever "
+               "MLVAPP_PLAYBACK_SMOKE_TELEMETRY was NOT set for this "
+               "session -- every field on this line except "
+               "offered_source_frames is then a vacuous zero, "
+               "partition_sound is unconditionally false, and "
+               "source_frame_loss_ratio is the literal token unmeasured, "
+               "never a number -- a confident total-loss report from a "
+               "session that never measured anything is exactly the defect "
+               "this replaces. UNMEASURED is a third state, distinct from "
+               "both zero loss and total loss; treat it exactly like an "
+               "unsound partition -- fail closed, do not substitute a "
+               "fallback ratio computed from these fields\"" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( static_cast<qulonglong>( sourceFramePopulation.offeredSourceFrames ) )
                .arg( static_cast<qulonglong>( sourceFramePopulation.neverRequestedSourceFrames ) )
@@ -25752,7 +25777,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    sourceFramePopulation.presentedViaLookaheadFrames ) )
                .arg( static_cast<qulonglong>( sourceFramePopulation.presentedFrames ) )
                .arg( bool01( sourceFramePopulation.partitionSound ) )
-               .arg( sourceFrameLossRatio, 0, 'f', 6 );
+               .arg( sourceFrameLossRatioText )
+               .arg( bool01( sourceFramePopulation.attributionMeasured ) );
 
     qInfo().noquote()
         << QStringLiteral(
@@ -25881,7 +25907,17 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
          * skippedOrUnpresented comment near the top of this function).
          * Additive field, schema-compatible with mlvapp.perf-field-log.v1. */
         fieldLog.insert( QStringLiteral("timeline_fps_authoritative"), false );
-        fieldLog.insert( QStringLiteral("source_frame_loss_ratio"), sourceFrameLossRatio );
+        /* CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "the
+         * telemetry-off session reports a CONFIDENT 100% loss"): mirror the
+         * qInfo() line's third state here too -- a JSON string
+         * "unmeasured", never a number, when attributionMeasured is false,
+         * so this exported surface cannot misreport total loss either. */
+        fieldLog.insert( QStringLiteral("source_frame_loss_ratio"),
+                         sourceFramePopulation.attributionMeasured
+                             ? QJsonValue( sourceFrameLossRatioValue )
+                             : QJsonValue( QStringLiteral("unmeasured") ) );
+        fieldLog.insert( QStringLiteral("source_frame_attribution_measured"),
+                         sourceFramePopulation.attributionMeasured );
         fieldLog.insert( QStringLiteral("source_frame_loss_ratio_partition_sound"),
                          sourceFramePopulation.partitionSound );
         fieldLog.insert( QStringLiteral("no_readback_percent"), noReadbackPercent );

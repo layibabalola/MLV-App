@@ -1468,6 +1468,16 @@ $presentedViaLookaheadFrames = Get-ObjectPropertyValue $sourceFramePopulation "p
 $sourceFramePopulationPresentedFrames = Get-ObjectPropertyValue $sourceFramePopulation "presented_frames"
 $sourceFramePopulationSound = Convert-ToNullableBool (Get-ObjectPropertyValue $sourceFramePopulation "partition_sound")
 $sourceFrameLossRatio = Get-ObjectPropertyValue $sourceFramePopulation "source_frame_loss_ratio"
+# CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "the telemetry-off
+# session reports a CONFIDENT 100% loss"): the third state. A session with
+# MLVAPP_PLAYBACK_SMOKE_TELEMETRY off emits source_frame_attribution_measured
+# =false, partition_sound=false and source_frame_loss_ratio="unmeasured"
+# (a non-numeric token) -- distinct from both "sound, 0% loss" and "sound,
+# 100% loss". $null here means an older build that predates this field, not
+# "measured"; treated as not-measured below, matching this script's
+# missing-is-always-an-error convention once telemetry was actually
+# requested (see the validation failure below).
+$sourceFrameAttributionMeasured = Convert-ToNullableBool (Get-ObjectPropertyValue $sourceFramePopulation "source_frame_attribution_measured")
 $sourceFrameLossRatioForGate = $null
 if ($sourceFramePopulationSound -eq $true -and $null -ne $sourceFrameLossRatio) {
     $sourceFrameLossRatioForGate = [double]$sourceFrameLossRatio
@@ -1619,8 +1629,22 @@ if (-not $LaunchOnlyProbe) {
     # definitions -- see PlaybackSourceFramePopulation::partitionSound), fail
     # closed here instead of silently trusting whichever request-based figure
     # $skippedOrUnpresentedRatioForGate fell back to above.
-    if ($null -ne $sourceFramePopulation -and $sourceFramePopulationSound -ne $true) {
-        $validationFailures += "Source-frame population partition was not sound (partition_sound=$sourceFramePopulationSound); source-frame loss cannot be trusted for this run."
+    # Round 7 (astra major, "the telemetry-off session reports a CONFIDENT
+    # 100% loss"): partition_sound is now unconditionally false whenever
+    # source_frame_attribution_measured is false too (an UNMEASURED session,
+    # not an unsound one). Only raise THIS failure when telemetry actually
+    # ran and still came out unsound -- that is a real bucket-arithmetic bug.
+    # An unmeasured record is legitimate whenever this run did not request
+    # telemetry (-FrameTelemetry:$false); when it DID request telemetry
+    # ($FrameTelemetry, the default) but the record says unmeasured anyway,
+    # that is a wiring failure and must still fail closed.
+    if ($null -ne $sourceFramePopulation) {
+        if ($sourceFrameAttributionMeasured -eq $true -and $sourceFramePopulationSound -ne $true) {
+            $validationFailures += "Source-frame population partition was not sound (partition_sound=$sourceFramePopulationSound); source-frame loss cannot be trusted for this run."
+        }
+        elseif ($sourceFrameAttributionMeasured -ne $true -and $FrameTelemetry) {
+            $validationFailures += "Frame telemetry was requested (-FrameTelemetry) but the source-frame population record reports source_frame_attribution_measured=$sourceFrameAttributionMeasured; source-frame loss cannot be trusted for this run."
+        }
     }
     if ($null -eq $skippedOrUnpresentedRatioForGate) {
         $validationFailures += "Playback summary could not establish a skipped/unpresented-frame ratio."
@@ -2105,6 +2129,12 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     sourceFrameLossRatio = $sourceFrameLossRatio
     sourceFrameLossRatioAuthoritative = $true
     sourceFrameLossRatioSound = $sourceFramePopulationSound
+    # CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "the telemetry-off
+    # session reports a CONFIDENT 100% loss"): the third state --
+    # sourceFrameLossRatio is the literal string "unmeasured" (not a number)
+    # and sourceFrameLossRatioSound is false whenever this is false, distinct
+    # from a genuinely unsound-but-measured partition.
+    sourceFrameAttributionMeasured = $sourceFrameAttributionMeasured
     maxSkippedOrUnpresentedRatio = $MaxSkippedOrUnpresentedRatio
     colorArtifactScanPassed = [bool]$colorArtifactScanPassed
     colorArtifactScanVerdict = $colorArtifactVerdict

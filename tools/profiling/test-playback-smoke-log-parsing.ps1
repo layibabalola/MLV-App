@@ -65,6 +65,21 @@ $selectedFromReordered = Select-PlaybackSmokeRecordLine -Lines $reorderedLines -
 Assert-Equal $frameLine $selectedFromReordered `
     "selection must not depend on record emission order"
 
+# CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "the telemetry-off
+# session reports a CONFIDENT 100% loss"): a telemetry-off record's
+# source_frame_loss_ratio is the literal token "unmeasured", not a number --
+# Convert-PlaybackLogLineToObject must store it as a string (its numeric
+# TryParse fallback path), not silently coerce or drop it, so the consumer's
+# guard against reading a fake ratio actually has something to check.
+$unmeasuredLine = 'playback_smoke.source_frame_population session=2 offered_source_frames=60 never_requested_source_frames=0 requested_then_discarded_lookahead_frames=0 requested_then_skipped_target_frames=0 presented_via_target_frames=0 presented_via_lookahead_frames=0 presented_frames=0 partition_sound=0 source_frame_loss_ratio=unmeasured source_frame_attribution_measured=0 population_basis="telemetry was off for this session"'
+$unmeasuredPopulation = Convert-PlaybackLogLineToObject $unmeasuredLine
+Assert-Equal "unmeasured" $unmeasuredPopulation.source_frame_loss_ratio `
+    "source_frame_loss_ratio must parse as the literal string 'unmeasured', not be dropped or coerced to a number"
+Assert-Equal 0 $unmeasuredPopulation.source_frame_attribution_measured `
+    "source_frame_attribution_measured must survive parsing"
+Assert-Equal 0 $unmeasuredPopulation.partition_sound `
+    "partition_sound must be false on an unmeasured record"
+
 if ($failures.Count -gt 0) {
     foreach ($failure in $failures) {
         Write-Host "[FAIL] $failure"
@@ -72,4 +87,4 @@ if ($failures.Count -gt 0) {
     throw "$($failures.Count) playback-smoke-log-parsing test(s) failed."
 }
 
-Write-Host "[SUMMARY] playback-smoke-log-parsing tests=6 failed=0"
+Write-Host "[SUMMARY] playback-smoke-log-parsing tests=9 failed=0"

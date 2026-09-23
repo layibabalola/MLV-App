@@ -76,6 +76,17 @@ struct PlaybackSourceFramePopulation
      *  above remain per-origin diagnostics only; this field, not their sum,
      *  is what the four-bucket partition and the loss ratio use. */
     uint64_t presentedFrames = 0;
+    /*! CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "the telemetry-off
+     *  session reports a CONFIDENT 100% loss"): true iff frame telemetry
+     *  (MLVAPP_PLAYBACK_SMOKE_TELEMETRY) was active for this session, i.e.
+     *  the identity-tracker inputs below are real measurements rather than
+     *  the vacuous zeros a session that never gated any insertion at all
+     *  produces. When false, partitionSound is forced false and every
+     *  bucket below except offeredSourceFrames is forced to 0 -- attribution
+     *  is UNAVAILABLE, a third state distinct from both "zero loss" and
+     *  "100% loss", never a numeric ratio a consumer can silently accept.
+     *  See PlaybackPresentedFrameIdentityTracker.h's telemetry-gating note. */
+    bool attributionMeasured = false;
     /*! True iff every source-frame occurrence requested (via either origin)
      *  was requested via exactly one of {target-only, lookahead-only, both}
      *  in a way the four buckets can account for without double-counting --
@@ -192,6 +203,18 @@ public:
      *         set-difference semantics as
      *         requestedThenSkippedTargetOccurrenceCount above, for the
      *         lookahead-requested set.
+     *  \param frameTelemetryMeasured CUDA-ATTRIBUTION-BASELINE-1 round 7
+     *         (astra major, "the telemetry-off session reports a CONFIDENT
+     *         100% loss"): whether MLVAPP_PLAYBACK_SMOKE_TELEMETRY was
+     *         active for this session (MainWindow::
+     *         m_playbackSmokeFrameTelemetry). When false, every identity
+     *         count above is a vacuous zero -- not evidence nothing was
+     *         requested/presented, evidence nothing was ever measured.
+     *         Defaults to true so every pre-round-7 call site (including
+     *         every existing test in this codebase, which models an
+     *         actively-measuring session) is unaffected; only
+     *         MainWindow::finishPlaybackSmokeTelemetry() need pass the real
+     *         value.
      */
     static PlaybackSourceFramePopulation computeSourceFramePopulation(
         double timelineSourceFramesOfferedNow,
@@ -201,7 +224,8 @@ public:
         uint64_t presentedViaLookaheadFramesThisSession,
         uint64_t presentedOccurrenceUnionCount,
         uint64_t requestedThenSkippedTargetOccurrenceCount,
-        uint64_t requestedThenDiscardedLookaheadOccurrenceCount )
+        uint64_t requestedThenDiscardedLookaheadOccurrenceCount,
+        bool frameTelemetryMeasured = true )
     {
         PlaybackSourceFramePopulation result;
         const double rawOffered =
@@ -210,6 +234,19 @@ public:
             rawOffered > 0.0
                 ? static_cast<uint64_t>( rawOffered + 0.5 )
                 : 0;
+        result.attributionMeasured = frameTelemetryMeasured;
+
+        if( !frameTelemetryMeasured )
+        {
+            /* Every identity-tracker input is a vacuous zero when telemetry
+             * never ran -- report the third state (UNMEASURED) rather than
+             * the numeric zeros/100%-loss those inputs would otherwise
+             * produce. partitionSound stays false unconditionally: a
+             * partition that was never measured cannot be "sound". */
+            result.partitionSound = false;
+            return result;
+        }
+
         result.presentedViaTargetFrames = presentedViaTargetFramesThisSession;
         result.presentedViaLookaheadFrames = presentedViaLookaheadFramesThisSession;
         result.presentedFrames = presentedOccurrenceUnionCount;
