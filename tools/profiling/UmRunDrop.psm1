@@ -12,7 +12,10 @@
 #   - renames never overwrite: a destination that appeared concurrently makes the rename fail, and
 #     the result is accepted only if that destination already holds identical bytes (side-file) --
 #     a job file is never replaced;
-#   - every side-file is in place before the job is dropped.
+#   - every side-file is in place before the job is dropped;
+#   - a budget (-JobTimeoutSec) is range-checked before any side-file is copied, and its metadata
+#     is removed if the job placement that follows it fails or is refused, so a failed submission
+#     never bricks a later retry of the same JobId (ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2).
 
 Set-StrictMode -Version Latest
 
@@ -145,6 +148,12 @@ function Invoke-UmRunDrop {
 
     if ($JobId -and $JobId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "UMRUN_JOBID_INVALID '$JobId'" }
     if ($JobId -and $JobId.EndsWith('.')) { throw "UMRUN_JOBID_INVALID '$JobId' ends with a dot" }
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol minor 1): checked BEFORE the side-file
+    # loop below, which can be a multi-GB transfer -- an invalid budget must never be discovered
+    # only after paying for that transfer.
+    if ($JobTimeoutSec -ne 0 -and ($JobTimeoutSec -lt 1 -or $JobTimeoutSec -gt 86400)) {
+        throw "UMRUN_JOB_TIMEOUT_INVALID $JobTimeoutSec is outside the agent's accepted 1..86400 range"
+    }
     $id = if ($JobId) { $JobId } else { "job_{0}_{1}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'), ([guid]::NewGuid().ToString('N').Substring(0, 8)) }
     if (Test-Path -LiteralPath (Join-Path $Outbox "$id.result.json")) {
         throw "UMRUN_JOBID_IN_USE outbox already holds $id.result.json"
@@ -203,16 +212,28 @@ function Invoke-UmRunDrop {
     # therefore be in place BEFORE the job file is renamed into view -- same ordering rule the
     # side-files above obey, and for the same reason: the agent may claim the job the instant it
     # appears. Written through a nonce temp and renamed, never overwriting.
+    #
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol major 1): if metadata is placed here but
+    # the job placement below then fails or is refused, this submission's own metadata is removed in
+    # that failure's catch block -- otherwise it outlives the refused submission and bricks every
+    # later retry that reuses the same JobId (UMRUN_JOBID_IN_USE at the check above) even though no
+    # job or result exists. $metaPlacedHere tracks ONLY metadata this call itself placed, never a
+    # pre-existing file (which already throws UMRUN_JOBID_IN_USE before reaching here).
+    $metaPlacedHere = $false
+    $metaFinal = Join-Path $Inbox "$id.meta.json"
     if ($JobTimeoutSec -ne 0) {
-        if ($JobTimeoutSec -lt 1 -or $JobTimeoutSec -gt 86400) {
-            throw "UMRUN_JOB_TIMEOUT_INVALID $JobTimeoutSec is outside the agent's accepted 1..86400 range"
-        }
-        $metaFinal = Join-Path $Inbox "$id.meta.json"
         if (Test-Path -LiteralPath $metaFinal) { throw "UMRUN_JOBID_IN_USE inbox already holds $id.meta.json" }
         $metaTmp = Join-Path $Inbox "$id.$nonce.meta.tmp"
         $metaJson = [ordered]@{ jobId = $id; timeoutSec = $JobTimeoutSec } | ConvertTo-Json -Compress
         try {
             Set-Content -LiteralPath $metaTmp -Value $metaJson -Encoding ascii -NoNewline
+            # fable/sol minor 2: side-files are re-read from the share and hash-verified before
+            # their rename; the metadata previously was not, so a torn write silently reverted the
+            # agent to its own default -- the original bug, undetected. Re-read and compare bytes.
+            $metaWrittenBack = Get-Content -LiteralPath $metaTmp -Raw -Encoding ascii
+            if ($metaWrittenBack -ne $metaJson) {
+                throw "UMRUN_JOB_METADATA_VERIFY_FAILED $id.meta.json did not round-trip to the share"
+            }
             try {
                 Move-Item -LiteralPath $metaTmp -Destination $metaFinal -ErrorAction Stop   # no -Force
             } catch {
@@ -221,6 +242,7 @@ function Invoke-UmRunDrop {
         } finally {
             if (Test-Path -LiteralPath $metaTmp) { Remove-Item -LiteralPath $metaTmp -Force -ErrorAction SilentlyContinue }
         }
+        $metaPlacedHere = $true
         Write-Output ("job metadata placed: {0}.meta.json timeoutSec={1}" -f $id, $JobTimeoutSec)
     }
 
@@ -232,6 +254,11 @@ function Invoke-UmRunDrop {
         } catch {
             throw "UMRUN_JOBID_IN_USE inbox\$id.job.ps1 appeared concurrently; refusing to replace it"
         }
+    } catch {
+        if ($metaPlacedHere) {
+            Remove-Item -LiteralPath $metaFinal -Force -ErrorAction SilentlyContinue
+        }
+        throw
     } finally {
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     }

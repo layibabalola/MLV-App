@@ -78,10 +78,21 @@ try {
     } while ((Get-Date) -lt $heartbeatDeadline)
     if (-not (Test-Path -LiteralPath $heartbeatPath -PathType Leaf)) { throw "Timed out waiting for $heartbeatPath" }
 
+    # The agent is started with its own -JobTimeoutSec 4 (below); the client asks for 20s. Before
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 this agent had no meta.json handling at all, so it
+    # always killed at its own 4s regardless of what the client asked for -- this test passed, but
+    # for the wrong reason (fable/sol major 2). It now must kill at the REQUESTED 20s instead.
     $result = & $runnerScript -ScriptPath $payloadPath -AgentShare $root -TimeoutSec 20 -PollSeconds 1
     if ([int]$result.exitCode -ne 124 -or -not [bool]$result.timedOut) {
         throw "Expected agent timeout result; got exitCode=$($result.exitCode) timedOut=$($result.timedOut)."
     }
+    if ([int]$result.timeoutSec -ne 20) {
+        throw "Expected the agent to honour the job's metadata budget (20s) rather than its own -JobTimeoutSec default (4s); got timeoutSec=$($result.timeoutSec)."
+    }
+    $metaInboxPath = Join-Path $root ("inbox\{0}.meta.json" -f $result.jobId)
+    $metaProcessedPath = Join-Path $root ("processed\{0}.meta.json" -f $result.jobId)
+    if (Test-Path -LiteralPath $metaInboxPath) { throw "Job metadata was left behind in inbox: $metaInboxPath" }
+    if (-not (Test-Path -LiteralPath $metaProcessedPath)) { throw "Job metadata was not moved to processed alongside its job: $metaProcessedPath" }
     if (-not (Test-Path -LiteralPath $grandchildIdentityPath -PathType Leaf)) { throw 'Tracked descendant did not publish its identity.' }
     $grandchildIdentity = Get-Content -LiteralPath $grandchildIdentityPath -Raw | ConvertFrom-Json
     $survivor = Get-Process -Id ([int]$grandchildIdentity.processId) -ErrorAction SilentlyContinue

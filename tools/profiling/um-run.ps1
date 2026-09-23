@@ -32,16 +32,33 @@ param(
     [int]$TimeoutSec = 1800,
     [int]$PollSeconds = 3,
     [int]$MaxHeartbeatAgeSec = 30,
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (sol major 3): how long the client waits to see the
+    # job CLAIMED (running\<id>.started.json, written by a compatible agent) before giving up on it
+    # ever running at all. Jobs are processed sequentially, so a job ahead in the queue can delay a
+    # claim by up to its own budget -- as much as 86400s, the same max any caller can request -- so
+    # that is the default. Once claimed, patience is governed by -TimeoutSec + the grace below
+    # instead, measured from the claim, not from submission.
+    [int]$MaxQueueWaitSec = 86400,
     [string[]]$SideFile = @(),
     # Keep a generator's own job id (so outbox\<JobId>.result.json and its artifacts line up).
     [string]$JobId = ''
 )
 
 $ErrorActionPreference = "Stop"
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (sol major 3): 0 is a sentinel INSIDE UmRunDrop.psm1
+# ("write no metadata"; an internal contract used directly by tests), but forwarding it here from a
+# public caller collided with the grace formula below -- a caller asking for "no budget" got a
+# 5-SECOND client patience while a compatible agent quietly fell back to ITS OWN default (which can
+# be 1800s or more). The public contract is therefore explicit: 0 has no defined per-job budget and
+# is refused here, before it ever reaches the module.
+if ($TimeoutSec -le 0) {
+    throw "UMRUN_TIMEOUT_SEC_INVALID -TimeoutSec must be a positive integer (1..86400); 0 has no defined client patience"
+}
 Import-Module (Join-Path $PSScriptRoot 'UmRunDrop.psm1') -Force
-$inbox  = Join-Path $AgentShare "inbox"
-$outbox = Join-Path $AgentShare "outbox"
-$hb     = Join-Path $AgentShare "heartbeat.txt"
+$inbox   = Join-Path $AgentShare "inbox"
+$outbox  = Join-Path $AgentShare "outbox"
+$running = Join-Path $AgentShare "running"
+$hb      = Join-Path $AgentShare "heartbeat.txt"
 
 # Liveness gate: never submit into a dead agent (mirrors the bridge Monitor lesson).
 if (-not (Test-Path $hb)) { throw "No agent heartbeat at $hb - run install-ultra-magnus-agent.ps1 on the host first." }
@@ -63,7 +80,8 @@ foreach ($line in $dropLines) {
 }
 if (-not $jobId) { throw "UmRunDrop returned no job id" }
 
-$resultFile = Join-Path $outbox "$jobId.result.json"
+$resultFile    = Join-Path $outbox "$jobId.result.json"
+$startedMarker = Join-Path $running "$jobId.started.json"
 # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1: -TimeoutSec is now the AGENT's budget too (written into the
 # job metadata above), so the client must outlast it -- otherwise the two deadlines race and the
 # caller throws its own generic timeout instead of reading the agent's receipt, which is the only
@@ -73,13 +91,73 @@ $resultFile = Join-Path $outbox "$jobId.result.json"
 # Proportional, so a 1-second probe does not wait three minutes for a receipt that will never come,
 # and an hour-long placement still gets a usable margin. Floor 5 s covers the queue-and-write gap.
 $clientGraceSec = [math]::Min(180, [math]::Max(5, [int]($TimeoutSec * 0.1)))
-$deadline = (Get-Date).AddSeconds($TimeoutSec + $clientGraceSec)
-while ((Get-Date) -lt $deadline) {
-    if (Test-Path $resultFile) {
+
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol major 3): the agent's own deadline starts
+# when it CLAIMS the job, not when this client submitted it, and jobs on a shared agent are
+# processed sequentially -- a job ahead in the queue can delay the claim by up to its own budget.
+# Anchoring the client's deadline to submission time (as before) makes it race and lose against a
+# merely-queued job, then throw a message that affirmatively misdiagnoses a healthy, still-running
+# job as a dead agent. So there are two phases, and the client always knows which one it is in:
+#   - QUEUED: waiting to see running\<jobId>.started.json, a marker a compatible agent writes the
+#     instant it claims the job (read here rather than guessed at). Ceiling: $MaxQueueWaitSec.
+#   - CLAIMED: once the marker appears, patience becomes claim time + -TimeoutSec + the grace above,
+#     exactly as if the client had started counting at the claim.
+# A queue ceiling of exactly $TimeoutSec+grace here would BE the pre-fix behaviour (misdiagnosing a
+# queued job the moment ITS OWN naive deadline passes); the point of $MaxQueueWaitSec is to be able
+# to outlast an unrelated job ahead of it.
+$submittedAt   = Get-Date
+$queueDeadline = $submittedAt.AddSeconds($MaxQueueWaitSec)
+$claimedAt     = $null
+$execDeadline  = $null
+
+function Get-UmRunResultIfPresent {
+    param([string]$Path)
+    if (Test-Path -LiteralPath $Path) {
         Start-Sleep -Milliseconds 400   # let the atomic rename settle
-        $r = Get-Content $resultFile -Raw | ConvertFrom-Json
-        return $r
+        return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
     }
+    return $null
+}
+
+while ($true) {
+    $r = Get-UmRunResultIfPresent -Path $resultFile
+    if ($null -ne $r) { return $r }
+
+    if ($null -eq $claimedAt -and (Test-Path -LiteralPath $startedMarker)) {
+        $claimedAt = Get-Date
+        try {
+            $marker = Get-Content -LiteralPath $startedMarker -Raw | ConvertFrom-Json
+            # ConvertFrom-Json auto-converts an ISO-8601 "...Z" string into a [datetime] with
+            # Kind=Utc -- casting THAT straight to [string] silently drops the Z/offset (its default
+            # ToString() prints bare local-culture digits), so re-parsing the string then assumes
+            # those digits are already LOCAL wall time and shifts the claim by the zone offset. Read
+            # the DateTime object directly instead of round-tripping it through a string.
+            $startedRaw = $marker.startedUtc
+            if ($startedRaw -is [DateTime]) {
+                $asUtc = if ($startedRaw.Kind -eq [DateTimeKind]::Utc) { $startedRaw } else { [DateTime]::SpecifyKind($startedRaw, [DateTimeKind]::Utc) }
+                $claimedAt = $asUtc.ToLocalTime()
+            } elseif ($startedRaw) {
+                $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+                $claimedAt = [DateTimeOffset]::Parse([string]$startedRaw, [Globalization.CultureInfo]::InvariantCulture, $styles).LocalDateTime
+            }
+        } catch { }
+        $execDeadline = $claimedAt.AddSeconds($TimeoutSec + $clientGraceSec)
+    }
+
+    $activeDeadline = if ($null -ne $execDeadline) { $execDeadline } else { $queueDeadline }
+    if ((Get-Date) -ge $activeDeadline) { break }
     Start-Sleep -Seconds $PollSeconds
 }
-throw "Timed out after $($TimeoutSec + $clientGraceSec)s waiting for $resultFile (agent budget ${TimeoutSec}s + ${clientGraceSec}s grace; no agent receipt appeared, so the job never ran or the agent is down)"
+
+# fable/sol major 3 (second half): re-check once more before throwing -- a receipt (or a claim) that
+# lands in the instant between the deadline check above and this line must still be read, not missed.
+$r = Get-UmRunResultIfPresent -Path $resultFile
+if ($null -ne $r) { return $r }
+
+if ($null -ne $claimedAt) {
+    $execElapsedSec = [int]((Get-Date) - $claimedAt).TotalSeconds
+    throw "Timed out ${execElapsedSec}s after $jobId was claimed by the agent (budget ${TimeoutSec}s + ${clientGraceSec}s grace); $resultFile still has not appeared -- the agent claimed the job but has not finished or published a result"
+} else {
+    $queuedElapsedSec = [int]((Get-Date) - $submittedAt).TotalSeconds
+    throw "Timed out after ${queuedElapsedSec}s: $jobId was never claimed (no $startedMarker marker appeared) and $resultFile never appeared -- it may still be queued behind other work on the agent, or the agent may be unreachable"
+}

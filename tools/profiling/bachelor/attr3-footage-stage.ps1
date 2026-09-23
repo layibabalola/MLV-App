@@ -135,6 +135,15 @@ if (-not [int]::TryParse($TimeoutSec, [ref]$timeoutSecValue) -or $timeoutSecValu
     throw "ATTR3_FOOTAGE_STAGE_TIMEOUT_SEC_INVALID -TimeoutSec must be an integer >= $MinAttr3FootageStageTimeoutSec"
 }
 
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (sol minor): the presence preflight below is a hash
+# verification optimisation with a bounded, known-cheap workload (it never transfers a byte) -- it
+# is not the placement itself, so it must not inherit the placement's own (possibly hour-long)
+# -TimeoutSec. Before this, a stuck preflight on a large -TimeoutSec silently delayed fallback to the
+# real transfer for the full placement budget instead of the old fixed 1800s agent ceiling. Capped
+# independently, and never below the CLI's own floor.
+$MaxAttr3FootagePresenceTimeoutSec = 300
+$presenceTimeoutSecValue = [Math]::Max($MinAttr3FootageStageTimeoutSec, [Math]::Min($timeoutSecValue, $MaxAttr3FootagePresenceTimeoutSec))
+
 # ATTR3-FOOTAGE-STAGE-1 round 4 (sol BLOCKER 1): -AgentShare and -AgentRootOnHost used to be
 # public parameters -- the id-only interface's actual remaining authority boundary, since a
 # caller-supplied share or agent root could redirect every byte this script transfers and every
@@ -299,7 +308,7 @@ try {
     # Write-Host -- the Information stream (6), not this call's own success-stream return value --
     # including a "submitted <id> -> <path>" line that names a real agent-share path. `6>$null`
     # discards that stream at the call site so it never reaches this process's own console.
-    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $timeoutSecValue 6>$null
+    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $presenceTimeoutSecValue 6>$null
     $presentIndexArray = @(Get-Attr3FootagePresentPartIndexes -Stdout $presenceResult.stdout -ClipId $ClipId)
 } catch {
     # Presence is an optimization, not a correctness requirement -- if the preflight itself could

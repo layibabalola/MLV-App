@@ -88,6 +88,11 @@ RACING_SIDE = ("{ param($s, $d) Copy-Item -LiteralPath $s -Destination $d; "
 RACING_JOB = ("{ param($s, $d) Copy-Item -LiteralPath $s -Destination $d; "
               "if ($d -like '*.job.tmp') { $final = $d -replace '\\.[0-9a-f]{32}\\.job\\.tmp$', '.job.ps1'; "
               "[IO.File]::WriteAllText($final, 'Write-Output concurrent') } }")
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol major 1). Metadata is placed successfully;
+# only the JOB's own copy is made to fail, simulating the share hiccup / concurrent-rename class of
+# failure fable's review used as its repro.
+JOB_COPY_FAILS = ("{ param($s, $d) if ($d -like '*.job.tmp') { throw 'INJECTED_JOB_COPY_FAILURE' }; "
+                   "Copy-Item -LiteralPath $s -Destination $d }")
 # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1. The metadata is written with Set-Content, not through the
 # copier, so ordering cannot be read off the copy log alone: this copier records, at the moment the
 # JOB's temporary is written, whether the metadata is already in place. That is the property the
@@ -144,6 +149,30 @@ class UmRunDropModuleTests(_Share):
                 self.assertIn("THREW UMRUN_JOB_TIMEOUT_INVALID", proc.stdout, proc.stdout + proc.stderr)
                 self.assertEqual(self.names(), [],
                                  "a refused budget must leave neither metadata nor a job")
+
+    def test_an_invalid_budget_is_refused_before_any_sidefile_is_copied(self) -> None:
+        # fable/sol minor 1: the range check used to run AFTER the side-file loop, so an invalid
+        # -JobTimeoutSec was only discovered after a possibly multi-GB transfer had already happened.
+        proc = self.drop(OBSERVING, job_timeout_sec=86401)   # self.side is a real side-file by default
+        self.assertIn("THREW UMRUN_JOB_TIMEOUT_INVALID", proc.stdout, proc.stdout + proc.stderr)
+        self.assertFalse(self.log.exists(), "no copy may happen before the budget is validated")
+        self.assertEqual(self.names(), [])
+
+    def test_a_failed_job_copy_removes_the_metadata_so_a_retry_with_the_same_job_id_succeeds(self) -> None:
+        # fable/sol major 1: metadata was placed and never rolled back when the job's OWN copy then
+        # failed. Deterministic job ids (playback-attr-3-cuda-dll-job.ps1, ...-stage-job.ps1) have no
+        # attempt nonce, so every retry of the same id was then refused (UMRUN_JOBID_IN_USE) against
+        # a job/result that never actually existed -- this is the SUBMIT-RETRY-1 bug itself.
+        first = self.drop(JOB_COPY_FAILS, side=[], job_timeout_sec=3600)
+        self.assertIn("THREW", first.stdout, first.stdout + first.stderr)
+        self.assertNotIn("UMRUN_JOBID=demo", first.stdout)
+        self.assertEqual(self.names(), [],
+                         "a failed job placement must leave neither its own metadata nor a job behind")
+
+        retry = self.drop(OBSERVING, side=[], job_timeout_sec=3600)
+        self.assertIn("UMRUN_JOBID=demo", retry.stdout, retry.stdout + retry.stderr)
+        self.assertEqual(self.names(), ["demo.job.ps1", "demo.meta.json"],
+                         "the retry must succeed exactly as if the first attempt had never happened")
 
     def test_metadata_that_appears_concurrently_is_not_overwritten(self) -> None:
         (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":42}', encoding="ascii")
@@ -310,11 +339,16 @@ class UmRunDropModuleTests(_Share):
 
 
 class UmRunEndToEndTests(_Share):
-    def submit(self, *extra: str, timeout_sec: str = "1") -> subprocess.CompletedProcess:
+    def submit(self, *extra: str, timeout_sec: str = "1", max_queue_wait_sec: str = "5") -> subprocess.CompletedProcess:
+        # max_queue_wait_sec is small here on purpose: these tests use a FAKE share with no agent,
+        # so the job is NEVER claimed, and the production default (86400s -- see um-run.ps1's own
+        # comment on -MaxQueueWaitSec) would make every one of them hang. A real caller that expects
+        # queue contention passes a larger value explicitly; a caller that does not gets a fast,
+        # honestly-worded "never claimed" failure instead of a false "agent is down" diagnosis.
         return subprocess.run(
             [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
              "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
-             "-TimeoutSec", timeout_sec, "-PollSeconds", "1", *extra],
+             "-TimeoutSec", timeout_sec, "-PollSeconds", "1", "-MaxQueueWaitSec", max_queue_wait_sec, *extra],
             capture_output=True, text=True,
         )
 
@@ -325,6 +359,17 @@ class UmRunEndToEndTests(_Share):
         self.assertEqual(self.names(), ["demo-source.zip", "demo.job.ps1", "demo.meta.json"])
         self.assertEqual(hashlib.sha256((self.inbox / "demo-source.zip").read_bytes()).hexdigest(),
                          hashlib.sha256(self.side.read_bytes()).hexdigest())
+
+    def test_a_timeout_of_zero_is_rejected_by_the_public_client(self) -> None:
+        # sol major 3: 0 is a valid MODULE-level sentinel ("write no metadata"), but the public
+        # client forwarded it unchanged into a grace formula that gave the CALLER only 5s of
+        # patience while a compatible agent quietly fell back to its own (possibly 1800s+) default.
+        # The public contract closes that collision by refusing 0 outright, before anything is
+        # submitted.
+        proc = self.submit(timeout_sec="0")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("UMRUN_TIMEOUT_SEC_INVALID", proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), [], "a rejected -TimeoutSec must submit nothing at all")
 
     def test_the_callers_timeout_reaches_the_agent_as_the_jobs_own_budget(self) -> None:
         # The bug this closes: -TimeoutSec bounded only the client poll, so the agent ran every job
@@ -350,11 +395,75 @@ class UmRunEndToEndTests(_Share):
             proc.kill()
             proc.communicate()
 
-    def test_the_client_poll_outlasts_the_agent_budget_so_a_receipt_can_be_read(self) -> None:
-        # Equal deadlines race: the client would throw its own generic timeout at the same instant
-        # the agent writes the receipt that says WHY the job ended.
-        proc = self.submit("-JobId", "demo")
-        self.assertIn("agent budget 1s + 5s grace", proc.stdout + proc.stderr)
+    def test_an_unclaimed_job_times_out_with_a_queued_diagnosis_never_a_down_diagnosis(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol major 3): the OLD message
+        # ("the job never ran or the agent is down") is an affirmative diagnosis the client has not
+        # earned -- it cannot distinguish "dead agent" from "queued behind other work". Against this
+        # fake, agent-less share the job is genuinely never claimed, so the message must say exactly
+        # that, and nothing stronger.
+        proc = self.submit("-JobId", "demo", max_queue_wait_sec="2")
+        combined = proc.stdout + proc.stderr
+        self.assertIn("was never claimed", combined, combined)
+        self.assertNotIn("the job never ran or the agent is down", combined, combined)
+
+    def test_a_late_claim_extends_the_deadline_past_the_original_queue_wait(self) -> None:
+        # fable/sol major 3: the agent's deadline starts at CLAIM, not submission, and jobs are
+        # processed sequentially, so a job stuck behind another can be claimed well after this
+        # client's naive submit-time deadline would have expired. Simulates a compatible agent's
+        # claim marker (running\<id>.started.json) appearing late, and proves the client's patience
+        # shifts to (claim + budget + grace) instead of giving up at the old, submission-anchored one.
+        running_dir = self.share / "running"
+        proc = subprocess.Popen(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
+             "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
+             "-TimeoutSec", "1", "-PollSeconds", "1", "-MaxQueueWaitSec", "3", "-JobId", "demo"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(1.5)   # inside the 3s queue-wait ceiling
+            running_dir.mkdir(parents=True, exist_ok=True)
+            marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            (running_dir / "demo.started.json").write_text(json.dumps(marker), encoding="ascii")
+            # By the OLD queue-wait ceiling (3s from submission) the client must still be alive,
+            # because it saw the claim and switched to (claim + 1s budget + 5s grace) instead.
+            time.sleep(2.0)   # ~3.5s since submission: past the 3s queue ceiling
+            self.assertIsNone(proc.poll(), "the client gave up even though the agent had claimed the job")
+            stdout, stderr = proc.communicate(timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        combined = (stdout or "") + (stderr or "")
+        self.assertIn("claimed by the agent", combined, combined)
+        self.assertNotIn("was never claimed", combined, combined)
+
+    def test_a_receipt_written_during_the_final_sleep_is_still_read(self) -> None:
+        # fable/sol major 3 (second half): the old loop tested its deadline BEFORE sleeping, so a
+        # receipt published during the final poll sleep was skipped -- the deadline had already
+        # passed by the time the loop would have looked again. PollSeconds is deliberately larger
+        # than MaxQueueWaitSec so the run's only sleep straddles the deadline.
+        proc = subprocess.Popen(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
+             "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
+             "-TimeoutSec", "1", "-PollSeconds", "3", "-MaxQueueWaitSec", "1", "-JobId", "demo"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(1.5)   # during the loop's single sleep, after the 1s queue-wait ceiling
+            result = {"jobId": "demo", "exitCode": 0, "stdout": "late but real", "stderr": "",
+                      "timeoutSec": 1, "timedOut": False}
+            tmp = self.outbox / "demo.result.tmp"
+            tmp.write_text(json.dumps(result), encoding="ascii")
+            tmp.replace(self.outbox / "demo.result.json")
+            stdout, stderr = proc.communicate(timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        # Checked by exit code and absence of the timeout throw, not by scraping stdout for the
+        # returned object's fields: PowerShell's default console formatting of a returned
+        # PSCustomObject is not a stable text contract to assert against.
+        combined = (stdout or "") + (stderr or "")
+        self.assertEqual(proc.returncode, 0, combined)
+        self.assertNotIn("Timed out", combined, combined)
 
     def test_a_different_same_named_file_is_refused_and_no_job_is_dropped(self) -> None:
         (self.inbox / "demo-source.zip").write_bytes(b"someone else's bytes")
