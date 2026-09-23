@@ -192,8 +192,12 @@ function Get-SmokeSummaryHostLoadFields {
             reason = "no hostLoad telemetry recorded in the smoke result"
         }
     }
+    # round 4 (sol major): "provisional" and "state" used to be derived independently, so a block
+    # carrying an explicit provisional=false alongside a missing/blank state read as
+    # state=unknown PROVISIONAL=false -- an inconsistent, clean-reading combination that let
+    # UNKNOWN enter an fps comparison unrefused. state=unknown now always forces provisional=true.
     $provisionalProperty = $HostLoad.PSObject.Properties["provisional"]
-    $provisional = if ($null -eq $provisionalProperty -or $null -eq $provisionalProperty.Value) {
+    $provisionalDeclared = if ($null -eq $provisionalProperty -or $null -eq $provisionalProperty.Value) {
         $true
     } else {
         [bool]$provisionalProperty.Value
@@ -204,6 +208,7 @@ function Get-SmokeSummaryHostLoadFields {
     } else {
         [string]$stateProperty.Value
     }
+    $provisional = ($provisionalDeclared -or $state -eq "unknown")
     $reasonProperty = $HostLoad.PSObject.Properties["reason"]
     $reason = if ($null -eq $reasonProperty) { $null } else { [string]$reasonProperty.Value }
 
@@ -636,6 +641,23 @@ function Import-EvidencePacket {
                     [double]$summary.inputs.minPresentedFps
                 } else {
                     24.0
+                }
+                # round 4 (sol major): re-applying the floor is not enough on its own -- a legacy
+                # or degenerate packet whose summary.proof.speedValidated was computed under an
+                # older schema (before host-load provenance existed, or a future drift) could
+                # still carry a presentedFps that clears the floor while its host load was
+                # provisional or unrecorded. Reject independently, per clip, rather than trusting
+                # speedValidated (checked above) alone -- fail toward provisional on a missing
+                # property, same stance as Get-SmokeSummaryHostLoadFields.
+                $clipHostLoadProvisionalProperty = $clip.PSObject.Properties["hostLoadProvisional"]
+                $clipHostLoadProvisional = if ($null -eq $clipHostLoadProvisionalProperty -or
+                    $null -eq $clipHostLoadProvisionalProperty.Value) {
+                    $true
+                } else {
+                    [bool]$clipHostLoadProvisionalProperty.Value
+                }
+                if ($clipHostLoadProvisional) {
+                    Add-Failure $importFailures "$clipName host load was PROVISIONAL or unrecorded (hostLoadProvisional=$clipHostLoadProvisional); an fps number measured under provisional host load is not proof of speed, regardless of the floor."
                 }
                 if ([double]$clip.presentedFps -lt $minSpeedFps) {
                     Add-Failure $importFailures "$clipName had presentedFps=$($clip.presentedFps); expected >= $minSpeedFps for speed proof mode."
@@ -1207,6 +1229,13 @@ exit `$LASTEXITCODE
             Add-Failure $clipFailures "Smoke result did not report a log path."
         }
 
+        # round 4 (sol major): computed here, ahead of the SpeedLeg floor check below that needs
+        # it -- it used to be computed only after $clipFailures was finalized, so a loaded host
+        # that dragged presented_fps under the hard floor was recorded as a genuine clipFailures
+        # entry, conflating "we couldn't get a clean signal" with "the build is broken", exactly
+        # backwards from this card's own rule that host load MARKS, never fails, a run.
+        $hostLoadFields = Get-SmokeSummaryHostLoadFields -HostLoad (if ($result) { $result.hostLoad } else { $null })
+
         if ($receiptRawFixesEnabled) {
             if ($noReadbackFrames -le 0) {
                 Add-Failure $clipFailures "gpu_texture_no_readback_frames was $noReadbackFrames; expected > 0."
@@ -1232,7 +1261,18 @@ exit `$LASTEXITCODE
             if ($SpeedLeg) {
                 $presentedFpsValue = if ($result) { [double]$result.log.summary.presented_fps } else { 0.0 }
                 if ($presentedFpsValue -lt $MinPresentedFps) {
-                    Add-Failure $clipFailures ("Speed leg presented_fps={0:N3} was below hard floor {1:N3} fps." -f $presentedFpsValue, $MinPresentedFps)
+                    if ($hostLoadFields.provisional) {
+                        [void]$warnings.Add((
+                            "Speed leg presented_fps={0:N3} was below hard floor {1:N3} fps, but " +
+                            "host load was PROVISIONAL (state=$($hostLoadFields.state) " +
+                            "reason=$($hostLoadFields.reason)); this is not evidence the build is " +
+                            "slow, only that this run's fps is not a trustworthy signal. Rerun on " +
+                            "a quiet host."
+                        ) -f $presentedFpsValue, $MinPresentedFps)
+                    }
+                    else {
+                        Add-Failure $clipFailures ("Speed leg presented_fps={0:N3} was below hard floor {1:N3} fps." -f $presentedFpsValue, $MinPresentedFps)
+                    }
                 }
                 if (($borrowedNoReadbackInputFrameCount + $ownedNoReadbackInputFrameCount) -le 0) {
                     Add-Failure $clipFailures "Speed leg did not report borrowed or owned no-readback input frames; expected r16_amaze_skip_input_borrowed=1 or gpu_tex_nr_owned_input=1."
@@ -1309,7 +1349,7 @@ exit `$LASTEXITCODE
         # MARKS, never fails: per this card's own rule, host load never fails a run by itself --
         # it only disqualifies the fps it recorded from being trusted as a regression/acceptance
         # signal. $speedValidated below is exactly that acceptance signal for the speed leg.
-        $hostLoadFields = Get-SmokeSummaryHostLoadFields -HostLoad (if ($result) { $result.hostLoad } else { $null })
+        # ($hostLoadFields is computed above, ahead of the SpeedLeg floor check that needs it.)
         $clipResults += [pscustomobject]@{
             clip = $clipItem.FullName
             status = $clipStatus

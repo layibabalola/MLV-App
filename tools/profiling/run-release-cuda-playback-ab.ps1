@@ -756,10 +756,15 @@ function Get-SmokeSummaryHostLoadFields {
     # Get-HostLoadComparisonEvidence.
     param([object]$HostLoad)
 
+    # round 4 (sol major): "provisional" and "state" used to be derived independently, so a block
+    # carrying an explicit provisional=false alongside a missing/blank state read as
+    # state=unknown PROVISIONAL=false -- an inconsistent, clean-reading combination that let
+    # UNKNOWN enter an fps comparison unrefused. state=unknown now always forces provisional=true.
     $provisionalRaw = if ($null -eq $HostLoad) { $null } else { Get-NestedValue $HostLoad "provisional" }
-    $provisional = if ($null -eq $HostLoad -or $null -eq $provisionalRaw) { $true } else { [bool]$provisionalRaw }
+    $provisionalDeclared = if ($null -eq $HostLoad -or $null -eq $provisionalRaw) { $true } else { [bool]$provisionalRaw }
     $stateRaw = if ($null -eq $HostLoad) { $null } else { Get-NestedValue $HostLoad "state" }
     $state = if ($null -eq $HostLoad -or [string]::IsNullOrWhiteSpace([string]$stateRaw)) { "unknown" } else { [string]$stateRaw }
+    $provisional = ($provisionalDeclared -or $state -eq "unknown")
     $reason = if ($null -eq $HostLoad) {
         "no hostLoad telemetry recorded in the smoke result"
     } else {
@@ -1677,11 +1682,25 @@ if ($RequireCandidateGlParity) {
     }
 }
 if ($RequireCandidateImprovesPresentedFps) {
-    $baselineFps = Convert-ToNullableDouble $baselineSummary.presentedFps
     $candidateForSpeed = if ($SeparateCandidateSpeedRun) { $candidateSpeedSummary } else { $candidateSummary }
-    $candidateFps = Convert-ToNullableDouble $candidateForSpeed.presentedFps
-    if ($null -eq $baselineFps -or $null -eq $candidateFps -or $candidateFps -le $baselineFps) {
-        $proofFailures += "candidate-presented-fps-not-improved baseline=$baselineFps candidate=$candidateFps"
+    # round 4 (sol major): this requirement used to compare presentedFps unconditionally, even
+    # when Get-HostLoadProofFailures (above) had already flagged one of these exact legs as
+    # host-load provisional -- the overall proof still failed either way, but this check ALSO
+    # emitted a "candidate-presented-fps-not-improved" line computed from noisy data, which
+    # misrepresents a host-load problem as an fps regression. Refuse the fps comparison itself
+    # when either leg is provisional instead of computing it from untrustworthy numbers.
+    if ($baselineSummary.hostLoadProvisional -or $candidateForSpeed.hostLoadProvisional) {
+        $proofFailures += (
+            "candidate-presented-fps-improvement-not-evaluated host-load-provisional " +
+            "baseline=$($baselineSummary.hostLoadProvisional) candidate=$($candidateForSpeed.hostLoadProvisional)"
+        )
+    }
+    else {
+        $baselineFps = Convert-ToNullableDouble $baselineSummary.presentedFps
+        $candidateFps = Convert-ToNullableDouble $candidateForSpeed.presentedFps
+        if ($null -eq $baselineFps -or $null -eq $candidateFps -or $candidateFps -le $baselineFps) {
+            $proofFailures += "candidate-presented-fps-not-improved baseline=$baselineFps candidate=$candidateFps"
+        }
     }
 }
 

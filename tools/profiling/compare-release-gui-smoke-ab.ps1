@@ -415,10 +415,15 @@ function Get-HostLoadComparisonEvidence {
         # read the same as a missing block entirely -- provisional/unknown, never coerced to
         # clean. [bool]$null -eq $false is the trap: it would make a degenerate block silently
         # pass as a clean leg, exactly backwards from this gate's fail-toward-provisional stance.
+        # round 4 (sol major): "provisional" and "state" used to be derived independently, so a
+        # block carrying an explicit provisional=false alongside a missing/blank state read as
+        # state=unknown PROVISIONAL=false -- an inconsistent, clean-reading combination that let
+        # UNKNOWN enter comparison unrefused. state=unknown now always forces provisional=true.
         $legProvisionalRaw = if ($null -eq $legHostLoad) { $null } else { Get-NestedValue $legHostLoad "provisional" }
-        $legProvisional = if ($null -eq $legHostLoad -or $null -eq $legProvisionalRaw) { $true } else { [bool]$legProvisionalRaw }
+        $legProvisionalDeclared = if ($null -eq $legHostLoad -or $null -eq $legProvisionalRaw) { $true } else { [bool]$legProvisionalRaw }
         $legStateRaw = if ($null -eq $legHostLoad) { $null } else { Get-NestedValue $legHostLoad "state" }
         $legState = if ($null -eq $legHostLoad -or [string]::IsNullOrWhiteSpace([string]$legStateRaw)) { "unknown" } else { [string]$legStateRaw }
+        $legProvisional = ($legProvisionalDeclared -or $legState -eq "unknown")
         $legReason = if ($null -eq $legHostLoad) {
             "no hostLoad telemetry recorded in the smoke result"
         } else {

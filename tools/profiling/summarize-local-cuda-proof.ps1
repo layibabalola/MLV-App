@@ -642,7 +642,39 @@ else {
                 -NextAction "Fix the A/B proof failure before quoting playback speed."
         }
     }
-    if ($playbackAbSpeedCompare -and $null -ne $playbackAbSpeedCompare.presentedFps) {
+    # round 4 (sol major): relying only on $playbackAb.proofFailures let a legacy/degenerate
+    # packet -- one produced before the host-load gate existed, or lacking the field for any other
+    # reason -- pass this section cleanly even though its FPS numbers were never checked against
+    # host load at all. Check the relevant legs' hostLoadProvisional independently, defaulting a
+    # missing/absent property to provisional (fail toward provisional, same stance as every other
+    # reader in this card).
+    $playbackAbCandidateLeg = if ($playbackAbComparisonBasis -eq "candidateSpeed") {
+        $playbackAb.candidateSpeed
+    } else {
+        $playbackAb.candidate
+    }
+    $playbackAbHostLoadLegs = @(
+        [pscustomobject]@{ Name = "baseline"; Leg = $playbackAb.baseline },
+        [pscustomobject]@{ Name = $playbackAbComparisonBasis; Leg = $playbackAbCandidateLeg }
+    )
+    $playbackAbHostLoadProvisional = $false
+    foreach ($legEntry in $playbackAbHostLoadLegs) {
+        $legProvisionalValue = Get-Field $legEntry.Leg "hostLoadProvisional"
+        $legProvisional = if ($null -eq $legProvisionalValue) { $true } else { [bool]$legProvisionalValue }
+        if ($legProvisional) {
+            $playbackAbHostLoadProvisional = $true
+            [void]$playbackAbBlockers.Add("playback A/B $($legEntry.Name) leg host load was PROVISIONAL or unrecorded")
+            Add-Diagnostic `
+                -Diagnostics $diagnostics `
+                -Area "playback-speed" `
+                -Code "PLAYBACK_AB_HOST_LOAD_PROVISIONAL" `
+                -Message "Playback A/B $($legEntry.Name) leg host load was PROVISIONAL or unrecorded." `
+                -Evidence @("leg=$($legEntry.Name)") `
+                -NextAction "Rerun the playback A/B stage on a quiet host; an fps number measured under provisional or unrecorded host load is not a property of the build."
+        }
+    }
+    if (-not $playbackAbHostLoadProvisional -and
+        $playbackAbSpeedCompare -and $null -ne $playbackAbSpeedCompare.presentedFps) {
         $fpsDelta = Convert-ToNullableDouble (Get-Field $playbackAbSpeedCompare.presentedFps "delta")
         if ($null -ne $fpsDelta -and $fpsDelta -le 0) {
             Add-Diagnostic `

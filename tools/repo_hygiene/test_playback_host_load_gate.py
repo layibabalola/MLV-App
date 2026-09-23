@@ -17,6 +17,7 @@ fixture-driven unit level only. Everything is skipped cleanly when pwsh is not o
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -31,6 +32,7 @@ COMPARE_SCRIPT = ROOT / "tools" / "profiling" / "compare-release-gui-smoke-ab.ps
 CUDA_AB_SCRIPT = ROOT / "tools" / "profiling" / "run-release-cuda-playback-ab.ps1"
 COMPARE_MACHINE_PERF_SCRIPT = ROOT / "tools" / "profiling" / "compare-machine-perf.ps1"
 P3_VALIDATION_SCRIPT = ROOT / "tools" / "profiling" / "run-ultramagnus-p3-validation.ps1"
+CUDA_PROOF_SUMMARIZER_SCRIPT = ROOT / "tools" / "profiling" / "summarize-local-cuda-proof.ps1"
 
 PWSH = shutil.which("pwsh")
 requires_pwsh = unittest.skipIf(PWSH is None, "pwsh is not on PATH")
@@ -91,24 +93,36 @@ class HostLoadSnapshotTests(_ProbeCase):
         "Windows-only; on other hosts it correctly reports collected=False (see "
         "HostLoadSnapshotUnknownWhereCollectionIsImpossibleTests below).",
     )
-    def test_real_snapshot_collects_without_paths_or_command_lines(self) -> None:
+    def test_real_snapshot_collects_or_reports_uncollectable_never_paths_or_command_lines(self) -> None:
+        # round 4 (sol major): a restricted Windows host (locked-down CIM/WMI, no admin rights, a
+        # sandboxed runner) can legitimately fail to collect telemetry -- this is a valid third
+        # outcome on Windows too, not something the test should assume away. This review lane
+        # itself observed collected=false on every direct probe. Accept either outcome; only
+        # assert the shape and privacy properties that must hold regardless of which one occurs.
         proc = self.run_snippet(
             "$s = Get-HostLoadSnapshot -TopProcessCount 6\n"
             "Write-Host \"COLLECTED=$($s.collected)\"\n"
             "Write-Host \"PROC_COUNT=$($s.processCount)\"\n"
             "Write-Host \"TOP_COUNT=$($s.topCpuConsumers.Count)\"\n"
-            "Write-Host ($s.topCpuConsumers -join '|')\n"
+            "Write-Host \"TOP=$($s.topCpuConsumers -join '|')\"\n"
+            "Write-Host \"ERROR=$($s.error)\"\n"
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("COLLECTED=True", proc.stdout)
-        self.assertRegex(proc.stdout, r"PROC_COUNT=\d+")
+        self.assertRegex(proc.stdout, r"COLLECTED=(True|False)")
+        top_line = next(l for l in proc.stdout.splitlines() if l.startswith("TOP="))
         # Top consumers are recorded BY NAME ONLY: no path separators, no drive letters, no
-        # command-line argument text -- this is host-load evidence, not process forensics.
-        top_line = proc.stdout.splitlines()[-1]
-        for name in [n for n in top_line.split("|") if n]:
+        # command-line argument text -- this is host-load evidence, not process forensics. This
+        # holds whether or not collection actually succeeded (an uncollectable snapshot's
+        # topCpuConsumers is simply empty).
+        for name in [n for n in top_line[len("TOP="):].split("|") if n]:
             self.assertNotIn("\\", name)
             self.assertNotIn("/", name)
             self.assertNotIn(":", name)
+        if "COLLECTED=True" in proc.stdout:
+            self.assertRegex(proc.stdout, r"PROC_COUNT=\d+")
+            self.assertIn("ERROR=", proc.stdout)
+        else:
+            self.assertIn("COLLECTED=False", proc.stdout)
 
     def test_snapshot_records_a_timestamp(self) -> None:
         proc = self.run_snippet(
@@ -150,6 +164,44 @@ class HostLoadSnapshotUnknownWhereCollectionIsImpossibleTests(_ProbeCase):
         self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
         self.assertNotIn("STATE=quiet", proc.stdout)
         self.assertNotIn("STATE=exceeded", proc.stdout)
+
+    def test_uncollectable_snapshot_error_is_sanitized_not_raw_exception_text(self) -> None:
+        # round 4 (sol minor, fable minor): $_.Exception.Message can embed a path, server name,
+        # or namespace. Record only the exception's TYPE -- this test exercises the real catch
+        # path (CIM is unavailable outside Windows) and asserts the exact narrow shape, which by
+        # construction cannot contain a path separator or drive letter.
+        proc = self.run_snippet(
+            "$s = Get-HostLoadSnapshot -TopProcessCount 1\n"
+            "Write-Host \"ERROR=$($s.error)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        error_line = next(l for l in proc.stdout.splitlines() if l.startswith("ERROR="))
+        error_text = error_line[len("ERROR="):]
+        self.assertRegex(error_text, r"^collection failed: [A-Za-z0-9_.]+$")
+        self.assertNotIn("\\", error_text)
+        self.assertNotIn("/", error_text)
+
+
+@requires_pwsh
+class HostLoadSnapshotPrivacyTests(_ProbeCase):
+    """round 4 (sol minor, fable minor): the privacy test previously inspected only
+    topCpuConsumers; sol's finding is that the FULLY SERIALIZED snapshot (where an unsanitized
+    exception message would actually surface in a receipt) was never checked."""
+
+    script = SMOKE_SCRIPT
+    functions = ["Get-HostLoadSnapshot"]
+
+    def test_full_serialized_snapshot_carries_no_path_or_drive_text(self) -> None:
+        proc = self.run_snippet(
+            "$s = Get-HostLoadSnapshot -TopProcessCount 6\n"
+            "$s | ConvertTo-Json -Depth 6 -Compress\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        serialized = json.dumps(payload)
+        self.assertNotIn("\\", serialized)
+        self.assertNotIn("C:", serialized)
+        self.assertNotIn("/", serialized)
 
 
 @requires_pwsh
@@ -254,6 +306,147 @@ class HostLoadVerdictTests(_ProbeCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
 
+    def _verdict_with_sampling(
+        self, before: str, after: str, during: str, sample_interval_ms, bar: float = 75
+    ) -> subprocess.CompletedProcess:
+        interval_literal = "$null" if sample_interval_ms is None else str(sample_interval_ms)
+        return self.run_snippet(
+            f"$before = {before}\n"
+            f"$after = {after}\n"
+            f"$during = {during}\n"
+            f"$v = Get-HostLoadVerdict -Before $before -After $after -During $during "
+            f"-Bar {bar} -SampleIntervalMs {interval_literal}\n"
+            "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional) REASON=$($v.reason)\"\n"
+        )
+
+    def test_sampling_disabled_forces_unknown_even_when_bracket_is_quiet(self) -> None:
+        # round 4 (sol BLOCKER), repro case 1: "Run a leg with HostLoadSampleIntervalMs=0 ...
+        # while before/after snapshots remain below 75%; ... Get-HostLoadVerdict returns
+        # quiet/provisional=false." Declaring SampleIntervalMs=0 must now force unknown/provisional
+        # even though bracketing alone reads quiet.
+        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
+        proc = self._verdict_with_sampling(quiet, quiet, "@()", sample_interval_ms=0)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
+        self.assertIn("sampling was disabled", proc.stdout)
+
+    def test_sampling_enabled_but_zero_interior_samples_forces_unknown(self) -> None:
+        # round 4 (sol BLOCKER), repro case 2: a leg short enough that not even one interior tick
+        # occurred never rose above bracket-only coverage either, even though sampling was
+        # nominally enabled.
+        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
+        proc = self._verdict_with_sampling(quiet, quiet, "@()", sample_interval_ms=4000)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
+        self.assertIn("collected zero samples", proc.stdout)
+
+    def test_sampling_enabled_with_interior_samples_stays_quiet_when_actually_quiet(self) -> None:
+        # Regression guard: once sampling is enabled AND it actually produced interior coverage,
+        # a genuinely quiet leg must still read quiet -- the new coverage rule must not turn every
+        # leg provisional.
+        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
+        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 })"
+        proc = self._verdict_with_sampling(quiet, quiet, during, sample_interval_ms=4000)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
+
+    def test_sampling_enabled_still_catches_a_covered_burst(self) -> None:
+        # Regression guard: the coverage rule must not weaken the round-3 peak-of-samples catch
+        # for a burst that WAS covered by an interior tick.
+        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
+        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0 })"
+        proc = self._verdict_with_sampling(quiet, quiet, during, sample_interval_ms=4000)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=exceeded PROVISIONAL=True", proc.stdout)
+
+    def test_callers_that_omit_sample_interval_ms_are_unaffected(self) -> None:
+        # Backward compatibility: every caller/fixture that predates round 4 (and every other
+        # round-3 test in this file) never passes -SampleIntervalMs at all; the new coverage rule
+        # must stay inert for them, preserving bracket-only round-2/3 semantics exactly.
+        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
+        proc = self._verdict_with_sampling(quiet, quiet, "@()", sample_interval_ms=None)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
+
+    def test_cpu_heavy_subject_on_a_quiet_host_is_not_provisional(self) -> None:
+        # round 4 (fable minor), required test 1: "a CPU-heavy SUBJECT on a quiet host must NOT
+        # be provisional." A sample carrying a high raw cpuLoadPercent but a low
+        # nonSubjectCpuLoadPercent (the rest of the host is quiet; the load is the measured
+        # process's own legitimate decode work) must read quiet.
+        before = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
+        after = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
+        during = (
+            "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 92.0; "
+            "nonSubjectCpuLoadPercent = 8.0 })"
+        )
+        proc = self._verdict_with_sampling(before, after, during, sample_interval_ms=4000)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
+
+    def test_busy_host_is_still_provisional_even_with_a_quiet_subject(self) -> None:
+        # round 4 (fable minor), required test 2: "a busy host must be [provisional]." A sample
+        # whose OTHER processes (not the subject) are driving the load must still exceed the bar.
+        before = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
+        after = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
+        during = (
+            "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 92.0; "
+            "nonSubjectCpuLoadPercent = 90.0 })"
+        )
+        proc = self._verdict_with_sampling(before, after, during, sample_interval_ms=4000)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=exceeded PROVISIONAL=True", proc.stdout)
+
+
+@requires_pwsh
+class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
+    """tools/profiling/run-release-gui-smoke.ps1's Get-HostLoadNonSubjectCpuLoadPercent."""
+
+    script = SMOKE_SCRIPT
+    functions = ["Get-HostLoadNonSubjectCpuLoadPercent"]
+
+    def _percent(self, current: str, previous: str, processor_count: int = 4) -> subprocess.CompletedProcess:
+        return self.run_snippet(
+            f"$current = {current}\n"
+            f"$previous = {previous}\n"
+            f"$p = Get-HostLoadNonSubjectCpuLoadPercent -CurrentSnapshot $current "
+            f"-PreviousSnapshot $previous -ProcessorCount {processor_count}\n"
+            "Write-Host \"PERCENT=$p\"\n"
+        )
+
+    def test_subject_consuming_all_the_load_leaves_non_subject_near_zero(self) -> None:
+        # Over 4 elapsed seconds on a 4-core host, the subject accrued 4*4=16 processor-seconds --
+        # 100% of the machine's capacity for that window -- while raw cpuLoadPercent read 100%.
+        current = (
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 100.0; "
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 16.0 }"
+        )
+        previous = (
+            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0 }"
+        )
+        proc = self._percent(current, previous, processor_count=4)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=0", proc.stdout)
+
+    def test_no_subject_tracking_falls_back_to_raw_load(self) -> None:
+        current = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 55.0; capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = $null }"
+        previous = "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = $null }"
+        proc = self._percent(current, previous)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=55", proc.stdout)
+
+    def test_missing_previous_sample_falls_back_to_raw_load(self) -> None:
+        current = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 55.0; capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 2.0 }"
+        proc = self._percent(current, "$null")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=55", proc.stdout)
+
+    def test_non_positive_elapsed_time_falls_back_to_raw_load(self) -> None:
+        current = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 55.0; capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 2.0 }"
+        previous = "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0 }"
+        proc = self._percent(current, previous)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=55", proc.stdout)
+
 
 @requires_pwsh
 class GuiSmokeResultCarriesHostLoadTests(unittest.TestCase):
@@ -282,7 +475,10 @@ class GuiSmokeResultCarriesHostLoadTests(unittest.TestCase):
         source = SMOKE_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("-SampleIntervalMs $HostLoadSampleIntervalMs", source)
         self.assertIn("-OnSample $hostLoadOnSample", source)
-        self.assertIn("$hostLoadDuringSamples.Add((Get-HostLoadSnapshot", source)
+        # round 4: $OnSample now assigns to $newSample first (so Get-HostLoadNonSubjectCpuLoadPercent
+        # can diff it against the previous sample) before adding it to the list.
+        self.assertIn("$newSample = Get-HostLoadSnapshot", source)
+        self.assertIn("$hostLoadDuringSamples.Add($newSample)", source)
         self.assertIn("-During @($hostLoadDuringSamples)", source)
         self.assertIn("during = @($hostLoadDuringSamples)", source)
 
@@ -348,6 +544,20 @@ class CompareGuiSmokeAbHostLoadRefusalTests(_ProbeCase):
         self.assertNotIn("FAILURES=0", proc.stdout)
         self.assertIn("before smoke host load is PROVISIONAL", proc.stdout)
 
+    def test_provisional_false_with_missing_state_is_still_refused_not_read_as_clean_unknown(self) -> None:
+        # round 4 (sol major), exact repro: "Pass before.hostLoad={provisional:false} and a normal
+        # quiet after leg ...; the observed result is before.state=unknown, before.provisional=
+        # false, failures=0." "provisional" and "state" were derived independently, so an explicit
+        # provisional=false paired with a missing state read as an inconsistent, clean-reading
+        # combination. state=unknown must now always force provisional=true.
+        inconsistent = "[pscustomobject]@{ hostLoad = [pscustomobject]@{ provisional = $false } }"
+        quiet = "[pscustomobject]@{ hostLoad = [pscustomobject]@{ provisional = $false; state = 'quiet'; reason = $null } }"
+        proc = self._compare(inconsistent, quiet)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("BEFORE_STATE=unknown", proc.stdout)
+        self.assertNotIn("FAILURES=0", proc.stdout)
+        self.assertIn("before smoke host load is PROVISIONAL", proc.stdout)
+
 
 @requires_pwsh
 class SmokeSummaryHostLoadFieldsTests(_ProbeCase):
@@ -386,6 +596,13 @@ class SmokeSummaryHostLoadFieldsTests(_ProbeCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PROVISIONAL=False STATE=quiet", proc.stdout)
+
+    def test_provisional_false_with_missing_state_reads_as_provisional_not_clean_unknown(self) -> None:
+        # round 4 (sol major): an explicit provisional=false paired with a missing state used to
+        # read as the inconsistent, clean-reading STATE=unknown PROVISIONAL=False.
+        proc = self._fields("[pscustomobject]@{ provisional = $false }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True STATE=unknown", proc.stdout)
 
 
 @requires_pwsh
@@ -710,6 +927,13 @@ class P3ValidationSmokeSummaryHostLoadFieldsTests(_ProbeCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PROVISIONAL=False STATE=quiet", proc.stdout)
 
+    def test_provisional_false_with_missing_state_reads_as_provisional_not_clean_unknown(self) -> None:
+        # round 4 (sol major): an explicit provisional=false paired with a missing state used to
+        # read as the inconsistent, clean-reading STATE=unknown PROVISIONAL=False.
+        proc = self._fields("[pscustomobject]@{ provisional = $false }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True STATE=unknown", proc.stdout)
+
 
 class P3ValidationSpeedValidatedWiringTests(unittest.TestCase):
     """Static structural check: speedValidated (the card's own "acceptance signal" language,
@@ -726,6 +950,106 @@ class P3ValidationSpeedValidatedWiringTests(unittest.TestCase):
         speed_validated_start = source.index("$speedValidated =")
         speed_validated_block = source[speed_validated_start:speed_validated_start + 1600]
         self.assertIn("[bool]$_.hostLoadProvisional", speed_validated_block)
+
+    def test_speed_floor_check_computes_host_load_fields_before_it_runs(self) -> None:
+        # round 4 (sol major): the per-clip fps floor used to run BEFORE $hostLoadFields existed,
+        # so a loaded/uncollectable host that dragged presented_fps under the floor was recorded
+        # as a genuine clipFailures entry -- conflating "we couldn't get a clean signal" with "the
+        # build is broken". $hostLoadFields must now be computed ahead of the floor check.
+        source = P3_VALIDATION_SCRIPT.read_text(encoding="utf-8")
+        host_load_fields_index = source.index(
+            "$hostLoadFields = Get-SmokeSummaryHostLoadFields -HostLoad "
+            "(if ($result) { $result.hostLoad } else { $null })"
+        )
+        floor_check_index = source.index('was below hard floor {1:N3} fps."')
+        self.assertLess(
+            host_load_fields_index, floor_check_index,
+            "$hostLoadFields must be computed before the speed-leg fps floor check consumes it",
+        )
+
+    def test_speed_floor_breach_is_a_warning_not_a_failure_when_host_load_is_provisional(self) -> None:
+        source = P3_VALIDATION_SCRIPT.read_text(encoding="utf-8")
+        speed_leg_start = source.index("$presentedFpsValue = if ($result)")
+        speed_leg_block = source[speed_leg_start:speed_leg_start + 1000]
+        self.assertIn("if ($hostLoadFields.provisional)", speed_leg_block)
+        self.assertIn("$warnings.Add(", speed_leg_block)
+        # the raw Add-Failure floor breach must only fire in the non-provisional branch
+        provisional_branch_index = speed_leg_block.index("if ($hostLoadFields.provisional)")
+        else_index = speed_leg_block.index("else {", provisional_branch_index)
+        add_failure_index = speed_leg_block.index(
+            'Add-Failure $clipFailures ("Speed leg presented_fps'
+        )
+        self.assertGreater(
+            add_failure_index, else_index,
+            "the floor-breach Add-Failure must live in the non-provisional else branch",
+        )
+
+
+class P3ValidationImportIndependentlyChecksHostLoadTests(unittest.TestCase):
+    """Static structural check: packet import for a speed proof must independently verify each
+    clip's host-load provenance rather than trusting a possibly-stale summary.proof.speedValidated
+    alone -- round 4 (sol major), closing the last of three PARTIAL findings this round."""
+
+    def test_import_speed_floor_block_independently_checks_host_load_provisional(self) -> None:
+        source = P3_VALIDATION_SCRIPT.read_text(encoding="utf-8")
+        import_speed_start = source.index('if ($isSpeedProof) {\n                $minSpeedFps')
+        import_speed_block = source[import_speed_start:import_speed_start + 1800]
+        self.assertIn('$clip.PSObject.Properties["hostLoadProvisional"]', import_speed_block)
+        self.assertIn("host load was PROVISIONAL or unrecorded", import_speed_block)
+        # the independent host-load Add-Failure must not be gated behind the floor comparison
+        host_load_check_index = import_speed_block.index("$clipHostLoadProvisionalProperty")
+        floor_check_index = import_speed_block.index("[double]$clip.presentedFps -lt $minSpeedFps")
+        self.assertLess(host_load_check_index, floor_check_index)
+
+
+class RequireCandidateImprovesPresentedFpsHostLoadGuardTests(unittest.TestCase):
+    """Static structural check: tools/profiling/run-release-cuda-playback-ab.ps1's optional
+    -RequireCandidateImprovesPresentedFps proof must refuse the fps comparison itself when either
+    leg is host-load provisional, rather than computing a "not improved" claim from noisy data --
+    round 4 (sol major)."""
+
+    def test_fps_improvement_requirement_refuses_before_comparing_when_host_load_is_provisional(self) -> None:
+        source = CUDA_AB_SCRIPT.read_text(encoding="utf-8")
+        block_start = source.index("if ($RequireCandidateImprovesPresentedFps) {")
+        block_end = source.index("\n}\n", block_start)
+        block = source[block_start:block_end]
+        self.assertIn("hostLoadProvisional", block)
+        self.assertIn("candidate-presented-fps-improvement-not-evaluated", block)
+        guard_index = block.index(
+            "if ($baselineSummary.hostLoadProvisional -or $candidateForSpeed.hostLoadProvisional)"
+        )
+        comparison_index = block.index("$candidateFps -le $baselineFps")
+        self.assertLess(
+            guard_index, comparison_index,
+            "the host-load-provisional guard must be checked before the raw fps comparison",
+        )
+
+
+class LocalCudaProofSummarizerHostLoadGuardTests(unittest.TestCase):
+    """Static structural check: tools/profiling/summarize-local-cuda-proof.ps1 must independently
+    verify playback A/B host-load provenance rather than relying only on $playbackAb.proofFailures
+    (which a legacy/degenerate packet lacking the field would never populate) -- round 4 (sol
+    major)."""
+
+    def test_summarizer_checks_host_load_provisional_independently_of_proof_failures(self) -> None:
+        source = CUDA_PROOF_SUMMARIZER_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('Get-Field $legEntry.Leg "hostLoadProvisional"', source)
+        self.assertIn("PLAYBACK_AB_HOST_LOAD_PROVISIONAL", source)
+        host_load_guard_index = source.index("$playbackAbHostLoadLegs = @(")
+        # "PLAYBACK_PRESENTED_FPS_NOT_IMPROVED" also appears earlier in the file as a reason-code
+        # string in an unrelated aggregation helper -- search from the guard onward for the
+        # diagnostic emission this test actually cares about.
+        fps_not_improved_index = source.index("PLAYBACK_PRESENTED_FPS_NOT_IMPROVED", host_load_guard_index)
+        self.assertLess(
+            host_load_guard_index, fps_not_improved_index,
+            "the host-load-provisional guard must be checked before the fps-not-improved diagnostic",
+        )
+
+    def test_fps_not_improved_diagnostic_is_skipped_when_host_load_is_provisional(self) -> None:
+        source = CUDA_PROOF_SUMMARIZER_SCRIPT.read_text(encoding="utf-8")
+        guard_start = source.index("if (-not $playbackAbHostLoadProvisional -and")
+        guard_block = source[guard_start:guard_start + 500]
+        self.assertIn("PLAYBACK_PRESENTED_FPS_NOT_IMPROVED", guard_block)
 
 
 if __name__ == "__main__":
