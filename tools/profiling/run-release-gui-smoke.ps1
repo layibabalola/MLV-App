@@ -93,6 +93,7 @@ $validationWarnings = @()
 . (Join-Path $PSScriptRoot 'gui-smoke-gpu-texture-route-validation.ps1')
 Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force
 . (Join-Path $PSScriptRoot 'provenance-stamp.ps1')
+. (Join-Path $PSScriptRoot 'playback-smoke-log-parsing.ps1')
 
 if ($RequireFreshScreenshotRender -and -not $CaptureScreenshot) {
     throw "-RequireFreshScreenshotRender requires -CaptureScreenshot."
@@ -179,33 +180,9 @@ if (($CaptureScreenshot -or $FrameTelemetry) -and $Seconds -lt $settledValidatio
     )
 }
 
-function Convert-PlaybackLogLineToObject {
-    param([string]$Line)
-
-    $result = [ordered]@{}
-    $matches = [regex]::Matches($Line, '(?<key>[A-Za-z0-9_]+)=(?<value>"[^"]*"|\S+)')
-    foreach ($match in $matches) {
-        $key = $match.Groups["key"].Value
-        $rawValue = $match.Groups["value"].Value.Trim('"')
-
-        $intValue = 0L
-        $doubleValue = 0.0
-        if ([long]::TryParse($rawValue, [ref]$intValue)) {
-            $result[$key] = $intValue
-        }
-        elseif ([double]::TryParse(
-            $rawValue,
-            [System.Globalization.NumberStyles]::Float,
-            [System.Globalization.CultureInfo]::InvariantCulture,
-            [ref]$doubleValue)) {
-            $result[$key] = $doubleValue
-        }
-        else {
-            $result[$key] = $rawValue
-        }
-    }
-    [pscustomobject]$result
-}
+# Select-PlaybackSmokeRecordLine and Convert-PlaybackLogLineToObject are
+# defined in playback-smoke-log-parsing.ps1 (dot-sourced above) so they can be
+# unit-tested without launching the GUI app.
 
 function Get-LogTimestampUtc {
     param([string]$Line)
@@ -1167,9 +1144,20 @@ $gpuSummaryLine = $recentLines |
 # CUDA-ATTRIBUTION-BASELINE-1: sound, serial-based skip/frame-population
 # accounting, immune to the loop-wrap unsoundness of the timeline-position
 # figures on playback_smoke.summary (see MainWindow.cpp finishPlaybackSmokeTelemetry).
-$framePopulationLine = $recentLines |
-    Where-Object { $_ -like "*playback_smoke.frame_population*" } |
-    Select-Object -Last 1
+# CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra major, round-3 regression): the
+# companion playback_smoke.source_frame_population line's own population_basis
+# explanatory text below names this field ("...companion playback_smoke.
+# frame_population -- this is the fix for...") as plain prose, so a bare
+# "*playback_smoke.frame_population*" wildcard also matches THAT line, and
+# with -Last 1 it wins once the source-frame-population line is emitted after
+# it -- silently losing loop_wrap_count and every other field here (parsed
+# from the wrong line's key=value pairs) and reviving the equal-endpoint false
+# "stuck" failure this field exists to prevent. Select-PlaybackSmokeRecordLine
+# anchors on " session=" -- the literal key=value token that starts every
+# actual record -- which the prose reference never has immediately after the
+# field name.
+$framePopulationLine = Select-PlaybackSmokeRecordLine `
+    -Lines $recentLines -FieldName "playback_smoke.frame_population"
 # CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
 # RESOLVED): the frame_population figures above only see frames that BECAME a
 # render request. This line's offered_source_frames is independent of request
@@ -1177,9 +1165,8 @@ $framePopulationLine = $recentLines |
 # catches a source frame drop-frame catch-up skipped over before ever issuing
 # a request for it -- see MainWindow.cpp finishPlaybackSmokeTelemetry's
 # comment on m_playbackTimelineSourceFramesOffered.
-$sourceFramePopulationLine = $recentLines |
-    Where-Object { $_ -like "*playback_smoke.source_frame_population*" } |
-    Select-Object -Last 1
+$sourceFramePopulationLine = Select-PlaybackSmokeRecordLine `
+    -Lines $recentLines -FieldName "playback_smoke.source_frame_population"
 # Round-4: fields that used to sit beyond QString::arg's %99 limit (garbage)
 # now arrive on a continuation line; merged into the same cpuSummary object.
 $cpuSummaryExtLine = $recentLines |
