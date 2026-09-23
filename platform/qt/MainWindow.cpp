@@ -6570,6 +6570,21 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
             phase3ModeFor( playbackQualityModeFromInt( m_playbackQualityMode ) ) );
     }
     requestContext.frameNumber = static_cast<uint32_t>( requestedFrame );
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "Lookahead requests
+     * outside the measured offered window are counted inside the
+     * partition"): mark this position as the new offered ceiling BEFORE any
+     * lookahead is queued for it below, and regardless of whether this call
+     * goes on to issue a genuine target request or reuse an existing
+     * lookahead (the playbackLookaheadCoversCurrent branch further down) --
+     * this IS the position playbackHandling() most recently advanced to,
+     * independent of how drawFrame() ends up satisfying it. See
+     * PlaybackPresentedFrameIdentityTracker.h's round-7 note. */
+    if( m_playbackSmokeActive && m_playbackSmokeFrameTelemetry )
+    {
+        m_playbackSmokePresentedFrameIdentity.noteOfferedFrame(
+            requestContext.playbackSmokeLoopEpoch,
+            static_cast<uint64_t>( requestedFrame ) );
+    }
     if( mlvappPlaybackRenderLookaheadFrames() > 0
      && ui->actionPlay->isChecked()
      && m_pRenderThread

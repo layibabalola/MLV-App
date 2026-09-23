@@ -615,6 +615,97 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_ReusedLookaheadTargetAttemp
               + population.presentedFrames);
 }
 
+// CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "Lookahead requests
+// outside the measured offered window are counted inside the partition"):
+// astra's repro verbatim -- offer/request/present targets 3,6,...,60 (20
+// targets), each with a depth-1 lookahead one past it (4,7,...,61, 20
+// requests, never presented). The lookahead spawned by target 60 asks for
+// occurrence 61, which the session's own advancement never reached (the
+// ceiling stops at 60) -- it must not be counted as a discarded lookahead.
+// astra's correct partition: never_requested=21, discarded_lookahead=19,
+// presented=20, skipped_target=0 (61 is simply excluded from every bucket).
+TEST(PlaybackFramePopulationPolicy, AstraRepro_LookaheadOutsideOfferedWindowIsExcluded)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t target = 3; target <= 60; target += 3)
+    {
+        identity.noteOfferedFrame(/*loopEpoch=*/0, target);
+        identity.noteRequestedFrame(/*loopEpoch=*/0, target, /*viaLookahead=*/false);
+        identity.notePresentedFrame(/*loopEpoch=*/0, target, /*viaLookahead=*/false);
+        const uint64_t lookahead = target + 1;
+        identity.noteRequestedFrame(/*loopEpoch=*/0, lookahead, /*viaLookahead=*/true);
+        // never presented
+    }
+
+    ASSERT_EQ(uint64_t(39), identity.requestedOccurrenceUnionCount());
+    ASSERT_EQ(uint64_t(19), identity.requestedThenDiscardedLookaheadCount());
+    ASSERT_EQ(uint64_t(0), identity.requestedThenSkippedTargetCount());
+
+    const PlaybackSourceFramePopulation population =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            /*timelineSourceFramesOfferedNow=*/60.0,
+            /*timelineSourceFramesOfferedStart=*/0.0,
+            identity.requestedOccurrenceUnionCount(),
+            identity.distinctTargetPresentedCount(),
+            identity.distinctLookaheadPresentedCount(),
+            identity.presentedOccurrenceUnionCount(),
+            identity.requestedThenSkippedTargetCount(),
+            identity.requestedThenDiscardedLookaheadCount() );
+
+    ASSERT_EQ(uint64_t(60), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(20), population.presentedFrames);
+    ASSERT_EQ(uint64_t(19), population.requestedThenDiscardedLookaheadFrames);
+    ASSERT_EQ(uint64_t(0), population.requestedThenSkippedTargetFrames);
+    ASSERT_EQ(uint64_t(21), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+    ASSERT_EQ(population.offeredSourceFrames,
+              population.neverRequestedSourceFrames
+              + population.requestedThenDiscardedLookaheadFrames
+              + population.requestedThenSkippedTargetFrames
+              + population.presentedFrames);
+}
+
+// Direct tracker-level check: a request beyond the current ceiling is
+// excluded, and becomes eligible once the ceiling advances to cover it.
+TEST(PlaybackFramePopulationPolicy, IdentityTracker_OfferedCeilingExcludesRequestsBeyondIt)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    identity.noteOfferedFrame(/*loopEpoch=*/0, /*displayFrame=*/10);
+    identity.noteRequestedFrame(/*loopEpoch=*/0, /*displayFrame=*/10, /*viaLookahead=*/false);
+    identity.noteRequestedFrame(/*loopEpoch=*/0, /*displayFrame=*/11, /*viaLookahead=*/true);
+
+    ASSERT_EQ(uint64_t(1), identity.requestedOccurrenceUnionCount());
+    ASSERT_EQ(uint64_t(0), identity.requestedThenDiscardedLookaheadCount());
+
+    identity.noteOfferedFrame(/*loopEpoch=*/0, /*displayFrame=*/11);
+
+    ASSERT_EQ(uint64_t(2), identity.requestedOccurrenceUnionCount());
+    ASSERT_EQ(uint64_t(1), identity.requestedThenDiscardedLookaheadCount());
+}
+
+// Without any noteOfferedFrame() call this session (a fixture that predates
+// round 7, or a call before drawFrame()'s first invocation), the tracker
+// must behave exactly as it did before the ceiling existed -- pass through
+// unfiltered rather than guessing an empty window.
+TEST(PlaybackFramePopulationPolicy, IdentityTracker_NoOfferedCeilingSetPassesThroughUnfiltered)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    identity.noteRequestedFrame(/*loopEpoch=*/0, /*displayFrame=*/100, /*viaLookahead=*/true);
+    ASSERT_EQ(uint64_t(1), identity.requestedOccurrenceUnionCount());
+}
+
+// reset() must clear the offered ceiling too -- a stale low ceiling from the
+// previous session must not survive to filter the next session's
+// identities.
+TEST(PlaybackFramePopulationPolicy, IdentityTracker_ResetClearsOfferedCeiling)
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    identity.noteOfferedFrame(/*loopEpoch=*/0, /*displayFrame=*/5);
+    identity.reset();
+    identity.noteRequestedFrame(/*loopEpoch=*/0, /*displayFrame=*/500, /*viaLookahead=*/true);
+    ASSERT_EQ(uint64_t(1), identity.requestedOccurrenceUnionCount());
+}
+
 // Same successful-reuse scenario, but with offered=20 instead of 60 --
 // must resolve consistently regardless of how much of the clip's total
 // span the reused identities represent.
