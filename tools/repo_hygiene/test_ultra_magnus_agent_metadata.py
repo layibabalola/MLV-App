@@ -120,8 +120,21 @@ class UltraMagnusAgentMetadataFallbackTests(unittest.TestCase):
         result = json.loads(result_path.read_text(encoding="ascii"))
         self.assertEqual(result["timeoutSec"], 2, "must fall back to the agent's own -JobTimeoutSec")
         self.assertTrue(result["timedOut"])
+
+        # The agent publishes outbox\demo.result.json (the poll above) BEFORE it archives
+        # inbox\demo.job.ps1 and inbox\demo.meta.json to processed\ (ultra-magnus-agent.ps1,
+        # deliberately: the result publish is what retires the JobId in UmRunDrop.psm1's
+        # outbox-result check, so it must land first, before either file moves) -- so the archival
+        # is a few more of the agent's own instructions past the instant result.json becomes
+        # visible, not simultaneous with it. Give it the same bounded settle time every other
+        # file-visibility check in this module gets, rather than asserting the exact instant
+        # result.json appears.
+        meta_processed = self.share / "processed" / "demo.meta.json"
+        deadline = time.time() + 5
+        while time.time() < deadline and (inbox / "demo.meta.json").exists() and not meta_processed.exists():
+            time.sleep(0.1)
         self.assertFalse((inbox / "demo.meta.json").exists(), "the unparseable metadata must still be moved out of inbox")
-        self.assertTrue((self.share / "processed" / "demo.meta.json").exists())
+        self.assertTrue(meta_processed.exists())
 
 
 if __name__ == "__main__":
