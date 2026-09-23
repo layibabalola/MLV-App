@@ -122,6 +122,20 @@ public:
      *         frame mode sets m_frameChanged on every timer tick regardless
      *         of whether the computed source position crossed a whole-frame
      *         boundary since the previous tick).
+     *  \param reusedLookaheadTargetFramesThisSession CUDA-ATTRIBUTION-
+     *         BASELINE-1 round 4 (astra major, round-3 PARTIAL): of the
+     *         target-request events above, how many took drawFrame()'s
+     *         lookahead-reuse early return (MainWindow.cpp
+     *         playbackLookaheadCoversCurrent branch) instead of issuing a
+     *         genuinely new render demand. m_nextTargetRenderRequestSerial
+     *         advances BEFORE that branch is evaluated, so those events are
+     *         not a distinct source-frame demand at all -- they are the same
+     *         source frame the lookahead already requested, and they
+     *         present (if at all) through the lookahead path, not the target
+     *         path. Left in requestedTargetFramesBySerialThisSession, they
+     *         inflate genuine target demand by exactly the reuse count,
+     *         which then reads as requestedThenSkippedTargetFrames even
+     *         though every one of those attempts was satisfied.
      *  \param lookaheadRequestsBySerialThisSession the session's speculative-
      *         lookahead request EVENT count (PlaybackFramePopulation::
      *         lookaheadRequestsBySerial).
@@ -135,6 +149,7 @@ public:
         double timelineSourceFramesOfferedNow,
         double timelineSourceFramesOfferedStart,
         uint64_t requestedTargetFramesBySerialThisSession,
+        uint64_t reusedLookaheadTargetFramesThisSession,
         uint64_t lookaheadRequestsBySerialThisSession,
         uint64_t presentedViaTargetFramesThisSession,
         uint64_t presentedViaLookaheadFramesThisSession )
@@ -151,11 +166,25 @@ public:
         result.presentedFrames =
             presentedViaTargetFramesThisSession + presentedViaLookaheadFramesThisSession;
 
+        /* A reuse attempt is not a distinct source-frame demand -- back it
+         * out of the target-request count before deriving skip/demand
+         * buckets from it. If reuse ever exceeds the raw request count
+         * (an invariant violation elsewhere), that is itself an unsoundness
+         * signal, not something to clamp silently. */
+        const bool reuseAccountingSound =
+            requestedTargetFramesBySerialThisSession
+                >= reusedLookaheadTargetFramesThisSession;
+        const uint64_t genuineTargetRequests =
+            reuseAccountingSound
+                ? requestedTargetFramesBySerialThisSession
+                      - reusedLookaheadTargetFramesThisSession
+                : 0;
+
         const bool targetBucketSound =
-            requestedTargetFramesBySerialThisSession >= presentedViaTargetFramesThisSession;
+            genuineTargetRequests >= presentedViaTargetFramesThisSession;
         result.requestedThenSkippedTargetFrames =
             targetBucketSound
-                ? requestedTargetFramesBySerialThisSession - presentedViaTargetFramesThisSession
+                ? genuineTargetRequests - presentedViaTargetFramesThisSession
                 : 0;
 
         const bool lookaheadBucketSound =
@@ -176,7 +205,10 @@ public:
                 : 0;
 
         result.partitionSound =
-            targetBucketSound && lookaheadBucketSound && offeredBucketSound;
+            reuseAccountingSound
+            && targetBucketSound
+            && lookaheadBucketSound
+            && offeredBucketSound;
         return result;
     }
 };

@@ -1047,6 +1047,14 @@ private:
     double m_playbackSmokeStartTimelineSourceFramesOffered = 0.0;
     int m_playbackSmokePresentedViaTargetFrames = 0;
     int m_playbackSmokePresentedViaLookaheadFrames = 0;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra major, round-3 PARTIAL):
+     * count of target requests (m_nextTargetRenderRequestSerial advances)
+     * that took drawFrame()'s lookahead-reuse early return instead of
+     * issuing a genuinely new render demand -- see its increment site and
+     * PlaybackFramePopulationPolicy::computeSourceFramePopulation's
+     * reusedLookaheadTargetFramesThisSession parameter. Reset at playback
+     * start alongside the other smoke counters. */
+    int m_playbackSmokeReusedLookaheadTargetFrames = 0;
     uint64_t m_playbackSmokeStartDecodeRequestsIssued = 0;
     uint64_t m_playbackSmokeStartPrepStaleDrops = 0;
     uint64_t m_playbackSmokeStartPrepGenerationDrops = 0;

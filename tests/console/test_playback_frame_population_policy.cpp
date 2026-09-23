@@ -107,7 +107,7 @@ TEST(PlaybackFramePopulationPolicy, AstraRepro_SkippedSourceFramesSurfaceAsNever
     const PlaybackSourceFramePopulation population =
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             offeredNow, offeredStart,
-            targetRequests, lookaheadRequests,
+            targetRequests, /*reusedLookaheadTargetFrames=*/0, lookaheadRequests,
             presentedViaTarget, presentedViaLookahead );
 
     ASSERT_EQ(uint64_t(60), population.offeredSourceFrames);
@@ -140,6 +140,7 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_NoLossIsFullyAccountedFor)
             /*timelineSourceFramesOfferedNow=*/25.0,
             /*timelineSourceFramesOfferedStart=*/5.0,
             /*requestedTargetFramesBySerialThisSession=*/20,
+            /*reusedLookaheadTargetFramesThisSession=*/0,
             /*lookaheadRequestsBySerialThisSession=*/0,
             /*presentedViaTargetFramesThisSession=*/20,
             /*presentedViaLookaheadFramesThisSession=*/0 );
@@ -165,6 +166,7 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_DiscardedLookaheadAndSkippe
             /*timelineSourceFramesOfferedNow=*/100.0,
             /*timelineSourceFramesOfferedStart=*/0.0,
             /*requestedTargetFramesBySerialThisSession=*/70,
+            /*reusedLookaheadTargetFramesThisSession=*/0,
             /*lookaheadRequestsBySerialThisSession=*/20,
             /*presentedViaTargetFramesThisSession=*/50,
             /*presentedViaLookaheadFramesThisSession=*/5 );
@@ -195,6 +197,7 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_UnsoundInputsAreFlaggedNotH
             /*timelineSourceFramesOfferedNow=*/50.0,
             /*timelineSourceFramesOfferedStart=*/0.0,
             /*requestedTargetFramesBySerialThisSession=*/10,
+            /*reusedLookaheadTargetFramesThisSession=*/0,
             /*lookaheadRequestsBySerialThisSession=*/0,
             /*presentedViaTargetFramesThisSession=*/15, // more presented than requested
             /*presentedViaLookaheadFramesThisSession=*/0 );
@@ -215,6 +218,7 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_OfferedAccumulatorIsWrapImm
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             afterThreeLapsOf24Frames, beforeWraps,
             /*requestedTargetFramesBySerialThisSession=*/72,
+            /*reusedLookaheadTargetFramesThisSession=*/0,
             /*lookaheadRequestsBySerialThisSession=*/0,
             /*presentedViaTargetFramesThisSession=*/72,
             /*presentedViaLookaheadFramesThisSession=*/0 );
@@ -222,4 +226,89 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_OfferedAccumulatorIsWrapImm
     ASSERT_EQ(uint64_t(72), population.offeredSourceFrames);
     ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
     ASSERT_TRUE(population.partitionSound);
+}
+
+// CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra major, round-3 PARTIAL):
+// astra's own repro -- offered=60, target attempts=20 (all satisfied by
+// reusing an already-ready lookahead), lookahead requests=20, target
+// presentations=0, lookahead presentations=20. Round-3 code (reuse count
+// folded into genuine target demand) reported never_requested=20 and
+// requested_then_skipped_target=20 -- 20 phantom "skips" for target attempts
+// that were in fact all satisfied, and 20 source frames wrongly hidden from
+// never_requested. The reuse count must be backed out so a reused attempt
+// lands in exactly one real bucket (here: fully absorbed by the lookahead
+// presentation it rode on) rather than manufacturing a fictitious skip.
+TEST(PlaybackFramePopulationPolicy, SourcePopulation_ReusedLookaheadTargetAttemptsAreNotSkips)
+{
+    const PlaybackSourceFramePopulation population =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            /*timelineSourceFramesOfferedNow=*/60.0,
+            /*timelineSourceFramesOfferedStart=*/0.0,
+            /*requestedTargetFramesBySerialThisSession=*/20,
+            /*reusedLookaheadTargetFramesThisSession=*/20,
+            /*lookaheadRequestsBySerialThisSession=*/20,
+            /*presentedViaTargetFramesThisSession=*/0,
+            /*presentedViaLookaheadFramesThisSession=*/20 );
+
+    ASSERT_EQ(uint64_t(60), population.offeredSourceFrames);
+    // Astra's correct attribution: all 20 target attempts were reuse, so
+    // genuine target demand is zero -- nothing was skipped on the target
+    // side.
+    ASSERT_EQ(uint64_t(0), population.requestedThenSkippedTargetFrames);
+    ASSERT_EQ(uint64_t(0), population.requestedThenDiscardedLookaheadFrames);
+    ASSERT_EQ(uint64_t(20), population.presentedFrames);
+    // The 40 source frames nothing ever requested (neither a genuine target
+    // attempt nor a lookahead) must surface, not be absorbed into a
+    // fictitious skipped-target bucket.
+    ASSERT_EQ(uint64_t(40), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+    ASSERT_EQ(population.offeredSourceFrames,
+              population.neverRequestedSourceFrames
+              + population.requestedThenDiscardedLookaheadFrames
+              + population.requestedThenSkippedTargetFrames
+              + population.presentedFrames);
+}
+
+// Same successful-reuse scenario, but with offered=20 instead of 60. Round-3
+// code produced partition_sound=false here (accountedFor overshot offered)
+// even though nothing was actually wrong -- a false failure caused by the
+// same bug that produced a false pass in the offered=60 case above. Both
+// must resolve consistently once reuse is backed out correctly.
+TEST(PlaybackFramePopulationPolicy, SourcePopulation_ReusedLookaheadTargetAttemptsStaySoundAtSmallerOfferedCount)
+{
+    const PlaybackSourceFramePopulation population =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            /*timelineSourceFramesOfferedNow=*/20.0,
+            /*timelineSourceFramesOfferedStart=*/0.0,
+            /*requestedTargetFramesBySerialThisSession=*/20,
+            /*reusedLookaheadTargetFramesThisSession=*/20,
+            /*lookaheadRequestsBySerialThisSession=*/20,
+            /*presentedViaTargetFramesThisSession=*/0,
+            /*presentedViaLookaheadFramesThisSession=*/20 );
+
+    ASSERT_EQ(uint64_t(20), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(0), population.requestedThenSkippedTargetFrames);
+    ASSERT_EQ(uint64_t(0), population.requestedThenDiscardedLookaheadFrames);
+    ASSERT_EQ(uint64_t(20), population.presentedFrames);
+    ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+}
+
+// If reuse accounting itself is broken (more reuse claimed than target
+// requests issued -- an invariant violation this policy cannot cause on its
+// own but must not hide), the third-state/UNKNOWN rule applies: fail closed
+// rather than silently clamping to a plausible-looking number.
+TEST(PlaybackFramePopulationPolicy, SourcePopulation_ReuseCountExceedingRequestsIsFlaggedNotHidden)
+{
+    const PlaybackSourceFramePopulation population =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            /*timelineSourceFramesOfferedNow=*/30.0,
+            /*timelineSourceFramesOfferedStart=*/0.0,
+            /*requestedTargetFramesBySerialThisSession=*/10,
+            /*reusedLookaheadTargetFramesThisSession=*/15, // more reuse than requests
+            /*lookaheadRequestsBySerialThisSession=*/0,
+            /*presentedViaTargetFramesThisSession=*/0,
+            /*presentedViaLookaheadFramesThisSession=*/0 );
+
+    ASSERT_TRUE(!population.partitionSound);
 }

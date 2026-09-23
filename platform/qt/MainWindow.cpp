@@ -6600,6 +6600,18 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     }
     if( playbackLookaheadCoversCurrent )
     {
+        /* CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra major, round-3
+         * PARTIAL): m_nextTargetRenderRequestSerial already advanced above
+         * (before playbackLookaheadCoversCurrent could be evaluated), but
+         * this attempt is being satisfied by an EXISTING lookahead request
+         * rather than issuing a new one -- it is not a distinct source-frame
+         * demand. Record it so computeSourceFramePopulation() can back it
+         * out of genuine target demand instead of double-counting it as a
+         * skip once it presents via the lookahead bucket. */
+        if( m_playbackSmokeActive )
+        {
+            ++m_playbackSmokeReusedLookaheadTargetFrames;
+        }
         const bool playbackLookaheadReady =
             m_pRenderThread->hasReadyPlaybackLookaheadFrame(
                 static_cast<uint32_t>( requestedFrame ),
@@ -22548,6 +22560,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeStartTimelineSourceFramesOffered = m_playbackTimelineSourceFramesOffered;
     m_playbackSmokePresentedViaTargetFrames = 0;
     m_playbackSmokePresentedViaLookaheadFrames = 0;
+    m_playbackSmokeReusedLookaheadTargetFrames = 0;
     m_playbackSmokeStartDecodeRequestsIssued =
         m_pRenderThread ? m_pRenderThread->decodeRequestsIssuedCount() : 0;
     m_playbackSmokeStartPrepStaleDrops =
@@ -25297,6 +25310,7 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
             m_playbackTimelineSourceFramesOffered,
             m_playbackSmokeStartTimelineSourceFramesOffered,
             requestedTargetFramesBySerial,
+            static_cast<uint64_t>( qMax( 0, m_playbackSmokeReusedLookaheadTargetFrames ) ),
             lookaheadRequestsBySerial,
             static_cast<uint64_t>( qMax( 0, m_playbackSmokePresentedViaTargetFrames ) ),
             static_cast<uint64_t>( qMax( 0, m_playbackSmokePresentedViaLookaheadFrames ) ) );
