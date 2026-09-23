@@ -257,6 +257,17 @@ def compute_deadline_evaluation(
         raise RefreshHistogramError(f"targetFps must be positive, got {target_fps!r}")
     if math.isnan(target_fps) or math.isinf(target_fps):
         raise RefreshHistogramError(f"targetFps must be a finite positive number, got {target_fps!r}")
+    # CUDA-ATTRIBUTION-BASELINE-1 round 2 (astra minor finding): NaN and
+    # +/-infinity both satisfy `not (x <= 1.0)` being False -- i.e. they slip
+    # past a `tolerance_multiplier <= 1.0` check silently, exactly like the
+    # target_fps NaN/inf check two lines above this one exists to catch.
+    # An infinite tolerance makes deadline_ms infinite, so every interval
+    # below is "not missed" and this would silently report a false
+    # missedDeadlineCount of 0 instead of rejecting the input.
+    if math.isnan(tolerance_multiplier) or math.isinf(tolerance_multiplier):
+        raise RefreshHistogramError(
+            f"toleranceMultiplier must be a finite number, got {tolerance_multiplier!r}"
+        )
     if tolerance_multiplier <= 1.0:
         raise RefreshHistogramError(
             f"toleranceMultiplier must be > 1.0 (it multiplies the intended period to "

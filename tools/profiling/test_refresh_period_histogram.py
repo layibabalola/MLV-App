@@ -7,6 +7,7 @@ empty-but-successful report, or mis-rounding a refresh multiple at the bucket bo
 from __future__ import annotations
 
 import csv
+import math
 
 import pytest
 
@@ -313,6 +314,22 @@ def test_deadline_evaluation_rejects_non_positive_target_fps():
 def test_deadline_evaluation_rejects_tolerance_at_or_below_one():
     with pytest.raises(RefreshHistogramError, match="toleranceMultiplier"):
         compute_deadline_evaluation([16.67], target_fps=30.0, tolerance_multiplier=1.0)
+
+
+def test_deadline_evaluation_rejects_non_finite_tolerance():
+    # CUDA-ATTRIBUTION-BASELINE-1 round 2 (astra minor finding): on 2bc8cc0a
+    # `tolerance_multiplier <= 1.0` is False for both NaN and +inf (NaN
+    # comparisons are always False; inf > 1.0), so both slipped past the
+    # guard. An infinite tolerance then makes deadline_ms infinite, so no
+    # interval is ever "missed" -- a silent false missedDeadlineCount=0
+    # instead of a rejection. This test fails on 2bc8cc0a (no exception
+    # raised) and passes once non-finite values are rejected.
+    with pytest.raises(RefreshHistogramError, match="toleranceMultiplier"):
+        compute_deadline_evaluation([1000.0], target_fps=30.0, tolerance_multiplier=math.nan)
+    with pytest.raises(RefreshHistogramError, match="toleranceMultiplier"):
+        compute_deadline_evaluation([1000.0], target_fps=30.0, tolerance_multiplier=math.inf)
+    with pytest.raises(RefreshHistogramError, match="toleranceMultiplier"):
+        compute_deadline_evaluation([1000.0], target_fps=30.0, tolerance_multiplier=-math.inf)
 
 
 def test_deadline_evaluation_omitted_from_report_without_target_fps(tmp_path):
