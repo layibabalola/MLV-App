@@ -1992,6 +1992,7 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
 #include "MainWindowGpuPreviewPolicy.h"
 #include "PlaybackFramePopulationPolicy.h"
 #include "PlaybackLookaheadLoopPositionPolicy.h"
+#include "PlaybackDropFrameAdvancePolicy.h"
 #include "PlaybackQualityPolicy.h"
 #include "PlaybackScaling.h"
 #include "ZebraThresholds.h"
@@ -10158,8 +10159,23 @@ void MainWindow::playbackHandling(int timeDiff)
                  * travelled to get there. */
                 const double dropFrameSourceFramesAdvanced =
                     getFramerate() * (double)timeDiff / 1000.0;
+                /* CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major,
+                 * "Non-looping EOF overshoot inflates the denominator"):
+                 * credit the offered accumulator with the CAPPED distance
+                 * actually travelled to the clip's last frame when looping
+                 * is off and this tick's raw advance would overshoot it --
+                 * not the uncapped raw delta, which counts nonexistent
+                 * frames past EOF as offered source frames. Computed BEFORE
+                 * m_newPosDropMode mutates below, from the SAME raw delta
+                 * the position update uses, so the two stay consistent.
+                 * See PlaybackDropFrameAdvancePolicy.h. */
+                m_playbackTimelineSourceFramesOffered +=
+                    PlaybackDropFrameAdvancePolicy::offeredAdvance(
+                        m_newPosDropMode,
+                        dropFrameSourceFramesAdvanced,
+                        ui->actionLoop->isChecked(),
+                        ui->spinBoxCutOut->value() - 1 );
                 m_newPosDropMode += dropFrameSourceFramesAdvanced;
-                m_playbackTimelineSourceFramesOffered += dropFrameSourceFramesAdvanced;
                 //Loop!
                 if( ui->actionLoop->isChecked() && ( m_newPosDropMode >= ui->spinBoxCutOut->value() - 1 ) )
                 {

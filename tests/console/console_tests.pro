@@ -49,7 +49,8 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_playback_achieved_scale_policy.cpp \
     $$REPO_ROOT/tests/console/test_gpu_texture_present_availability_policy.cpp \
     $$REPO_ROOT/tests/console/test_playback_frame_population_policy.cpp \
-    $$REPO_ROOT/tests/console/test_playback_lookahead_loop_position_policy.cpp
+    $$REPO_ROOT/tests/console/test_playback_lookahead_loop_position_policy.cpp \
+    $$REPO_ROOT/tests/console/test_playback_drop_frame_advance_policy.cpp
 
 HEADERS += \
     $$REPO_ROOT/platform/qt/FpmNameValidator.h \
@@ -79,7 +80,8 @@ HEADERS += \
     $$REPO_ROOT/platform/qt/GpuTexturePresentAvailabilityPolicy.h \
     $$REPO_ROOT/platform/qt/PlaybackFramePopulationPolicy.h \
     $$REPO_ROOT/platform/qt/PlaybackPresentedFrameIdentityTracker.h \
-    $$REPO_ROOT/platform/qt/PlaybackLookaheadLoopPositionPolicy.h
+    $$REPO_ROOT/platform/qt/PlaybackLookaheadLoopPositionPolicy.h \
+    $$REPO_ROOT/platform/qt/PlaybackDropFrameAdvancePolicy.h
 
 win32{
     WINDOWS_TEST_RUNTIME_DEPLOY = $$relative_path($$REPO_ROOT/tools/testing/deploy-windows-test-runtime.ps1, $$OUT_PWD)
