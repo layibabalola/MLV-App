@@ -47,6 +47,7 @@
 #include "ReceiptCopyMaskDialog.h"
 #include "QRecentFilesMenu.h"
 #include "PlaybackQualityPolicy.h"
+#include "PlaybackPresentedFrameIdentityTracker.h"
 #include "batch/BatchTypes.h"
 #include <atomic>
 #include <deque>
@@ -1039,14 +1040,26 @@ private:
     uint64_t m_playbackSmokeStartRequestSerial = 0;
     uint64_t m_playbackSmokeStartTargetRequestSerial = 0;
     /* CUDA-ATTRIBUTION-BASELINE-1 round 3: session-start snapshot of
-     * m_playbackTimelineSourceFramesOffered, and the per-session presented-
-     * frame split by request origin, both consumed by
+     * m_playbackTimelineSourceFramesOffered, consumed by
      * PlaybackFramePopulationPolicy::computeSourceFramePopulation() in
      * finishPlaybackSmokeTelemetry(). Reset at playback start alongside the
      * other smoke counters. */
     double m_playbackSmokeStartTimelineSourceFramesOffered = 0.0;
-    int m_playbackSmokePresentedViaTargetFrames = 0;
-    int m_playbackSmokePresentedViaLookaheadFrames = 0;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 5 (sol BLOCKER): the per-session
+     * presented-frame split by request origin used to be a plain event
+     * count (++ on every presentation), which is identity-blind -- the same
+     * source frame presented three times inflated this exactly as much as
+     * three distinct frames presented once each, so a drop-frame catch-up
+     * that quietly re-presented a stale frame instead of advancing could
+     * read as zero loss. This tracks the distinct displayFrame indices
+     * actually reaching notePlaybackSmokePresentedFrame(), split by origin
+     * the same way the event counters used to be; its distinct*Count()s are
+     * what feed PlaybackFramePopulationPolicy::computeSourceFramePopulation()'s
+     * presentedViaTargetFramesThisSession/presentedViaLookaheadFramesThisSession.
+     * See PlaybackPresentedFrameIdentityTracker.h for the bounded-memory
+     * argument. Cleared at playback start alongside the other smoke
+     * counters. */
+    PlaybackPresentedFrameIdentityTracker m_playbackSmokePresentedFrameIdentity;
     /* CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra major, round-3 PARTIAL):
      * count of target requests (m_nextTargetRenderRequestSerial advances)
      * that took drawFrame()'s lookahead-reuse early return instead of

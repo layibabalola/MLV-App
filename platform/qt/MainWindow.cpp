@@ -22558,8 +22558,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeStartRequestSerial = m_nextRenderRequestSerial;
     m_playbackSmokeStartTargetRequestSerial = m_nextTargetRenderRequestSerial;
     m_playbackSmokeStartTimelineSourceFramesOffered = m_playbackTimelineSourceFramesOffered;
-    m_playbackSmokePresentedViaTargetFrames = 0;
-    m_playbackSmokePresentedViaLookaheadFrames = 0;
+    m_playbackSmokePresentedFrameIdentity.reset();
     m_playbackSmokeReusedLookaheadTargetFrames = 0;
     m_playbackSmokeStartDecodeRequestsIssued =
         m_pRenderThread ? m_pRenderThread->decodeRequestsIssuedCount() : 0;
@@ -22882,15 +22881,13 @@ void MainWindow::notePlaybackSmokePresentedFrame(
      * round 2's skippedOrUnpresentedByTargetSerial subtracted the TOTAL
      * presented count (target- and lookahead-served alike) from the
      * target-only request count, which could hide genuine target skips
-     * whenever any lookahead-served frame was presented in the same session. */
-    if( requestContext.playbackLookaheadRequest )
-    {
-        ++m_playbackSmokePresentedViaLookaheadFrames;
-    }
-    else
-    {
-        ++m_playbackSmokePresentedViaTargetFrames;
-    }
+     * whenever any lookahead-served frame was presented in the same session.
+     * Round 5 (sol BLOCKER): record the DISTINCT displayFrame, not a raw
+     * event tick -- a duplicate presentation of a source frame already in
+     * the set is not new information and must not inflate the "presented"
+     * bucket computeSourceFramePopulation() derives loss from. */
+    m_playbackSmokePresentedFrameIdentity.notePresentedFrame(
+        displayFrame, requestContext.playbackLookaheadRequest );
     const auto avgSmokeMs = [this]( double sum ) -> double
     {
         return m_playbackSmokePresentedFrames > 0
@@ -25304,7 +25301,14 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
      * assumed, to sum back to it -- see PlaybackSourceFramePopulation::
      * partitionSound. This is the gate figure now; see
      * playback_smoke.source_frame_population below and its use in
-     * run-release-gui-smoke.ps1. */
+     * run-release-gui-smoke.ps1.
+     * Round 5 (sol BLOCKER): the two presented-count arguments below are
+     * distinct-displayFrame-index counts, not event counts -- a source
+     * frame presented N times over the session contributes 1, not N, so a
+     * duplicate presentation can no longer masquerade as N distinct frames
+     * accounted for. See m_playbackSmokePresentedFrameIdentity's
+     * declaration comment and PlaybackPresentedFrameIdentityTracker.h for
+     * why the underlying sets are safely bounded. */
     const PlaybackSourceFramePopulation sourceFramePopulation =
         PlaybackFramePopulationPolicy::computeSourceFramePopulation(
             m_playbackTimelineSourceFramesOffered,
@@ -25312,8 +25316,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
             requestedTargetFramesBySerial,
             static_cast<uint64_t>( qMax( 0, m_playbackSmokeReusedLookaheadTargetFrames ) ),
             lookaheadRequestsBySerial,
-            static_cast<uint64_t>( qMax( 0, m_playbackSmokePresentedViaTargetFrames ) ),
-            static_cast<uint64_t>( qMax( 0, m_playbackSmokePresentedViaLookaheadFrames ) ) );
+            m_playbackSmokePresentedFrameIdentity.distinctTargetPresentedCount(),
+            m_playbackSmokePresentedFrameIdentity.distinctLookaheadPresentedCount() );
     const double sourceFrameLossRatio =
         sourceFramePopulation.offeredSourceFrames > 0
             ? static_cast<double>(
@@ -25582,7 +25586,19 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
      * either line above -- same arg-count-ceiling reason as
      * playback_smoke.frame_population's own comment. This is now the
      * AUTHORITATIVE gate figure (source_frame_loss_ratio); see
-     * run-release-gui-smoke.ps1's use of it. */
+     * run-release-gui-smoke.ps1's use of it.
+     * Round 5 (sol BLOCKER): presented_via_target_frames/
+     * presented_via_lookahead_frames are now distinct-source-frame counts
+     * (QSet<displayFrame>.size()), not presentation-event counts -- the only
+     * consumers of these two fields (run-release-gui-smoke.ps1's
+     * presentedViaTargetFrames/presentedViaLookaheadFrames passthrough into
+     * clipResults, and this line's own presented_frames/loss-ratio math) use
+     * them exclusively for source-frame-loss accounting, never as a
+     * presentation-cadence/workload figure -- m_playbackSmokePresentedFrames
+     * (playback_smoke.frame_population's presented_frames) remains the
+     * event-count total for that purpose, unchanged. No dual-field export
+     * needed: repurposing this field name completes the fix these two
+     * fields exist for rather than colliding with a different one. */
     qInfo().noquote()
         << QStringLiteral(
                "playback_smoke.source_frame_population session=%1 "
@@ -25602,8 +25618,14 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "figure on this line's companion playback_smoke."
                "frame_population -- this is the fix for the source-frame "
                "loss those figures cannot see: a frame drop-frame catch-up "
-               "skips over before issuing a request for it. The four named "
-               "buckets (never_requested_source_frames, "
+               "skips over before issuing a request for it. "
+               "presented_via_target_frames/presented_via_lookahead_frames "
+               "count DISTINCT displayFrame indices reaching presentation "
+               "(round 5), not presentation events -- the same source frame "
+               "presented repeatedly contributes once, so a duplicate "
+               "re-presentation cannot masquerade as covering the source "
+               "frames it did not advance to. The four named buckets "
+               "(never_requested_source_frames, "
                "requested_then_discarded_lookahead_frames, "
                "requested_then_skipped_target_frames, presented_frames) sum "
                "exactly to offered_source_frames whenever partition_sound is "

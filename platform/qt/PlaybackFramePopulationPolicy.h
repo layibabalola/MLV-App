@@ -139,11 +139,22 @@ public:
      *  \param lookaheadRequestsBySerialThisSession the session's speculative-
      *         lookahead request EVENT count (PlaybackFramePopulation::
      *         lookaheadRequestsBySerial).
-     *  \param presentedViaTargetFramesThisSession presentations this session
-     *         whose PresentationContext::playbackLookaheadRequest was false.
-     *  \param presentedViaLookaheadFramesThisSession presentations this
-     *         session whose PresentationContext::playbackLookaheadRequest was
-     *         true.
+     *  \param presentedViaTargetFramesThisSession CUDA-ATTRIBUTION-BASELINE-1
+     *         round 5 (sol BLOCKER, was PARTIAL through round 4): the count
+     *         of DISTINCT source-frame (displayFrame) indices presented this
+     *         session whose PresentationContext::playbackLookaheadRequest
+     *         was false -- a set size, not a presentation-event count.
+     *         Nothing upstream of notePlaybackSmokePresentedFrame() dedups
+     *         by displayFrame, so an event count here could not distinguish
+     *         N distinct source frames presented once each from 1 source
+     *         frame presented N times; both used to read as "N frames
+     *         accounted for", silently hiding the other N-1 as neither
+     *         skipped nor never-requested. See its caller for how the set is
+     *         built and why it is bounded.
+     *  \param presentedViaLookaheadFramesThisSession the same distinct-count
+     *         semantics as presentedViaTargetFramesThisSession above, for
+     *         presentations whose PresentationContext::
+     *         playbackLookaheadRequest was true.
      */
     static PlaybackSourceFramePopulation computeSourceFramePopulation(
         double timelineSourceFramesOfferedNow,

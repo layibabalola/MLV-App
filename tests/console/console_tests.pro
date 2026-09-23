@@ -76,7 +76,8 @@ HEADERS += \
     $$REPO_ROOT/platform/qt/AsyncH2dCounterContract.h \
     $$REPO_ROOT/platform/qt/PlaybackAchievedScalePolicy.h \
     $$REPO_ROOT/platform/qt/GpuTexturePresentAvailabilityPolicy.h \
-    $$REPO_ROOT/platform/qt/PlaybackFramePopulationPolicy.h
+    $$REPO_ROOT/platform/qt/PlaybackFramePopulationPolicy.h \
+    $$REPO_ROOT/platform/qt/PlaybackPresentedFrameIdentityTracker.h
 
 win32{
     WINDOWS_TEST_RUNTIME_DEPLOY = $$relative_path($$REPO_ROOT/tools/testing/deploy-windows-test-runtime.ps1, $$OUT_PWD)
