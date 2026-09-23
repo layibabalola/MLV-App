@@ -82,6 +82,8 @@ param(
     [switch]$LaunchOnlyProbe,
     [ValidateRange(0.0, 1.0)]
     [double]$MaxSkippedOrUnpresentedRatio = 0.5,
+    [double]$HostLoadCpuPercentBar = 75,
+    [int]$HostLoadTopProcessCount = 8,
     [switch]$DryRun
 )
 
@@ -280,6 +282,102 @@ function Wait-SystemCpuSettle {
     $result.elapsedMs = [int]$watch.ElapsedMilliseconds
     $result.settled = $result.stableMs -ge $StableMs
     [pscustomobject]$result
+}
+
+function Get-HostLoadSnapshot {
+    # Records host state around a playback leg. BACHELOR is also the owner's interactive
+    # workstation: an fps number measured while it is loaded is not a property of the build
+    # (measured 2026-09-22 -- CPU_LOAD_PCT=96 turned a 4.8fps CPU reference into 1.2fps with
+    # identical route counters). Top consumers are recorded BY NAME ONLY -- no command lines,
+    # no paths -- this is host-load evidence, not process forensics.
+    param([int]$TopProcessCount = 8)
+
+    $capturedAtUtc = [datetime]::UtcNow
+    $snapshot = [ordered]@{
+        capturedAtUtc = $capturedAtUtc.ToString("o")
+        collected = $false
+        error = $null
+        cpuLoadPercent = $null
+        processCount = $null
+        freePhysicalMemoryMb = $null
+        totalVisibleMemoryMb = $null
+        topCpuConsumers = @()
+    }
+    try {
+        $cpuLoad = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop |
+            Measure-Object -Property LoadPercentage -Average).Average
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $processes = Get-Process -ErrorAction Stop
+        $topConsumers = @(
+            $processes | Sort-Object CPU -Descending | Select-Object -First $TopProcessCount |
+                ForEach-Object { $_.ProcessName }
+        )
+        if ($null -eq $cpuLoad) {
+            $snapshot.error = "LoadPercentage unavailable from Win32_Processor."
+        }
+        else {
+            $snapshot.cpuLoadPercent = [double]$cpuLoad
+        }
+        $snapshot.processCount = [int]$processes.Count
+        $snapshot.freePhysicalMemoryMb = [Math]::Round($os.FreePhysicalMemory / 1024.0, 1)
+        $snapshot.totalVisibleMemoryMb = [Math]::Round($os.TotalVisibleMemorySize / 1024.0, 1)
+        $snapshot.topCpuConsumers = $topConsumers
+        $snapshot.collected = ($null -ne $snapshot.cpuLoadPercent)
+    }
+    catch {
+        $snapshot.collected = $false
+        $snapshot.error = $_.Exception.Message
+    }
+    [pscustomobject]$snapshot
+}
+
+function Get-HostLoadVerdict {
+    # Three outcomes, never two: quiet (usable), exceeded (usable-as-evidence, unusable-as-signal),
+    # unknown (telemetry could not be collected -- treated as PROVISIONAL too, never as "quiet").
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1: a run whose load exceeds the bar, or whose load could
+    # not be measured, is marked PROVISIONAL -- worth recording, never usable as a regression or
+    # acceptance signal. Never fail the run for this; only mark it.
+    param(
+        [object]$Before,
+        [object]$After,
+        [double]$Bar
+    )
+
+    $samples = @($Before, $After)
+    $collectedSamples = @($samples | Where-Object { $_.collected })
+    $unknown = ($collectedSamples.Count -lt $samples.Count)
+    $maxCpuLoadPercent = if ($collectedSamples.Count -gt 0) {
+        ($collectedSamples | Measure-Object -Property cpuLoadPercent -Maximum).Maximum
+    } else {
+        $null
+    }
+    $exceeded = ($null -ne $maxCpuLoadPercent -and $maxCpuLoadPercent -gt $Bar)
+    $state = if ($unknown) {
+        "unknown"
+    } elseif ($exceeded) {
+        "exceeded"
+    } else {
+        "quiet"
+    }
+    $provisional = ($unknown -or $exceeded)
+    $reason = if ($unknown) {
+        "Host load telemetry could not be collected for at least one snapshot " +
+            "(before.collected=$($Before.collected), after.collected=$($After.collected)); " +
+            "an fps measurement under unknown host load is never usable as a regression or acceptance signal."
+    } elseif ($exceeded) {
+        "Host CPU load reached $maxCpuLoadPercent% during this leg, exceeding the " +
+            "$Bar% bar; an fps number measured on a loaded host is not a property of the build."
+    } else {
+        $null
+    }
+
+    [pscustomobject]@{
+        bar = $Bar
+        maxCpuLoadPercent = $maxCpuLoadPercent
+        state = $state
+        provisional = [bool]$provisional
+        reason = $reason
+    }
 }
 
 function Get-ObjectPropertyValue {
@@ -1054,6 +1152,7 @@ $preLaunchSystemCpuSettle = Wait-SystemCpuSettle `
     -StableMs $SystemSettleCpuStableMs `
     -MaxMs $SystemSettleCpuMaxMs
 
+$hostLoadBefore = Get-HostLoadSnapshot -TopProcessCount $HostLoadTopProcessCount
 $startUtc = [datetime]::UtcNow
 $process = [System.Diagnostics.Process]::Start($startInfo)
 $screenshotCapture = $null
@@ -1072,6 +1171,8 @@ $stderr = $processBoundary.stderr
 $processExitCode = [int]$processBoundary.exitCode
 $captureBindingFailures += @($processBoundary.failures)
 $endUtc = [datetime]::UtcNow
+$hostLoadAfter = Get-HostLoadSnapshot -TopProcessCount $HostLoadTopProcessCount
+$hostLoadVerdict = Get-HostLoadVerdict -Before $hostLoadBefore -After $hostLoadAfter -Bar $HostLoadCpuPercentBar
 
 if ($CaptureScreenshot) {
     if (-not (Test-Path -LiteralPath $screenshotPath)) {
@@ -1849,6 +1950,16 @@ $result = [pscustomobject]@{
         note = "sustainedBottomLeftGuiFps/visibleBottomLeftGuiFps/screenshotGuiStatusValue is the bottom-left Playback FPS label visible after the requested playback duration in screenshot.windowCapture and enlarged in playbackFps.sustainedBottomLeftGuiProof; guiStatusValue is the later end-of-run summary sample and can differ; smokePresentedFps and smokeTimelineFps are smoke-run telemetry over the full requested duration, and per-stage FPS-equivalent values are 1000 / stage_ms."
     }
     playbackArtifacts = $playbackArtifacts
+    hostLoad = [pscustomobject]@{
+        schema = "mlvapp-gui-smoke-host-load.v1"
+        bar = [pscustomobject]@{ cpuLoadPercent = $HostLoadCpuPercentBar }
+        before = $hostLoadBefore
+        after = $hostLoadAfter
+        maxCpuLoadPercent = $hostLoadVerdict.maxCpuLoadPercent
+        state = $hostLoadVerdict.state
+        provisional = [bool]$hostLoadVerdict.provisional
+        reason = $hostLoadVerdict.reason
+    }
     process = [pscustomobject]@{
         id = $process.Id
         exitCode = $processExitCode

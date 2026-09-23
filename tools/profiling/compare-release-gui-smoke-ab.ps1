@@ -393,6 +393,51 @@ function Get-LegEvidenceBinding {
     }
 }
 
+function Get-HostLoadComparisonEvidence {
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1: refuse to compare fps across a pair where either leg's
+    # host load is PROVISIONAL (bar exceeded, or telemetry UNKNOWN -- a run recorded before this
+    # gate existed has no hostLoad field at all, which is also UNKNOWN, never "quiet"). An fps
+    # number measured on a loaded host is not a property of the build, so a provisional leg is
+    # never usable as a regression signal, whatever the other leg's state is.
+    param(
+        [object]$BeforeSmoke,
+        [object]$AfterSmoke
+    )
+
+    $evidence = [ordered]@{}
+    $failures = @()
+    foreach ($leg in @(
+        [pscustomobject]@{ Name = "before"; Smoke = $BeforeSmoke },
+        [pscustomobject]@{ Name = "after"; Smoke = $AfterSmoke }
+    )) {
+        $legHostLoad = Get-NestedValue $leg.Smoke "hostLoad"
+        $legProvisional = if ($null -eq $legHostLoad) { $true } else { [bool](Get-NestedValue $legHostLoad "provisional") }
+        $legState = if ($null -eq $legHostLoad) { "unknown" } else { [string](Get-NestedValue $legHostLoad "state") }
+        $legReason = if ($null -eq $legHostLoad) {
+            "no hostLoad telemetry recorded in the smoke result"
+        } else {
+            [string](Get-NestedValue $legHostLoad "reason")
+        }
+        $evidence[$leg.Name] = [pscustomobject]@{
+            state = $legState
+            provisional = $legProvisional
+            reason = $legReason
+        }
+        if ($legProvisional) {
+            $failures += (
+                "$($leg.Name) smoke host load is PROVISIONAL (state=$legState" +
+                $(if ($legReason) { ": $legReason" } else { "" }) +
+                "); an fps comparison against a PROVISIONAL run is refused."
+            )
+        }
+    }
+
+    [pscustomobject]@{
+        evidence = [pscustomobject]$evidence
+        failures = @($failures)
+    }
+}
+
 function Convert-ToStableValueText {
     param([object]$Value)
 
@@ -808,6 +853,10 @@ foreach ($leg in @(
         $failures += "$($leg.Name) smoke did not prove displayed-frame advancement."
     }
 }
+$hostLoadComparison = Get-HostLoadComparisonEvidence -BeforeSmoke $beforeSmoke -AfterSmoke $afterSmoke
+$hostLoadEvidence = $hostLoadComparison.evidence
+$failures += @($hostLoadComparison.failures)
+
 $beforeLastPresented = $presentedFrameEvidence.before.lastPresentedFrame
 $afterLastPresented = $presentedFrameEvidence.after.lastPresentedFrame
 if ($null -eq $beforeLastPresented -or $null -eq $afterLastPresented -or
@@ -852,6 +901,7 @@ $result = [pscustomobject]@{
     }
     screenshot = $screenshotCompare
     presentedFrameEvidence = [pscustomobject]$presentedFrameEvidence
+    hostLoadEvidence = $hostLoadEvidence
     autoDecision = New-AutoDecisionComparison `
         -BeforeSmoke $beforeSmoke `
         -AfterSmoke $afterSmoke
@@ -895,7 +945,7 @@ Write-Host ((
     "GUI-SMOKE-AB verdict={0} screenshot_status={1} mean_abs_rgb_delta={2} " +
     "changed_sample_ratio={3} gui_fps_delta={4} presented_fps_delta={5} " +
     "auto_reason_before={6} auto_reason_after={7} auto_avg_ms_delta={8} " +
-    "auto_avg_fps_eq_delta={9} output={10}") -f
+    "auto_avg_fps_eq_delta={9} host_load_before={10} host_load_after={11} output={12}") -f
     $result.verdict,
     $result.screenshot.status,
     $result.screenshot.meanAbsRgbDelta,
@@ -906,6 +956,8 @@ Write-Host ((
     $result.autoDecision.reason.after,
     $result.autoDecision.averageMs.delta,
     $result.autoDecision.averageFpsEquivalent.delta,
+    $result.hostLoadEvidence.before.state,
+    $result.hostLoadEvidence.after.state,
     $(if ([string]::IsNullOrWhiteSpace($Output)) { "<stdout-json>" } else { $resolvedOutput })
 )
 

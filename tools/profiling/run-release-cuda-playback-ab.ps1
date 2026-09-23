@@ -697,6 +697,41 @@ function Invoke-ChildPowerShell {
     }
 }
 
+function Get-HostLoadProofFailures {
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1: this proof's presentedFps comparison is exactly the kind
+    # of cross-run fps comparison a PROVISIONAL leg must never enter -- an fps number measured on
+    # a loaded host (or one whose load could not be measured) is not a property of the build.
+    # Refuse the whole A/B fps proof rather than silently proving an improvement that is really
+    # host noise.
+    param(
+        [object]$BaselineSummary,
+        [object]$CandidateSummary,
+        [object]$CandidateSpeedSummary,
+        [switch]$SeparateCandidateSpeedRun
+    )
+
+    $failures = @()
+    if ($BaselineSummary.hostLoadProvisional) {
+        $failures += (
+            "baseline-host-load-provisional state=$($BaselineSummary.hostLoadState) " +
+            "reason=$($BaselineSummary.hostLoadReason)"
+        )
+    }
+    if ($CandidateSummary.hostLoadProvisional) {
+        $failures += (
+            "candidate-host-load-provisional state=$($CandidateSummary.hostLoadState) " +
+            "reason=$($CandidateSummary.hostLoadReason)"
+        )
+    }
+    if ($SeparateCandidateSpeedRun -and $CandidateSpeedSummary.hostLoadProvisional) {
+        $failures += (
+            "candidate-speed-host-load-provisional state=$($CandidateSpeedSummary.hostLoadState) " +
+            "reason=$($CandidateSpeedSummary.hostLoadReason)"
+        )
+    }
+    @($failures)
+}
+
 function Read-SmokeSummary {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -710,10 +745,23 @@ function Read-SmokeSummary {
             exists = $false
             exitCode = $ExitCode
             validationOk = $false
+            hostLoadProvisional = $true
+            hostLoadState = "unknown"
+            hostLoadReason = "smoke result JSON does not exist"
         }
     }
 
     $json = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -Depth 100
+    $hostLoad = Get-NestedValue $json "hostLoad"
+    # A leg recorded before PLAYBACK-MEASURE-HOST-LOAD-GATE-1 (or one whose host-load capture
+    # never made it into the JSON) never MEASURED its load, which is UNKNOWN, not "quiet".
+    $hostLoadProvisional = if ($null -eq $hostLoad) { $true } else { [bool](Get-NestedValue $hostLoad "provisional") }
+    $hostLoadState = if ($null -eq $hostLoad) { "unknown" } else { [string](Get-NestedValue $hostLoad "state") }
+    $hostLoadReason = if ($null -eq $hostLoad) {
+        "no hostLoad telemetry recorded in the smoke result"
+    } else {
+        [string](Get-NestedValue $hostLoad "reason")
+    }
     $summary = Get-NestedValue $json "log.summary"
     $glProof = Get-NestedValue $json "visualQuality.glOutputProof"
     if ($null -eq $glProof) {
@@ -822,6 +870,9 @@ function Read-SmokeSummary {
         exists = $true
         exitCode = $ExitCode
         validationOk = $validationOk
+        hostLoadProvisional = $hostLoadProvisional
+        hostLoadState = $hostLoadState
+        hostLoadReason = $hostLoadReason
         runMetadata = Get-NestedValue $json "log.runMetadata"
         validationFailures = @(Get-NestedValue $json "validation.failures")
         validationWarnings = @(Get-NestedValue $json "validation.warnings")
@@ -1524,6 +1575,11 @@ if (-not $candidateSummary.validationOk) {
 if ($SeparateCandidateSpeedRun -and -not $candidateSpeedSummary.validationOk) {
     $proofFailures += "candidate-speed-validation-not-ok"
 }
+$proofFailures += @(Get-HostLoadProofFailures `
+    -BaselineSummary $baselineSummary `
+    -CandidateSummary $candidateSummary `
+    -CandidateSpeedSummary $candidateSpeedSummary `
+    -SeparateCandidateSpeedRun:$SeparateCandidateSpeedRun)
 $candidateTextureProofSummaries = @(
     [pscustomobject]@{ label = "candidate"; summary = $candidateSummary }
 )
