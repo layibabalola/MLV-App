@@ -60,18 +60,31 @@ class _Share(unittest.TestCase):
         return sorted(p.name for p in self.inbox.iterdir())
 
     def drop(self, copier: str, *, side: list[Path] | None = None, job_id: str = "demo",
-             job_timeout_sec: int | None = None) -> subprocess.CompletedProcess:
+             job_timeout_sec: int | None = None, orphan_grace_sec: int | None = None,
+             before_job_visible: str | None = None,
+             after_meta_tmp_written: str | None = None) -> subprocess.CompletedProcess:
         sides = ",".join(_q(p) for p in (side if side is not None else [self.side]))
         timeout_arg = "" if job_timeout_sec is None else f" -JobTimeoutSec {job_timeout_sec}"
+        grace_arg = "" if orphan_grace_sec is None else f" -OrphanMetaGraceSec {orphan_grace_sec}"
         script = self.tmp / "drop.ps1"
-        script.write_text(
+        preamble = (
             "$ErrorActionPreference = 'Stop'\n"
             f"Import-Module {_q(MODULE)} -Force\n"
             f"$log = {_q(self.log)}\n"
             f"$copier = {copier}\n"
+        )
+        hook_args = ""
+        if before_job_visible is not None:
+            preamble += f"$beforeJobVisible = {before_job_visible}\n"
+            hook_args += " -TestHookBeforeJobVisible $beforeJobVisible"
+        if after_meta_tmp_written is not None:
+            preamble += f"$afterMetaTmpWritten = {after_meta_tmp_written}\n"
+            hook_args += " -TestHookAfterMetaTmpWritten $afterMetaTmpWritten"
+        script.write_text(
+            preamble +
             "try {\n"
             f"  Invoke-UmRunDrop -Inbox {_q(self.inbox)} -Outbox {_q(self.outbox)} -ScriptPath {_q(self.job)} "
-            f"-JobId '{job_id}' -SideFile @({sides}){timeout_arg} -Copier $copier\n"
+            f"-JobId '{job_id}' -SideFile @({sides}){timeout_arg}{grace_arg}{hook_args} -Copier $copier\n"
             "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
             encoding="utf-8",
         )
@@ -88,19 +101,15 @@ RACING_SIDE = ("{ param($s, $d) Copy-Item -LiteralPath $s -Destination $d; "
 RACING_JOB = ("{ param($s, $d) Copy-Item -LiteralPath $s -Destination $d; "
               "if ($d -like '*.job.tmp') { $final = $d -replace '\\.[0-9a-f]{32}\\.job\\.tmp$', '.job.ps1'; "
               "[IO.File]::WriteAllText($final, 'Write-Output concurrent') } }")
-# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol major 1). Metadata is placed successfully;
-# only the JOB's own copy is made to fail, simulating the share hiccup / concurrent-rename class of
-# failure fable's review used as its repro.
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol major 1), round 4 (sol major: reordered so
+# the job's own bytes are copied BEFORE metadata is written at all -- see UmRunDrop.psm1's own
+# header). The job's own copy is made to fail, simulating the share hiccup / concurrent-rename
+# class of failure fable's review used as its repro; because it fails before metadata is ever
+# written, this now proves the weaker "nothing partial survives the very first copy" property --
+# see test_a_racing_job_rename_with_a_budget_rolls_back_its_own_metadata below for the round-4
+# rollback proof that actually exercises metadata-then-job-rename-fails.
 JOB_COPY_FAILS = ("{ param($s, $d) if ($d -like '*.job.tmp') { throw 'INJECTED_JOB_COPY_FAILURE' }; "
                    "Copy-Item -LiteralPath $s -Destination $d }")
-# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1. The metadata is written with Set-Content, not through the
-# copier, so ordering cannot be read off the copy log alone: this copier records, at the moment the
-# JOB's temporary is written, whether the metadata is already in place. That is the property the
-# agent depends on -- it may claim the job the instant the job file appears.
-META_ORDER = ("{ param($s, $d) if ($d -like '*.job.tmp') { "
-              "Add-Content -LiteralPath $log -Value ('meta-present-at-job-copy=' + "
-              "(Test-Path -LiteralPath (Join-Path (Split-Path -Parent $d) 'demo.meta.json'))) }; "
-              "Add-Content -LiteralPath $log -Value $d; Copy-Item -LiteralPath $s -Destination $d }")
 
 
 class UmRunDropModuleTests(_Share):
@@ -125,14 +134,33 @@ class UmRunDropModuleTests(_Share):
     # placement asked to take an hour was killed at 30 minutes, twice, discarding a ~50 min transfer.
 
     def test_the_job_budget_is_in_place_before_the_job_becomes_visible(self) -> None:
-        proc = self.drop(META_ORDER, side=[], job_timeout_sec=3600)
+        # sol round 4 minor: this used to prove metadata-before-the-job's-OWN-temporary-copy (a
+        # copier hook fired when demo.job.tmp was written) -- the wrong instant, since round 4
+        # reordered the module to copy the job's bytes to that same temporary FIRST, before
+        # metadata is written at all (see UmRunDrop.psm1's own header). The real contract the agent
+        # depends on is metadata-before-the-job-becoming-VISIBLE (the rename to demo.job.ps1) --
+        # -TestHookBeforeJobVisible fires at exactly that instant, whatever the module's internal
+        # copy order is.
+        hook = ("{ Add-Content -LiteralPath " + _q(self.log) + " -Value ('meta-present-before-visible=' + "
+                "(Test-Path -LiteralPath (Join-Path " + _q(self.inbox) + " 'demo.meta.json'))) }")
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, before_job_visible=hook)
         self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
         lines = self.log.read_text(encoding="utf-8").splitlines()
-        self.assertIn("meta-present-at-job-copy=True", lines, lines)
+        self.assertIn("meta-present-before-visible=True", lines, lines)
         self.assertEqual(self.names(), ["demo.job.ps1", "demo.meta.json"])
         meta = json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))
         self.assertEqual(meta["timeoutSec"], 3600)
         self.assertEqual(meta["jobId"], "demo")
+
+    def test_the_jobs_own_bytes_are_copied_before_metadata_is_written(self) -> None:
+        # The other half of the round-4 reorder: at the moment the job's OWN temporary is copied,
+        # metadata must NOT yet exist -- it is published only once those bytes already sit on the
+        # share, narrowing the window in which metadata is visible with no job to the rename alone.
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600)
+        self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
+        copies = [Path(line).name for line in self.log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(copies), 1, copies)
+        self.assertTrue(copies[0].endswith(".job.tmp"), copies)
 
     def test_no_metadata_is_written_when_no_budget_is_requested(self) -> None:
         proc = self.drop(OBSERVING, side=[])
@@ -173,6 +201,70 @@ class UmRunDropModuleTests(_Share):
         self.assertIn("UMRUN_JOBID=demo", retry.stdout, retry.stdout + retry.stderr)
         self.assertEqual(self.names(), ["demo.job.ps1", "demo.meta.json"],
                          "the retry must succeed exactly as if the first attempt had never happened")
+
+    def test_a_racing_job_rename_with_a_budget_rolls_back_its_own_metadata(self) -> None:
+        # sol round 4 major (item 4/5): the "budgeted final-job rename refusal" coverage sol named
+        # as absent. With the round-4 reorder, metadata is published only just before the job's
+        # final rename -- this proves that when that LAST rename loses a race (another submitter's
+        # job.ps1 appears first), this call's own metadata is rolled back exactly like the
+        # job-copy-failure case above, never left to brick a later retry.
+        proc = self.drop(RACING_JOB, side=[], job_timeout_sec=3600)
+        self.assertIn("THREW UMRUN_JOBID_IN_USE", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual((self.inbox / "demo.job.ps1").read_text(encoding="utf-8"), "Write-Output concurrent")
+        self.assertEqual(self.names(), ["demo.job.ps1"],
+                         "a lost job-rename race must roll back this call's own metadata, not leave it behind")
+
+    def test_a_torn_metadata_write_is_rejected_by_readback_verification(self) -> None:
+        # sol round 4 minor: "removing metadata readback verification would not fail any test" --
+        # -TestHookAfterMetaTmpWritten corrupts the metadata temp file after it is written but
+        # before the write-back comparison, proving that comparison actually rejects a torn write
+        # rather than merely existing, untested, in the source.
+        hook = "{ param($p) [IO.File]::AppendAllText($p, 'TORN') }"
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, after_meta_tmp_written=hook)
+        self.assertIn("THREW UMRUN_JOB_METADATA_VERIFY_FAILED", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), [], "a torn metadata write must leave neither metadata nor a job")
+
+    def test_an_orphaned_metadata_from_a_hard_interruption_is_self_healed_after_its_grace_period(self) -> None:
+        # sol round 4 major (item 2/4): metadata with no job and no result can only be left by a
+        # submission hard-interrupted (killed, not thrown) between publishing metadata and exposing
+        # the job -- neither agent ever consumes metadata without its paired job. -OrphanMetaGraceSec
+        # 0 simulates that grace period having already elapsed: the retry must reclaim the JobId
+        # instead of being bricked forever, which is the SUBMIT-RETRY-1 bug this round closes for
+        # the interrupt path (round 2 already closed it for the thrown-exception path).
+        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":99}', encoding="ascii")
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, orphan_grace_sec=0)
+        self.assertIn("removed orphaned metadata", proc.stdout, proc.stdout + proc.stderr)
+        self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), ["demo.job.ps1", "demo.meta.json"])
+        meta = json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))
+        self.assertEqual(meta["timeoutSec"], 3600, "the retry's own fresh metadata, never the stale orphan's")
+
+    def test_an_orphaned_metadata_still_inside_its_grace_period_is_treated_as_possibly_live(self) -> None:
+        # The other half: immediately after it appears, orphaned metadata is indistinguishable from
+        # a live submission mid-rename, so the default grace period still refuses the retry -- this
+        # is the same outcome as test_metadata_that_appears_concurrently_is_not_overwritten below,
+        # named here to make the grace-period boundary explicit.
+        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":99}', encoding="ascii")
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600)   # default -OrphanMetaGraceSec
+        self.assertIn("THREW UMRUN_JOBID_IN_USE", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))["timeoutSec"], 99)
+
+    def test_a_stale_orphan_that_cannot_be_removed_is_surfaced_not_silently_kept(self) -> None:
+        # sol round 4 minor (item 2/4, "cleanup failure"): the round-2 rollback cleanup was
+        # SilentlyContinue, so a share hiccup that broke a removal was invisible. The self-heal
+        # removal above is not: a stale orphan that fails to delete (here, a non-empty directory
+        # occupying the meta path -- Remove-Item without -Recurse refuses a non-empty directory)
+        # surfaces a clear UMRUN_JOBID_IN_USE refusal instead of silently proceeding to place a
+        # job the agent could claim against unremovable, unrelated metadata.
+        meta_dir = self.inbox / "demo.meta.json"
+        meta_dir.mkdir()
+        (meta_dir / "unrelated.txt").write_bytes(b"bytes that must survive untouched")
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, orphan_grace_sec=0)
+        self.assertIn("THREW UMRUN_JOBID_IN_USE", proc.stdout, proc.stdout + proc.stderr)
+        self.assertIn("could not be removed", proc.stdout, proc.stdout + proc.stderr)
+        self.assertTrue(meta_dir.is_dir(), "an unremovable orphan must be left in place, not partially cleared")
+        self.assertEqual((meta_dir / "unrelated.txt").read_bytes(), b"bytes that must survive untouched")
+        self.assertEqual(self.names(), ["demo.meta.json"])
 
     def test_metadata_that_appears_concurrently_is_not_overwritten(self) -> None:
         (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":42}', encoding="ascii")

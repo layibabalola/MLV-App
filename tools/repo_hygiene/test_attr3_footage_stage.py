@@ -1135,6 +1135,27 @@ class EndToEndTransferIdempotenceTests(unittest.TestCase):
 
 
 @unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+class QueueWaitBoundTests(unittest.TestCase):
+    """ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (fable major): neither um-run.ps1 call site used
+    to bound the QUEUED phase, so a dead/wedged agent left a job unclaimed for up to um-run's own
+    86400s -MaxQueueWaitSec default -- round 2's own 300s preflight execution cap notwithstanding.
+    Both call sites now pass a -MaxQueueWaitSec derived from THIS run's own -TimeoutSec."""
+
+    def test_both_um_run_call_sites_pass_a_caller_derived_max_queue_wait_sec(self) -> None:
+        text = GENERATOR.read_text(encoding="utf-8")
+        self.assertIn(
+            "-MaxQueueWaitSec $presenceTimeoutSecValue", text,
+            "the presence preflight must bound its own queue wait to its own capped budget, "
+            "never um-run.ps1's 86400s default",
+        )
+        self.assertIn(
+            "-MaxQueueWaitSec $timeoutSecValue", text,
+            "the placement submission must bound its queue wait to the caller's own -TimeoutSec, "
+            "never um-run.ps1's 86400s default",
+        )
+
+
+@unittest.skipIf(PWSH is None, "pwsh is not on PATH")
 @unittest.skipUnless(os.name == "nt", "the emitted job targets a Windows measurement host")
 class NoPathInAnyBranchTests(unittest.TestCase):
     """ATTR3-FOOTAGE-STAGE-1 round 3 (sol/astra PR #148 MAJOR): the specific branches the
@@ -1891,6 +1912,35 @@ class Attr3FootageStageCliEndToEndTests(unittest.TestCase):
         self.assertIn("SOURCE PART=0 STATUS=SOURCE_PATH_UNSAFE", combined)
         self.assertNotIn("TRANSFER PART", combined)
         self.assertEqual(real_file.read_bytes(), content)
+
+    # ---- round 4 (fable major): the queued phase is bounded, never a day-long hang --------------
+
+    def test_a_dead_agent_bounds_the_presence_preflights_queue_wait(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (fable major). Before this round, neither
+        # um-run.ps1 call site bounded the QUEUED phase, so a dead/wedged agent -- a stale
+        # heartbeat.txt, exactly this repro -- left the presence preflight (round 2 capped at 300s
+        # of its own EXECUTION precisely so a stuck preflight cannot delay fallback,
+        # attr3-footage-stage.ps1:144-145) unclaimed for up to um-run's own 86400s
+        # -MaxQueueWaitSec default. It is now bounded to this run's own -TimeoutSec (floored to
+        # 30s here), so the preflight must fail in well under a minute, never a day.
+        clip_id = "FIX-E2E-CLI-DEADAGENT-0001"
+        target_dir = self.tmp / "spec" / clip_id
+        content = (b"e2e cli dead agent part zero " * 53, b"e2e cli dead agent part one " * 5)
+        parts = [
+            {"index": i, "path": str(target_dir / f"part{i}.raw"), "length": len(c), "sha256": hashlib.sha256(c).hexdigest()}
+            for i, c in enumerate(content)
+        ]
+        self.set_fixture_parts(clip_id, parts)
+        self._stop_agent()   # heartbeat.txt remains on the share, stale -- exactly fable's own repro
+        started = time.monotonic()
+        proc = self.run_cli(clip_id, timeout_sec=30)   # the CLI's own -TimeoutSec floor
+        elapsed = time.monotonic() - started
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertLess(elapsed, 90, "a dead agent must fail in a bounded multiple of -TimeoutSec, not hang for a day")
+        self.assertIn("PRESENCE PREFLIGHT=INCONCLUSIVE CLASS=QUEUED", combined, combined)
+        self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
+        self._no_console_leak(combined)
 
 
 if __name__ == "__main__":

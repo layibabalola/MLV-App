@@ -235,6 +235,28 @@ function ConvertTo-Attr3FootageStageSafeOutput {
     return ,@($safeLines)
 }
 
+function Get-Attr3FootageUmRunFailureClass {
+    <#
+    .SYNOPSIS
+    Classify an um-run.ps1 failure as QUEUED (never claimed), CLAIMED (claimed, then too slow to
+    finish or publish), or UNKNOWN (anything else -- a dead heartbeat, a missing script, ...),
+    from a FIXED substring match only -- the exception's own .Message is never returned or
+    otherwise echoed, since um-run.ps1's timeout messages name real agent-share paths (the result
+    file, the claim marker).
+    .DESCRIPTION
+    ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (fable major): the round-2 CLASS=$exceptionClass
+    slot on the outer catch already exists for an unanticipated .NET exception; this reuses that
+    same convention for the two um-run.ps1 phase diagnoses (um-run.ps1:159,162) so a refusal says
+    WHICH bound expired without ever forwarding the message that proves it.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message)
+
+    if ($Message -match 'was never claimed') { return 'QUEUED' }
+    if ($Message -match 'claimed by the agent') { return 'CLAIMED' }
+    return 'UNKNOWN'
+}
+
 $ResolverPath = Join-Path $RepoRoot 'tools\gates\resolve_consented_clip.py'
 if (-not (Test-Path -LiteralPath $ResolverPath -PathType Leaf)) {
     # ATTR3-FOOTAGE-STAGE-1 round 3 (no path in any branch): the resolver's location is fixed
@@ -308,13 +330,25 @@ try {
     # Write-Host -- the Information stream (6), not this call's own success-stream return value --
     # including a "submitted <id> -> <path>" line that names a real agent-share path. `6>$null`
     # discards that stream at the call site so it never reaches this process's own console.
-    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $presenceTimeoutSecValue 6>$null
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (fable major): um-run.ps1's own -MaxQueueWaitSec
+    # defaults to 86400s -- a bound sized for a job ahead of THIS one in the agent's queue, not for
+    # a dead/wedged agent that never claims the job at all. Left at that default, a preflight this
+    # script capped at $MaxAttr3FootagePresenceTimeoutSec seconds precisely so a stuck run cannot
+    # delay fallback (see that constant's own comment) could still sit unclaimed for up to a day.
+    # Bounded here to the SAME per-caller value already governing the preflight's own execution
+    # budget -- derived from the caller's -TimeoutSec, never the global default -- so the whole
+    # preflight (queue + exec + grace) stays a small multiple of what the caller actually asked for.
+    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $presenceTimeoutSecValue -MaxQueueWaitSec $presenceTimeoutSecValue 6>$null
     $presentIndexArray = @(Get-Attr3FootagePresentPartIndexes -Stdout $presenceResult.stdout -ClipId $ClipId)
 } catch {
     # Presence is an optimization, not a correctness requirement -- if the preflight itself could
     # not be submitted or timed out, fall through to the normal verify-and-transfer path below
-    # rather than failing the whole run over an inconclusive probe.
-    Write-Output 'PRESENCE PREFLIGHT=INCONCLUSIVE'
+    # rather than failing the whole run over an inconclusive probe. CLASS distinguishes "never
+    # claimed" (queue-bound expiry) from "claimed but slow" (exec-bound expiry) from anything else,
+    # the same fixed-token phase diagnosis the real placement submission below reports on refusal --
+    # never the wrapped message itself, which can name a real agent-share path.
+    $presenceFailClass = Get-Attr3FootageUmRunFailureClass -Message ([string]$_.Exception.Message)
+    Write-Output "PRESENCE PREFLIGHT=INCONCLUSIVE CLASS=$presenceFailClass"
 }
 $presentIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
 foreach ($presentIndex in $presentIndexArray) { [void]$presentIndexes.Add([int]$presentIndex) }
@@ -446,10 +480,16 @@ try {
     # ATTR3-FOOTAGE-STAGE-1 round 5 (sol/astra: output channels): `6>$null` discards um-run.ps1's
     # (and UmRunDrop.psm1's) own Write-Host progress lines -- see the presence preflight's own
     # call above for why that stream, left unredirected, can print a real agent-share path.
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (fable major): -MaxQueueWaitSec is bounded to this
+    # run's own -TimeoutSec -- derived from the caller's intent, never um-run.ps1's 86400s default
+    # -- so a dead or wedged agent that never claims this job fails in a bounded multiple of what
+    # the caller asked for instead of sitting queued for up to a day. A caller who wants more queue
+    # patience simply asks for a larger -TimeoutSec, which raises both bounds together.
     try {
-        $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $timeoutSecValue 6>$null
+        $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $timeoutSecValue -MaxQueueWaitSec $timeoutSecValue 6>$null
     } catch {
-        throw "ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED job could not be submitted or its result could not be retrieved"
+        $submitFailClass = Get-Attr3FootageUmRunFailureClass -Message ([string]$_.Exception.Message)
+        throw "ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED job could not be submitted or its result could not be retrieved CLASS=$submitFailClass"
     }
 
     # ATTR3-FOOTAGE-STAGE-1 round 4 (sol MAJOR, astra 4: path-free output): the submitted job's own

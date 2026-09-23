@@ -15,7 +15,16 @@
 #   - every side-file is in place before the job is dropped;
 #   - a budget (-JobTimeoutSec) is range-checked before any side-file is copied, and its metadata
 #     is removed if the job placement that follows it fails or is refused, so a failed submission
-#     never bricks a later retry of the same JobId (ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2).
+#     never bricks a later retry of the same JobId (ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2);
+#   - the job's own bytes are copied to their temporary FIRST, metadata is published only once
+#     those bytes already sit on the share, and the job is exposed (renamed into view) immediately
+#     after -- so the window in which metadata is visible with no job to consume it is a single
+#     rename, not the whole job copy (round 4, escalating fable's round-3 minor to sol's major: a
+#     hard interruption -- a kill, not a thrown exception -- during that window cannot be caught,
+#     so metadata surviving it is a certainty, not a bug to eliminate; it is instead SELF-HEALED on
+#     the next submission attempt for the same JobId once -OrphanMetaGraceSec has passed, since
+#     neither agent ever consumes metadata without its paired job (both move together), so metadata
+#     with no job and no result, older than the grace period, is provably from a dead submission.
 
 Set-StrictMode -Version Latest
 
@@ -143,7 +152,23 @@ function Invoke-UmRunDrop {
         # and the reason a multi-GB placement was killed at 30 min while its caller had asked for an
         # hour: um-run's -TimeoutSec reached only the CLIENT poll and never crossed to the host.
         [int]$JobTimeoutSec = 0,
-        [scriptblock]$Copier = { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination }
+        [scriptblock]$Copier = { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination },
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (sol major -- escalates fable's round-3 minor):
+        # how long metadata with no paired job and no result is tolerated as "maybe still an
+        # in-flight submission" before a later call for the SAME JobId is allowed to reclaim it. The
+        # only window in which a live submission legitimately shows this exact shape is the single
+        # rename below (metadata already published, job not yet exposed) -- sub-second in practice
+        # -- so the default is generous headroom for that race, not a real wait a caller ever sees.
+        [int]$OrphanMetaGraceSec = 60,
+        # Test-only: invoked with no arguments immediately before the job's own rename into view,
+        # i.e. the last instant at which "is metadata already published?" is the real contract this
+        # module owes the agent (metadata-before-VISIBILITY, not metadata-before-the-job's-own-
+        # temporary-copy, which sol's round-4 review named as the wrong thing to have proved).
+        [scriptblock]$TestHookBeforeJobVisible = $null,
+        # Test-only: invoked with the metadata temp file's path immediately after it is written,
+        # before the write-back verification -- lets a test corrupt it to prove that verification
+        # actually rejects a torn write rather than merely being present and untested.
+        [scriptblock]$TestHookAfterMetaTmpWritten = $null
     )
 
     if ($JobId -and $JobId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "UMRUN_JOBID_INVALID '$JobId'" }
@@ -161,6 +186,29 @@ function Invoke-UmRunDrop {
     $final = Join-Path $Inbox "$id.job.ps1"
     if (Test-Path -LiteralPath $final) { throw "UMRUN_JOBID_IN_USE inbox already holds $id.job.ps1" }
     if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) { throw "UMRUN_SCRIPT_MISSING $ScriptPath" }
+
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (sol major -- escalates fable's round-3 minor,
+    # "the interrupt window is still open one rename wide"). Metadata with no job and no result can
+    # ONLY be left by a submission that was hard-interrupted between publishing metadata and
+    # exposing the job below -- neither agent ever consumes metadata without its paired job (both
+    # move together), so this state is never a live job the agent is running. Once it is older than
+    # $OrphanMetaGraceSec (comfortably past the single-rename window a live submission could still
+    # be inside), a retry for this JobId self-heals by reclaiming it, rather than being bricked
+    # forever (the exact bug this round exists to close). Within the grace period it is still
+    # treated as possibly live, matching the pre-round-4 refusal.
+    $metaFinal = Join-Path $Inbox "$id.meta.json"
+    if (Test-Path -LiteralPath $metaFinal) {
+        $metaAgeSec = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $metaFinal -Force).LastWriteTimeUtc).TotalSeconds
+        if ($metaAgeSec -lt $OrphanMetaGraceSec) {
+            throw "UMRUN_JOBID_IN_USE inbox already holds $id.meta.json"
+        }
+        try {
+            Remove-Item -LiteralPath $metaFinal -Force -ErrorAction Stop
+        } catch {
+            throw "UMRUN_JOBID_IN_USE inbox\$id.meta.json is orphaned from an interrupted earlier submission (age $([int]$metaAgeSec)s) and could not be removed for retry"
+        }
+        Write-Output ("removed orphaned metadata from an interrupted earlier submission: {0}.meta.json (age {1:N0}s)" -f $id, $metaAgeSec)
+    }
 
     $nonce = [guid]::NewGuid().ToString('N')
     foreach ($path in @($SideFile | ForEach-Object { $_ -split ';' } | Where-Object { $_ })) {
@@ -207,6 +255,21 @@ function Invoke-UmRunDrop {
         Write-Output ("side-file placed: {0} sha256={1}" -f $name, $localSha.ToLowerInvariant())
     }
 
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (sol major, reordering fable/sol's round-2/3
+    # metadata-before-job-visibility rule): the job's own bytes are copied to their nonce temp
+    # FIRST, before metadata is written at all. Previously metadata was published, THEN the job was
+    # copied and renamed -- so a hard interruption during that copy (which can be the whole transfer
+    # for a large job body) left metadata visible with nothing to ever consume it. Copying first
+    # means metadata is only ever published once the job's bytes already sit on the share, so the
+    # window where metadata is visible with no job is just the rename below, not the copy above it.
+    $tmp = Join-Path $Inbox "$id.$nonce.job.tmp"
+    try {
+        & $Copier $ScriptPath $tmp
+    } catch {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+        throw
+    }
+
     # The agent reads inbox\<id>.meta.json when it picks the job up, and accepts timeoutSec in
     # 1..86400, falling back to its own default when the value is missing or unparseable. It must
     # therefore be in place BEFORE the job file is renamed into view -- same ordering rule the
@@ -218,37 +281,37 @@ function Invoke-UmRunDrop {
     # that failure's catch block -- otherwise it outlives the refused submission and bricks every
     # later retry that reuses the same JobId (UMRUN_JOBID_IN_USE at the check above) even though no
     # job or result exists. $metaPlacedHere tracks ONLY metadata this call itself placed, never a
-    # pre-existing file (which already throws UMRUN_JOBID_IN_USE before reaching here).
+    # pre-existing file (which already throws UMRUN_JOBID_IN_USE, or is self-healed, before reaching
+    # here).
     $metaPlacedHere = $false
-    $metaFinal = Join-Path $Inbox "$id.meta.json"
-    if ($JobTimeoutSec -ne 0) {
-        if (Test-Path -LiteralPath $metaFinal) { throw "UMRUN_JOBID_IN_USE inbox already holds $id.meta.json" }
-        $metaTmp = Join-Path $Inbox "$id.$nonce.meta.tmp"
-        $metaJson = [ordered]@{ jobId = $id; timeoutSec = $JobTimeoutSec } | ConvertTo-Json -Compress
-        try {
-            Set-Content -LiteralPath $metaTmp -Value $metaJson -Encoding ascii -NoNewline
-            # fable/sol minor 2: side-files are re-read from the share and hash-verified before
-            # their rename; the metadata previously was not, so a torn write silently reverted the
-            # agent to its own default -- the original bug, undetected. Re-read and compare bytes.
-            $metaWrittenBack = Get-Content -LiteralPath $metaTmp -Raw -Encoding ascii
-            if ($metaWrittenBack -ne $metaJson) {
-                throw "UMRUN_JOB_METADATA_VERIFY_FAILED $id.meta.json did not round-trip to the share"
-            }
-            try {
-                Move-Item -LiteralPath $metaTmp -Destination $metaFinal -ErrorAction Stop   # no -Force
-            } catch {
-                throw "UMRUN_JOBID_IN_USE inbox\$id.meta.json appeared concurrently; refusing to replace it"
-            }
-        } finally {
-            if (Test-Path -LiteralPath $metaTmp) { Remove-Item -LiteralPath $metaTmp -Force -ErrorAction SilentlyContinue }
-        }
-        $metaPlacedHere = $true
-        Write-Output ("job metadata placed: {0}.meta.json timeoutSec={1}" -f $id, $JobTimeoutSec)
-    }
-
-    $tmp = Join-Path $Inbox "$id.$nonce.job.tmp"
     try {
-        & $Copier $ScriptPath $tmp
+        if ($JobTimeoutSec -ne 0) {
+            if (Test-Path -LiteralPath $metaFinal) { throw "UMRUN_JOBID_IN_USE inbox already holds $id.meta.json" }
+            $metaTmp = Join-Path $Inbox "$id.$nonce.meta.tmp"
+            $metaJson = [ordered]@{ jobId = $id; timeoutSec = $JobTimeoutSec } | ConvertTo-Json -Compress
+            try {
+                Set-Content -LiteralPath $metaTmp -Value $metaJson -Encoding ascii -NoNewline
+                if ($TestHookAfterMetaTmpWritten) { & $TestHookAfterMetaTmpWritten $metaTmp }
+                # fable/sol minor 2: side-files are re-read from the share and hash-verified before
+                # their rename; the metadata previously was not, so a torn write silently reverted the
+                # agent to its own default -- the original bug, undetected. Re-read and compare bytes.
+                $metaWrittenBack = Get-Content -LiteralPath $metaTmp -Raw -Encoding ascii
+                if ($metaWrittenBack -ne $metaJson) {
+                    throw "UMRUN_JOB_METADATA_VERIFY_FAILED $id.meta.json did not round-trip to the share"
+                }
+                try {
+                    Move-Item -LiteralPath $metaTmp -Destination $metaFinal -ErrorAction Stop   # no -Force
+                } catch {
+                    throw "UMRUN_JOBID_IN_USE inbox\$id.meta.json appeared concurrently; refusing to replace it"
+                }
+            } finally {
+                if (Test-Path -LiteralPath $metaTmp) { Remove-Item -LiteralPath $metaTmp -Force -ErrorAction SilentlyContinue }
+            }
+            $metaPlacedHere = $true
+            Write-Output ("job metadata placed: {0}.meta.json timeoutSec={1}" -f $id, $JobTimeoutSec)
+        }
+
+        if ($TestHookBeforeJobVisible) { & $TestHookBeforeJobVisible }
         try {
             Move-Item -LiteralPath $tmp -Destination $final -ErrorAction Stop   # no -Force: a job is never replaced
         } catch {
