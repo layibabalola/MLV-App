@@ -170,6 +170,16 @@ public:
              * exercised different processing resolutions or were silently
              * clamped to the same one. */
             int playbackScaleFactorRequestedBeforeGpuTextureRouteClamp = 1;
+            /* CUDA-ATTRIBUTION-BASELINE-1 round 2 (sol minor finding):
+             * MainWindow::m_playbackQualityMode at the moment THIS request
+             * was issued. The manifest emission site runs later, on the
+             * async pipeline's completion callback, by which time the live
+             * GUI setting may have moved on -- reading it there is a GUI-
+             * quality_mode-changed-mid-flight race, the same class of bug
+             * phase3_mode had (see ReadyFrame::phase3Mode). Captured here,
+             * synchronously with the request, like playbackScaleFactor
+             * above. */
+            int playbackQualityMode = 0;
             MainWindowGpuPreviewPolicyState gpuPreviewPolicy;
             GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
             GpuPreviewProcessingConfig gpuPreviewProcessingConfig;

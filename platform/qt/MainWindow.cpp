@@ -6517,6 +6517,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         m_playbackScaleClampedForGpuTextureRouteActive
             ? m_playbackScaleClampedForGpuTextureRouteRequestedScale
             : requestContext.playbackScaleFactor;
+    requestContext.playbackQualityMode = m_playbackQualityMode;
 
     RenderFrameThread::PresentationPreparationOptions presentationPreparation;
     presentationPreparation.fastPlaybackScale = requestContext.fastPlaybackScaleEligible;
@@ -24926,7 +24927,15 @@ void MainWindow::notePlaybackSmokePresentedFrame(
          * time -- that recomputation could read Phase3HQ configured while the
          * worker had fallen back to Disabled for this specific frame.
          * phase3_mode_configured keeps the old computation available,
-         * explicitly labelled as the policy rather than a per-frame result. */
+         * explicitly labelled as the policy rather than a per-frame result.
+         * quality_mode is now read from requestContext.playbackQualityMode
+         * (captured synchronously when this request was issued, next to
+         * playbackScaleFactor above) instead of the live m_playbackQualityMode
+         * member -- the manifest line runs later, on the async pipeline's
+         * completion callback, by which time the GUI setting may have moved
+         * on. Round 1 claimed quality_mode was "captured synchronously in
+         * drawFrame"; it read the live member at emission instead, so it
+         * was not actually per-request. */
         const int manifestPhase3ModeConfigured =
             static_cast<int>( phase3ModeFor(
                 playbackQualityModeFromInt( m_playbackQualityMode ) ) );
@@ -24938,7 +24947,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
             << QStringLiteral("scale_clamped_for_gpu_texture_route=%1").arg(
                    bool01( requestContext.playbackScaleFactorRequestedBeforeGpuTextureRouteClamp
                            != requestContext.playbackScaleFactor ) )
-            << QStringLiteral("quality_mode=%1").arg( m_playbackQualityMode )
+            << QStringLiteral("quality_mode=%1").arg(
+                   requestContext.playbackQualityMode )
             << QStringLiteral("phase3_mode=%1").arg(
                    static_cast<int>( readyFrame.phase3Mode ) )
             << QStringLiteral("phase3_mode_configured=%1").arg( manifestPhase3ModeConfigured );
