@@ -1020,6 +1020,7 @@ private:
     uint64_t m_dualIsoWarmupTelemetryPresentationGeneration = 0;
     int m_dualIsoWarmupTelemetryPresentedFrames = 0;
     uint64_t m_playbackSmokeStartRequestSerial = 0;
+    uint64_t m_playbackSmokeStartTargetRequestSerial = 0;
     uint64_t m_playbackSmokeStartDecodeRequestsIssued = 0;
     uint64_t m_playbackSmokeStartPrepStaleDrops = 0;
     uint64_t m_playbackSmokeStartPrepGenerationDrops = 0;
@@ -1281,6 +1282,20 @@ private:
     bool m_headlessPlaybackProfileUsePlaybackPolicy = false;
     bool m_headlessPlaybackProfileActive = false;
     uint64_t m_nextRenderRequestSerial = 1;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 2: m_nextRenderRequestSerial advances
+     * for BOTH the one target request drawFrame() issues per call and every
+     * speculative render-lookahead request queuePlaybackLookaheadRequests()
+     * issues alongside it -- lookaheads that are not the frame playback is
+     * actually waiting on are intentionally discarded in drawFrameReady()
+     * (see the playbackLookaheadRequest handling there) and never become a
+     * presented frame. Using m_nextRenderRequestSerial's delta alone as the
+     * presented-frame population denominator therefore counts every
+     * discarded speculative lookahead as "skipped", which overcounts loss
+     * whenever lookahead is enabled. This sibling counter advances only at
+     * the target-request call site, giving a population immune to both the
+     * timeline-wrap problem the by-serial figure was built to fix AND the
+     * lookahead overcount it introduced. */
+    uint64_t m_nextTargetRenderRequestSerial = 1;
     uint64_t m_lastPresentedRequestSerial = 0;
     GpuPreviewProcessingBackendRequest m_gpuPreviewProcessingBackendRequest =
         GpuPreviewProcessingBackendRequest::Auto;

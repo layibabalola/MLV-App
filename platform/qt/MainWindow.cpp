@@ -6349,6 +6349,12 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         mainWindowUsesGpuImagePresentation( renderPolicy );
 
     const uint64_t requestSerial = m_nextRenderRequestSerial++;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 2: this is the one target request
+     * this drawFrame() call issues (as opposed to the speculative lookahead
+     * requests queuePlaybackLookaheadRequests() issues below, which share
+     * m_nextRenderRequestSerial but not this counter) -- see
+     * m_nextTargetRenderRequestSerial's declaration. */
+    m_nextTargetRenderRequestSerial++;
     PresentationRequestContext requestContext;
     requestContext.requestSerial = requestSerial;
     requestContext.sceneWidth = sceneWidth;
@@ -22508,6 +22514,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeLastPresentedFrame = -1;
     m_playbackSmokeLoopWrapCount = 0;
     m_playbackSmokeStartRequestSerial = m_nextRenderRequestSerial;
+    m_playbackSmokeStartTargetRequestSerial = m_nextTargetRenderRequestSerial;
     m_playbackSmokeStartDecodeRequestsIssued =
         m_pRenderThread ? m_pRenderThread->decodeRequestsIssuedCount() : 0;
     m_playbackSmokeStartPrepStaleDrops =
@@ -25176,10 +25183,16 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
      * declaration and every increment site in MainWindow.cpp/.h) -- it never
      * resets or wraps within a session, so its delta over the smoke window is
      * exactly "render requests issued", immune to the timeline-position loop
-     * problem above. requestedFramesBySerial is therefore the authoritative
-     * population denominator for "how many frames were asked for", and
-     * skippedOrUnpresentedBySerial is the authoritative "how many of those
-     * never made it to presentation" figure. */
+     * problem above. requestedFramesBySerial is therefore wrap-immune, but it
+     * is NOT the presented-frame population by itself: with render lookahead
+     * enabled it also counts every speculative lookahead request, most of
+     * which are intentionally discarded (not the frame playback ends up
+     * waiting on) and never reach presentation -- see
+     * m_nextTargetRenderRequestSerial's declaration. requestedFramesBySerial/
+     * skippedOrUnpresentedBySerial are kept for backward compatibility and
+     * bounded-above accounting (informational, not the gate); the
+     * target-only figures below are the authoritative population and skip
+     * count. */
     const uint64_t requestedFramesBySerial =
         m_nextRenderRequestSerial >= m_playbackSmokeStartRequestSerial
             ? m_nextRenderRequestSerial - m_playbackSmokeStartRequestSerial
@@ -25189,6 +25202,24 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
             - static_cast<qint64>( m_playbackSmokePresentedFrames );
     const qulonglong skippedOrUnpresentedBySerial =
         static_cast<qulonglong>( qMax<qint64>( 0, skippedOrUnpresentedBySerialSigned ) );
+    /* Authoritative population: m_nextTargetRenderRequestSerial advances only
+     * at the one target request drawFrame() issues per call, never for a
+     * speculative lookahead, so this denominator is both wrap-immune (same
+     * monotonic-counter argument as requestedFramesBySerial) and free of the
+     * lookahead overcount above. */
+    const uint64_t requestedTargetFramesBySerial =
+        m_nextTargetRenderRequestSerial >= m_playbackSmokeStartTargetRequestSerial
+            ? m_nextTargetRenderRequestSerial - m_playbackSmokeStartTargetRequestSerial
+            : 0;
+    const qint64 skippedOrUnpresentedByTargetSerialSigned =
+        static_cast<qint64>( requestedTargetFramesBySerial )
+            - static_cast<qint64>( m_playbackSmokePresentedFrames );
+    const qulonglong skippedOrUnpresentedByTargetSerial =
+        static_cast<qulonglong>( qMax<qint64>( 0, skippedOrUnpresentedByTargetSerialSigned ) );
+    const uint64_t lookaheadRequestsBySerial =
+        requestedFramesBySerial >= requestedTargetFramesBySerial
+            ? requestedFramesBySerial - requestedTargetFramesBySerial
+            : 0;
     const double presentedFps =
         elapsedSeconds > 0.0
             ? static_cast<double>( m_playbackSmokePresentedFrames )
@@ -25411,20 +25442,36 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "skipped_or_unpresented_frames_by_serial=%4 "
                "skipped_or_unpresented_frames_by_timeline_position=%5 "
                "loop_wrap_count=%6 timeline_position_basis_sound=%7 "
-               "population_basis=\"requested_frames_by_serial counts render "
-               "requests issued (MainWindow::m_nextRenderRequestSerial delta, "
-               "monotonic, immune to timeline wraps); presented_frames counts "
-               "frames that actually reached presentPlaybackPreparedFrame's "
-               "presentation path; the difference includes stale/generation/"
-               "present-nothing drops (see prep_stale_drops etc. on the "
-               "summary line above), not just late frames\"" )
+               "requested_target_frames_by_serial=%8 "
+               "skipped_or_unpresented_frames_by_target_serial=%9 "
+               "lookahead_requests_by_serial=%10 "
+               "population_basis=\"requested_target_frames_by_serial is the "
+               "authoritative population -- render requests issued at the "
+               "target-request call site only (MainWindow::"
+               "m_nextTargetRenderRequestSerial delta, monotonic, immune to "
+               "timeline wraps), excluding speculative render-lookahead "
+               "requests; skipped_or_unpresented_frames_by_target_serial is "
+               "the authoritative skip count against it. "
+               "requested_frames_by_serial/skipped_or_unpresented_frames_by_"
+               "serial (MainWindow::m_nextRenderRequestSerial delta) also "
+               "count discarded speculative lookaheads as skipped and "
+               "overcount loss whenever lookahead_requests_by_serial > 0; "
+               "kept for backward compatibility, NOT the gate figure. "
+               "presented_frames counts frames that actually reached "
+               "presentPlaybackPreparedFrame's presentation path; the "
+               "difference from either population includes stale/"
+               "generation/present-nothing drops (see prep_stale_drops etc. "
+               "on the summary line above), not just late frames\"" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( static_cast<qulonglong>( requestedFramesBySerial ) )
                .arg( m_playbackSmokePresentedFrames )
                .arg( skippedOrUnpresentedBySerial )
                .arg( skippedOrUnpresented )
                .arg( static_cast<qulonglong>( m_playbackSmokeLoopWrapCount ) )
-               .arg( bool01( m_playbackSmokeLoopWrapCount == 0 ) );
+               .arg( bool01( m_playbackSmokeLoopWrapCount == 0 ) )
+               .arg( static_cast<qulonglong>( requestedTargetFramesBySerial ) )
+               .arg( skippedOrUnpresentedByTargetSerial )
+               .arg( static_cast<qulonglong>( lookaheadRequestsBySerial ) );
 
     qInfo().noquote()
         << QStringLiteral(

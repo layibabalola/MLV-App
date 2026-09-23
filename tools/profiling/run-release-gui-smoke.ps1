@@ -1425,20 +1425,40 @@ if ($null -ne $timelineDeltaAbs -and [double]$timelineDeltaAbs -gt 0 -and
 # earlier slider position, or lap all the way back to start, without that
 # meaning "stuck"). requestedFramesBySerial counts render requests issued
 # (a monotonic counter that never resets mid-session), so this ratio is valid
-# even when loopWrapCount > 0.
+# even when loopWrapCount > 0. NOT the gate figure any more -- kept only for
+# backward-compatible reporting -- because it also counts speculative
+# render-lookahead requests that were never the frame playback waited on and
+# were intentionally discarded, never reaching presentation. With lookahead
+# enabled that inflates this ratio; see requestedTargetFramesBySerial below.
 $requestedFramesBySerial = Get-ObjectPropertyValue $framePopulation "requested_frames_by_serial"
 $skippedOrUnpresentedFramesBySerial = Get-ObjectPropertyValue $framePopulation "skipped_or_unpresented_frames_by_serial"
 $loopWrapCount = Get-ObjectPropertyValue $framePopulation "loop_wrap_count"
+$timelinePositionBasisSound = Get-ObjectPropertyValue $framePopulation "timeline_position_basis_sound"
 $skippedOrUnpresentedRatioBySerial = $null
 if ($null -ne $requestedFramesBySerial -and [double]$requestedFramesBySerial -gt 0 -and
     $null -ne $skippedOrUnpresentedFramesBySerial) {
     $skippedOrUnpresentedRatioBySerial = [double]$skippedOrUnpresentedFramesBySerial / [double]$requestedFramesBySerial
 }
-# Prefer the sound figure when it is present; only fall back to the legacy
-# timeline-position ratio when frame_population telemetry did not run (older
-# build, or MLVAPP_PLAYBACK_SMOKE_TELEMETRY off).
+# CUDA-ATTRIBUTION-BASELINE-1 round 2: the actually-authoritative figure.
+# requestedTargetFramesBySerial (MainWindow::m_nextTargetRenderRequestSerial
+# delta) advances only at the one target request drawFrame() issues per
+# call, excluding every speculative lookahead request -- wrap-immune like
+# requestedFramesBySerial above, but without its lookahead overcount.
+$requestedTargetFramesBySerial = Get-ObjectPropertyValue $framePopulation "requested_target_frames_by_serial"
+$skippedOrUnpresentedFramesByTargetSerial = Get-ObjectPropertyValue $framePopulation "skipped_or_unpresented_frames_by_target_serial"
+$lookaheadRequestsBySerial = Get-ObjectPropertyValue $framePopulation "lookahead_requests_by_serial"
+$skippedOrUnpresentedRatioByTargetSerial = $null
+if ($null -ne $requestedTargetFramesBySerial -and [double]$requestedTargetFramesBySerial -gt 0 -and
+    $null -ne $skippedOrUnpresentedFramesByTargetSerial) {
+    $skippedOrUnpresentedRatioByTargetSerial = [double]$skippedOrUnpresentedFramesByTargetSerial / [double]$requestedTargetFramesBySerial
+}
+# Prefer the target-only figure when present; fall back to the (lookahead-
+# contaminated) all-requests figure, then the legacy timeline-position ratio,
+# only when the newer telemetry did not run (older build, or
+# MLVAPP_PLAYBACK_SMOKE_TELEMETRY off).
 $skippedOrUnpresentedRatioForGate =
-    if ($null -ne $skippedOrUnpresentedRatioBySerial) { $skippedOrUnpresentedRatioBySerial }
+    if ($null -ne $skippedOrUnpresentedRatioByTargetSerial) { $skippedOrUnpresentedRatioByTargetSerial }
+    elseif ($null -ne $skippedOrUnpresentedRatioBySerial) { $skippedOrUnpresentedRatioBySerial }
     else { $skippedOrUnpresentedRatio }
 $validatedScaleRequest = if ($null -ne $scaleRequestLast) { $scaleRequestLast } else { $scaleRequestStart }
 $validatedQualityMode = if ($null -ne $qualityModeLast) { $qualityModeLast } else { $qualityModeStart }
@@ -1975,13 +1995,35 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     launchOnlyProbe = [bool]$LaunchOnlyProbe
     firstPresentedFrame = $firstPresentedFrame
     lastPresentedFrame = $lastPresentedFrame
+    # CUDA-ATTRIBUTION-BASELINE-1 round 2: equal first/last frame IDs are NOT
+    # sound evidence of a stuck playback when the clip looped -- a full lap
+    # can return the slider to (or near) its start position while playback
+    # advanced the whole clip and wrapped (same reasoning as the
+    # first==last stuck-playback gate above). Only read "did not advance"
+    # from equal endpoints when loopWrapCount is known to be zero.
     displayedFrameAdvanced = ($null -ne $firstPresentedFrame -and
         $null -ne $lastPresentedFrame -and
-        [int64]$firstPresentedFrame -ne [int64]$lastPresentedFrame)
+        ([int64]$firstPresentedFrame -ne [int64]$lastPresentedFrame -or
+         ($null -ne $loopWrapCount -and [int64]$loopWrapCount -gt 0)))
+    # skippedOrUnpresentedRatio (legacy, timeline-position-based) is not
+    # authoritative whenever timelinePositionBasisSound is false/unknown --
+    # see finishPlaybackSmokeTelemetry's comment on skippedOrUnpresented.
+    # Mark that at this consumer surface, not only in the emitter's comment.
     skippedOrUnpresentedRatio = $skippedOrUnpresentedRatio
+    skippedOrUnpresentedRatioAuthoritative = $false
+    skippedOrUnpresentedRatioSound = (Convert-ToNullableBool $timelinePositionBasisSound)
+    # skippedOrUnpresentedRatioBySerial (all render requests, including
+    # discarded speculative lookaheads) is wrap-immune but overcounts loss
+    # whenever lookaheadRequestsBySerial > 0; also not authoritative --
+    # skippedOrUnpresentedRatioByTargetSerial below is.
     skippedOrUnpresentedRatioBySerial = $skippedOrUnpresentedRatioBySerial
+    skippedOrUnpresentedRatioBySerialAuthoritative = $false
+    skippedOrUnpresentedRatioByTargetSerial = $skippedOrUnpresentedRatioByTargetSerial
+    skippedOrUnpresentedRatioByTargetSerialAuthoritative = $true
     skippedOrUnpresentedRatioForGate = $skippedOrUnpresentedRatioForGate
     requestedFramesBySerial = $requestedFramesBySerial
+    requestedTargetFramesBySerial = $requestedTargetFramesBySerial
+    lookaheadRequestsBySerial = $lookaheadRequestsBySerial
     loopWrapCount = $loopWrapCount
     maxSkippedOrUnpresentedRatio = $MaxSkippedOrUnpresentedRatio
     colorArtifactScanPassed = [bool]$colorArtifactScanPassed
