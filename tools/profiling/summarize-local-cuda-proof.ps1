@@ -657,10 +657,22 @@ else {
         [pscustomobject]@{ Name = "baseline"; Leg = $playbackAb.baseline },
         [pscustomobject]@{ Name = $playbackAbComparisonBasis; Leg = $playbackAbCandidateLeg }
     )
+    # round 5 (sol BLOCKER): checking hostLoadProvisional alone repeats the exact inconsistency
+    # round 4 closed at the producer -- a leg carrying an explicit hostLoadProvisional=false
+    # alongside a missing/blank/"unknown" hostLoadState is a legacy or degenerate leg, not a clean
+    # one. sol's repro: hostLoadProvisional=false with hostLoadState='unknown' checked only the
+    # boolean here. Combine both fields, same as Get-Field's other callers in this section.
     $playbackAbHostLoadProvisional = $false
     foreach ($legEntry in $playbackAbHostLoadLegs) {
         $legProvisionalValue = Get-Field $legEntry.Leg "hostLoadProvisional"
-        $legProvisional = if ($null -eq $legProvisionalValue) { $true } else { [bool]$legProvisionalValue }
+        $legProvisionalDeclared = if ($null -eq $legProvisionalValue) { $true } else { [bool]$legProvisionalValue }
+        $legStateValue = Get-Field $legEntry.Leg "hostLoadState"
+        $legState = if ($null -eq $legStateValue -or [string]::IsNullOrWhiteSpace([string]$legStateValue)) {
+            "unknown"
+        } else {
+            [string]$legStateValue
+        }
+        $legProvisional = ($legProvisionalDeclared -or $legState -eq "unknown")
         if ($legProvisional) {
             $playbackAbHostLoadProvisional = $true
             [void]$playbackAbBlockers.Add("playback A/B $($legEntry.Name) leg host load was PROVISIONAL or unrecorded")

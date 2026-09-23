@@ -489,6 +489,138 @@ $unsampledResult = Wait-GuiSmokeProcessBounded -Process $unsampled -StandardOutp
     assert observed["sampleCount2"] == 0
 
 
+@pytest.mark.skipif(os.name != "nt", reason="MLV-App process ownership is Windows-specific")
+def test_gui_smoke_process_boundary_bounds_total_wait_despite_slow_onsample(tmp_path: Path) -> None:
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 5 (sol MAJOR): round 3/4 accumulated the wait loop's
+    # elapsed time as a sum of NOMINAL chunk lengths, never counting $OnSample's own execution
+    # time -- a slow callback (each real one is a Get-HostLoadSnapshot: two CIM queries plus a
+    # Get-Process enumeration/sort) let the total wait drift arbitrarily far past -TimeoutMs. Here
+    # each 300ms sampling chunk is paired with a 400ms OnSample callback against a process that
+    # deliberately outlives the whole test, so every iteration is real overhead the OLD nominal
+    # accounting would have hidden -- with the round-5 wall-clock stopwatch fix, total real elapsed
+    # must land close to -TimeoutMs (1200ms) plus at most one in-flight chunk+callback, not the
+    # ~2.3x compounding overrun the old accounting allowed.
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+
+    module_literal = str(GUI_SMOKE_PROCESS_BOUNDARY).replace("'", "''")
+    python_literal = str(sys.executable).replace("'", "''")
+    command = rf"""
+Import-Module '{module_literal}' -Force
+
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = '{python_literal}'
+$start.UseShellExecute = $false
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+[void]$start.ArgumentList.Add('-c')
+[void]$start.ArgumentList.Add('import time; time.sleep(30)')
+$p = [Diagnostics.Process]::new()
+$p.StartInfo = $start
+[void]$p.Start()
+$stdoutTask = $p.StandardOutput.ReadToEndAsync()
+$stderrTask = $p.StandardError.ReadToEndAsync()
+$onSample = {{ Start-Sleep -Milliseconds 400 }}
+$stopwatch = [Diagnostics.Stopwatch]::StartNew()
+$result = Wait-GuiSmokeProcessBounded -Process $p -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 1200 -TerminationGraceMs 5000 -StreamDrainMs 5000 -SampleIntervalMs 300 -OnSample $onSample
+$stopwatch.Stop()
+
+[pscustomobject]@{{
+    timedOut = $result.timedOut
+    elapsedMs = $stopwatch.ElapsedMilliseconds
+}} | ConvertTo-Json -Depth 8 -Compress
+"""
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    observed = json.loads(completed.stdout.strip())
+    assert observed["timedOut"] is True
+    # Old (buggy) nominal-sum accounting needed ~4 iterations of 300ms-wait + 400ms-callback to
+    # reach a nominal 1200ms, i.e. ~2800ms real. The round-5 wall-clock fix bounds this to roughly
+    # TimeoutMs plus one chunk+callback (~1900ms); 2400ms leaves headroom for scheduler jitter
+    # while still failing against the old behaviour.
+    assert observed["elapsedMs"] < 2400, observed["elapsedMs"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MLV-App process ownership is Windows-specific")
+def test_gui_smoke_process_boundary_sanitizes_onsample_exception_message(tmp_path: Path) -> None:
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 5 (sol minor, fable minor -- same class as round 4's
+    # hostLoad.*.error sanitization): a raw $_.Exception.Message can embed a path or host
+    # identifier and used to reach processBoundary.failures -> the summary receipt verbatim.
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+
+    module_literal = str(GUI_SMOKE_PROCESS_BOUNDARY).replace("'", "''")
+    python_literal = str(sys.executable).replace("'", "''")
+    command = rf"""
+Import-Module '{module_literal}' -Force
+
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = '{python_literal}'
+$start.UseShellExecute = $false
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+[void]$start.ArgumentList.Add('-c')
+[void]$start.ArgumentList.Add('import time; time.sleep(1.5)')
+$p = [Diagnostics.Process]::new()
+$p.StartInfo = $start
+[void]$p.Start()
+$stdoutTask = $p.StandardOutput.ReadToEndAsync()
+$stderrTask = $p.StandardError.ReadToEndAsync()
+$onSample = {{ throw "collection failed for host BACHELOR at C:\Users\owner\secret" }}
+$result = Wait-GuiSmokeProcessBounded -Process $p -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 8000 -TerminationGraceMs 5000 -StreamDrainMs 5000 -SampleIntervalMs 300 -OnSample $onSample
+
+[pscustomobject]@{{
+    failures = @($result.failures)
+}} | ConvertTo-Json -Depth 8 -Compress
+"""
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    observed = json.loads(completed.stdout.strip())
+    failures = observed["failures"]
+    assert any("Host-load sample during leg failed:" in f for f in failures), failures
+    joined = " ".join(failures)
+    assert "secret" not in joined
+    assert "BACHELOR" not in joined
+    assert "C:\\" not in joined
+    assert any(f.endswith("RuntimeException") for f in failures), failures
+
+
 @pytest.mark.skipif(os.name != "nt", reason="MLV-App GUI smoke comparer is PowerShell-based")
 def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None:
     pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")

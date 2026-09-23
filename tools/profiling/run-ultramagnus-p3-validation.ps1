@@ -649,13 +649,30 @@ function Import-EvidencePacket {
                 # provisional or unrecorded. Reject independently, per clip, rather than trusting
                 # speedValidated (checked above) alone -- fail toward provisional on a missing
                 # property, same stance as Get-SmokeSummaryHostLoadFields.
+                #
+                # round 5 (sol BLOCKER): reading hostLoadProvisional alone repeats the exact
+                # inconsistency round 4 closed at the producer -- a clip carrying an explicit
+                # hostLoadProvisional=false alongside a missing/blank/"unknown" hostLoadState is a
+                # legacy or degenerate clip, not a clean one. sol's repro: a clip with
+                # hostLoadProvisional=false and hostLoadState='unknown' passed this check
+                # unrefused. Combine both properties the same way Get-SmokeSummaryHostLoadFields
+                # already does above in this file, so reading the flag without the state is not
+                # possible here either.
                 $clipHostLoadProvisionalProperty = $clip.PSObject.Properties["hostLoadProvisional"]
-                $clipHostLoadProvisional = if ($null -eq $clipHostLoadProvisionalProperty -or
+                $clipHostLoadProvisionalDeclared = if ($null -eq $clipHostLoadProvisionalProperty -or
                     $null -eq $clipHostLoadProvisionalProperty.Value) {
                     $true
                 } else {
                     [bool]$clipHostLoadProvisionalProperty.Value
                 }
+                $clipHostLoadStateProperty = $clip.PSObject.Properties["hostLoadState"]
+                $clipHostLoadState = if ($null -eq $clipHostLoadStateProperty -or
+                    [string]::IsNullOrWhiteSpace([string]$clipHostLoadStateProperty.Value)) {
+                    "unknown"
+                } else {
+                    [string]$clipHostLoadStateProperty.Value
+                }
+                $clipHostLoadProvisional = ($clipHostLoadProvisionalDeclared -or $clipHostLoadState -eq "unknown")
                 if ($clipHostLoadProvisional) {
                     Add-Failure $importFailures "$clipName host load was PROVISIONAL or unrecorded (hostLoadProvisional=$clipHostLoadProvisional); an fps number measured under provisional host load is not proof of speed, regardless of the floor."
                 }

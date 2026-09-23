@@ -411,16 +411,34 @@ function Get-PlaybackAbLegHostLoadProvisional {
     # provisional/unknown, never as clean. This script has no StrictMode and no Get-NestedValue
     # helper, so a bare $Leg.hostLoadProvisional on a leg lacking that property silently returns
     # $null -> [bool]$null -eq $false, the same absent-means-clean trap fixed elsewhere this round.
+    #
+    # round 5 (sol BLOCKER): "provisional" and "state" were still being read as two independent
+    # signals here even though round 4 fixed the exact same inconsistency at the PRODUCER (a leg
+    # carrying an explicit hostLoadProvisional=false alongside a missing/blank/"unknown"
+    # hostLoadState is a legacy or degenerate record, not a clean one). sol's repro: a baseline leg
+    # with hostLoadProvisional=false and hostLoadState='unknown' plus a quiet candidate produced
+    # refusal=False here. This is the ONLY function in this file that may read hostLoadProvisional
+    # off a leg (every other reader -- Get-PlaybackAbHostLoadRefusal, New-RemoteP3SummaryRow via
+    # its per-clip Where-Object -- calls through this one), so folding the state check in here
+    # closes it everywhere at once rather than adding a third duplicated check.
     param([object]$Leg)
 
     if ($null -eq $Leg) {
         return $true
     }
-    $property = $Leg.PSObject.Properties["hostLoadProvisional"]
-    if ($null -eq $property -or $null -eq $property.Value) {
-        return $true
+    $provisionalProperty = $Leg.PSObject.Properties["hostLoadProvisional"]
+    $provisionalDeclared = if ($null -eq $provisionalProperty -or $null -eq $provisionalProperty.Value) {
+        $true
+    } else {
+        [bool]$provisionalProperty.Value
     }
-    [bool]$property.Value
+    $stateProperty = $Leg.PSObject.Properties["hostLoadState"]
+    $state = if ($null -eq $stateProperty -or [string]::IsNullOrWhiteSpace([string]$stateProperty.Value)) {
+        "unknown"
+    } else {
+        [string]$stateProperty.Value
+    }
+    ($provisionalDeclared -or $state -eq "unknown")
 }
 
 function Get-PlaybackAbHostLoadRefusal {
@@ -743,6 +761,12 @@ function New-ProfileRow {
         dng_suggested_optimization = $null
         dominant_bottleneck = $summary.bottleneck.limiting_stage
         suggested_optimization = $summary.bottleneck.suggested_optimization
+        # round 5 (sol MAJOR): mlvapp.playback_profile.v1 has never carried host-load telemetry at
+        # all -- this presented_fps was never checked against host load, so it is honestly
+        # UNRECORDED, not clean. Fail toward provisional, same stance as every other reader in
+        # this card, rather than silently omitting the field (which the round-5 census below now
+        # enforces for every New-*Row function in this file).
+        host_load_provisional = $true
         source = $Source
     }
 }
@@ -788,6 +812,12 @@ function New-FieldLogRow {
         dng_suggested_optimization = $null
         dominant_bottleneck = $Record.bottleneck.limiting_stage
         suggested_optimization = $Record.suggested_optimization
+        # round 5 (sol MAJOR): mlvapp.perf-field-log.v1 has never carried host-load telemetry --
+        # a playback row's presented_fps was never checked against host load, so it is honestly
+        # UNRECORDED, not clean (same stance as New-ProfileRow above). An export-kind row has no
+        # fps signal at all (export_frames only), so there is nothing to gate -- $null, matching
+        # New-RemoteCdngSummaryRow's "genuinely nothing to report" stance for its own null fps.
+        host_load_provisional = if ($kind -eq "playback") { $true } else { $null }
         source = $Source
     }
 }

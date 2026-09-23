@@ -330,6 +330,7 @@ function Get-HostLoadSnapshot {
         totalVisibleMemoryMb = $null
         topCpuConsumers = @()
         subjectCpuSeconds = $null
+        totalCpuSeconds = $null
     }
     try {
         $cpuLoad = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop `
@@ -361,6 +362,21 @@ function Get-HostLoadSnapshot {
                 0.0
             }
         }
+        # round 5 (sol MAJOR, fable minor -- matched-window subtraction): sum every process's
+        # cumulative TotalProcessorTime, the SAME cumulative-delta technique already used for
+        # subjectCpuSeconds above, so Get-HostLoadNonSubjectCpuLoadPercent can subtract two
+        # quantities measured over the SAME window instead of subtracting an interval-average
+        # subject contribution from a point-in-time (~last-second) Win32_Processor.LoadPercentage
+        # reading. A per-process access failure (a protected/exited process) must not blank the
+        # whole total -- skip that one process rather than aborting the snapshot.
+        $totalCpuSeconds = 0.0
+        foreach ($p in $processes) {
+            try {
+                $totalCpuSeconds += $p.TotalProcessorTime.TotalSeconds
+            } catch {
+            }
+        }
+        $snapshot.totalCpuSeconds = $totalCpuSeconds
     }
     catch {
         $snapshot.collected = $false
@@ -377,10 +393,24 @@ function Get-HostLoadNonSubjectCpuLoadPercent {
     # round 4 (fable minor): derives how much of $CurrentSnapshot.cpuLoadPercent was NOT the
     # subject process, by diffing subjectCpuSeconds (cumulative) against $PreviousSnapshot over
     # the elapsed wall time between the two captures. Fail-closed by construction: any input this
-    # cannot confidently use (missing subject tracking, missing previous sample, non-positive
-    # elapsed time) falls back to the RAW cpuLoadPercent, which is always >= the properly-excluded
-    # value -- so a computation failure can only make the verdict MORE conservative, never falsely
-    # quiet.
+    # cannot confidently use falls back to the RAW cpuLoadPercent, which is always >= the properly-
+    # excluded value -- so a computation failure can only make the verdict MORE conservative, never
+    # falsely quiet.
+    #
+    # round 5 (sol MAJOR, fable minor -- matched-window subtraction): round 4 subtracted an
+    # INTERVAL-AVERAGE subject contribution (subjectCpuSeconds delta averaged over the whole
+    # up-to-4s sampling interval) from a POINT sample (Win32_Processor.LoadPercentage, documented
+    # by Microsoft as approximately the last one second) -- two quantities measured over different
+    # windows are not safe to subtract. sol's repro: raw=96%, 4 elapsed seconds, 4 processors,
+    # subjectCpuSeconds delta=12.8s -> subjectPercent=80% -> nonSubject=16%, reading a 96% RAW
+    # sample as quiet under a 75% bar. Fixed by requiring BOTH sides of the subtraction to be
+    # cumulative CPU-time deltas over the IDENTICAL [previous, current] window: totalCpuSeconds
+    # (every process, see Get-HostLoadSnapshot) minus subjectCpuSeconds, both diffed against the
+    # same $PreviousSnapshot. When either snapshot lacks totalCpuSeconds (a fixture built before
+    # this round, a caller that never populated it, or exactly sol's literal repro object), no
+    # subtraction is attempted at all -- fall straight back to RAW, which is the same fail-closed
+    # answer this function has always given for an input it cannot confidently use, and directly
+    # resolves sol's repro (96 > a 75 bar) without a mismatched-window subtraction to hide behind.
     param(
         [object]$CurrentSnapshot,
         [object]$PreviousSnapshot,
@@ -393,7 +423,8 @@ function Get-HostLoadNonSubjectCpuLoadPercent {
     }
     $rawLoad = [double]$CurrentSnapshot.cpuLoadPercent
     if ($null -eq $CurrentSnapshot.subjectCpuSeconds -or $null -eq $PreviousSnapshot -or
-        $null -eq $PreviousSnapshot.capturedAtUtc -or $ProcessorCount -le 0) {
+        $null -eq $PreviousSnapshot.capturedAtUtc -or $ProcessorCount -le 0 -or
+        $null -eq $CurrentSnapshot.totalCpuSeconds -or $null -eq $PreviousSnapshot.totalCpuSeconds) {
         return $rawLoad
     }
     $previousSubjectSeconds = if ($null -ne $PreviousSnapshot.subjectCpuSeconds) {
@@ -406,8 +437,10 @@ function Get-HostLoadNonSubjectCpuLoadPercent {
         return $rawLoad
     }
     $subjectDeltaSeconds = [Math]::Max(0.0, [double]$CurrentSnapshot.subjectCpuSeconds - $previousSubjectSeconds)
-    $subjectPercent = 100.0 * $subjectDeltaSeconds / ($elapsedSec * $ProcessorCount)
-    [Math]::Max(0.0, $rawLoad - $subjectPercent)
+    $totalDeltaSeconds = [Math]::Max(
+        0.0, [double]$CurrentSnapshot.totalCpuSeconds - [double]$PreviousSnapshot.totalCpuSeconds)
+    $nonSubjectDeltaSeconds = [Math]::Max(0.0, $totalDeltaSeconds - $subjectDeltaSeconds)
+    100.0 * $nonSubjectDeltaSeconds / ($elapsedSec * $ProcessorCount)
 }
 
 function Get-HostLoadVerdict {
@@ -454,12 +487,24 @@ function Get-HostLoadVerdict {
     # legitimate decode work cannot by itself push an otherwise-quiet host into "exceeded". Samples
     # without the property (every existing caller/fixture) are completely unaffected -- this reads
     # identically to $_.cpuLoadPercent when the property is absent.
+    #
+    # round 5 (sol MAJOR): duringSampleIntervalMs used to just echo back the DECLARED cadence, not
+    # an actual upper bound -- Wait-GuiSmokeProcessBounded's OnSample callback duration was never
+    # counted, so a 4000ms wait followed by a 3000ms callback left ~7000ms between snapshot starts
+    # while the receipt still claimed 4000ms. -ObservedMaxSampleGapMs now carries the REAL max gap
+    # between consecutive sample timestamps (before/during/after, computed from their own
+    # capturedAtUtc by the caller -- see run-release-gui-smoke.ps1's main body), and coverage is
+    # unknown when that observed gap materially exceeds the declared cadence: the caller's disclosed
+    # bound was not honored, so the coverage guarantee it implies cannot be trusted either. A factor
+    # of 1.5x is slack for ordinary scheduling jitter, not a loophole -- round 5's own repro (4000ms
+    # wait + 3000ms callback = ~7000ms, a 1.75x overrun) exceeds it.
     param(
         [object]$Before,
         [object]$After,
         [object[]]$During = @(),
         [double]$Bar,
-        [AllowNull()][System.Nullable[int]]$SampleIntervalMs = $null
+        [AllowNull()][System.Nullable[int]]$SampleIntervalMs = $null,
+        [AllowNull()][System.Nullable[int]]$ObservedMaxSampleGapMs = $null
     )
 
     $samples = @($Before) + @($During) + @($After)
@@ -468,7 +513,10 @@ function Get-HostLoadVerdict {
     $samplingDeclared = ($null -ne $SampleIntervalMs)
     $samplingDisabled = ($samplingDeclared -and $SampleIntervalMs -le 0)
     $samplingBlind = ($samplingDeclared -and $SampleIntervalMs -gt 0 -and @($During).Count -eq 0)
-    $coverageUnknown = ($samplingDisabled -or $samplingBlind)
+    $samplingSpacingExceeded = (
+        $samplingDeclared -and $SampleIntervalMs -gt 0 -and $null -ne $ObservedMaxSampleGapMs -and
+        [double]$ObservedMaxSampleGapMs -gt ([double]$SampleIntervalMs * 1.5))
+    $coverageUnknown = ($samplingDisabled -or $samplingBlind -or $samplingSpacingExceeded)
     $unknown = ($collectionUnknown -or $coverageUnknown)
     $effectiveLoads = @($collectedSamples | ForEach-Object {
         $nonSubjectProperty = $_.PSObject.Properties["nonSubjectCpuLoadPercent"]
@@ -506,6 +554,11 @@ function Get-HostLoadVerdict {
         "Interior host-load sampling was enabled at $($SampleIntervalMs)ms but collected zero " +
             "samples during this leg (the leg ended before the first sampling tick); coverage " +
             "never rose above bracket-only, so this leg's coverage cannot certify quiet."
+    } elseif ($samplingSpacingExceeded) {
+        "Interior host-load sampling was declared at $($SampleIntervalMs)ms but the observed " +
+            "max spacing between samples was $($ObservedMaxSampleGapMs)ms; coverage did not " +
+            "actually meet the declared cadence (a slow OnSample callback can widen the true " +
+            "blind interval beyond what was requested), so this leg's coverage cannot certify quiet."
     } elseif ($exceeded) {
         "Host CPU load reached $maxCpuLoadPercent% during this leg (peak of $($samples.Count) " +
             "sample(s): before/after plus $($During.Count) interior), exceeding the $Bar% bar; " +
@@ -1346,9 +1399,25 @@ $processExitCode = [int]$processBoundary.exitCode
 $captureBindingFailures += @($processBoundary.failures)
 $endUtc = [datetime]::UtcNow
 $hostLoadAfter = Get-HostLoadSnapshot -TopProcessCount $HostLoadTopProcessCount
+# round 5 (sol MAJOR): the real upper bound on the blind interval is the actual spacing between
+# consecutive sample TIMESTAMPS, not the declared -HostLoadSampleIntervalMs -- derived here
+# directly from each snapshot's own capturedAtUtc (set by Get-HostLoadSnapshot itself) across the
+# full before/during/after sequence, so a slow OnSample callback (or any other source of drift
+# between chunked waits) shows up honestly instead of being silently absorbed into a receipt field
+# that only ever echoed the request.
+$hostLoadSampleSequence = @($hostLoadBefore) + @($hostLoadDuringSamples) + @($hostLoadAfter)
+$hostLoadObservedMaxSampleGapMs = $null
+for ($i = 1; $i -lt $hostLoadSampleSequence.Count; $i++) {
+    $gapMs = ([datetime]$hostLoadSampleSequence[$i].capturedAtUtc -
+        [datetime]$hostLoadSampleSequence[$i - 1].capturedAtUtc).TotalMilliseconds
+    if ($null -eq $hostLoadObservedMaxSampleGapMs -or $gapMs -gt $hostLoadObservedMaxSampleGapMs) {
+        $hostLoadObservedMaxSampleGapMs = $gapMs
+    }
+}
 $hostLoadVerdict = Get-HostLoadVerdict -Before $hostLoadBefore -After $hostLoadAfter `
     -During @($hostLoadDuringSamples) -Bar $HostLoadCpuPercentBar `
-    -SampleIntervalMs $HostLoadSampleIntervalMs
+    -SampleIntervalMs $HostLoadSampleIntervalMs `
+    -ObservedMaxSampleGapMs $(if ($null -ne $hostLoadObservedMaxSampleGapMs) { [int][Math]::Ceiling($hostLoadObservedMaxSampleGapMs) } else { $null })
 
 if ($CaptureScreenshot) {
     if (-not (Test-Path -LiteralPath $screenshotPath)) {
@@ -2132,6 +2201,11 @@ $result = [pscustomobject]@{
         before = $hostLoadBefore
         during = @($hostLoadDuringSamples)
         duringSampleIntervalMs = $HostLoadSampleIntervalMs
+        # round 5 (sol MAJOR): duringSampleIntervalMs above is the REQUESTED cadence only, never
+        # an upper bound -- observedMaxSampleGapMs is the actual max spacing between consecutive
+        # sample timestamps (before/during/after), which is what Get-HostLoadVerdict's coverage
+        # rule now checks against the declared cadence (see -ObservedMaxSampleGapMs).
+        observedMaxSampleGapMs = $hostLoadObservedMaxSampleGapMs
         after = $hostLoadAfter
         maxCpuLoadPercent = $hostLoadVerdict.maxCpuLoadPercent
         state = $hostLoadVerdict.state

@@ -368,6 +368,50 @@ class HostLoadVerdictTests(_ProbeCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
 
+    def _verdict_with_gap(
+        self, before: str, after: str, during: str, sample_interval_ms, observed_gap_ms, bar: float = 75
+    ) -> subprocess.CompletedProcess:
+        interval_literal = "$null" if sample_interval_ms is None else str(sample_interval_ms)
+        gap_literal = "$null" if observed_gap_ms is None else str(observed_gap_ms)
+        return self.run_snippet(
+            f"$before = {before}\n"
+            f"$after = {after}\n"
+            f"$during = {during}\n"
+            f"$v = Get-HostLoadVerdict -Before $before -After $after -During $during "
+            f"-Bar {bar} -SampleIntervalMs {interval_literal} -ObservedMaxSampleGapMs {gap_literal}\n"
+            "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional) REASON=$($v.reason)\"\n"
+        )
+
+    def test_observed_sample_gap_far_exceeding_declared_cadence_forces_unknown(self) -> None:
+        # round 5 (sol MAJOR), exact repro: a 4000ms wait followed by a 3000ms OnSample callback
+        # puts ~7000ms between snapshot starts while the declared cadence was 4000ms -- a 1.75x
+        # overrun. Coverage cannot certify quiet when the caller's own disclosed bound was not
+        # honored.
+        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
+        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 })"
+        proc = self._verdict_with_gap(quiet, quiet, during, sample_interval_ms=4000, observed_gap_ms=7000)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
+        self.assertIn("did not actually meet the declared cadence", proc.stdout)
+
+    def test_observed_sample_gap_within_tolerance_of_declared_cadence_stays_quiet(self) -> None:
+        # Regression guard: ordinary scheduling jitter (well under the 1.5x tolerance) must not
+        # turn every real leg provisional.
+        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
+        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 })"
+        proc = self._verdict_with_gap(quiet, quiet, during, sample_interval_ms=4000, observed_gap_ms=4200)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
+
+    def test_missing_observed_sample_gap_is_backward_compatible(self) -> None:
+        # Every test above this one, and every caller written before round 5, never passes
+        # -ObservedMaxSampleGapMs at all -- the new spacing rule must stay inert for them.
+        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
+        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 })"
+        proc = self._verdict_with_gap(quiet, quiet, during, sample_interval_ms=4000, observed_gap_ms=None)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
+
     def test_cpu_heavy_subject_on_a_quiet_host_is_not_provisional(self) -> None:
         # round 4 (fable minor), required test 1: "a CPU-heavy SUBJECT on a quiet host must NOT
         # be provisional." A sample carrying a high raw cpuLoadPercent but a low
@@ -416,12 +460,15 @@ class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
     def test_subject_consuming_all_the_load_leaves_non_subject_near_zero(self) -> None:
         # Over 4 elapsed seconds on a 4-core host, the subject accrued 4*4=16 processor-seconds --
         # 100% of the machine's capacity for that window -- while raw cpuLoadPercent read 100%.
+        # round 5: totalCpuSeconds now required for the matched-window path -- the subject IS the
+        # entire load here, so totalCpuSeconds delta equals subjectCpuSeconds delta (16.0).
         current = (
             "[pscustomobject]@{ collected = $true; cpuLoadPercent = 100.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 16.0 }"
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 16.0; totalCpuSeconds = 16.0 }"
         )
         previous = (
-            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0 }"
+            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
+            "totalCpuSeconds = 0.0 }"
         )
         proc = self._percent(current, previous, processor_count=4)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -446,6 +493,49 @@ class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
         proc = self._percent(current, previous)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PERCENT=55", proc.stdout)
+
+    def test_missing_total_cpu_seconds_falls_back_to_raw_load_not_mismatched_subtraction(self) -> None:
+        # round 5 (sol MAJOR): sol's exact repro, in the card's own units -- raw cpuLoadPercent=96,
+        # four elapsed seconds, four processors, subjectCpuSeconds delta=12.8. Round 4's
+        # subtraction (a POINT raw sample minus an INTERVAL-AVERAGE subject share) produced
+        # subjectPercent=80 -> nonSubject=16, reading a 96% sample as quiet under a 75% bar. This
+        # object has no totalCpuSeconds (exactly what round 4's fixtures, and any pre-round-5
+        # caller, look like) -- round 5 requires totalCpuSeconds on both sides for ANY subtraction,
+        # so this now falls straight back to the RAW 96, which correctly exceeds a 75% bar instead
+        # of being silently masked.
+        current = (
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 12.8 }"
+        )
+        previous = (
+            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0 }"
+        )
+        proc = self._percent(current, previous, processor_count=4)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=96", proc.stdout)
+
+    def test_matched_window_subtracts_commensurate_cumulative_deltas(self) -> None:
+        # round 5 (fable minor -- matched-window subtraction): 4s tick, 8 processors (capacity 32
+        # processor-seconds). The subject burned 16 processor-seconds over the interval (50% of
+        # capacity); ALL processes together (subject included) burned 24 processor-seconds (75% of
+        # capacity, e.g. an exogenous burst diluted across the same window). Both terms are
+        # cumulative deltas over the IDENTICAL window, so the subtraction is dimensionally sound:
+        # nonSubject = (24-16)/32*100 = 25%. A point-sample-vs-interval-average calculation (round
+        # 4's mismatched-window subtraction, using a raw point sample instead of totalCpuSeconds)
+        # could produce a different, incommensurate number for the same underlying load -- this
+        # test pins the matched-window arithmetic itself, independent of whatever the point sample
+        # happened to read.
+        current = (
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 60.0; "
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 16.0; totalCpuSeconds = 24.0 }"
+        )
+        previous = (
+            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
+            "totalCpuSeconds = 0.0 }"
+        )
+        proc = self._percent(current, previous, processor_count=8)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=25", proc.stdout)
 
 
 @requires_pwsh
@@ -739,9 +829,20 @@ class CompareMachinePerfPlaybackAbHostLoadRefusalTests(_ProbeCase):
         "Get-PlaybackAbAnalysis",
     ]
 
+    def _leg(self, provisional: bool, state: str = None) -> str:
+        # round 5: legs are now built WITH hostLoadState by default (as every real round-4+
+        # producer emits it alongside hostLoadProvisional) -- state defaults to the value implied
+        # by provisional so callers that only care about the boolean keep working unchanged.
+        resolved_state = state if state is not None else ("exceeded" if provisional else "quiet")
+        provisional_literal = "$true" if provisional else "$false"
+        return (
+            "[pscustomobject]@{ hostLoadProvisional = " + provisional_literal +
+            "; hostLoadState = '" + resolved_state + "' }"
+        )
+
     def _record(self, baseline_provisional: bool, candidate_provisional: bool, fps_delta_pct: float = -40.0) -> str:
-        baseline = "[pscustomobject]@{ hostLoadProvisional = " + ("$true" if baseline_provisional else "$false") + " }"
-        candidate = "[pscustomobject]@{ hostLoadProvisional = " + ("$true" if candidate_provisional else "$false") + " }"
+        baseline = self._leg(baseline_provisional)
+        candidate = self._leg(candidate_provisional)
         return (
             "[pscustomobject]@{ "
             f"baseline = {baseline}; candidate = {candidate}; candidateSpeed = $null; "
@@ -782,7 +883,7 @@ class CompareMachinePerfPlaybackAbHostLoadRefusalTests(_ProbeCase):
         # property entirely (older/degenerate record) must not coerce to clean.
         record = (
             "[pscustomobject]@{ baseline = [pscustomobject]@{}; "
-            "candidate = [pscustomobject]@{ hostLoadProvisional = $false }; candidateSpeed = $null; "
+            f"candidate = {self._leg(False)}; candidateSpeed = $null; "
             "compare = [pscustomobject]@{ presentedFps = [pscustomobject]@{ deltaPercent = -40.0 } } }"
         )
         proc = self.run_snippet(
@@ -792,6 +893,43 @@ class CompareMachinePerfPlaybackAbHostLoadRefusalTests(_ProbeCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PROVISIONAL=True BASELINE=True CANDIDATE=False", proc.stdout)
+
+    def test_provisional_false_with_unknown_state_is_still_refused_not_read_as_clean(self) -> None:
+        # round 5 (sol BLOCKER), exact repro: "a baseline leg with hostLoadProvisional=false and
+        # hostLoadState='unknown' plus a quiet candidate gives Get-PlaybackAbHostLoadRefusal ->
+        # refusal False." round 4 fixed this same inconsistency at the three PRODUCER
+        # normalizers; this consumer read the flag alone, so a legacy/degenerate leg still entered
+        # a cross-machine comparison as clean.
+        record = (
+            "[pscustomobject]@{ "
+            "baseline = [pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'unknown' }; "
+            f"candidate = {self._leg(False)}; candidateSpeed = $null; "
+            "compare = [pscustomobject]@{ presentedFps = [pscustomobject]@{ deltaPercent = -40.0 } } }"
+        )
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = Get-PlaybackAbHostLoadRefusal -Record $record\n"
+            "Write-Host \"PROVISIONAL=$($r.provisional) BASELINE=$($r.baselineProvisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True BASELINE=True", proc.stdout)
+
+    def test_provisional_false_with_missing_state_property_is_still_refused(self) -> None:
+        # Same repro, but hostLoadState is entirely ABSENT (not the string 'unknown') -- the
+        # legacy-record case round 4's producer-side fix and this consumer-side fix both name.
+        record = (
+            "[pscustomobject]@{ "
+            "baseline = [pscustomobject]@{ hostLoadProvisional = $false }; "
+            f"candidate = {self._leg(False)}; candidateSpeed = $null; "
+            "compare = [pscustomobject]@{ presentedFps = [pscustomobject]@{ deltaPercent = -40.0 } } }"
+        )
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = Get-PlaybackAbHostLoadRefusal -Record $record\n"
+            "Write-Host \"PROVISIONAL=$($r.provisional) BASELINE=$($r.baselineProvisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True BASELINE=True", proc.stdout)
 
 
 class CompareMachinePerfHostLoadWiringTests(unittest.TestCase):
@@ -813,6 +951,170 @@ class CompareMachinePerfHostLoadWiringTests(unittest.TestCase):
             refusal_check, trusts_embedded_analysis,
             "the host-load refusal must be checked before trusting the record's own cached analysis",
         )
+
+
+class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
+    """round 5 (sol MAJOR #4), fourth round of this finding: "stop enumerating and start
+    enforcing." Prior rounds fixed each unbound New-*Row function individually as it was found
+    (a nine-row sweep written up in prose in a fleet-run summary, per sol's round-4 review) --
+    nothing stopped a TENTH row function from making the same mistake. This test scans every
+    New-*Row function actually defined in compare-machine-perf.ps1 (not a hand-maintained list of
+    names) and fails if any of them can emit a real (non-hardcoded-null) presented_fps without
+    also carrying host_load_provisional in the same object literal, unless the function is named
+    in TELEMETRY_ONLY_ROW_FUNCTIONS with a reason.
+
+    Binds today: New-RemoteP3SummaryRow, New-ProfileRow, New-FieldLogRow, New-LocalProofSummaryRow,
+    New-PlaybackAbSummaryRow (every New-*Row function that can emit a real presented_fps).
+    Allowlisted: New-RemoteCdngSummaryRow (hardcodes presented_fps = $null -- CDNG export has no
+    playback-fps signal to rank at all).
+
+    Cannot bind: a brand-new STANDALONE script elsewhere under tools/profiling that independently
+    parses smoke JSON and computes its own fps ranking outside this file entirely -- that would
+    need a repo-wide PowerShell-aware scan this regex-based census does not attempt. fable's Q3
+    named exactly this class of exception for run-local-cuda-playback-dng-smoke.ps1 and
+    detect-playback-artifacts.ps1 (both project telemetry only, never rank or gate)."""
+
+    # Extraction pattern deliberately mirrors _extract_functions above (same file, same
+    # column-0-closing-brace convention this codebase already relies on for verbatim splicing).
+    ROW_FUNCTION_PATTERN = re.compile(r"function (New-\w*Row) \{.*?\n\}\r?\n", re.DOTALL)
+    REAL_FPS_PATTERN = re.compile(r"presented_fps\s*=(?!\s*\$null\b)")
+
+    TELEMETRY_ONLY_ROW_FUNCTIONS = {"New-RemoteCdngSummaryRow"}
+
+    def test_every_row_function_with_a_real_presented_fps_carries_host_load_provenance(self) -> None:
+        source = COMPARE_MACHINE_PERF_SCRIPT.read_text(encoding="utf-8")
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(source))
+        self.assertGreater(len(matches), 0, "no New-*Row functions found -- the census pattern is stale")
+        found_names = {match.group(1) for match in matches}
+        bound = []
+        unbound = []
+        for match in matches:
+            name = match.group(1)
+            body = match.group(0)
+            if name in self.TELEMETRY_ONLY_ROW_FUNCTIONS:
+                self.assertIn(
+                    "presented_fps = $null", body,
+                    f"{name} is on TELEMETRY_ONLY_ROW_FUNCTIONS but its presented_fps is no "
+                    "longer hardcoded null -- it now needs host_load_provisional, or removal "
+                    "from the allowlist.",
+                )
+                continue
+            if self.REAL_FPS_PATTERN.search(body):
+                (bound if "host_load_provisional" in body else unbound).append(name)
+        self.assertEqual(
+            unbound, [],
+            "New-*Row function(s) in compare-machine-perf.ps1 emit a real presented_fps without "
+            f"host_load_provisional: {unbound}. Either add host_load_provisional to the row, or "
+            "add the function name to TELEMETRY_ONLY_ROW_FUNCTIONS with a reason if it genuinely "
+            "never carries an fps signal to gate.",
+        )
+        # Round-5 fix regression guard: New-ProfileRow and New-FieldLogRow were the two unbound
+        # consumers sol's finding named -- if the census pattern stops matching them, this test
+        # would silently stop covering the exact defect it exists to catch.
+        self.assertIn("New-ProfileRow", found_names)
+        self.assertIn("New-FieldLogRow", found_names)
+        self.assertIn("New-ProfileRow", bound)
+        self.assertIn("New-FieldLogRow", bound)
+
+    def test_a_hypothetical_unbound_consumer_would_fail_this_census(self) -> None:
+        # Proves the census is a real detector, not a tautology: a synthetic row function shaped
+        # exactly like the round-5 defect (real presented_fps, no host_load_provisional) must be
+        # caught by the same regex this test class applies to the real file.
+        fixture = (
+            "function New-HypotheticalRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = if ($null -ne $Record.fps) { $Record.fps } else { $null }\n"
+            "        source = 'test'\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(body))
+        self.assertNotIn("host_load_provisional", body)
+
+
+@requires_pwsh
+class CompareMachinePerfProfileAndFieldLogHostLoadTests(_ProbeCase):
+    """round 5 (sol MAJOR #4): New-ProfileRow (mlvapp.playback_profile.v1) and New-FieldLogRow
+    (mlvapp.perf-field-log.v1) used to emit presented_fps with NO host-load provenance at all --
+    these two schemas have never carried host-load telemetry, so their fps was never checked
+    against it. Fail toward provisional/unrecorded, same stance as every other reader."""
+
+    script = COMPARE_MACHINE_PERF_SCRIPT
+    functions = [
+        "Convert-ToNullableInt64",
+        "Get-TotalPipelineFrames",
+        "Assert-MachineFingerprint",
+        "Get-MachineLabel",
+        "New-ProfileRow",
+        "New-FieldLogRow",
+    ]
+
+    def _profile_record(self, cadence_ms: float) -> str:
+        return (
+            "[pscustomobject]@{ schema = 'mlvapp.playback_profile.v1'; "
+            "machineFingerprint = [pscustomobject]@{ schema = 'machine-fingerprint.v1'; "
+            "hostname = 'H'; cpu = 'x'; gpu = 'y'; "
+            "os = 'z'; build_sha = 'abc1234' }; "
+            "metadata = [pscustomobject]@{ average_cadence_ms = " + str(cadence_ms) + " }; "
+            "summary = [pscustomobject]@{ schema = 'mlvapp.playback-profile-summary.v1'; "
+            "pipeline_counts = [pscustomobject]@{ gpu_texture_no_readback = 5 }; "
+            "fallback_count = 0; "
+            "bottleneck = [pscustomobject]@{ limiting_stage = 'decode'; suggested_optimization = 'x' } } }"
+        )
+
+    def test_profile_row_reports_host_load_provisional(self) -> None:
+        record = self._profile_record(20.0)
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = New-ProfileRow -Record $record -Source 'test'\n"
+            "Write-Host \"FPS=$($r.presented_fps) HOST_LOAD_PROVISIONAL=$($r.host_load_provisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("HOST_LOAD_PROVISIONAL=True", proc.stdout)
+        # A real (non-null) fps must be present -- this is the exact repro shape (a real ranking
+        # number with unrecorded host-load provenance), not a degenerate always-null row.
+        self.assertNotIn("FPS= ", proc.stdout)
+        self.assertNotIn("FPS=\n", proc.stdout)
+
+    def _field_log_record(self, kind: str, presented_fps) -> str:
+        fps_literal = "$null" if presented_fps is None else str(presented_fps)
+        return (
+            "[pscustomobject]@{ schema = 'mlvapp.perf-field-log.v1'; kind = '" + kind + "'; "
+            "machineFingerprint = [pscustomobject]@{ schema = 'machine-fingerprint.v1'; "
+            "hostname = 'H'; cpu = 'x'; gpu = 'y'; "
+            "os = 'z'; build_sha = 'abc1234' }; "
+            "pipeline_counts = [pscustomobject]@{ gpu_texture_no_readback = 5 }; "
+            "fallback_count = 0; "
+            f"presented_fps = {fps_literal}; no_readback_percent = 1.0; "
+            "frame_count = 100; "
+            "bottleneck = [pscustomobject]@{ limiting_stage = 'decode' }; "
+            "suggested_optimization = 'x' }"
+        )
+
+    def test_playback_field_log_row_reports_host_load_provisional(self) -> None:
+        record = self._field_log_record("playback", 24.0)
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = New-FieldLogRow -Record $record -Source 'test'\n"
+            "Write-Host \"FPS=$($r.presented_fps) HOST_LOAD_PROVISIONAL=$($r.host_load_provisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("FPS=24", proc.stdout)
+        self.assertIn("HOST_LOAD_PROVISIONAL=True", proc.stdout)
+
+    def test_export_field_log_row_has_no_fps_signal_to_gate(self) -> None:
+        record = self._field_log_record("export", None)
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = New-FieldLogRow -Record $record -Source 'test'\n"
+            "Write-Host \"FPS=$($r.presented_fps) HOST_LOAD_PROVISIONAL=$($r.host_load_provisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("FPS= HOST_LOAD_PROVISIONAL=", proc.stdout)
 
 
 @requires_pwsh
@@ -841,10 +1143,15 @@ class CompareMachinePerfP3HostLoadRowTests(_ProbeCase):
         "New-RemoteP3SummaryRow",
     ]
 
-    def _clip(self, presented_fps: float, host_load_provisional) -> str:
+    def _clip(self, presented_fps: float, host_load_provisional, host_load_state: str = None) -> str:
         extra = ""
         if host_load_provisional is not None:
             extra = "; hostLoadProvisional = " + ("$true" if host_load_provisional else "$false")
+            # round 5: default hostLoadState to what the boolean implies, unless the caller wants
+            # to test a specific (e.g. inconsistent) state explicitly.
+            resolved_state = host_load_state if host_load_state is not None else (
+                "exceeded" if host_load_provisional else "quiet")
+            extra += f"; hostLoadState = '{resolved_state}'"
         return (
             "[pscustomobject]@{ "
             f"presentedFps = {presented_fps}; gpuTextureNoReadbackFrames = 10; "
@@ -885,6 +1192,19 @@ class CompareMachinePerfP3HostLoadRowTests(_ProbeCase):
         # A p3 record from before this fix never carried the property at all -- "cannot know" is
         # the same disposition as "provisional" under this card's fail-toward-provisional stance.
         record = self._record([self._clip(24.0, None)])
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = New-RemoteP3SummaryRow -Record $record -Source 'test'\n"
+            "Write-Host \"HOST_LOAD_PROVISIONAL=$($r.host_load_provisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("HOST_LOAD_PROVISIONAL=True", proc.stdout)
+
+    def test_clip_with_provisional_false_and_unknown_state_is_still_provisional(self) -> None:
+        # round 5 (sol BLOCKER): Get-PlaybackAbLegHostLoadProvisional is reused for p3 clips
+        # (docstring above); this is the same "state=unknown, provisional=false" repro as
+        # CompareMachinePerfPlaybackAbHostLoadRefusalTests, exercised through the p3 row path.
+        record = self._record([self._clip(24.0, False, host_load_state="unknown")])
         proc = self.run_snippet(
             f"$record = {record}\n"
             "$r = New-RemoteP3SummaryRow -Record $record -Source 'test'\n"
@@ -993,9 +1313,12 @@ class P3ValidationImportIndependentlyChecksHostLoadTests(unittest.TestCase):
     def test_import_speed_floor_block_independently_checks_host_load_provisional(self) -> None:
         source = P3_VALIDATION_SCRIPT.read_text(encoding="utf-8")
         import_speed_start = source.index('if ($isSpeedProof) {\n                $minSpeedFps')
-        import_speed_block = source[import_speed_start:import_speed_start + 1800]
+        # round 5: widened from 1800 to fit the state-check addition below the flag-only read.
+        import_speed_block = source[import_speed_start:import_speed_start + 3200]
         self.assertIn('$clip.PSObject.Properties["hostLoadProvisional"]', import_speed_block)
         self.assertIn("host load was PROVISIONAL or unrecorded", import_speed_block)
+        # round 5 (sol BLOCKER): the flag alone is not enough -- hostLoadState must also gate.
+        self.assertIn('$clip.PSObject.Properties["hostLoadState"]', import_speed_block)
         # the independent host-load Add-Failure must not be gated behind the floor comparison
         host_load_check_index = import_speed_block.index("$clipHostLoadProvisionalProperty")
         floor_check_index = import_speed_block.index("[double]$clip.presentedFps -lt $minSpeedFps")
@@ -1045,11 +1368,87 @@ class LocalCudaProofSummarizerHostLoadGuardTests(unittest.TestCase):
             "the host-load-provisional guard must be checked before the fps-not-improved diagnostic",
         )
 
+    def test_summarizer_also_checks_host_load_state_not_just_the_flag(self) -> None:
+        # round 5 (sol BLOCKER): reading hostLoadProvisional alone repeats the exact inconsistency
+        # round 4 closed at the producer -- a leg with hostLoadProvisional=false and
+        # hostLoadState='unknown' (or missing) must still be treated as provisional here.
+        source = CUDA_PROOF_SUMMARIZER_SCRIPT.read_text(encoding="utf-8")
+        host_load_guard_index = source.index("$playbackAbHostLoadLegs = @(")
+        guard_block = source[host_load_guard_index:host_load_guard_index + 1600]
+        self.assertIn('Get-Field $legEntry.Leg "hostLoadState"', guard_block)
+        self.assertIn('$legState -eq "unknown"', guard_block)
+
     def test_fps_not_improved_diagnostic_is_skipped_when_host_load_is_provisional(self) -> None:
         source = CUDA_PROOF_SUMMARIZER_SCRIPT.read_text(encoding="utf-8")
         guard_start = source.index("if (-not $playbackAbHostLoadProvisional -and")
         guard_block = source[guard_start:guard_start + 500]
         self.assertIn("PLAYBACK_PRESENTED_FPS_NOT_IMPROVED", guard_block)
+
+
+GUI_SMOKE_PROCESS_BOUNDARY_MODULE = ROOT / "tools" / "profiling" / "gui-smoke-process-boundary.psm1"
+
+
+@requires_pwsh
+class WholeFileParseSafetyNetTests(unittest.TestCase):
+    """round 5: fable's round-3 finding was that the splice-based extraction technique this whole
+    test module relies on (_extract_functions) is BLIND to a syntax error outside any spliced
+    function -- a top-level break in run-ultramagnus-p3-validation.ps1 or any sibling script could
+    pass all 63 tests here silently, because every test only ever compiles the ONE named function
+    it spliced out, never the whole file. The round-4 producer explicitly DEFERRED this ("no parse
+    safety net exists" -- fable round-4 minor); the round-4 HUB ADDENDUM then wrongly told both
+    review keys it HAD been added (filed as HUB-ADDENDUM-CLAIMED-A-FIX-THAT-WAS-DEFERRED-1). This
+    closes it for real, using the same technique as test_candidate_acceptance.py:1417
+    (System.Management.Automation.Language.Parser]::ParseFile), swept over every .ps1/.psm1 file
+    this card touches."""
+
+    FILES = (
+        SMOKE_SCRIPT,
+        COMPARE_SCRIPT,
+        CUDA_AB_SCRIPT,
+        COMPARE_MACHINE_PERF_SCRIPT,
+        P3_VALIDATION_SCRIPT,
+        CUDA_PROOF_SUMMARIZER_SCRIPT,
+        GUI_SMOKE_PROCESS_BOUNDARY_MODULE,
+    )
+
+    @staticmethod
+    def _parse_check_command(path: Path) -> str:
+        literal = str(path).replace("'", "''")
+        return (
+            "$errors=$null; $tokens=$null; "
+            "[System.Management.Automation.Language.Parser]::ParseFile("
+            f"'{literal}',[ref]$tokens,[ref]$errors) | Out-Null; "
+            "if($errors.Count){$errors | ForEach-Object {$_.Message}; exit 1}"
+        )
+
+    @requires_pwsh
+    def test_every_host_load_gate_script_parses_cleanly(self) -> None:
+        self.assertEqual(len(self.FILES), 7, "the file list drifted -- update it alongside the card's file set")
+        for path in self.FILES:
+            self.assertTrue(path.is_file(), f"missing file: {path}")
+            proc = subprocess.run(
+                [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", self._parse_check_command(path)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, f"{path} failed to parse:\n{proc.stdout}{proc.stderr}")
+
+    @requires_pwsh
+    def test_a_top_level_syntax_error_outside_any_function_is_actually_caught(self) -> None:
+        # Proves this is a real detector, not a tautology: a top-level syntax error OUTSIDE any
+        # function definition (exactly the class of break the splice-based tests above cannot
+        # see, since they only ever compile one named function body at a time) must fail here.
+        with tempfile.TemporaryDirectory(prefix="parse-sweep-negative-") as tmp:
+            broken = Path(tmp) / "broken.ps1"
+            broken.write_text(
+                "function Foo {\n    Write-Host 'ok'\n}\n"
+                "$leftoverTopLevelBreak = 1 +\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", self._parse_check_command(broken)],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
 
 
 if __name__ == "__main__":

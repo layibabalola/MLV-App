@@ -64,9 +64,17 @@ function Wait-GuiSmokeProcessBounded {
     $terminationConfirmed = $false
 
     if ($SampleIntervalMs -gt 0 -and $null -ne $OnSample) {
-        $elapsedMs = 0
+        # round 5 (sol MAJOR): round 3/4 accumulated $elapsedMs as a sum of NOMINAL chunk lengths,
+        # never counting $OnSample's own execution time -- a slow callback (each one is a
+        # Get-HostLoadSnapshot: two CIM queries plus a Get-Process enumeration/sort) let the loop
+        # drift arbitrarily far past $TimeoutMs with every iteration, since the deadline check only
+        # ever compared against the undercounted nominal sum. Schedule against a real wall-clock
+        # stopwatch instead: $chunkMs is now computed from ACTUAL elapsed time (wait + callback),
+        # so the whole loop is bounded by $TimeoutMs plus at most one in-flight chunk's wait and one
+        # in-flight callback's duration, not an unbounded multiple of it.
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         while ($true) {
-            $chunkMs = [Math]::Min($SampleIntervalMs, $TimeoutMs - $elapsedMs)
+            $chunkMs = [Math]::Min($SampleIntervalMs, $TimeoutMs - $stopwatch.ElapsedMilliseconds)
             if ($chunkMs -le 0) {
                 $terminationConfirmed = $false
                 break
@@ -75,19 +83,22 @@ function Wait-GuiSmokeProcessBounded {
                 $terminationConfirmed = $Process.WaitForExit($chunkMs)
             }
             catch {
-                $failures.Add("Process wait failed: $($_.Exception.Message)")
+                $failures.Add("Process wait failed: $($_.Exception.GetType().Name)")
                 $terminationConfirmed = $false
                 break
             }
-            $elapsedMs += $chunkMs
-            if ($terminationConfirmed -or $elapsedMs -ge $TimeoutMs) {
+            if ($terminationConfirmed -or $stopwatch.ElapsedMilliseconds -ge $TimeoutMs) {
                 break
             }
             try {
                 & $OnSample
             }
             catch {
-                $failures.Add("Host-load sample during leg failed: $($_.Exception.Message)")
+                # round 5 (sol minor, same class as round 4's hostLoad.*.error sanitization):
+                # $_.Exception.Message can embed a path or host identifier and this string reaches
+                # the receipt via processBoundary.failures -> the summary JSON. Record only the
+                # exception's TYPE.
+                $failures.Add("Host-load sample during leg failed: $($_.Exception.GetType().Name)")
             }
         }
     }
