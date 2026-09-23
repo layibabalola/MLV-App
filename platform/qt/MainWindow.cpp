@@ -24904,10 +24904,21 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         /* CUDA-ATTRIBUTION-BASELINE-1: the five fields an attribution leg needs
          * to tell whether requested scales 4/2/1 exercised different processing
          * resolutions -- requested (pre-clamp) scale, effective (post-clamp,
-         * as-sent) scale, achieved (render-thread-reported) scale, the playback
-         * quality mode, and the Phase3 mode actually resolved from it. All five
-         * join to this same session+index as rendered_w/rendered_h above. */
-        const int manifestPhase3Mode =
+         * as-sent) scale, achieved (render-thread-reported, route-truthful --
+         * RenderFrameThread.cpp only reports a scale other than 1 on the
+         * routes that actually resize) scale, the playback quality mode, and
+         * the Phase3 mode actually resolved from it. All five join to this
+         * same session+index as rendered_w/rendered_h above.
+         *
+         * round 2: phase3_mode is now the mode FrameSlot::phase3Mode recorded
+         * as having actually run for this frame (readyFrame.phase3Mode,
+         * threaded through from renderDecodedSlot/runSerial's activePhase3Mode),
+         * not a recomputation from the live GUI/settings state at emission
+         * time -- that recomputation could read Phase3HQ configured while the
+         * worker had fallen back to Disabled for this specific frame.
+         * phase3_mode_configured keeps the old computation available,
+         * explicitly labelled as the policy rather than a per-frame result. */
+        const int manifestPhase3ModeConfigured =
             static_cast<int>( phase3ModeFor(
                 playbackQualityModeFromInt( m_playbackQualityMode ) ) );
         manifestFields
@@ -24919,7 +24930,9 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    bool01( requestContext.playbackScaleFactorRequestedBeforeGpuTextureRouteClamp
                            != requestContext.playbackScaleFactor ) )
             << QStringLiteral("quality_mode=%1").arg( m_playbackQualityMode )
-            << QStringLiteral("phase3_mode=%1").arg( manifestPhase3Mode );
+            << QStringLiteral("phase3_mode=%1").arg(
+                   static_cast<int>( readyFrame.phase3Mode ) )
+            << QStringLiteral("phase3_mode_configured=%1").arg( manifestPhase3ModeConfigured );
         qInfo().noquote()
             << QStringLiteral("playback_smoke.render_manifest ")
                    + manifestFields.join( QLatin1Char(' ') );
@@ -24940,6 +24953,53 @@ void MainWindow::notePlaybackSmokePresentedFrame(
          * subtraction residual that silently absorbs whatever the other three
          * probes missed. Name that basis explicitly instead of letting the
          * field read as a measured "thread overhead" cost. */
+        /* CUDA-ATTRIBUTION-BASELINE-1 round 2: texture_present_upload_ms_basis
+         * used to read "measured" whenever the combined `available` OR was
+         * true, even when only one of recon/AMaZE actually reported -- the
+         * other's contribution is a silent 0.0 fill (see the summed-timing
+         * inserts above this block's writer). It also used to read
+         * "unavailable_fallback_..." for CPU-only frames where the texture-
+         * present path never ran at all this frame (the key is simply absent
+         * from `timing`, not present-and-false) -- misreporting non-execution
+         * as an attempted-and-failed fallback. Distinguish all four states:
+         * not executed / unavailable (attempted, neither component) /
+         * partial (attempted, exactly one component) / measured (both). */
+        const bool texturePresentAttempted =
+            timing.contains(
+                QStringLiteral("gpu_playback_recon_texture_present_available") );
+        const bool texturePresentAvailable =
+            telemetryBoolValue(
+                timing, "gpu_playback_recon_texture_present_available" );
+        const bool texturePresentReconAvailable =
+            telemetryBoolValue(
+                timing, "gpu_playback_recon_texture_present_recon_component_available" );
+        const bool texturePresentAmazeAvailable =
+            telemetryBoolValue(
+                timing, "gpu_playback_recon_texture_present_amaze_component_available" );
+        QString texturePresentUploadMsBasis;
+        if( !texturePresentAttempted )
+        {
+            texturePresentUploadMsBasis =
+                QStringLiteral("not_executed_no_texture_present_this_frame");
+        }
+        else if( !texturePresentAvailable )
+        {
+            texturePresentUploadMsBasis =
+                QStringLiteral("unavailable_fallback_to_whole_call_wall_ms");
+        }
+        else if( texturePresentReconAvailable && texturePresentAmazeAvailable )
+        {
+            texturePresentUploadMsBasis = QStringLiteral("measured");
+        }
+        else
+        {
+            /* A combined flag may never upgrade a partial reading to
+             * "measured" -- exactly one of recon/AMaZE reported, and the
+             * other's contribution to the summed upload/kernel/interop/total
+             * fields is a silent 0.0 fill. */
+            texturePresentUploadMsBasis =
+                QStringLiteral("partial_component_unavailable_zero_filled");
+        }
         QStringList timingValidityFields;
         timingValidityFields
             << QStringLiteral("session=%1").arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
@@ -24948,20 +25008,16 @@ void MainWindow::notePlaybackSmokePresentedFrame(
             << QStringLiteral("processed16_threading_overhead_inputs=render_work_ms,llrawproc_ms,processed16_ms")
             << QStringLiteral("processed8_threading_overhead_basis=derived_subtraction")
             << QStringLiteral("processed8_threading_overhead_inputs=render_work_ms,llrawproc_ms,processed8_ms")
+            << QStringLiteral("texture_present_host_gap_ms_basis=derived_subtraction")
+            << QStringLiteral("texture_present_host_gap_ms_inputs=texture_present_wall_ms,texture_present_total_ms")
             << QStringLiteral("texture_present_available=%1").arg(
-                   bool01( telemetryBoolValue(
-                       timing, "gpu_playback_recon_texture_present_available" ) ) )
+                   bool01( texturePresentAvailable ) )
             << QStringLiteral("texture_present_recon_component_available=%1").arg(
-                   bool01( telemetryBoolValue(
-                       timing, "gpu_playback_recon_texture_present_recon_component_available" ) ) )
+                   bool01( texturePresentReconAvailable ) )
             << QStringLiteral("texture_present_amaze_component_available=%1").arg(
-                   bool01( telemetryBoolValue(
-                       timing, "gpu_playback_recon_texture_present_amaze_component_available" ) ) )
+                   bool01( texturePresentAmazeAvailable ) )
             << QStringLiteral("texture_present_upload_ms_basis=%1").arg(
-                   telemetryBoolValue(
-                       timing, "gpu_playback_recon_texture_present_available" )
-                       ? QStringLiteral("measured")
-                       : QStringLiteral("unavailable_fallback_to_whole_call_wall_ms") )
+                   texturePresentUploadMsBasis )
             << QStringLiteral("cpu_amaze_debayer_skipped_for_gpu_tex_nr=%1").arg(
                    bool01( telemetryBoolValue(
                        timing, "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" ) ) )

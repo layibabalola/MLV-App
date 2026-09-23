@@ -210,6 +210,14 @@ public:
         uint32_t frameNumber = 0;
         uint64_t requestSerial = 0;
         OutputMode outputMode = OutputProcessed8;
+        /* CUDA-ATTRIBUTION-BASELINE-1 round 2: the Phase3 mode actually executed
+         * for THIS frame (FrameSlot::phase3Mode, set by renderDecodedSlot/
+         * runSerial from activePhase3Mode -- which can differ from the
+         * requested mode on live fallback). Not the currently configured
+         * policy; see MainWindow's manifest emission, which used to
+         * substitute the configuration here and is exactly what this field
+         * exists to stop. */
+        Phase3Mode phase3Mode = Phase3Mode::Disabled;
         int renderedImageWidth = 0;
         int renderedImageHeight = 0;
         int playbackScaleFactorActive = 1;

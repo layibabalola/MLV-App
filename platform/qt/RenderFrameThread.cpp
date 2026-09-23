@@ -1556,6 +1556,7 @@ bool RenderFrameThread::acquireReadySlotLocked( ReadyFrame *frame,
         frame->frameNumber = slot.frameNumber;
         frame->requestSerial = slot.requestSerial;
         frame->outputMode = slot.outputMode;
+        frame->phase3Mode = slot.phase3Mode;
         frame->renderedImageWidth = slot.renderedImageWidth;
         frame->renderedImageHeight = slot.renderedImageHeight;
         frame->playbackScaleFactorActive = slot.playbackScaleFactorActive;
@@ -4747,10 +4748,20 @@ void RenderFrameThread::drawFrame( int slotIndex,
         }
     }
 
-    int playbackScaleFactorActive = playbackScaleFactor;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 2: playbackScaleFactorActive must mean
+     * the scale actually applied to the work this route performed, not the
+     * scale that was merely requested. Only OutputProcessed8/16 ever resize
+     * (mlvFrameOutputDimensions above, driven by the MLV core's own clamp);
+     * OutputDebayered16 always debayers at full source resolution -- see
+     * renderedImageWidth/renderedImageHeight above, which stay at
+     * m_imageWidth/m_imageHeight on this route regardless of the requested
+     * scale. Reporting the requested scale here would let a leg read
+     * "achieved_scale=4" while full-resolution work happened underneath. */
+    int playbackScaleFactorActive = 1;
     if( m_pMlvObject
      && ( outputMode == OutputProcessed8 || outputMode == OutputProcessed16 ) )
     {
+        playbackScaleFactorActive = playbackScaleFactor;
         const int coreActiveScale = m_pMlvObject->playback_scale_factor_active;
         if( coreActiveScale == 1 || coreActiveScale == 2 || coreActiveScale == 4 || coreActiveScale == 8 )
         {
