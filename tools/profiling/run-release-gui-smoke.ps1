@@ -1164,6 +1164,12 @@ $cpuSummaryLine = $recentLines |
 $gpuSummaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.gpu_summary*" } |
     Select-Object -Last 1
+# CUDA-ATTRIBUTION-BASELINE-1: sound, serial-based skip/frame-population
+# accounting, immune to the loop-wrap unsoundness of the timeline-position
+# figures on playback_smoke.summary (see MainWindow.cpp finishPlaybackSmokeTelemetry).
+$framePopulationLine = $recentLines |
+    Where-Object { $_ -like "*playback_smoke.frame_population*" } |
+    Select-Object -Last 1
 # Round-4: fields that used to sit beyond QString::arg's %99 limit (garbage)
 # now arrive on a continuation line; merged into the same cpuSummary object.
 $cpuSummaryExtLine = $recentLines |
@@ -1258,6 +1264,7 @@ $playbackStart = if ($playbackStartLine) { Convert-PlaybackLogLineToObject $play
 $playbackSummary = if ($summaryLine) { Convert-PlaybackLogLineToObject $summaryLine } else { $null }
 $cpuSummary = if ($cpuSummaryLine) { Convert-PlaybackLogLineToObject $cpuSummaryLine } else { $null }
 $gpuSummary = if ($gpuSummaryLine) { Convert-PlaybackLogLineToObject $gpuSummaryLine } else { $null }
+$framePopulation = if ($framePopulationLine) { Convert-PlaybackLogLineToObject $framePopulationLine } else { $null }
 if ($cpuSummary -and $cpuSummaryExtLine) {
     $cpuSummaryExt = Convert-PlaybackLogLineToObject $cpuSummaryExtLine
     if ($cpuSummaryExt) {
@@ -1413,6 +1420,26 @@ if ($null -ne $timelineDeltaAbs -and [double]$timelineDeltaAbs -gt 0 -and
     $null -ne $skippedOrUnpresentedFrames) {
     $skippedOrUnpresentedRatio = [double]$skippedOrUnpresentedFrames / [double]$timelineDeltaAbs
 }
+# CUDA-ATTRIBUTION-BASELINE-1: sound replacement, immune to the loop-wrap
+# unsoundness of the timeline-position figures above (a loop can revisit an
+# earlier slider position, or lap all the way back to start, without that
+# meaning "stuck"). requestedFramesBySerial counts render requests issued
+# (a monotonic counter that never resets mid-session), so this ratio is valid
+# even when loopWrapCount > 0.
+$requestedFramesBySerial = Get-ObjectPropertyValue $framePopulation "requested_frames_by_serial"
+$skippedOrUnpresentedFramesBySerial = Get-ObjectPropertyValue $framePopulation "skipped_or_unpresented_frames_by_serial"
+$loopWrapCount = Get-ObjectPropertyValue $framePopulation "loop_wrap_count"
+$skippedOrUnpresentedRatioBySerial = $null
+if ($null -ne $requestedFramesBySerial -and [double]$requestedFramesBySerial -gt 0 -and
+    $null -ne $skippedOrUnpresentedFramesBySerial) {
+    $skippedOrUnpresentedRatioBySerial = [double]$skippedOrUnpresentedFramesBySerial / [double]$requestedFramesBySerial
+}
+# Prefer the sound figure when it is present; only fall back to the legacy
+# timeline-position ratio when frame_population telemetry did not run (older
+# build, or MLVAPP_PLAYBACK_SMOKE_TELEMETRY off).
+$skippedOrUnpresentedRatioForGate =
+    if ($null -ne $skippedOrUnpresentedRatioBySerial) { $skippedOrUnpresentedRatioBySerial }
+    else { $skippedOrUnpresentedRatio }
 $validatedScaleRequest = if ($null -ne $scaleRequestLast) { $scaleRequestLast } else { $scaleRequestStart }
 $validatedQualityMode = if ($null -ne $qualityModeLast) { $qualityModeLast } else { $qualityModeStart }
 $autoDecision = [pscustomobject]@{
@@ -1532,15 +1559,22 @@ if (-not $LaunchOnlyProbe) {
     if ($null -eq $firstPresentedFrame -or $null -eq $lastPresentedFrame) {
         $validationFailures += "Playback summary did not report first and last presented frame ids."
     }
-    elseif ([int64]$firstPresentedFrame -eq [int64]$lastPresentedFrame) {
-        $validationFailures += "Displayed playback did not advance: first and last presented frame are both $firstPresentedFrame."
+    # CUDA-ATTRIBUTION-BASELINE-1: first==last is NOT sound evidence of a stuck
+    # playback when the clip looped (--loop can lap all the way back to a
+    # position equal to, or indistinguishable from, the start). Only fail
+    # here when frame_population confirms zero loop wraps happened; an
+    # UNKNOWN wrap count (older telemetry, field missing) still fails closed,
+    # matching this script's existing missing-is-always-an-error convention.
+    elseif ([int64]$firstPresentedFrame -eq [int64]$lastPresentedFrame -and
+            ($null -eq $loopWrapCount -or [int64]$loopWrapCount -eq 0)) {
+        $validationFailures += "Displayed playback did not advance: first and last presented frame are both $firstPresentedFrame (loop_wrap_count=$loopWrapCount)."
     }
-    if ($null -eq $skippedOrUnpresentedRatio) {
+    if ($null -eq $skippedOrUnpresentedRatioForGate) {
         $validationFailures += "Playback summary could not establish a skipped/unpresented-frame ratio."
     }
-    elseif ($skippedOrUnpresentedRatio -gt $MaxSkippedOrUnpresentedRatio) {
+    elseif ($skippedOrUnpresentedRatioForGate -gt $MaxSkippedOrUnpresentedRatio) {
         $validationFailures += ("Skipped/unpresented-frame ratio {0:P2} exceeds the playback-quality limit {1:P2}." -f
-            $skippedOrUnpresentedRatio, $MaxSkippedOrUnpresentedRatio)
+            $skippedOrUnpresentedRatioForGate, $MaxSkippedOrUnpresentedRatio)
     }
 }
 if ($FailOnColorArtifact -and
@@ -1945,6 +1979,10 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
         $null -ne $lastPresentedFrame -and
         [int64]$firstPresentedFrame -ne [int64]$lastPresentedFrame)
     skippedOrUnpresentedRatio = $skippedOrUnpresentedRatio
+    skippedOrUnpresentedRatioBySerial = $skippedOrUnpresentedRatioBySerial
+    skippedOrUnpresentedRatioForGate = $skippedOrUnpresentedRatioForGate
+    requestedFramesBySerial = $requestedFramesBySerial
+    loopWrapCount = $loopWrapCount
     maxSkippedOrUnpresentedRatio = $MaxSkippedOrUnpresentedRatio
     colorArtifactScanPassed = [bool]$colorArtifactScanPassed
     colorArtifactScanVerdict = $colorArtifactVerdict

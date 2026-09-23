@@ -152,9 +152,24 @@ public:
             bool zoomFitEnabled = false;
             bool fastPlaybackScaleEligible = false;
             uint64_t presentationGeneration = 0;
-            /* Requested playback scale factor (1, 2, 4, or 8). The renderer may
-             * reject incompatible clip dimensions and report the active scale. */
+            /* Playback scale factor actually sent to the render thread (1, 2, 4,
+             * or 8) -- i.e. EFFECTIVE scale, already passed through
+             * MainWindow::effectivePlaybackScaleFactorForRequest()'s
+             * CUDA-S4-TEXTURE-ROUTE-CLAMP-1 clamp. The renderer may further
+             * reject incompatible clip dimensions and report the active scale
+             * (see ReadyFrame::playbackScaleFactorActive below). This field is
+             * NOT the user/policy-requested scale before that clamp -- see
+             * playbackScaleFactorRequestedBeforeGpuTextureRouteClamp. */
             int playbackScaleFactor = 1;
+            /* CUDA-ATTRIBUTION-BASELINE-1: the scale MainWindow::
+             * playbackScaleFactorPolicyDecision() picked BEFORE the S4 texture-
+             * route clamp above may have forced it down to 1. Equal to
+             * playbackScaleFactor when no clamp occurred this request. Recorded
+             * per-request (not just as a last-value session summary) so an
+             * attribution leg can tell whether requested scales 4/2/1 actually
+             * exercised different processing resolutions or were silently
+             * clamped to the same one. */
+            int playbackScaleFactorRequestedBeforeGpuTextureRouteClamp = 1;
             MainWindowGpuPreviewPolicyState gpuPreviewPolicy;
             GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
             GpuPreviewProcessingConfig gpuPreviewProcessingConfig;

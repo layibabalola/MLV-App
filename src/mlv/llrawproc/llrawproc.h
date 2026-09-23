@@ -97,6 +97,15 @@ typedef struct
 typedef struct
 {
     int available;
+    /* CUDA-ATTRIBUTION-BASELINE-1: `available` is an OR of the recon and AMaZE
+     * sub-timings below it (see the combining writer in GpuDisplayWindow.cpp).
+     * That means `available=1` does NOT imply every summed field (upload_ms,
+     * kernel_ms, interop_ms, total_ms) is a real measurement -- one half of
+     * the sum can still be a silent 0.0 fill for the missing sub-timing. These
+     * two flags name which half was actually measured so a consumer can tell
+     * "component measured" from "combined flag true but half is a zero fill". */
+    int recon_available;
+    int amaze_available;
     double upload_ms;
     double kernel_ms;
     double interop_ms;

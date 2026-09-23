@@ -676,6 +676,8 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
     {
         memset(timing, 0, sizeof(*timing));
         timing->available = reconTiming.available || amazeTiming.available;
+        timing->recon_available = reconTiming.available ? 1 : 0;
+        timing->amaze_available = amazeTiming.available ? 1 : 0;
         timing->upload_ms =
             (reconTiming.available ? reconTiming.upload_ms : 0.0)
             + (amazeTiming.available ? amazeTiming.uploadMs : 0.0);

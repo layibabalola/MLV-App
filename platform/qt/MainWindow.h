@@ -1008,6 +1008,15 @@ private:
     int m_playbackSmokeTargetPresentedFrames = 0;
     int m_playbackSmokeFirstPresentedFrame = -1;
     int m_playbackSmokeLastPresentedFrame = -1;
+    /* CUDA-ATTRIBUTION-BASELINE-1: incremented each time playbackHandling()
+     * wraps the timeline position back to cut-in under --loop. The endpoint
+     * timeline-position delta used by the legacy skipped/unpresented estimate
+     * is unsound whenever this is nonzero (a loop can revisit -- or land back
+     * on -- an earlier position that looks identical to "stuck", and a full
+     * lap can make first==last presented frame even though playback advanced
+     * the whole clip). Reset at playback start alongside the other smoke
+     * counters. */
+    uint64_t m_playbackSmokeLoopWrapCount = 0;
     uint64_t m_dualIsoWarmupTelemetryPresentationGeneration = 0;
     int m_dualIsoWarmupTelemetryPresentedFrames = 0;
     uint64_t m_playbackSmokeStartRequestSerial = 0;

@@ -16,6 +16,7 @@ from refresh_period_histogram import (
     bucket_label,
     build_report,
     compute_buckets,
+    compute_deadline_evaluation,
     compute_refresh_period,
     compute_region_stats,
     parse_frame_log_rows,
@@ -281,6 +282,62 @@ def test_percentile_matches_known_p50_p95():
 def test_percentile_requires_at_least_one_value():
     with pytest.raises(RefreshHistogramError):
         percentile([], 0.5)
+
+
+# --- deadline evaluation (CUDA-ATTRIBUTION-BASELINE-1) -----------------------------
+
+def test_deadline_evaluation_two_refreshes_at_lower_target_is_not_a_miss():
+    # 60Hz panel (16.67ms refresh), 30fps target (33.34ms intended period): every
+    # frame landing on exactly 2 refreshes is CORRECT cadence, not a missed deadline.
+    intervals = [33.34] * 20
+    result = compute_deadline_evaluation(intervals, target_fps=30.0)
+    assert result["intendedPeriodMs"] == pytest.approx(33.34, abs=0.01)
+    assert result["missedDeadlineCount"] == 0
+    assert result["missedDeadlineShare"] == pytest.approx(0.0)
+
+
+def test_deadline_evaluation_flags_intervals_beyond_tolerance():
+    intervals = [33.34] * 15 + [100.0] * 5  # 5 frames land ~3x the intended period
+    result = compute_deadline_evaluation(intervals, target_fps=30.0, tolerance_multiplier=1.5)
+    assert result["missedDeadlineCount"] == 5
+    assert result["missedDeadlineShare"] == pytest.approx(0.25)
+
+
+def test_deadline_evaluation_rejects_non_positive_target_fps():
+    with pytest.raises(RefreshHistogramError, match="positive"):
+        compute_deadline_evaluation([16.67], target_fps=0.0)
+    with pytest.raises(RefreshHistogramError, match="positive"):
+        compute_deadline_evaluation([16.67], target_fps=-30.0)
+
+
+def test_deadline_evaluation_rejects_tolerance_at_or_below_one():
+    with pytest.raises(RefreshHistogramError, match="toleranceMultiplier"):
+        compute_deadline_evaluation([16.67], target_fps=30.0, tolerance_multiplier=1.0)
+
+
+def test_deadline_evaluation_omitted_from_report_without_target_fps(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    report = build_report(str(csv_path), str(log_path))
+    assert report["deadlineEvaluation"] is None
+
+
+def test_deadline_evaluation_present_in_report_with_target_fps(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 20)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    report = build_report(
+        str(csv_path), str(log_path), refresh_period_ms=16.67, target_fps=60.0, source_fps=24.0
+    )
+    assert report["deadlineEvaluation"] is not None
+    assert report["deadlineEvaluation"]["targetFps"] == 60.0
+    assert report["deadlineEvaluation"]["sourceFps"] == 24.0
+    assert report["deadlineEvaluation"]["expectedRefreshesPerFrame"] == pytest.approx(1.0, abs=0.01)
 
 
 # --- end-to-end build_report ----------------------------------------------------------

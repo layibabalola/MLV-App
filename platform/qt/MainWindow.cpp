@@ -5271,6 +5271,22 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_retained_device_bayer16_active"),
             texturePresentHandoffMode == QStringLiteral("retained_device_bayer16") );
+        /* CUDA-ATTRIBUTION-BASELINE-1: `available` is an OR of the recon and
+         * AMaZE sub-timings, so it does not by itself say whether upload_ms/
+         * kernel_ms/interop_ms/total_ms below are fully measured or half a
+         * silent zero-fill for whichever sub-timing was unavailable. Emit the
+         * combined flag plus both components explicitly so a consumer can
+         * tell "measured" from "unavailable, fell back to whole-call wall
+         * time" from "measured but only half the route reported". */
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_available"),
+            static_cast<bool>( texturePresentTiming.available ) );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_recon_component_available"),
+            static_cast<bool>( texturePresentTiming.recon_available ) );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_amaze_component_available"),
+            static_cast<bool>( texturePresentTiming.amaze_available ) );
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_upload_ms"),
             texturePresentTiming.available
@@ -6484,6 +6500,15 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
      * Once Phase 4B lands the dial will start producing smaller buffers
      * without any further plumbing churn. */
     requestContext.playbackScaleFactor = effectivePlaybackScaleFactorForRequest();
+    /* effectivePlaybackScaleFactorForRequest() just stashed whether it clamped
+     * this specific request (m_playbackScaleClampedForGpuTextureRouteActive/
+     * RequestedScale); capture it into the per-request context now, synchronously,
+     * before another request can overwrite those two members. See the field's
+     * doc comment in RenderFrameThread.h. */
+    requestContext.playbackScaleFactorRequestedBeforeGpuTextureRouteClamp =
+        m_playbackScaleClampedForGpuTextureRouteActive
+            ? m_playbackScaleClampedForGpuTextureRouteRequestedScale
+            : requestContext.playbackScaleFactor;
 
     RenderFrameThread::PresentationPreparationOptions presentationPreparation;
     presentationPreparation.fastPlaybackScale = requestContext.fastPlaybackScaleEligible;
@@ -10006,6 +10031,7 @@ void MainWindow::playbackHandling(int timeDiff)
                     ? requestedCutInFrame
                     : clampedCutInFrame;
                 //Loop, goto cut in
+                if( m_playbackSmokeActive ) ++m_playbackSmokeLoopWrapCount;
                 m_playbackInternalSliderAdvance = true;
                 ui->horizontalSliderPosition->setValue( cutInFrame );
                 m_playbackInternalSliderAdvance = false;
@@ -10050,6 +10076,7 @@ void MainWindow::playbackHandling(int timeDiff)
                 if( ui->actionLoop->isChecked() && ( m_newPosDropMode >= ui->spinBoxCutOut->value() - 1 ) )
                 {
                     m_newPosDropMode -= (ui->spinBoxCutOut->value() - ui->spinBoxCutIn->value());
+                    if( m_playbackSmokeActive ) ++m_playbackSmokeLoopWrapCount;
                     //Sync audio
                     if( ui->actionAudioOutput->isChecked() )
                     {
@@ -22479,6 +22506,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeParityMatchCount = 0;
     m_playbackSmokeFirstPresentedFrame = -1;
     m_playbackSmokeLastPresentedFrame = -1;
+    m_playbackSmokeLoopWrapCount = 0;
     m_playbackSmokeStartRequestSerial = m_nextRenderRequestSerial;
     m_playbackSmokeStartDecodeRequestsIssued =
         m_pRenderThread ? m_pRenderThread->decodeRequestsIssuedCount() : 0;
@@ -24571,7 +24599,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     "gpu_playback_recon_async_h2d_ready_before_run=%59 "
                     "gpu_playback_recon_async_h2d_host_staging_ms=%60 "
                     "gpu_playback_recon_async_h2d_upload_ms=%61 "
-                    "gpu_playback_recon_async_h2d_upload_wait_ms=%62" )
+                    "gpu_playback_recon_async_h2d_upload_wait_ms=%62 "
+                    "texture_present_available=%63 "
+                    "texture_recon_component_available=%64 "
+                    "texture_amaze_component_available=%65" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -24712,7 +24743,13 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                         0, 'f', 3 )
                     .arg( telemetryDoubleValue(
                         timing, "gpu_playback_recon_async_h2d_upload_wait_ms" ),
-                        0, 'f', 3 );
+                        0, 'f', 3 )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_texture_present_available" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_texture_present_recon_component_available" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_texture_present_amaze_component_available" ) ) );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "
@@ -24864,9 +24901,82 @@ void MainWindow::notePlaybackSmokePresentedFrame(
             << QStringLiteral("stretched_w=%1").arg(
                    static_cast<int>( qRound( qMax( 0, manifestRenderedWidth ) * manifestStretchX ) ) )
             << QStringLiteral("stretched_h=%1").arg( manifestRenderedHeight );
+        /* CUDA-ATTRIBUTION-BASELINE-1: the five fields an attribution leg needs
+         * to tell whether requested scales 4/2/1 exercised different processing
+         * resolutions -- requested (pre-clamp) scale, effective (post-clamp,
+         * as-sent) scale, achieved (render-thread-reported) scale, the playback
+         * quality mode, and the Phase3 mode actually resolved from it. All five
+         * join to this same session+index as rendered_w/rendered_h above. */
+        const int manifestPhase3Mode =
+            static_cast<int>( phase3ModeFor(
+                playbackQualityModeFromInt( m_playbackQualityMode ) ) );
+        manifestFields
+            << QStringLiteral("requested_scale=%1").arg(
+                   requestContext.playbackScaleFactorRequestedBeforeGpuTextureRouteClamp )
+            << QStringLiteral("effective_scale=%1").arg( requestContext.playbackScaleFactor )
+            << QStringLiteral("achieved_scale=%1").arg( readyFrame.playbackScaleFactorActive )
+            << QStringLiteral("scale_clamped_for_gpu_texture_route=%1").arg(
+                   bool01( requestContext.playbackScaleFactorRequestedBeforeGpuTextureRouteClamp
+                           != requestContext.playbackScaleFactor ) )
+            << QStringLiteral("quality_mode=%1").arg( m_playbackQualityMode )
+            << QStringLiteral("phase3_mode=%1").arg( manifestPhase3Mode );
         qInfo().noquote()
             << QStringLiteral("playback_smoke.render_manifest ")
                    + manifestFields.join( QLatin1Char(' ') );
+        /* CUDA-ATTRIBUTION-BASELINE-1: per-frame timing-validity join, session+
+         * index joinable to every other playback_smoke.* line above. Uses a
+         * key=value QStringList (not positional %N) for the same reason
+         * render_manifest does -- see that comment -- so this can grow without
+         * risking the %99 ceiling that silently corrupted cpu_summary once.
+         *
+         * Three states per the attribution baseline requirement, not two:
+         *   measured    -- a real sample was taken this frame
+         *   unavailable -- the probe could not run; field is a zero/NaN fill
+         *   derived     -- computed from other measured fields (e.g. by
+         *                  subtraction), so it inherits their combined error
+         *                  and is not itself an independent measurement.
+         * processed16/8_threading_overhead_ms carry no timing of their own --
+         * they are qMax(0, renderWorkMs - llrawprocMs - processedNMs), a
+         * subtraction residual that silently absorbs whatever the other three
+         * probes missed. Name that basis explicitly instead of letting the
+         * field read as a measured "thread overhead" cost. */
+        QStringList timingValidityFields;
+        timingValidityFields
+            << QStringLiteral("session=%1").arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+            << QStringLiteral("index=%1").arg( m_playbackSmokePresentedFrames )
+            << QStringLiteral("processed16_threading_overhead_basis=derived_subtraction")
+            << QStringLiteral("processed16_threading_overhead_inputs=render_work_ms,llrawproc_ms,processed16_ms")
+            << QStringLiteral("processed8_threading_overhead_basis=derived_subtraction")
+            << QStringLiteral("processed8_threading_overhead_inputs=render_work_ms,llrawproc_ms,processed8_ms")
+            << QStringLiteral("texture_present_available=%1").arg(
+                   bool01( telemetryBoolValue(
+                       timing, "gpu_playback_recon_texture_present_available" ) ) )
+            << QStringLiteral("texture_present_recon_component_available=%1").arg(
+                   bool01( telemetryBoolValue(
+                       timing, "gpu_playback_recon_texture_present_recon_component_available" ) ) )
+            << QStringLiteral("texture_present_amaze_component_available=%1").arg(
+                   bool01( telemetryBoolValue(
+                       timing, "gpu_playback_recon_texture_present_amaze_component_available" ) ) )
+            << QStringLiteral("texture_present_upload_ms_basis=%1").arg(
+                   telemetryBoolValue(
+                       timing, "gpu_playback_recon_texture_present_available" )
+                       ? QStringLiteral("measured")
+                       : QStringLiteral("unavailable_fallback_to_whole_call_wall_ms") )
+            << QStringLiteral("cpu_amaze_debayer_skipped_for_gpu_tex_nr=%1").arg(
+                   bool01( telemetryBoolValue(
+                       timing, "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" ) ) )
+            << QStringLiteral("gpu_pipeline_status=%1").arg(
+                   QString::fromLatin1(
+                       mainWindowGpuPlaybackPipelineStatusToken( gpuPlaybackPipelineStatus ) ) )
+            << QStringLiteral("prep_region_clock_resolution_ns=%1").arg(
+                   telemetryDoubleValue(
+                       timing, "playback_prep_region_clock_resolution_ns" ), 0, 'f', 0 )
+            << QStringLiteral("prep_region_clock_monotonic=%1").arg(
+                   bool01( telemetryBoolValue(
+                       timing, "playback_prep_region_clock_monotonic" ) ) );
+        qInfo().noquote()
+            << QStringLiteral("playback_smoke.timing_validity ")
+                   + timingValidityFields.join( QLatin1Char(' ') );
         if( dualIsoFull20Valid )
         {
             qInfo().noquote()
@@ -24994,8 +25104,35 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
     const int timelineDeltaAbs = timelineDelta >= 0
         ? timelineDelta
         : -timelineDelta;
+    /* CUDA-ATTRIBUTION-BASELINE-1 blocker fix: this is the ENDPOINT
+     * timeline-position estimate the arbiter flagged as unsound across loop
+     * wraps (MainWindow.cpp finishPlaybackSmokeTelemetry, run-release-gui-
+     * smoke.ps1:1535). A full lap can return the slider to (or near) its
+     * start position, understating true skip, and a loop crossing cut-out
+     * repeatedly can make this number meaningless as a population count.
+     * KEPT for backward compatibility with existing consumers, but it is NOT
+     * the authoritative figure whenever m_playbackSmokeLoopWrapCount > 0 --
+     * see skippedOrUnpresentedBySerial below, which is immune to wraps. */
     const int skippedOrUnpresented =
         qMax( 0, timelineDeltaAbs - m_playbackSmokePresentedFrames );
+    /* Sound replacement: m_nextRenderRequestSerial is a monotonic counter
+     * that only ever increments for the lifetime of the process (see its
+     * declaration and every increment site in MainWindow.cpp/.h) -- it never
+     * resets or wraps within a session, so its delta over the smoke window is
+     * exactly "render requests issued", immune to the timeline-position loop
+     * problem above. requestedFramesBySerial is therefore the authoritative
+     * population denominator for "how many frames were asked for", and
+     * skippedOrUnpresentedBySerial is the authoritative "how many of those
+     * never made it to presentation" figure. */
+    const uint64_t requestedFramesBySerial =
+        m_nextRenderRequestSerial >= m_playbackSmokeStartRequestSerial
+            ? m_nextRenderRequestSerial - m_playbackSmokeStartRequestSerial
+            : 0;
+    const qint64 skippedOrUnpresentedBySerialSigned =
+        static_cast<qint64>( requestedFramesBySerial )
+            - static_cast<qint64>( m_playbackSmokePresentedFrames );
+    const qulonglong skippedOrUnpresentedBySerial =
+        static_cast<qulonglong>( qMax<qint64>( 0, skippedOrUnpresentedBySerialSigned ) );
     const double presentedFps =
         elapsedSeconds > 0.0
             ? static_cast<double>( m_playbackSmokePresentedFrames )
@@ -25202,6 +25339,36 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                                     m_playbackSmokeStartPresentNothingDrops ) )
                .arg( bool01( m_playbackScaleClampedForGpuTextureRouteActive ) )
                .arg( m_playbackScaleClampedForGpuTextureRouteRequestedScale );
+
+    /* CUDA-ATTRIBUTION-BASELINE-1: the sound, serial-based replacement for
+     * skipped_or_unpresented_frames above (see its computation and comments
+     * near the top of this function). A SEPARATE qInfo() line, not more
+     * positional %N args on playback_smoke.summary -- that line is already at
+     * 66 args against Qt's documented %99 QString::arg() ceiling, and hitting
+     * that ceiling silently corrupted playback_smoke.cpu_summary once before
+     * (see the comment at the render_manifest emission site). Joinable by
+     * session=. */
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.frame_population session=%1 "
+               "requested_frames_by_serial=%2 presented_frames=%3 "
+               "skipped_or_unpresented_frames_by_serial=%4 "
+               "skipped_or_unpresented_frames_by_timeline_position=%5 "
+               "loop_wrap_count=%6 timeline_position_basis_sound=%7 "
+               "population_basis=\"requested_frames_by_serial counts render "
+               "requests issued (MainWindow::m_nextRenderRequestSerial delta, "
+               "monotonic, immune to timeline wraps); presented_frames counts "
+               "frames that actually reached presentPlaybackPreparedFrame's "
+               "presentation path; the difference includes stale/generation/"
+               "present-nothing drops (see prep_stale_drops etc. on the "
+               "summary line above), not just late frames\"" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+               .arg( static_cast<qulonglong>( requestedFramesBySerial ) )
+               .arg( m_playbackSmokePresentedFrames )
+               .arg( skippedOrUnpresentedBySerial )
+               .arg( skippedOrUnpresented )
+               .arg( static_cast<qulonglong>( m_playbackSmokeLoopWrapCount ) )
+               .arg( bool01( m_playbackSmokeLoopWrapCount == 0 ) );
 
     qInfo().noquote()
         << QStringLiteral(
