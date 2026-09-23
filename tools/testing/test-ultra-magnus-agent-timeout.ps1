@@ -91,6 +91,18 @@ try {
     }
     $metaInboxPath = Join-Path $root ("inbox\{0}.meta.json" -f $result.jobId)
     $metaProcessedPath = Join-Path $root ("processed\{0}.meta.json" -f $result.jobId)
+    # fable round 6 minor: this honour-path E2E used to assert both facts the instant um-run.ps1
+    # returned, with no settle allowance at all -- the exact flake class round 5 fixed for
+    # test_ultra_magnus_agent_metadata.py's own archival assertion (the agent publishes
+    # outbox\<id>.result.json, which is what retires the JobId and what um-run.ps1 polls for,
+    # BEFORE it archives inbox\<id>.job.ps1/meta.json to processed\ -- a few more of the agent's own
+    # instructions past the instant the result becomes visible, not simultaneous with it). Protected
+    # only incidentally, until now, by um-run.ps1's 400ms post-result settle sleep and 1s poll
+    # cadence. Same bounded 5s poll, same two assertions.
+    $metaSettleDeadline = (Get-Date).AddSeconds(5)
+    while ((Test-Path -LiteralPath $metaInboxPath) -and -not (Test-Path -LiteralPath $metaProcessedPath) -and (Get-Date) -lt $metaSettleDeadline) {
+        Start-Sleep -Milliseconds 100
+    }
     if (Test-Path -LiteralPath $metaInboxPath) { throw "Job metadata was left behind in inbox: $metaInboxPath" }
     if (-not (Test-Path -LiteralPath $metaProcessedPath)) { throw "Job metadata was not moved to processed alongside its job: $metaProcessedPath" }
     if (-not (Test-Path -LiteralPath $grandchildIdentityPath -PathType Leaf)) { throw 'Tracked descendant did not publish its identity.' }

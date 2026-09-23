@@ -156,11 +156,19 @@ class UmRunDropModuleTests(_Share):
         # The other half of the round-4 reorder: at the moment the job's OWN temporary is copied,
         # metadata must NOT yet exist -- it is published only once those bytes already sit on the
         # share, narrowing the window in which metadata is visible with no job to the rename alone.
-        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600)
+        #
+        # sol round 5 minor: the previous version of this test only counted logged `.job.tmp`
+        # copies and never inspected metadata state during the copy, so reversing the ordering (the
+        # exact crash-window regression this test exists to prevent) left it green. The copier below
+        # observes the live inbox for `demo.meta.json` at the instant it copies the job's own
+        # temporary -- reversing the module's ordering would make it observe True and fail here.
+        copier = ("{ param($s, $d) if ($d -like '*.job.tmp') { Add-Content -LiteralPath " + _q(self.log) +
+                  " -Value ('meta-present-during-job-copy=' + (Test-Path -LiteralPath (Join-Path " +
+                  _q(self.inbox) + " 'demo.meta.json'))) }; Copy-Item -LiteralPath $s -Destination $d }")
+        proc = self.drop(copier, side=[], job_timeout_sec=3600)
         self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
-        copies = [Path(line).name for line in self.log.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual(len(copies), 1, copies)
-        self.assertTrue(copies[0].endswith(".job.tmp"), copies)
+        lines = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertIn("meta-present-during-job-copy=False", lines, lines)
 
     def test_no_metadata_is_written_when_no_budget_is_requested(self) -> None:
         proc = self.drop(OBSERVING, side=[])

@@ -198,7 +198,23 @@ function Invoke-UmRunDrop {
     # treated as possibly live, matching the pre-round-4 refusal.
     $metaFinal = Join-Path $Inbox "$id.meta.json"
     if (Test-Path -LiteralPath $metaFinal) {
-        $metaAgeSec = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $metaFinal -Force).LastWriteTimeUtc).TotalSeconds
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 6 (fable minor): the age check used to subtract
+        # $metaFinal's LastWriteTimeUtc from THIS SUBMITTER's own Get-Date -- the "can only be a
+        # dead submission" proof silently assumed the two clocks agree to within
+        # $OrphanMetaGraceSec, so cross-machine skew at or above the grace could let a concurrent
+        # same-JobId submitter reclaim a LIVE submission's metadata. NTFS-over-SMB stamps
+        # LastWriteTimeUtc using the FILE SERVER's clock, not the writer's -- so a nonce probe
+        # written to (and immediately removed from) this same share, right now, is stamped by that
+        # SAME clock. Comparing two timestamps from one clock domain needs no assumption about this
+        # submitter's own clock at all.
+        $shareNowProbe = Join-Path $Inbox ".umrun-clock-probe.$([guid]::NewGuid().ToString('N'))"
+        try {
+            Set-Content -LiteralPath $shareNowProbe -Value '' -Encoding ascii -NoNewline
+            $shareNowUtc = (Get-Item -LiteralPath $shareNowProbe -Force).LastWriteTimeUtc
+        } finally {
+            Remove-Item -LiteralPath $shareNowProbe -Force -ErrorAction SilentlyContinue
+        }
+        $metaAgeSec = ($shareNowUtc - (Get-Item -LiteralPath $metaFinal -Force).LastWriteTimeUtc).TotalSeconds
         if ($metaAgeSec -lt $OrphanMetaGraceSec) {
             throw "UMRUN_JOBID_IN_USE inbox already holds $id.meta.json"
         }
@@ -318,8 +334,20 @@ function Invoke-UmRunDrop {
             throw "UMRUN_JOBID_IN_USE inbox\$id.job.ps1 appeared concurrently; refusing to replace it"
         }
     } catch {
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 6 (sol minor): a rollback deletion failure here
+        # used to be silently swallowed (SilentlyContinue), so metadata from a refused submission
+        # could outlive it and block a same-JobId retry for the full -OrphanMetaGraceSec against
+        # this module's own "a failed submission leaves no metadata" invariant, with no indication
+        # why. The ORIGINAL failure is still why this submission failed, so it is captured before
+        # attempting cleanup and folded into whatever is thrown, rather than replaced by a
+        # cleanup-only error.
+        $originalError = $_
         if ($metaPlacedHere) {
-            Remove-Item -LiteralPath $metaFinal -Force -ErrorAction SilentlyContinue
+            try {
+                Remove-Item -LiteralPath $metaFinal -Force -ErrorAction Stop
+            } catch {
+                throw "$($originalError.Exception.Message) -- additionally, inbox\$id.meta.json could not be removed during rollback and may outlive this refused submission"
+            }
         }
         throw
     } finally {

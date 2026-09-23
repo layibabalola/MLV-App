@@ -5,6 +5,11 @@
 # Protocol (all under <agent root>, which is this script's folder):
 #   inbox\<jobId>.job.ps1   - VM drops a PowerShell script here (atomic rename)
 #   inbox\<jobId>.meta.json - OPTIONAL, VM-written per-job budget: {"jobId":...,"timeoutSec":N}
+#   running\<jobId>.started.json - written the instant this agent claims a job: {"jobId":...,
+#                            "startedUtc":...}. Consumed by um-run.ps1's client to switch from its
+#                            submission-anchored QUEUED-phase deadline to a claim-anchored CLAIMED-
+#                            phase one; removed again once the job's result is published so a later
+#                            submission that reuses the same jobId never reads a stale claim time.
 #   outbox\<jobId>.result.json - agent writes {exitCode,stdout,stderr,timing}
 #   processed\              - consumed job scripts (and their meta.json, if any) are moved here
 #   logs\                   - per-job stdout/stderr capture
@@ -12,17 +17,20 @@
 #
 # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol major 2): this is the repository's ONLY
 # tracked agent, and it is a DELIBERATELY MINIMAL double of the richer, untracked agent deployed at
-# \\bachelor\mlv-agent\ultra-magnus-agent.ps1 (which additionally has queue-age expiry and a
-# running\<id>.started.json claim marker -- see tools/profiling/um-run.ps1's own header for the
-# client-side half of that contract). This tracked copy reads ONLY inbox\<jobId>.meta.json's
-# timeoutSec, in the SAME 1..86400 range and the SAME fall-back-to-default-when-missing-or-
-# unparseable rule as the deployed one, so -JobTimeoutSec below is an agent-wide FALLBACK, never the
-# effective per-job budget when metadata is present. It does NOT write a claim marker: a host running
-# this tracked copy gives um-run.ps1's client no "claimed" signal, so that client falls back to its
-# queue-wait ceiling for the whole job. Tell the two apart by that marker: if
-# `running\<jobId>.started.json` ever appears on a share, the deployed copy is running it; if it
-# never does, whatever is running is (at most) this one. Do not assume the two are otherwise
-# equivalent just because both now honour timeoutSec.
+# \\bachelor\mlv-agent\ultra-magnus-agent.ps1 (which additionally has queue-age expiry). This
+# tracked copy reads ONLY inbox\<jobId>.meta.json's timeoutSec, in the SAME 1..86400 range and the
+# SAME fall-back-to-default-when-missing-or-unparseable rule as the deployed one, so -JobTimeoutSec
+# below is an agent-wide FALLBACK, never the effective per-job budget when metadata is present.
+#
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 6 (sol major 1): this copy now WRITES the same
+# running\<jobId>.started.json claim marker the deployed copy does. Without it, both production
+# wrapper call sites (attr3-footage-stage.ps1) set -MaxQueueWaitSec equal to -TimeoutSec, so a
+# full-budget job's client never saw a claim signal, stayed on its submission-anchored QUEUED
+# deadline for its entire wait, and could throw before the agent -- whose own deadline starts only
+# at claim, strictly after submission -- ever published its timeout receipt. Writing the marker
+# closes that gap the same way the deployed agent already does, rather than asking every client to
+# reason about a queue ceiling that cannot itself outlast an execution ceiling it has no visibility
+# into.
 #
 # Security: this intentionally executes scripts dropped into inbox\. It is a
 # private automation channel on the user's own LAN/host/account. Stop it by
@@ -41,9 +49,10 @@ $ErrorActionPreference = "Continue"
 $inbox     = Join-Path $Root "inbox"
 $outbox    = Join-Path $Root "outbox"
 $processed = Join-Path $Root "processed"
+$running   = Join-Path $Root "running"
 $logs      = Join-Path $Root "logs"
 $heartbeat = Join-Path $Root "heartbeat.txt"
-foreach ($d in @($inbox, $outbox, $processed, $logs)) {
+foreach ($d in @($inbox, $outbox, $processed, $running, $logs)) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
 
@@ -288,6 +297,13 @@ while ($true) {
         $outFile = Join-Path $logs "$jobId.out.txt"
         $errFile = Join-Path $logs "$jobId.err.txt"
         $started = (Get-Date).ToUniversalTime().ToString("o")
+        $startedMarkerPath = Join-Path $running "$jobId.started.json"
+        # sol round 6 major 1: written the instant this job is claimed (dequeued off the inbox),
+        # before any per-job setup below -- um-run.ps1's client switches to a claim-anchored
+        # deadline the moment this file appears, so claiming later than this line would leave the
+        # same submission-anchored race window open for whatever runs between here and the write.
+        [pscustomobject]@{ jobId = $jobId; startedUtc = $started } |
+            ConvertTo-Json -Compress | Set-Content -Encoding ASCII $startedMarkerPath
         $exit    = $null
         $timedOut = $false
         $killedProcessIds = @()
@@ -428,6 +444,12 @@ while ($true) {
         $fin = Join-Path $outbox "$jobId.result.json"
         $result | ConvertTo-Json -Depth 6 | Set-Content -Encoding ASCII $tmp
         Move-Item -Force $tmp $fin
+        # sol round 6 major 1: the claim marker's lifetime matches the job's -- removed once the
+        # result is published (the instant that retires this JobId in UmRunDrop.psm1's own
+        # outbox-result check), never left behind. A deterministic job id reused by a later retry
+        # must never read THIS run's claim time as its own, which a stale marker would cause: the
+        # client would treat it as already claimed long ago and give up almost immediately.
+        Remove-Item -LiteralPath $startedMarkerPath -Force -ErrorAction SilentlyContinue
         Move-Item -Force $job.FullName (Join-Path $processed $job.Name)
         # fable/sol major 1/2: the metadata's lifetime matches the job's -- move it out of inbox\
         # alongside the job it governed, whether or not it was actually honoured this round.

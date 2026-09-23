@@ -1784,6 +1784,27 @@ class Attr3FootageStageCliEndToEndTests(unittest.TestCase):
             self.assertIn("ATTR3_FOOTAGE_STAGE_TIMEOUT_SEC_INVALID", combined)
             self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
 
+    def test_a_timeout_sec_above_the_agents_maximum_is_rejected_before_any_transfer(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 6 (sol major 2): -TimeoutSec used to be
+        # range-checked only against a floor here, so a value above UmRunDrop.psm1's own accepted
+        # 1..86400 maximum was accepted, resolved, and fully transferred -- discovered invalid only
+        # once Invoke-UmRunDrop itself threw UMRUN_JOB_TIMEOUT_INVALID, after paying for the whole
+        # placement. A real clip id would be needed to prove a transfer WAS attempted; using an
+        # invalid one here proves the opposite -- that this rejection fires before even the
+        # resolver runs, so RESOLVED (which the resolver alone can emit) never appears either.
+        clip_id = "NOT-A-REAL-CLIP-ID-ATTR3-STAGE-TIMEOUT"
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path),
+             "-ClipId", clip_id, "-TimeoutSec", "86401"],
+            capture_output=True, text=True,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0, combined)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_TIMEOUT_SEC_INVALID", combined)
+        self.assertNotIn("RESOLVED", combined)
+        self.assertNotIn("TRANSFER PART", combined)
+        self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
+
     def test_a_path_shaped_timeout_sec_value_never_reaches_output(self) -> None:
         # ATTR3-FOOTAGE-STAGE-1 round 6 (sol major, astra major: binding-time output). -TimeoutSec
         # used to be [int]-typed, so PowerShell's OWN parameter binder attempted the conversion

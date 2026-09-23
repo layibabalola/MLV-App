@@ -129,10 +129,20 @@ if ($ClipId -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
 # staleness sweeps' floor (Attr3FootageStageJob.psm1, AttrCudaOwnerFootage.psm1) are meant to agree
 # on; a caller passing zero, a negative number, or anything not a plain integer gets a fixed token,
 # never the offending value.
+#
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 6 (sol major 2): $MaxAttr3FootageStageTimeoutSec mirrors
+# UmRunDrop.psm1's own accepted 1..86400 range for -JobTimeoutSec. Before this, a value above 86400
+# was accepted here and discovered only inside Invoke-UmRunDrop, AFTER step 5's multi-GB transfer
+# had already run -- an inevitably refused request paid for and then discarded the whole placement.
+# Both bounds are checked here, before step 1 (the resolver) even runs, so an out-of-range request
+# never reaches a single byte of work.
 $MinAttr3FootageStageTimeoutSec = 30
+$MaxAttr3FootageStageTimeoutSec = 86400
 $timeoutSecValue = 0
-if (-not [int]::TryParse($TimeoutSec, [ref]$timeoutSecValue) -or $timeoutSecValue -lt $MinAttr3FootageStageTimeoutSec) {
-    throw "ATTR3_FOOTAGE_STAGE_TIMEOUT_SEC_INVALID -TimeoutSec must be an integer >= $MinAttr3FootageStageTimeoutSec"
+if (-not [int]::TryParse($TimeoutSec, [ref]$timeoutSecValue) -or
+    $timeoutSecValue -lt $MinAttr3FootageStageTimeoutSec -or
+    $timeoutSecValue -gt $MaxAttr3FootageStageTimeoutSec) {
+    throw "ATTR3_FOOTAGE_STAGE_TIMEOUT_SEC_INVALID -TimeoutSec must be an integer between $MinAttr3FootageStageTimeoutSec and $MaxAttr3FootageStageTimeoutSec"
 }
 
 # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (sol minor): the presence preflight below is a hash

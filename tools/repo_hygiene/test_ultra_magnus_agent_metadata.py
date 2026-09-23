@@ -136,6 +136,50 @@ class UltraMagnusAgentMetadataFallbackTests(unittest.TestCase):
         self.assertFalse((inbox / "demo.meta.json").exists(), "the unparseable metadata must still be moved out of inbox")
         self.assertTrue(meta_processed.exists())
 
+    def test_a_full_budget_job_is_not_misdiagnosed_as_queued_against_the_tracked_agent(self) -> None:
+        # sol round 6 major 1: the tracked agent used to emit no claim marker at all, while both
+        # production wrapper call sites (attr3-footage-stage.ps1) set -MaxQueueWaitSec EQUAL to
+        # -TimeoutSec -- the FULL-BUDGET configuration itself, not a generously larger toy queue
+        # ceiling that would hide the race. Without a marker, um-run.ps1's client never leaves its
+        # submission-anchored QUEUED phase, so its deadline (submission + MaxQueueWaitSec) equalled
+        # the agent's own execution budget measured from submission -- but the agent's real deadline
+        # starts at CLAIM, strictly after submission, so the client could throw before the agent's
+        # later timeout receipt was ever published. This submits a job that legitimately consumes
+        # its entire requested budget (the agent kills it, exactly the receipt that must survive to
+        # be read) and proves the client survives long enough to read it, matching sol's repro
+        # exactly: TimeoutSec == MaxQueueWaitSec, a job that outlives that budget.
+        budget = 6
+        job_id = "budget-consuming"
+        job = self.local / "budget-consuming.job.ps1"
+        job.write_text("Start-Sleep -Seconds 30\n", encoding="utf-8")
+        script = self.tmp / "full-budget-submit.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            "try {\n"
+            f"  $r = & '{UM_RUN}' -ScriptPath '{job}' -JobId '{job_id}' -AgentShare '{self.share}' "
+            f"-TimeoutSec {budget} -MaxQueueWaitSec {budget} -PollSeconds 1\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode + ' TIMEDOUT=' + $r.timedOut)\n"
+            "} catch {\n"
+            "  Write-Output ('E2E_RESULT=THREW ' + $_.Exception.Message)\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                               capture_output=True, text=True)
+        combined = proc.stdout + proc.stderr
+        self.assertNotIn("E2E_RESULT=THREW", combined,
+                          "the client misdiagnosed a claimed-but-still-running job as never claimed: " + combined)
+        self.assertIn("E2E_RESULT=OK EXIT=124 TIMEDOUT=True", combined, combined)
+
+        # The claim marker's lifetime must match the job's: still present is fine mid-run, but it
+        # must never survive past the job it governed (a stale marker would misdate a later retry
+        # that reuses this job id as already claimed at THIS run's claim time).
+        started_marker = self.share / "running" / f"{job_id}.started.json"
+        deadline = time.time() + 5
+        while time.time() < deadline and started_marker.exists():
+            time.sleep(0.1)
+        self.assertFalse(started_marker.exists(), "the claim marker must be removed once the job's result is published")
+
 
 if __name__ == "__main__":
     unittest.main()
