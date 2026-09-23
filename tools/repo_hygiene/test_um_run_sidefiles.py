@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -58,8 +59,10 @@ class _Share(unittest.TestCase):
     def names(self) -> list[str]:
         return sorted(p.name for p in self.inbox.iterdir())
 
-    def drop(self, copier: str, *, side: list[Path] | None = None, job_id: str = "demo") -> subprocess.CompletedProcess:
+    def drop(self, copier: str, *, side: list[Path] | None = None, job_id: str = "demo",
+             job_timeout_sec: int | None = None) -> subprocess.CompletedProcess:
         sides = ",".join(_q(p) for p in (side if side is not None else [self.side]))
+        timeout_arg = "" if job_timeout_sec is None else f" -JobTimeoutSec {job_timeout_sec}"
         script = self.tmp / "drop.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
@@ -68,7 +71,7 @@ class _Share(unittest.TestCase):
             f"$copier = {copier}\n"
             "try {\n"
             f"  Invoke-UmRunDrop -Inbox {_q(self.inbox)} -Outbox {_q(self.outbox)} -ScriptPath {_q(self.job)} "
-            f"-JobId '{job_id}' -SideFile @({sides}) -Copier $copier\n"
+            f"-JobId '{job_id}' -SideFile @({sides}){timeout_arg} -Copier $copier\n"
             "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
             encoding="utf-8",
         )
@@ -85,6 +88,14 @@ RACING_SIDE = ("{ param($s, $d) Copy-Item -LiteralPath $s -Destination $d; "
 RACING_JOB = ("{ param($s, $d) Copy-Item -LiteralPath $s -Destination $d; "
               "if ($d -like '*.job.tmp') { $final = $d -replace '\\.[0-9a-f]{32}\\.job\\.tmp$', '.job.ps1'; "
               "[IO.File]::WriteAllText($final, 'Write-Output concurrent') } }")
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1. The metadata is written with Set-Content, not through the
+# copier, so ordering cannot be read off the copy log alone: this copier records, at the moment the
+# JOB's temporary is written, whether the metadata is already in place. That is the property the
+# agent depends on -- it may claim the job the instant the job file appears.
+META_ORDER = ("{ param($s, $d) if ($d -like '*.job.tmp') { "
+              "Add-Content -LiteralPath $log -Value ('meta-present-at-job-copy=' + "
+              "(Test-Path -LiteralPath (Join-Path (Split-Path -Parent $d) 'demo.meta.json'))) }; "
+              "Add-Content -LiteralPath $log -Value $d; Copy-Item -LiteralPath $s -Destination $d }")
 
 
 class UmRunDropModuleTests(_Share):
@@ -101,6 +112,45 @@ class UmRunDropModuleTests(_Share):
         self.assertNotIn("demo-source.zip.sidepart", copies)
         self.assertNotIn("demo.job.tmp", copies)
         self.assertEqual(self.names(), ["demo-build.json", "demo-source.zip", "demo.job.ps1"])
+
+    # ---- agent-side job budget (ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1) --------------------------
+    # The agent reads inbox\<id>.meta.json when it claims a job and honours timeoutSec in 1..86400,
+    # falling back to its own 1800 s default when the file is missing or unparseable. Before this,
+    # nothing wrote that file: um-run's -TimeoutSec reached only the client poll, so a multi-GB
+    # placement asked to take an hour was killed at 30 minutes, twice, discarding a ~50 min transfer.
+
+    def test_the_job_budget_is_in_place_before_the_job_becomes_visible(self) -> None:
+        proc = self.drop(META_ORDER, side=[], job_timeout_sec=3600)
+        self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
+        lines = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertIn("meta-present-at-job-copy=True", lines, lines)
+        self.assertEqual(self.names(), ["demo.job.ps1", "demo.meta.json"])
+        meta = json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))
+        self.assertEqual(meta["timeoutSec"], 3600)
+        self.assertEqual(meta["jobId"], "demo")
+
+    def test_no_metadata_is_written_when_no_budget_is_requested(self) -> None:
+        proc = self.drop(OBSERVING, side=[])
+        self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), ["demo.job.ps1"],
+                         "a caller that names no budget must leave the agent on its own default")
+
+    def test_a_budget_outside_the_agents_accepted_range_is_refused_and_nothing_is_placed(self) -> None:
+        for bad in (86401, -1):
+            with self.subTest(timeout=bad):
+                for leftover in self.inbox.iterdir():
+                    leftover.unlink()
+                proc = self.drop(OBSERVING, side=[], job_timeout_sec=bad)
+                self.assertIn("THREW UMRUN_JOB_TIMEOUT_INVALID", proc.stdout, proc.stdout + proc.stderr)
+                self.assertEqual(self.names(), [],
+                                 "a refused budget must leave neither metadata nor a job")
+
+    def test_metadata_that_appears_concurrently_is_not_overwritten(self) -> None:
+        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":42}', encoding="ascii")
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600)
+        self.assertIn("THREW UMRUN_JOBID_IN_USE", proc.stdout, proc.stdout + proc.stderr)
+        self.assertEqual(json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))["timeoutSec"], 42)
+        self.assertEqual(self.names(), ["demo.meta.json"], "no job may be dropped after a metadata conflict")
 
     def test_bytes_altered_on_the_share_are_refused_and_nothing_is_placed(self) -> None:
         proc = self.drop(CORRUPTING)
@@ -260,11 +310,11 @@ class UmRunDropModuleTests(_Share):
 
 
 class UmRunEndToEndTests(_Share):
-    def submit(self, *extra: str) -> subprocess.CompletedProcess:
+    def submit(self, *extra: str, timeout_sec: str = "1") -> subprocess.CompletedProcess:
         return subprocess.run(
             [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
              "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
-             "-TimeoutSec", "1", "-PollSeconds", "1", *extra],
+             "-TimeoutSec", timeout_sec, "-PollSeconds", "1", *extra],
             capture_output=True, text=True,
         )
 
@@ -272,9 +322,39 @@ class UmRunEndToEndTests(_Share):
         proc = self.submit("-SideFile", str(self.side), "-JobId", "demo")
         self.assertIn("side-file placed: demo-source.zip", proc.stdout, proc.stdout + proc.stderr)
         self.assertIn("Timed out", proc.stdout + proc.stderr)
-        self.assertEqual(self.names(), ["demo-source.zip", "demo.job.ps1"])
+        self.assertEqual(self.names(), ["demo-source.zip", "demo.job.ps1", "demo.meta.json"])
         self.assertEqual(hashlib.sha256((self.inbox / "demo-source.zip").read_bytes()).hexdigest(),
                          hashlib.sha256(self.side.read_bytes()).hexdigest())
+
+    def test_the_callers_timeout_reaches_the_agent_as_the_jobs_own_budget(self) -> None:
+        # The bug this closes: -TimeoutSec bounded only the client poll, so the agent ran every job
+        # on its 1800 s default and killed a placement the caller had given an hour.
+        # A real hour-long budget now makes the CLIENT wait an hour too (that is the point of the
+        # change), so this asserts on the artifact and kills the poll rather than sitting out the
+        # deadline: the metadata is written during the drop, long before any result could appear.
+        proc = subprocess.Popen(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
+             "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
+             "-TimeoutSec", "3600", "-PollSeconds", "1", "-JobId", "demo"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            meta_path = self.inbox / "demo.meta.json"
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and not meta_path.exists():
+                time.sleep(0.2)
+            self.assertTrue(meta_path.exists(), "the drop must write the agent's job budget")
+            meta = json.loads(meta_path.read_text(encoding="ascii"))
+            self.assertEqual(meta["timeoutSec"], 3600)
+            self.assertEqual(meta["jobId"], "demo")
+        finally:
+            proc.kill()
+            proc.communicate()
+
+    def test_the_client_poll_outlasts_the_agent_budget_so_a_receipt_can_be_read(self) -> None:
+        # Equal deadlines race: the client would throw its own generic timeout at the same instant
+        # the agent writes the receipt that says WHY the job ended.
+        proc = self.submit("-JobId", "demo")
+        self.assertIn("agent budget 1s + 5s grace", proc.stdout + proc.stderr)
 
     def test_a_different_same_named_file_is_refused_and_no_job_is_dropped(self) -> None:
         (self.inbox / "demo-source.zip").write_bytes(b"someone else's bytes")
@@ -287,13 +367,13 @@ class UmRunEndToEndTests(_Share):
         shutil.copy2(self.side, self.inbox / "demo-source.zip")
         proc = self.submit("-SideFile", str(self.side), "-JobId", "demo")
         self.assertIn("already present with matching sha256", proc.stdout, proc.stdout + proc.stderr)
-        self.assertEqual(self.names(), ["demo-source.zip", "demo.job.ps1"])
+        self.assertEqual(self.names(), ["demo-source.zip", "demo.job.ps1", "demo.meta.json"])
 
     def test_semicolon_list_places_every_file(self) -> None:
         second = self.local / "demo-build.json"
         second.write_text("{}", encoding="utf-8")
         proc = self.submit("-SideFile", f"{self.side};{second}", "-JobId", "demo")
-        self.assertEqual(self.names(), ["demo-build.json", "demo-source.zip", "demo.job.ps1"], proc.stdout + proc.stderr)
+        self.assertEqual(self.names(), ["demo-build.json", "demo-source.zip", "demo.job.ps1", "demo.meta.json"], proc.stdout + proc.stderr)
 
 
 if __name__ == "__main__":

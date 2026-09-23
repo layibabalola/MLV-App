@@ -133,6 +133,13 @@ function Invoke-UmRunDrop {
         [Parameter(Mandatory = $true)][string]$ScriptPath,
         [string]$JobId = '',
         [string[]]$SideFile = @(),
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1: the AGENT's per-job budget, written to
+        # inbox\<id>.meta.json BEFORE the job becomes visible (the agent's own contract: "VM submit
+        # metadata written before the job is visible"). 0 means "write no metadata", which leaves the
+        # agent on its own -JobTimeoutSec default (1800 s) -- the behaviour every caller had before,
+        # and the reason a multi-GB placement was killed at 30 min while its caller had asked for an
+        # hour: um-run's -TimeoutSec reached only the CLIENT poll and never crossed to the host.
+        [int]$JobTimeoutSec = 0,
         [scriptblock]$Copier = { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination }
     )
 
@@ -189,6 +196,32 @@ function Invoke-UmRunDrop {
             if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue }
         }
         Write-Output ("side-file placed: {0} sha256={1}" -f $name, $localSha.ToLowerInvariant())
+    }
+
+    # The agent reads inbox\<id>.meta.json when it picks the job up, and accepts timeoutSec in
+    # 1..86400, falling back to its own default when the value is missing or unparseable. It must
+    # therefore be in place BEFORE the job file is renamed into view -- same ordering rule the
+    # side-files above obey, and for the same reason: the agent may claim the job the instant it
+    # appears. Written through a nonce temp and renamed, never overwriting.
+    if ($JobTimeoutSec -ne 0) {
+        if ($JobTimeoutSec -lt 1 -or $JobTimeoutSec -gt 86400) {
+            throw "UMRUN_JOB_TIMEOUT_INVALID $JobTimeoutSec is outside the agent's accepted 1..86400 range"
+        }
+        $metaFinal = Join-Path $Inbox "$id.meta.json"
+        if (Test-Path -LiteralPath $metaFinal) { throw "UMRUN_JOBID_IN_USE inbox already holds $id.meta.json" }
+        $metaTmp = Join-Path $Inbox "$id.$nonce.meta.tmp"
+        $metaJson = [ordered]@{ jobId = $id; timeoutSec = $JobTimeoutSec } | ConvertTo-Json -Compress
+        try {
+            Set-Content -LiteralPath $metaTmp -Value $metaJson -Encoding ascii -NoNewline
+            try {
+                Move-Item -LiteralPath $metaTmp -Destination $metaFinal -ErrorAction Stop   # no -Force
+            } catch {
+                throw "UMRUN_JOBID_IN_USE inbox\$id.meta.json appeared concurrently; refusing to replace it"
+            }
+        } finally {
+            if (Test-Path -LiteralPath $metaTmp) { Remove-Item -LiteralPath $metaTmp -Force -ErrorAction SilentlyContinue }
+        }
+        Write-Output ("job metadata placed: {0}.meta.json timeoutSec={1}" -f $id, $JobTimeoutSec)
     }
 
     $tmp = Join-Path $Inbox "$id.$nonce.job.tmp"

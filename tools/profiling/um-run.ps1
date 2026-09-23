@@ -56,7 +56,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Command') {
 }
 if (-not (Test-Path $ScriptPath)) { throw "Script not found: $ScriptPath" }
 
-$dropLines = @(Invoke-UmRunDrop -Inbox $inbox -Outbox $outbox -ScriptPath $ScriptPath -JobId $JobId -SideFile $SideFile)
+$dropLines = @(Invoke-UmRunDrop -Inbox $inbox -Outbox $outbox -ScriptPath $ScriptPath -JobId $JobId -SideFile $SideFile -JobTimeoutSec $TimeoutSec)
 $jobId = $null
 foreach ($line in $dropLines) {
     if ($line -like 'UMRUN_JOBID=*') { $jobId = $line.Substring('UMRUN_JOBID='.Length) } else { Write-Host $line }
@@ -64,7 +64,16 @@ foreach ($line in $dropLines) {
 if (-not $jobId) { throw "UmRunDrop returned no job id" }
 
 $resultFile = Join-Path $outbox "$jobId.result.json"
-$deadline = (Get-Date).AddSeconds($TimeoutSec)
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1: -TimeoutSec is now the AGENT's budget too (written into the
+# job metadata above), so the client must outlast it -- otherwise the two deadlines race and the
+# caller throws its own generic timeout instead of reading the agent's receipt, which is the only
+# artifact that says WHY the job ended (exitCode 124, "killed process tree", the pids). The grace is
+# queue wait plus the agent's own result write; a caller that wants the agent to stop sooner lowers
+# -TimeoutSec, which lowers both.
+# Proportional, so a 1-second probe does not wait three minutes for a receipt that will never come,
+# and an hour-long placement still gets a usable margin. Floor 5 s covers the queue-and-write gap.
+$clientGraceSec = [math]::Min(180, [math]::Max(5, [int]($TimeoutSec * 0.1)))
+$deadline = (Get-Date).AddSeconds($TimeoutSec + $clientGraceSec)
 while ((Get-Date) -lt $deadline) {
     if (Test-Path $resultFile) {
         Start-Sleep -Milliseconds 400   # let the atomic rename settle
@@ -73,4 +82,4 @@ while ((Get-Date) -lt $deadline) {
     }
     Start-Sleep -Seconds $PollSeconds
 }
-throw "Timed out after ${TimeoutSec}s waiting for $resultFile"
+throw "Timed out after $($TimeoutSec + $clientGraceSec)s waiting for $resultFile (agent budget ${TimeoutSec}s + ${clientGraceSec}s grace; no agent receipt appeared, so the job never ran or the agent is down)"
