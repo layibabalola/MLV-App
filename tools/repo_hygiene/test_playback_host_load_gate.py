@@ -17,6 +17,7 @@ fixture-driven unit level only. Everything is skipped cleanly when pwsh is not o
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -82,6 +83,12 @@ class HostLoadSnapshotTests(_ProbeCase):
     script = SMOKE_SCRIPT
     functions = ["Get-HostLoadSnapshot"]
 
+    @unittest.skipUnless(
+        os.name == "nt",
+        "Get-HostLoadSnapshot's Win32_Processor/Win32_OperatingSystem CIM collection is "
+        "Windows-only; on other hosts it correctly reports collected=False (see "
+        "HostLoadSnapshotUnknownWhereCollectionIsImpossibleTests below).",
+    )
     def test_real_snapshot_collects_without_paths_or_command_lines(self) -> None:
         proc = self.run_snippet(
             "$s = Get-HostLoadSnapshot -TopProcessCount 6\n"
@@ -108,6 +115,39 @@ class HostLoadSnapshotTests(_ProbeCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertRegex(proc.stdout, r"CAPTURED=\d{4}-\d{2}-\d{2}T")
+
+
+@requires_pwsh
+@unittest.skipUnless(
+    os.name != "nt",
+    "exercises the real Get-HostLoadSnapshot on a host where its Windows-only CIM "
+    "collection is expected to fail -- on Windows itself collection normally succeeds, "
+    "so that path is covered by HostLoadSnapshotTests above instead.",
+)
+class HostLoadSnapshotUnknownWhereCollectionIsImpossibleTests(_ProbeCase):
+    """A host that cannot collect telemetry must classify as UNKNOWN/PROVISIONAL, never
+    'quiet' -- this is the round-1 card's own third-state rule, exercised end to end
+    against the real Get-HostLoadSnapshot + Get-HostLoadVerdict functions rather than a
+    fixture standing in for a collection failure."""
+
+    script = SMOKE_SCRIPT
+    functions = ["Get-HostLoadSnapshot", "Get-HostLoadVerdict"]
+
+    def test_real_uncollectable_snapshot_is_classified_unknown_and_provisional(self) -> None:
+        proc = self.run_snippet(
+            "$before = Get-HostLoadSnapshot -TopProcessCount 1\n"
+            "$after = Get-HostLoadSnapshot -TopProcessCount 1\n"
+            "Write-Host \"BEFORE_COLLECTED=$($before.collected)\"\n"
+            "Write-Host \"AFTER_COLLECTED=$($after.collected)\"\n"
+            "$v = Get-HostLoadVerdict -Before $before -After $after -Bar 75\n"
+            "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("BEFORE_COLLECTED=False", proc.stdout)
+        self.assertIn("AFTER_COLLECTED=False", proc.stdout)
+        self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
+        self.assertNotIn("STATE=quiet", proc.stdout)
+        self.assertNotIn("STATE=exceeded", proc.stdout)
 
 
 @requires_pwsh
