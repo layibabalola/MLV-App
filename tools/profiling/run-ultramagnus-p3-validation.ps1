@@ -177,6 +177,43 @@ function Add-Failure {
     [void]$Failures.Add($Message)
 }
 
+function Get-SmokeSummaryHostLoadFields {
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 3: this script invokes run-release-gui-smoke.ps1
+    # per clip and already parses its JSON output ($result below) for presentedFps etc; that JSON
+    # carries a hostLoad block. Same fail-toward-provisional logic as
+    # run-release-cuda-playback-ab.ps1's Get-SmokeSummaryHostLoadFields (this script is a separate
+    # standalone .ps1 with no shared module, hence the duplicate rather than an import).
+    param([object]$HostLoad)
+
+    if ($null -eq $HostLoad) {
+        return [pscustomobject]@{
+            provisional = $true
+            state = "unknown"
+            reason = "no hostLoad telemetry recorded in the smoke result"
+        }
+    }
+    $provisionalProperty = $HostLoad.PSObject.Properties["provisional"]
+    $provisional = if ($null -eq $provisionalProperty -or $null -eq $provisionalProperty.Value) {
+        $true
+    } else {
+        [bool]$provisionalProperty.Value
+    }
+    $stateProperty = $HostLoad.PSObject.Properties["state"]
+    $state = if ($null -eq $stateProperty -or [string]::IsNullOrWhiteSpace([string]$stateProperty.Value)) {
+        "unknown"
+    } else {
+        [string]$stateProperty.Value
+    }
+    $reasonProperty = $HostLoad.PSObject.Properties["reason"]
+    $reason = if ($null -eq $reasonProperty) { $null } else { [string]$reasonProperty.Value }
+
+    [pscustomobject]@{
+        provisional = $provisional
+        state = $state
+        reason = $reason
+    }
+}
+
 function Add-NullableDouble {
     param(
         [System.Collections.Generic.List[double]]$Values,
@@ -1269,6 +1306,10 @@ exit `$LASTEXITCODE
         }
 
         $clipStatus = if ($clipFailures.Count -eq 0) { "success" } else { "failed" }
+        # MARKS, never fails: per this card's own rule, host load never fails a run by itself --
+        # it only disqualifies the fps it recorded from being trusted as a regression/acceptance
+        # signal. $speedValidated below is exactly that acceptance signal for the speed leg.
+        $hostLoadFields = Get-SmokeSummaryHostLoadFields -HostLoad (if ($result) { $result.hostLoad } else { $null })
         $clipResults += [pscustomobject]@{
             clip = $clipItem.FullName
             status = $clipStatus
@@ -1281,6 +1322,9 @@ exit `$LASTEXITCODE
             presentedFrames = if ($result) { $result.log.summary.presented_frames } else { $null }
             presentedFps = if ($result) { $result.log.summary.presented_fps } else { $null }
             timelineFps = if ($result) { $result.log.summary.timeline_fps } else { $null }
+            hostLoadProvisional = $hostLoadFields.provisional
+            hostLoadState = $hostLoadFields.state
+            hostLoadReason = $hostLoadFields.reason
             gpuTextureNoReadbackFrames = $noReadbackFrames
             gpuTextureReadbackFrames = $textureReadbackFrames
             noReadbackCandidateFrameCount = $noReadbackCandidateFrameCount
@@ -1370,7 +1414,12 @@ $speedValidated =
         [double]$_.presentedFps -lt $MinPresentedFps -or
         [int]$_.gpuTextureNoReadbackFrames -le 0 -or
         [int]$_.fallbackFrameCount -ne 0 -or
-        $acceptedAmazeFrameCount -ne [int]$_.activeNoReadbackFrameCount
+        $acceptedAmazeFrameCount -ne [int]$_.activeNoReadbackFrameCount -or
+        # PLAYBACK-MEASURE-HOST-LOAD-GATE-1: speedValidated is exactly the "acceptance signal"
+        # this card's own rule names -- a presentedFps that cleared $MinPresentedFps only
+        # because a loaded/uncollectable host happened not to drag it far enough below the
+        # floor is not proof the build is fast; it is proof the floor was generous enough.
+        [bool]$_.hostLoadProvisional
     }).Count -eq 0)
 
 $summary = [pscustomobject]@{

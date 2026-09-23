@@ -564,6 +564,16 @@ function New-RemoteP3SummaryRow {
         $fpsValues += $clip.presentedFps
     }
     $presentedFps = Get-AverageNullableDouble -Values $fpsValues
+    # MARKS: round 3 taught run-ultramagnus-p3-validation.ps1's clipResults a hostLoadProvisional
+    # field (reusing Get-PlaybackAbLegHostLoadProvisional's absent-property-safe check -- it only
+    # inspects a boolean "hostLoadProvisional" property, so it applies to any leg object with that
+    # shape, not only a playback-ab leg). $null with zero clips: genuinely nothing to report, not
+    # a false "clean".
+    $hostLoadProvisional = if ($clips.Count -eq 0) {
+        $null
+    } else {
+        [bool](@($clips | Where-Object { Get-PlaybackAbLegHostLoadProvisional -Leg $_ }).Count -gt 0)
+    }
 
     $suggestion = if ([string]$Record.status -ne "success") {
         "inspect_p3_remote_validation_failure"
@@ -595,6 +605,7 @@ function New-RemoteP3SummaryRow {
         dng_suggested_optimization = $null
         dominant_bottleneck = "unknown"
         suggested_optimization = $suggestion
+        host_load_provisional = $hostLoadProvisional
         build_status = $Record.status
         source = $Source
     }

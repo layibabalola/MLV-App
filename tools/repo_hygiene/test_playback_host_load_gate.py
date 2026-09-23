@@ -30,6 +30,7 @@ SMOKE_SCRIPT = ROOT / "tools" / "profiling" / "run-release-gui-smoke.ps1"
 COMPARE_SCRIPT = ROOT / "tools" / "profiling" / "compare-release-gui-smoke-ab.ps1"
 CUDA_AB_SCRIPT = ROOT / "tools" / "profiling" / "run-release-cuda-playback-ab.ps1"
 COMPARE_MACHINE_PERF_SCRIPT = ROOT / "tools" / "profiling" / "compare-machine-perf.ps1"
+P3_VALIDATION_SCRIPT = ROOT / "tools" / "profiling" / "run-ultramagnus-p3-validation.ps1"
 
 PWSH = shutil.which("pwsh")
 requires_pwsh = unittest.skipIf(PWSH is None, "pwsh is not on PATH")
@@ -595,6 +596,136 @@ class CompareMachinePerfHostLoadWiringTests(unittest.TestCase):
             refusal_check, trusts_embedded_analysis,
             "the host-load refusal must be checked before trusting the record's own cached analysis",
         )
+
+
+@requires_pwsh
+class CompareMachinePerfP3HostLoadRowTests(_ProbeCase):
+    """tools/profiling/compare-machine-perf.ps1's New-RemoteP3SummaryRow -- round 3 folds in
+    sol's finding: p3 rows previously carried presented_fps with no host-load provenance at all
+    (fable's finding #2 also named this gap). Get-PlaybackAbLegHostLoadProvisional is reused here
+    even though it is named for playback-ab legs, because its absent-property-safe check on a
+    bare "hostLoadProvisional" boolean applies to any leg-shaped object, p3 clips included."""
+
+    script = COMPARE_MACHINE_PERF_SCRIPT
+    functions = [
+        "Convert-ToNullableDouble",
+        "Convert-ToNullableInt64",
+        "Get-AverageNullableDouble",
+        "Get-PlaybackAbLegHostLoadProvisional",
+        "Get-FirstPropertyValue",
+        "Convert-NvidiaSmiMemoryToMb",
+        "Get-ImportedP3RunMetadata",
+        "New-MachineFingerprintObject",
+        "New-RemoteP3MachineFingerprint",
+        "Assert-MachineFingerprint",
+        "Get-MachineLabel",
+        "Get-ClipPresentedFrames",
+        "Get-TotalPipelineFrames",
+        "New-RemoteP3SummaryRow",
+    ]
+
+    def _clip(self, presented_fps: float, host_load_provisional) -> str:
+        extra = ""
+        if host_load_provisional is not None:
+            extra = "; hostLoadProvisional = " + ("$true" if host_load_provisional else "$false")
+        return (
+            "[pscustomobject]@{ "
+            f"presentedFps = {presented_fps}; gpuTextureNoReadbackFrames = 10; "
+            f"fallbackFrameCount = 0; validationOk = $true{extra} }}"
+        )
+
+    def _record(self, clips: list) -> str:
+        clips_literal = ", ".join(clips)
+        return (
+            "[pscustomobject]@{ schema = 'mlvapp-ultramagnus-p3-validation.v1'; status = 'success'; "
+            "machineFingerprint = [pscustomobject]@{ hostname = 'ULTRAMAGNUS'; cpu = 'x'; gpu = 'y'; "
+            "os = 'z'; build_sha = 'abc1234' }; "
+            f"clipResults = @({clips_literal}); "
+            "proof = [pscustomobject]@{ correctnessValidated = $true } }"
+        )
+
+    def test_all_quiet_clips_report_host_load_provisional_false(self) -> None:
+        record = self._record([self._clip(24.0, False), self._clip(25.0, False)])
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = New-RemoteP3SummaryRow -Record $record -Source 'test'\n"
+            "Write-Host \"HOST_LOAD_PROVISIONAL=$($r.host_load_provisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("HOST_LOAD_PROVISIONAL=False", proc.stdout)
+
+    def test_one_provisional_clip_marks_the_whole_row_provisional(self) -> None:
+        record = self._record([self._clip(24.0, False), self._clip(4.0, True)])
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = New-RemoteP3SummaryRow -Record $record -Source 'test'\n"
+            "Write-Host \"HOST_LOAD_PROVISIONAL=$($r.host_load_provisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("HOST_LOAD_PROVISIONAL=True", proc.stdout)
+
+    def test_clip_missing_hostloadprovisional_property_is_treated_as_provisional(self) -> None:
+        # A p3 record from before this fix never carried the property at all -- "cannot know" is
+        # the same disposition as "provisional" under this card's fail-toward-provisional stance.
+        record = self._record([self._clip(24.0, None)])
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = New-RemoteP3SummaryRow -Record $record -Source 'test'\n"
+            "Write-Host \"HOST_LOAD_PROVISIONAL=$($r.host_load_provisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("HOST_LOAD_PROVISIONAL=True", proc.stdout)
+
+
+@requires_pwsh
+class P3ValidationSmokeSummaryHostLoadFieldsTests(_ProbeCase):
+    """tools/profiling/run-ultramagnus-p3-validation.ps1's Get-SmokeSummaryHostLoadFields --
+    duplicated (this script has no shared module with the CUDA A/B script) but same behaviour:
+    fail toward provisional/unknown on a missing or degenerate hostLoad block."""
+
+    script = P3_VALIDATION_SCRIPT
+    functions = ["Get-SmokeSummaryHostLoadFields"]
+
+    def _fields(self, host_load: str) -> subprocess.CompletedProcess:
+        return self.run_snippet(
+            f"$hostLoad = {host_load}\n"
+            "$f = Get-SmokeSummaryHostLoadFields -HostLoad $hostLoad\n"
+            "Write-Host \"PROVISIONAL=$($f.provisional) STATE=$($f.state)\"\n"
+        )
+
+    def test_missing_hostload_reads_as_unknown_provisional(self) -> None:
+        proc = self._fields("$null")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True STATE=unknown", proc.stdout)
+
+    def test_hostload_present_but_missing_provisional_property_reads_as_provisional(self) -> None:
+        proc = self._fields("[pscustomobject]@{ state = 'exceeded' }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True", proc.stdout)
+
+    def test_well_formed_quiet_hostload_reads_through_untouched(self) -> None:
+        proc = self._fields(
+            "[pscustomobject]@{ provisional = $false; state = 'quiet'; reason = $null }"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=False STATE=quiet", proc.stdout)
+
+
+class P3ValidationSpeedValidatedWiringTests(unittest.TestCase):
+    """Static structural check: speedValidated (the card's own "acceptance signal" language,
+    applied to the speed leg's fps floor) must consult per-clip host-load provenance, and each
+    clip result must carry it -- otherwise the mark computed above is never reachable."""
+
+    def test_clip_results_carry_host_load_fields(self) -> None:
+        source = P3_VALIDATION_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("hostLoadProvisional = $hostLoadFields.provisional", source)
+        self.assertIn("$hostLoadFields = Get-SmokeSummaryHostLoadFields -HostLoad", source)
+
+    def test_speed_validated_excludes_host_load_provisional_clips(self) -> None:
+        source = P3_VALIDATION_SCRIPT.read_text(encoding="utf-8")
+        speed_validated_start = source.index("$speedValidated =")
+        speed_validated_block = source[speed_validated_start:speed_validated_start + 1600]
+        self.assertIn("[bool]$_.hostLoadProvisional", speed_validated_block)
 
 
 if __name__ == "__main__":
