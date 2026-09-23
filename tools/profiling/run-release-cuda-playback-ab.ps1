@@ -379,6 +379,14 @@ function New-PlaybackAbAnalysis {
     $suggestion = "rerun_playback_ab_for_stage_metrics"
     $confidence = "missing_metrics"
 
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 3: this analysis is embedded in the summary JSON and
+    # trusted verbatim downstream (compare-machine-perf.ps1's Get-ProofSummarySuggestion reads
+    # .analysis.suggestedOptimization directly). A host-load-provisional leg must refuse the
+    # delta-based bottleneck diagnosis here too, or the refusal never reaches that consumer -- the
+    # fps deltas below ($fpsDeltaPct etc.) are still computed and kept in .evidence for
+    # transparency, only the derived diagnosis is withheld.
+    $hostLoadProofFailures = @($ProofFailures | Where-Object { $_ -match 'host-load-provisional' })
+
     if ($null -ne $fpsDeltaPct) {
         $confidence = "observed_delta"
         if ($fpsDeltaPct -lt -1.0) {
@@ -450,6 +458,12 @@ function New-PlaybackAbAnalysis {
                 $suggestion = "validate_same_clip_on_second_machine"
             }
         }
+    }
+
+    if ($hostLoadProofFailures.Count -gt 0) {
+        $dominant = "host-load-provisional"
+        $suggestion = "rerun_playback_ab_with_quiet_host"
+        $confidence = "host_load_provisional"
     }
 
     [pscustomobject]@{
@@ -732,6 +746,33 @@ function Get-HostLoadProofFailures {
     @($failures)
 }
 
+function Get-SmokeSummaryHostLoadFields {
+    # A leg recorded before PLAYBACK-MEASURE-HOST-LOAD-GATE-1 (or one whose host-load capture
+    # never made it into the JSON) never MEASURED its load, which is UNKNOWN, not "quiet".
+    # round 3: same for a hostLoad block that is PRESENT but missing "provisional"/"state" --
+    # [bool]$null -eq $false would silently read a degenerate block as clean, exactly backwards
+    # from this gate's fail-toward-provisional stance. Factored out of Read-SmokeSummary so it is
+    # independently testable, mirroring compare-release-gui-smoke-ab.ps1's
+    # Get-HostLoadComparisonEvidence.
+    param([object]$HostLoad)
+
+    $provisionalRaw = if ($null -eq $HostLoad) { $null } else { Get-NestedValue $HostLoad "provisional" }
+    $provisional = if ($null -eq $HostLoad -or $null -eq $provisionalRaw) { $true } else { [bool]$provisionalRaw }
+    $stateRaw = if ($null -eq $HostLoad) { $null } else { Get-NestedValue $HostLoad "state" }
+    $state = if ($null -eq $HostLoad -or [string]::IsNullOrWhiteSpace([string]$stateRaw)) { "unknown" } else { [string]$stateRaw }
+    $reason = if ($null -eq $HostLoad) {
+        "no hostLoad telemetry recorded in the smoke result"
+    } else {
+        [string](Get-NestedValue $HostLoad "reason")
+    }
+
+    [pscustomobject]@{
+        provisional = $provisional
+        state = $state
+        reason = $reason
+    }
+}
+
 function Read-SmokeSummary {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -753,15 +794,10 @@ function Read-SmokeSummary {
 
     $json = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -Depth 100
     $hostLoad = Get-NestedValue $json "hostLoad"
-    # A leg recorded before PLAYBACK-MEASURE-HOST-LOAD-GATE-1 (or one whose host-load capture
-    # never made it into the JSON) never MEASURED its load, which is UNKNOWN, not "quiet".
-    $hostLoadProvisional = if ($null -eq $hostLoad) { $true } else { [bool](Get-NestedValue $hostLoad "provisional") }
-    $hostLoadState = if ($null -eq $hostLoad) { "unknown" } else { [string](Get-NestedValue $hostLoad "state") }
-    $hostLoadReason = if ($null -eq $hostLoad) {
-        "no hostLoad telemetry recorded in the smoke result"
-    } else {
-        [string](Get-NestedValue $hostLoad "reason")
-    }
+    $hostLoadFields = Get-SmokeSummaryHostLoadFields -HostLoad $hostLoad
+    $hostLoadProvisional = $hostLoadFields.provisional
+    $hostLoadState = $hostLoadFields.state
+    $hostLoadReason = $hostLoadFields.reason
     $summary = Get-NestedValue $json "log.summary"
     $glProof = Get-NestedValue $json "visualQuality.glOutputProof"
     if ($null -eq $glProof) {

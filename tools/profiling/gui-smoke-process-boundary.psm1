@@ -47,7 +47,14 @@ function Wait-GuiSmokeProcessBounded {
         [ValidateRange(1, 60000)]
         [int]$TerminationGraceMs = 15000,
         [ValidateRange(1, 60000)]
-        [int]$StreamDrainMs = 15000
+        [int]$StreamDrainMs = 15000,
+        # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 3: 0 (default) preserves the original single
+        # blocking WaitForExit exactly -- every caller that doesn't opt in keeps its prior
+        # behaviour untouched. >0 chops the wait into chunks so $OnSample can run between them,
+        # i.e. DURING the leg, not just at its edges.
+        [ValidateRange(0, 3600000)]
+        [int]$SampleIntervalMs = 0,
+        [scriptblock]$OnSample = $null
     )
 
     $failures = [System.Collections.Generic.List[string]]::new()
@@ -56,11 +63,41 @@ function Wait-GuiSmokeProcessBounded {
     $treeKillSucceeded = $false
     $terminationConfirmed = $false
 
-    try {
-        $terminationConfirmed = $Process.WaitForExit($TimeoutMs)
+    if ($SampleIntervalMs -gt 0 -and $null -ne $OnSample) {
+        $elapsedMs = 0
+        while ($true) {
+            $chunkMs = [Math]::Min($SampleIntervalMs, $TimeoutMs - $elapsedMs)
+            if ($chunkMs -le 0) {
+                $terminationConfirmed = $false
+                break
+            }
+            try {
+                $terminationConfirmed = $Process.WaitForExit($chunkMs)
+            }
+            catch {
+                $failures.Add("Process wait failed: $($_.Exception.Message)")
+                $terminationConfirmed = $false
+                break
+            }
+            $elapsedMs += $chunkMs
+            if ($terminationConfirmed -or $elapsedMs -ge $TimeoutMs) {
+                break
+            }
+            try {
+                & $OnSample
+            }
+            catch {
+                $failures.Add("Host-load sample during leg failed: $($_.Exception.Message)")
+            }
+        }
     }
-    catch {
-        $failures.Add("Process wait failed: $($_.Exception.Message)")
+    else {
+        try {
+            $terminationConfirmed = $Process.WaitForExit($TimeoutMs)
+        }
+        catch {
+            $failures.Add("Process wait failed: $($_.Exception.Message)")
+        }
     }
 
     if (-not $terminationConfirmed) {

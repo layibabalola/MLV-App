@@ -411,8 +411,14 @@ function Get-HostLoadComparisonEvidence {
         [pscustomobject]@{ Name = "after"; Smoke = $AfterSmoke }
     )) {
         $legHostLoad = Get-NestedValue $leg.Smoke "hostLoad"
-        $legProvisional = if ($null -eq $legHostLoad) { $true } else { [bool](Get-NestedValue $legHostLoad "provisional") }
-        $legState = if ($null -eq $legHostLoad) { "unknown" } else { [string](Get-NestedValue $legHostLoad "state") }
+        # round 3: a hostLoad block that is PRESENT but missing "provisional" (or "state") must
+        # read the same as a missing block entirely -- provisional/unknown, never coerced to
+        # clean. [bool]$null -eq $false is the trap: it would make a degenerate block silently
+        # pass as a clean leg, exactly backwards from this gate's fail-toward-provisional stance.
+        $legProvisionalRaw = if ($null -eq $legHostLoad) { $null } else { Get-NestedValue $legHostLoad "provisional" }
+        $legProvisional = if ($null -eq $legHostLoad -or $null -eq $legProvisionalRaw) { $true } else { [bool]$legProvisionalRaw }
+        $legStateRaw = if ($null -eq $legHostLoad) { $null } else { Get-NestedValue $legHostLoad "state" }
+        $legState = if ($null -eq $legHostLoad -or [string]::IsNullOrWhiteSpace([string]$legStateRaw)) { "unknown" } else { [string]$legStateRaw }
         $legReason = if ($null -eq $legHostLoad) {
             "no hostLoad telemetry recorded in the smoke result"
         } else {

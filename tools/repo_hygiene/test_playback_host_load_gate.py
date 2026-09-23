@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SMOKE_SCRIPT = ROOT / "tools" / "profiling" / "run-release-gui-smoke.ps1"
 COMPARE_SCRIPT = ROOT / "tools" / "profiling" / "compare-release-gui-smoke-ab.ps1"
 CUDA_AB_SCRIPT = ROOT / "tools" / "profiling" / "run-release-cuda-playback-ab.ps1"
+COMPARE_MACHINE_PERF_SCRIPT = ROOT / "tools" / "profiling" / "compare-machine-perf.ps1"
 
 PWSH = shutil.which("pwsh")
 requires_pwsh = unittest.skipIf(PWSH is None, "pwsh is not on PATH")
@@ -207,6 +208,51 @@ class HostLoadVerdictTests(_ProbeCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
 
+    def test_mid_leg_burst_is_missed_by_bracketing_alone_but_caught_by_sampling(self) -> None:
+        # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 3: this is the exact case in point. A burst
+        # that starts after the before-snapshot and ends before the after-snapshot is invisible
+        # to bracketing alone (round 2's behaviour -- calling Get-HostLoadVerdict with no -During
+        # samples) but must be caught once interior samples are supplied (round 3's behaviour).
+        # The rule is PEAK across all samples, not average or sustained-for-N: a single 96%
+        # interior sample marks the whole leg exceeded/provisional even though before/after are
+        # both quiet.
+        before = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
+        after = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 14.0 }"
+        burst_during = (
+            "@("
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 }, "
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0 }, "
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 13.0 }"
+            ")"
+        )
+        proc = self.run_snippet(
+            f"$before = {before}\n"
+            f"$after = {after}\n"
+            f"$during = {burst_during}\n"
+            "$bracketedOnly = Get-HostLoadVerdict -Before $before -After $after -Bar 75\n"
+            "Write-Host \"BRACKETED_STATE=$($bracketedOnly.state) "
+            "BRACKETED_PROVISIONAL=$($bracketedOnly.provisional)\"\n"
+            "$sampled = Get-HostLoadVerdict -Before $before -After $after -During $during -Bar 75\n"
+            "Write-Host \"SAMPLED_STATE=$($sampled.state) "
+            "SAMPLED_PROVISIONAL=$($sampled.provisional) SAMPLED_MAX=$($sampled.maxCpuLoadPercent)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("BRACKETED_STATE=quiet BRACKETED_PROVISIONAL=False", proc.stdout)
+        self.assertIn("SAMPLED_STATE=exceeded SAMPLED_PROVISIONAL=True", proc.stdout)
+        self.assertIn("SAMPLED_MAX=96", proc.stdout)
+
+    def test_an_uncollected_interior_sample_is_unknown_not_silently_dropped(self) -> None:
+        before = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
+        after = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
+        during = "@([pscustomobject]@{ collected = $false; cpuLoadPercent = $null })"
+        proc = self.run_snippet(
+            f"$before = {before}\n$after = {after}\n$during = {during}\n"
+            "$v = Get-HostLoadVerdict -Before $before -After $after -During $during -Bar 75\n"
+            "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
+
 
 @requires_pwsh
 class GuiSmokeResultCarriesHostLoadTests(unittest.TestCase):
@@ -227,6 +273,17 @@ class GuiSmokeResultCarriesHostLoadTests(unittest.TestCase):
         after_capture = source.index("$hostLoadAfter = Get-HostLoadSnapshot")
         self.assertLess(before_capture, process_start, "hostLoad 'before' must be captured before launch")
         self.assertLess(process_start, after_capture, "hostLoad 'after' must be captured after the process ends")
+
+    def test_leg_wait_is_wired_to_sample_host_load_during_the_leg(self) -> None:
+        # round 3: bracketing alone (before Process::Start, after WaitForExit) is not enough --
+        # Wait-GuiSmokeProcessBounded must be given a sampling cadence and callback so it can
+        # take interior snapshots too, and the verdict must actually consume them.
+        source = SMOKE_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("-SampleIntervalMs $HostLoadSampleIntervalMs", source)
+        self.assertIn("-OnSample $hostLoadOnSample", source)
+        self.assertIn("$hostLoadDuringSamples.Add((Get-HostLoadSnapshot", source)
+        self.assertIn("-During @($hostLoadDuringSamples)", source)
+        self.assertIn("during = @($hostLoadDuringSamples)", source)
 
 
 @requires_pwsh
@@ -278,6 +335,56 @@ class CompareGuiSmokeAbHostLoadRefusalTests(_ProbeCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("BEFORE_STATE=unknown", proc.stdout)
         self.assertNotIn("FAILURES=0", proc.stdout)
+
+    def test_hostload_block_present_but_missing_provisional_reads_as_provisional(self) -> None:
+        # round 3 item 3: a hostLoad block that EXISTS but lacks the "provisional" property (a
+        # degenerate/partial write, or a future schema drift) must not coerce [bool]$null to
+        # $false and read as clean -- that is fail-toward-clean, backwards from this gate.
+        degenerate = "[pscustomobject]@{ hostLoad = [pscustomobject]@{ state = 'exceeded' } }"
+        quiet = "[pscustomobject]@{ hostLoad = [pscustomobject]@{ provisional = $false; state = 'quiet'; reason = $null } }"
+        proc = self._compare(degenerate, quiet)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("FAILURES=0", proc.stdout)
+        self.assertIn("before smoke host load is PROVISIONAL", proc.stdout)
+
+
+@requires_pwsh
+class SmokeSummaryHostLoadFieldsTests(_ProbeCase):
+    """tools/profiling/run-release-cuda-playback-ab.ps1's Get-SmokeSummaryHostLoadFields --
+    factored out of Read-SmokeSummary round 3 so the schema-drift-safety fix (item 3) is
+    independently testable rather than only reachable through a full JSON-file read."""
+
+    script = CUDA_AB_SCRIPT
+    functions = ["Get-NestedValue", "Get-SmokeSummaryHostLoadFields"]
+
+    def _fields(self, host_load: str) -> subprocess.CompletedProcess:
+        return self.run_snippet(
+            f"$hostLoad = {host_load}\n"
+            "$f = Get-SmokeSummaryHostLoadFields -HostLoad $hostLoad\n"
+            "Write-Host \"PROVISIONAL=$($f.provisional) STATE=$($f.state) REASON=$($f.reason)\"\n"
+        )
+
+    def test_missing_hostload_reads_as_unknown_provisional(self) -> None:
+        proc = self._fields("$null")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True STATE=unknown", proc.stdout)
+
+    def test_hostload_present_but_missing_provisional_property_reads_as_provisional(self) -> None:
+        proc = self._fields("[pscustomobject]@{ state = 'exceeded' }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True", proc.stdout)
+
+    def test_hostload_present_but_missing_state_property_reads_as_unknown(self) -> None:
+        proc = self._fields("[pscustomobject]@{ provisional = $false }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=unknown", proc.stdout)
+
+    def test_well_formed_quiet_hostload_reads_through_untouched(self) -> None:
+        proc = self._fields(
+            "[pscustomobject]@{ provisional = $false; state = 'quiet'; reason = $null }"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=False STATE=quiet", proc.stdout)
 
 
 @requires_pwsh
@@ -333,6 +440,60 @@ class CudaPlaybackAbHostLoadGateTests(_ProbeCase):
         self.assertIn("REQUESTED_FAILURES=1", proc.stdout)
 
 
+@requires_pwsh
+class PlaybackAbAnalysisHostLoadRefusalTests(_ProbeCase):
+    """tools/profiling/run-release-cuda-playback-ab.ps1's New-PlaybackAbAnalysis -- round 3: this
+    is the AUTHORITATIVE analysis writer embedded in the summary JSON and trusted verbatim
+    downstream (compare-machine-perf.ps1's Get-ProofSummarySuggestion reads
+    .analysis.suggestedOptimization directly), so the refusal must live here too, not only in
+    compare-machine-perf.ps1's own recompute path."""
+
+    script = CUDA_AB_SCRIPT
+    functions = [
+        "Convert-ToNullableDouble",
+        "Get-NestedValue",
+        "Get-CompareDeltaPercent",
+        "Test-DeltaAtLeast",
+        "New-PlaybackAbAnalysis",
+    ]
+
+    def test_host_load_provisional_proof_failure_refuses_the_bottleneck_diagnosis(self) -> None:
+        # A large, clearly-actionable-looking fps regression must still be refused when the
+        # ProofFailures say the baseline leg was host-load provisional -- the diagnosis would
+        # otherwise be derived from noise, not from the candidate build.
+        compare = (
+            "[pscustomobject]@{ "
+            "presentedFps = [pscustomobject]@{ deltaPercent = -40.0 }; "
+            "avgQueueWaitMs = [pscustomobject]@{ deltaPercent = 30.0; candidate = 20.0 }; "
+            "avgDrawTotalMs = [pscustomobject]@{ deltaPercent = 20.0; candidate = 5.0 } "
+            "}"
+        )
+        proc = self.run_snippet(
+            f"$compare = {compare}\n"
+            "$proofFailures = @('baseline-host-load-provisional state=exceeded reason=CPU 96%')\n"
+            "$a = New-PlaybackAbAnalysis -Compare $compare -ProofFailures $proofFailures -ComparisonBasis 'candidate'\n"
+            "Write-Host \"DOMINANT=$($a.dominantBottleneck) SUGGESTION=$($a.suggestedOptimization) "
+            "CONFIDENCE=$($a.confidence)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("DOMINANT=host-load-provisional", proc.stdout)
+        self.assertIn("SUGGESTION=rerun_playback_ab_with_quiet_host", proc.stdout)
+        self.assertNotIn("DOMINANT=present-bound", proc.stdout)
+
+    def test_non_host_load_proof_failure_does_not_trigger_the_host_load_refusal(self) -> None:
+        # A different kind of proof failure (e.g. GL parity) must not be mislabeled as a
+        # host-load problem -- the delta-based diagnosis should still run normally.
+        compare = "[pscustomobject]@{ presentedFps = [pscustomobject]@{ deltaPercent = 20.0 } }"
+        proc = self.run_snippet(
+            f"$compare = {compare}\n"
+            "$proofFailures = @('candidate-gl-parity-mismatches=3')\n"
+            "$a = New-PlaybackAbAnalysis -Compare $compare -ProofFailures $proofFailures -ComparisonBasis 'candidate'\n"
+            "Write-Host \"DOMINANT=$($a.dominantBottleneck)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("DOMINANT=host-load-provisional", proc.stdout)
+
+
 class RunReleaseCudaPlaybackAbWiresTheGateInTests(unittest.TestCase):
     """Static check: the main script body must actually call the extracted gate function."""
 
@@ -341,6 +502,99 @@ class RunReleaseCudaPlaybackAbWiresTheGateInTests(unittest.TestCase):
         self.assertIn("$proofFailures += @(Get-HostLoadProofFailures", source)
         self.assertIn("-BaselineSummary $baselineSummary", source)
         self.assertIn("-CandidateSummary $candidateSummary", source)
+
+
+@requires_pwsh
+class CompareMachinePerfPlaybackAbHostLoadRefusalTests(_ProbeCase):
+    """tools/profiling/compare-machine-perf.ps1's Get-PlaybackAbHostLoadRefusal and
+    Get-PlaybackAbAnalysis -- round 3 item 2: this cross-machine/cross-run comparison tool must
+    refuse a derived bottleneck diagnosis for a provisional leg, not just display the numbers
+    next to a status flag nobody is required to read."""
+
+    script = COMPARE_MACHINE_PERF_SCRIPT
+    functions = [
+        "Convert-ToNullableDouble",
+        "Get-PlaybackAbLegHostLoadProvisional",
+        "Get-PlaybackAbHostLoadRefusal",
+        "Get-CompareDeltaPercent",
+        "Test-DeltaAtLeast",
+        "Get-PlaybackAbAnalysis",
+    ]
+
+    def _record(self, baseline_provisional: bool, candidate_provisional: bool, fps_delta_pct: float = -40.0) -> str:
+        baseline = "[pscustomobject]@{ hostLoadProvisional = " + ("$true" if baseline_provisional else "$false") + " }"
+        candidate = "[pscustomobject]@{ hostLoadProvisional = " + ("$true" if candidate_provisional else "$false") + " }"
+        return (
+            "[pscustomobject]@{ "
+            f"baseline = {baseline}; candidate = {candidate}; candidateSpeed = $null; "
+            f"compare = [pscustomobject]@{{ presentedFps = [pscustomobject]@{{ deltaPercent = {fps_delta_pct} }} }} "
+            "}"
+        )
+
+    def test_provisional_baseline_refuses_the_bottleneck_diagnosis(self) -> None:
+        proc = self.run_snippet(
+            f"$record = {self._record(True, False)}\n"
+            "$a = Get-PlaybackAbAnalysis -Record $record\n"
+            "Write-Host \"DOMINANT=$($a.dominantBottleneck) SUGGESTION=$($a.suggestedOptimization)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("DOMINANT=host-load-provisional", proc.stdout)
+        self.assertIn("SUGGESTION=rerun_playback_ab_with_quiet_host", proc.stdout)
+
+    def test_provisional_candidate_also_refuses(self) -> None:
+        proc = self.run_snippet(
+            f"$record = {self._record(False, True)}\n"
+            "$a = Get-PlaybackAbAnalysis -Record $record\n"
+            "Write-Host \"DOMINANT=$($a.dominantBottleneck)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("DOMINANT=host-load-provisional", proc.stdout)
+
+    def test_quiet_legs_still_get_a_real_diagnosis(self) -> None:
+        proc = self.run_snippet(
+            f"$record = {self._record(False, False)}\n"
+            "$a = Get-PlaybackAbAnalysis -Record $record\n"
+            "Write-Host \"DOMINANT=$($a.dominantBottleneck)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("DOMINANT=host-load-provisional", proc.stdout)
+
+    def test_leg_missing_hostloadprovisional_property_is_treated_as_provisional(self) -> None:
+        # Same fail-toward-provisional stance as item 3: a leg object present but lacking the
+        # property entirely (older/degenerate record) must not coerce to clean.
+        record = (
+            "[pscustomobject]@{ baseline = [pscustomobject]@{}; "
+            "candidate = [pscustomobject]@{ hostLoadProvisional = $false }; candidateSpeed = $null; "
+            "compare = [pscustomobject]@{ presentedFps = [pscustomobject]@{ deltaPercent = -40.0 } } }"
+        )
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = Get-PlaybackAbHostLoadRefusal -Record $record\n"
+            "Write-Host \"PROVISIONAL=$($r.provisional) BASELINE=$($r.baselineProvisional) CANDIDATE=$($r.candidateProvisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True BASELINE=True CANDIDATE=False", proc.stdout)
+
+
+class CompareMachinePerfHostLoadWiringTests(unittest.TestCase):
+    """Static structural checks: the human-facing table and JSON rows must actually carry
+    host_load_provisional, not just the underlying analysis function."""
+
+    def test_playback_ab_and_local_proof_rows_carry_host_load_provisional(self) -> None:
+        source = COMPARE_MACHINE_PERF_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("host_load_provisional = $hostLoadRefusal.provisional", source)
+        self.assertIn("host_load_provisional = $hostLoadProvisional", source)
+        self.assertIn("host_load_provisional,", source)
+
+    def test_proof_summary_suggestion_refuses_ahead_of_trusting_embedded_analysis(self) -> None:
+        source = COMPARE_MACHINE_PERF_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("rerun_playback_ab_with_quiet_host", source)
+        refusal_check = source.index("(Get-PlaybackAbHostLoadRefusal -Record $playbackAb).provisional")
+        trusts_embedded_analysis = source.index("$playbackAb.analysis -and $playbackAb.analysis.suggestedOptimization")
+        self.assertLess(
+            refusal_check, trusts_embedded_analysis,
+            "the host-load refusal must be checked before trusting the record's own cached analysis",
+        )
 
 
 if __name__ == "__main__":

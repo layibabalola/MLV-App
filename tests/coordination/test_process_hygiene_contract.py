@@ -405,6 +405,90 @@ Start-Sleep -Milliseconds 200
     assert observed["childAlive"] is False
 
 
+@pytest.mark.skipif(os.name != "nt", reason="MLV-App process ownership is Windows-specific")
+def test_gui_smoke_process_boundary_samples_during_a_live_wait(tmp_path: Path) -> None:
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 3: before/after snapshots alone only bracket a
+    # leg -- Wait-GuiSmokeProcessBounded must be able to sample DURING the wait too, via
+    # -SampleIntervalMs/-OnSample, without changing behaviour for callers that don't opt in.
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+
+    module_literal = str(GUI_SMOKE_PROCESS_BOUNDARY).replace("'", "''")
+    python_literal = str(sys.executable).replace("'", "''")
+    command = rf"""
+Import-Module '{module_literal}' -Force
+
+function New-SleepProcess {{
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = '{python_literal}'
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    [void]$start.ArgumentList.Add('-c')
+    [void]$start.ArgumentList.Add('import time; time.sleep(1.5)')
+    $p = [Diagnostics.Process]::new()
+    $p.StartInfo = $start
+    [void]$p.Start()
+    $p
+}}
+
+$sampled = New-SleepProcess
+$stdoutTask = $sampled.StandardOutput.ReadToEndAsync()
+$stderrTask = $sampled.StandardError.ReadToEndAsync()
+$global:sampleCount = 0
+$onSample = {{ $global:sampleCount++ }}
+$sampledResult = Wait-GuiSmokeProcessBounded -Process $sampled -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 8000 -TerminationGraceMs 5000 -StreamDrainMs 5000 -SampleIntervalMs 300 -OnSample $onSample
+
+$unsampled = New-SleepProcess
+$stdoutTask2 = $unsampled.StandardOutput.ReadToEndAsync()
+$stderrTask2 = $unsampled.StandardError.ReadToEndAsync()
+$global:sampleCount2 = 0
+$onSample2 = {{ $global:sampleCount2++ }}
+$unsampledResult = Wait-GuiSmokeProcessBounded -Process $unsampled -StandardOutputTask $stdoutTask2 -StandardErrorTask $stderrTask2 -TimeoutMs 8000 -TerminationGraceMs 5000 -StreamDrainMs 5000
+
+[pscustomobject]@{{
+    sampledTimedOut = $sampledResult.timedOut
+    sampledTerminationConfirmed = $sampledResult.terminationConfirmed
+    sampleCount = $sampleCount
+    unsampledTimedOut = $unsampledResult.timedOut
+    unsampledTerminationConfirmed = $unsampledResult.terminationConfirmed
+    sampleCount2 = $sampleCount2
+}} | ConvertTo-Json -Depth 8 -Compress
+"""
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    observed = json.loads(completed.stdout.strip())
+    # A ~1.5s leg sampled every 300ms should yield roughly 3-5 interior samples; a wide but
+    # bounded range keeps this robust to scheduler jitter while still proving sampling happened
+    # more than once (ruling out an accidental single-shot) and did not run away unboundedly.
+    assert observed["sampledTimedOut"] is False
+    assert observed["sampledTerminationConfirmed"] is True
+    assert 2 <= observed["sampleCount"] <= 8
+    # -SampleIntervalMs omitted (defaults to 0) must reproduce the original single blocking wait
+    # exactly -- zero interior samples, same as every pre-round-3 caller of this function.
+    assert observed["unsampledTimedOut"] is False
+    assert observed["unsampledTerminationConfirmed"] is True
+    assert observed["sampleCount2"] == 0
+
+
 @pytest.mark.skipif(os.name != "nt", reason="MLV-App GUI smoke comparer is PowerShell-based")
 def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None:
     pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")

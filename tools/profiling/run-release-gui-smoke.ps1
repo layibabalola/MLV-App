@@ -84,6 +84,13 @@ param(
     [double]$MaxSkippedOrUnpresentedRatio = 0.5,
     [double]$HostLoadCpuPercentBar = 75,
     [int]$HostLoadTopProcessCount = 8,
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 3: cadence for interior host-load sampling while the
+    # leg runs, not just before/after it. 4000ms on a 24-30s leg (per the round-2 evidence) yields
+    # ~6-7 interior samples -- enough to catch an agent-job-length burst without materially adding
+    # to the leg's own cost (see the "cost" note on $hostLoadDuringSamples below). 0 disables
+    # interior sampling and reproduces round 2's bracket-only behaviour exactly.
+    [ValidateRange(0, 60000)]
+    [int]$HostLoadSampleIntervalMs = 4000,
     [switch]$DryRun
 )
 
@@ -337,13 +344,28 @@ function Get-HostLoadVerdict {
     # PLAYBACK-MEASURE-HOST-LOAD-GATE-1: a run whose load exceeds the bar, or whose load could
     # not be measured, is marked PROVISIONAL -- worth recording, never usable as a regression or
     # acceptance signal. Never fail the run for this; only mark it.
+    #
+    # round 3: -During carries zero or more interior samples taken WHILE the leg was running (see
+    # Wait-GuiSmokeProcessBounded's -SampleIntervalMs). Before/after alone only BRACKET the leg --
+    # a burst confined to the interior (starts after the before-snapshot, ends before the
+    # after-snapshot) reads quiet under bracketing alone. The verdict rule is PEAK: the maximum
+    # collected cpuLoadPercent across every sample (before, during, after) decides exceeded/quiet,
+    # not an average or a "sustained for N samples" threshold. Peak is deliberate: a short interior
+    # burst is exactly the case bracketing misses and this round exists to catch, and averaging or
+    # requiring sustain would dilute or miss it again. The failure direction is asymmetric --
+    # under-marking a loaded leg as clean is dangerous (a noisy fps number enters comparisons as
+    # trustworthy), while over-marking a quiet leg as provisional is cheap (provisional never fails
+    # a run, only removes it from comparisons) -- so peak is the conservative choice on both counts.
+    # An uncollected sample anywhere in the bracket-or-interior set (not just before/after) also
+    # forces "unknown", for the same fail-toward-provisional reason as round 3's item 3.
     param(
         [object]$Before,
         [object]$After,
+        [object[]]$During = @(),
         [double]$Bar
     )
 
-    $samples = @($Before, $After)
+    $samples = @($Before) + @($During) + @($After)
     $collectedSamples = @($samples | Where-Object { $_.collected })
     $unknown = ($collectedSamples.Count -lt $samples.Count)
     $maxCpuLoadPercent = if ($collectedSamples.Count -gt 0) {
@@ -361,12 +383,15 @@ function Get-HostLoadVerdict {
     }
     $provisional = ($unknown -or $exceeded)
     $reason = if ($unknown) {
-        "Host load telemetry could not be collected for at least one snapshot " +
-            "(before.collected=$($Before.collected), after.collected=$($After.collected)); " +
-            "an fps measurement under unknown host load is never usable as a regression or acceptance signal."
+        $uncollectedCount = @($samples).Count - $collectedSamples.Count
+        "Host load telemetry could not be collected for $uncollectedCount of $($samples.Count) " +
+            "snapshot(s) (before.collected=$($Before.collected), during=$($During.Count) " +
+            "sample(s), after.collected=$($After.collected)); an fps measurement under unknown " +
+            "host load is never usable as a regression or acceptance signal."
     } elseif ($exceeded) {
-        "Host CPU load reached $maxCpuLoadPercent% during this leg, exceeding the " +
-            "$Bar% bar; an fps number measured on a loaded host is not a property of the build."
+        "Host CPU load reached $maxCpuLoadPercent% during this leg (peak of $($samples.Count) " +
+            "sample(s): before/after plus $($During.Count) interior), exceeding the $Bar% bar; " +
+            "an fps number measured on a loaded host is not a property of the build."
     } else {
         $null
     }
@@ -1161,18 +1186,35 @@ $fpsStatusCropCapture = $null
 $colorArtifactScan = $null
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderrTask = $process.StandardError.ReadToEndAsync()
+# PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 3: before/after alone only BRACKET the leg -- a burst
+# confined to the interior reads quiet. $hostLoadDuringSamples collects zero or more interior
+# snapshots taken by Wait-GuiSmokeProcessBounded's polling loop (via -OnSample) instead of one
+# single blocking wait. Cost: each sample is one Get-HostLoadSnapshot call (2 CIM queries + a
+# Get-Process enumeration/sort, sub-second per call); at the default 4000ms cadence a 24-30s leg
+# takes ~6-7 samples, spending well under 1% of the leg's wall clock on collection and adding no
+# extra wall-clock time at all (the sampling happens inside intervals the code was already
+# spending blocked in WaitForExit). $OnSample is a scriptblock literal defined here in the
+# top-level script scope, so Get-HostLoadSnapshot resolves against this script's functions even
+# though it is invoked from inside the imported module.
+$hostLoadDuringSamples = [System.Collections.Generic.List[object]]::new()
+$hostLoadOnSample = {
+    $hostLoadDuringSamples.Add((Get-HostLoadSnapshot -TopProcessCount $HostLoadTopProcessCount))
+}
 $processBoundary = Wait-GuiSmokeProcessBounded `
     -Process $process `
     -StandardOutputTask $stdoutTask `
     -StandardErrorTask $stderrTask `
-    -TimeoutMs $effectiveProcessTimeoutMs
+    -TimeoutMs $effectiveProcessTimeoutMs `
+    -SampleIntervalMs $HostLoadSampleIntervalMs `
+    -OnSample $hostLoadOnSample
 $stdout = $processBoundary.stdout
 $stderr = $processBoundary.stderr
 $processExitCode = [int]$processBoundary.exitCode
 $captureBindingFailures += @($processBoundary.failures)
 $endUtc = [datetime]::UtcNow
 $hostLoadAfter = Get-HostLoadSnapshot -TopProcessCount $HostLoadTopProcessCount
-$hostLoadVerdict = Get-HostLoadVerdict -Before $hostLoadBefore -After $hostLoadAfter -Bar $HostLoadCpuPercentBar
+$hostLoadVerdict = Get-HostLoadVerdict -Before $hostLoadBefore -After $hostLoadAfter `
+    -During @($hostLoadDuringSamples) -Bar $HostLoadCpuPercentBar
 
 if ($CaptureScreenshot) {
     if (-not (Test-Path -LiteralPath $screenshotPath)) {
@@ -1954,6 +1996,8 @@ $result = [pscustomobject]@{
         schema = "mlvapp-gui-smoke-host-load.v1"
         bar = [pscustomobject]@{ cpuLoadPercent = $HostLoadCpuPercentBar }
         before = $hostLoadBefore
+        during = @($hostLoadDuringSamples)
+        duringSampleIntervalMs = $HostLoadSampleIntervalMs
         after = $hostLoadAfter
         maxCpuLoadPercent = $hostLoadVerdict.maxCpuLoadPercent
         state = $hostLoadVerdict.state

@@ -353,6 +353,12 @@ function Get-ProofSummarySuggestion {
     if ($null -eq $playbackAb -or $null -eq $playbackAbCompare) {
         return "run_playback_ab_speed_probe"
     }
+    # REFUSES ahead of trusting the embedded analysis: a record written before round 3's
+    # New-PlaybackAbAnalysis fix could still carry a delta-derived suggestedOptimization even
+    # though its legs are host-load provisional.
+    if ((Get-PlaybackAbHostLoadRefusal -Record $playbackAb).provisional) {
+        return "rerun_playback_ab_with_quiet_host"
+    }
     if ($playbackAb.analysis -and $playbackAb.analysis.suggestedOptimization) {
         return [string]$playbackAb.analysis.suggestedOptimization
     }
@@ -399,8 +405,53 @@ function Test-DeltaAtLeast {
     ($null -ne $parsed -and $parsed -ge $Threshold)
 }
 
+function Get-PlaybackAbLegHostLoadProvisional {
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 3: same fail-toward-provisional stance as the smoke
+    # and A/B readers -- a missing leg, or a leg present but missing hostLoadProvisional, reads as
+    # provisional/unknown, never as clean. This script has no StrictMode and no Get-NestedValue
+    # helper, so a bare $Leg.hostLoadProvisional on a leg lacking that property silently returns
+    # $null -> [bool]$null -eq $false, the same absent-means-clean trap fixed elsewhere this round.
+    param([object]$Leg)
+
+    if ($null -eq $Leg) {
+        return $true
+    }
+    $property = $Leg.PSObject.Properties["hostLoadProvisional"]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return $true
+    }
+    [bool]$property.Value
+}
+
+function Get-PlaybackAbHostLoadRefusal {
+    # Cross-run fps deltas/bottleneck diagnoses for a mlvapp-cuda-playback-ab.v1 record must never
+    # be derived from a leg whose host load was provisional -- whichever leg is actually being
+    # compared (candidateSpeed when a separate speed run was recorded, candidate otherwise, mirroring
+    # how $compare/$playbackComparisonBasis are chosen below).
+    param([object]$Record)
+
+    $candidateLeg = if ($Record.speedCompare -and $Record.candidateSpeed) { $Record.candidateSpeed } else { $Record.candidate }
+    $baselineProvisional = Get-PlaybackAbLegHostLoadProvisional -Leg $Record.baseline
+    $candidateProvisional = Get-PlaybackAbLegHostLoadProvisional -Leg $candidateLeg
+    [pscustomobject]@{
+        provisional = ($baselineProvisional -or $candidateProvisional)
+        baselineProvisional = $baselineProvisional
+        candidateProvisional = $candidateProvisional
+    }
+}
+
 function Get-PlaybackAbAnalysis {
     param([object]$Record)
+
+    if ((Get-PlaybackAbHostLoadRefusal -Record $Record).provisional) {
+        # REFUSES: never derive a bottleneck diagnosis from a provisional leg, whatever the
+        # record's own cached .analysis says (an older record predating this fix could still
+        # carry a delta-derived diagnosis even though its legs are marked provisional).
+        return [pscustomobject]@{
+            dominantBottleneck = "host-load-provisional"
+            suggestedOptimization = "rerun_playback_ab_with_quiet_host"
+        }
+    }
 
     if ($Record.analysis -and
         $Record.analysis.dominantBottleneck -and
@@ -772,6 +823,12 @@ function New-LocalProofSummaryRow {
     $dngSuggestion = if ($cdng -and $cdng.throughputClassification) {
         [string]$cdng.throughputClassification.suggestedOptimization
     } else { $null }
+    # MARKS: this row's presented_fps is a candidate reading from the embedded playbackAb leg
+    # (same shape as the standalone mlvapp-cuda-playback-ab.v1 record) -- $null when there is no
+    # embedded playbackAb at all, since a leg that was never run cannot be "clean".
+    $hostLoadProvisional = if ($playbackAb) {
+        (Get-PlaybackAbHostLoadRefusal -Record $playbackAb).provisional
+    } else { $null }
 
     [pscustomobject]@{
         record_kind = "local_proof_summary"
@@ -792,6 +849,7 @@ function New-LocalProofSummaryRow {
         dng_suggested_optimization = $dngSuggestion
         dominant_bottleneck = "unknown"
         suggested_optimization = Get-ProofSummarySuggestion -Record $Record
+        host_load_provisional = $hostLoadProvisional
         build_status = $Record.status
         source = $Source
     }
@@ -814,6 +872,12 @@ function New-PlaybackAbSummaryRow {
     $candidatePresented = Convert-ToNullableDouble $speedCompare.presentedFps.candidate
     $deltaPct = Convert-ToNullableDouble $speedCompare.presentedFps.deltaPercent
     $analysis = Get-PlaybackAbAnalysis -Record $Record
+    # MARKS, does not refuse: the raw fps numbers stay visible (this table is advisory, and the
+    # gate that actually fails a run already ran in run-release-cuda-playback-ab.ps1), but a reader
+    # can see host_load_provisional right next to them instead of having to cross-reference the
+    # source JSON's proofFailures. Get-PlaybackAbAnalysis above already REFUSES the derived
+    # dominant_bottleneck/suggested_optimization when this is true.
+    $hostLoadRefusal = Get-PlaybackAbHostLoadRefusal -Record $Record
     $suggestion = if ([string]::IsNullOrWhiteSpace([string]$analysis.suggestedOptimization)) {
         if ([string]$Record.status -ne "success") {
             "fix_playback_ab_proof_failures"
@@ -845,6 +909,7 @@ function New-PlaybackAbSummaryRow {
         dng_suggested_optimization = $null
         dominant_bottleneck = if ($analysis) { [string]$analysis.dominantBottleneck } else { "unknown" }
         suggested_optimization = $suggestion
+        host_load_provisional = $hostLoadRefusal.provisional
         build_status = $Record.status
         source = $Source
     }
@@ -911,6 +976,6 @@ if ($Json) {
 }
 
 $sortedRows |
-    Format-Table -AutoSize -Wrap record_kind, machine, playback_comparison_basis, baseline_presented_fps, presented_fps, playback_fps_delta_pct, no_readback_pct, fallback_pct, fallback_count, export_frames, cdng_verdict, dng_hash, gpu_export_replaced_pct, gpu_export_trusted_pct, dng_elapsed_delta_pct, dng_throughput_status, dominant_bottleneck, suggested_optimization, dng_suggested_optimization, build_sha, source |
+    Format-Table -AutoSize -Wrap record_kind, machine, playback_comparison_basis, baseline_presented_fps, presented_fps, playback_fps_delta_pct, host_load_provisional, no_readback_pct, fallback_pct, fallback_count, export_frames, cdng_verdict, dng_hash, gpu_export_replaced_pct, gpu_export_trusted_pct, dng_elapsed_delta_pct, dng_throughput_status, dominant_bottleneck, suggested_optimization, dng_suggested_optimization, build_sha, source |
     Out-String -Width 4096 |
     Write-Output
