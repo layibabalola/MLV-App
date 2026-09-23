@@ -41,7 +41,13 @@ param(
     [int]$MaxQueueWaitSec = 86400,
     [string[]]$SideFile = @(),
     # Keep a generator's own job id (so outbox\<JobId>.result.json and its artifacts line up).
-    [string]$JobId = ''
+    [string]$JobId = '',
+    # Test-only: invoked with no arguments the instant the queue deadline is judged reached and no
+    # claim has been seen yet, immediately BEFORE the recheck that follows it -- lets a test land a
+    # claim marker write deterministically inside what is otherwise a sub-millisecond window between
+    # this script's last (negative) marker check and its final diagnosis (round 7, sol blocker).
+    # Production never passes this.
+    [scriptblock]$TestHookAtQueueDeadline = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -119,38 +125,53 @@ function Get-UmRunResultIfPresent {
     return $null
 }
 
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 7 (sol/fable blocker): claimedAt used to come from the
+# marker's own startedUtc field -- a timestamp stamped by the AGENT HOST's clock -- while every
+# deadline built from it is compared against THIS CLIENT's Get-Date a few lines down. Those are two
+# different clocks with no guarantee they agree; sufficient skew (or slow client-side setup after
+# the marker is published) computes an already-expired deadline and throws before the agent's own
+# timeout receipt can land. Round 6 hit the same class in the orphan self-heal and fixed it there by
+# probing a THIRD, shared clock domain (the file server's) -- right for that call, because both
+# timestamps being compared there are remotely authored. Here the client is setting a deadline for
+# its OWN wait, so the simpler and stricter fix is to never leave the client's own clock domain at
+# all: $claimedAt is the client's own Get-Date at the instant it first observes the marker, never
+# the agent's stamp of when it wrote it. That can only differ from the agent's real claim instant by
+# at most one -PollSeconds of propagation -- i.e. it errs toward MORE client patience, never less,
+# and no cross-machine clock comparison is possible because only one clock is ever read.
 while ($true) {
     $r = Get-UmRunResultIfPresent -Path $resultFile
     if ($null -ne $r) { return $r }
 
     if ($null -eq $claimedAt -and (Test-Path -LiteralPath $startedMarker)) {
-        $claimedAt = Get-Date
-        try {
-            $marker = Get-Content -LiteralPath $startedMarker -Raw | ConvertFrom-Json
-            # ConvertFrom-Json auto-converts an ISO-8601 "...Z" string into a [datetime] with
-            # Kind=Utc -- casting THAT straight to [string] silently drops the Z/offset (its default
-            # ToString() prints bare local-culture digits), so re-parsing the string then assumes
-            # those digits are already LOCAL wall time and shifts the claim by the zone offset. Read
-            # the DateTime object directly instead of round-tripping it through a string.
-            $startedRaw = $marker.startedUtc
-            if ($startedRaw -is [DateTime]) {
-                $asUtc = if ($startedRaw.Kind -eq [DateTimeKind]::Utc) { $startedRaw } else { [DateTime]::SpecifyKind($startedRaw, [DateTimeKind]::Utc) }
-                $claimedAt = $asUtc.ToLocalTime()
-            } elseif ($startedRaw) {
-                $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
-                $claimedAt = [DateTimeOffset]::Parse([string]$startedRaw, [Globalization.CultureInfo]::InvariantCulture, $styles).LocalDateTime
-            }
-        } catch { }
+        $claimedAt    = Get-Date
         $execDeadline = $claimedAt.AddSeconds($TimeoutSec + $clientGraceSec)
     }
 
     $activeDeadline = if ($null -ne $execDeadline) { $execDeadline } else { $queueDeadline }
-    if ((Get-Date) -ge $activeDeadline) { break }
+    if ((Get-Date) -ge $activeDeadline) {
+        # round 7 (sol blocker): the comment below has always promised a receipt-OR-claim recheck,
+        # but this break was the only path out of the loop and it never rechecked the claim marker --
+        # so a claim landing after the Test-Path above found nothing, but before this break/throw
+        # completes, was still reported as "never claimed" for a job the agent had, in fact, just
+        # started. One more look at the marker right here: if it has now appeared, switch onto the
+        # job's own (finite, just-computed) execution deadline instead of ending the loop.
+        if ($null -eq $claimedAt) {
+            if ($TestHookAtQueueDeadline) { & $TestHookAtQueueDeadline }
+            if (Test-Path -LiteralPath $startedMarker) {
+                $claimedAt    = Get-Date
+                $execDeadline = $claimedAt.AddSeconds($TimeoutSec + $clientGraceSec)
+                continue
+            }
+        }
+        break
+    }
     Start-Sleep -Seconds $PollSeconds
 }
 
-# fable/sol major 3 (second half): re-check once more before throwing -- a receipt (or a claim) that
-# lands in the instant between the deadline check above and this line must still be read, not missed.
+# fable/sol major 3 (second half): re-check the receipt once more before throwing -- one that lands
+# in the instant between the deadline check above and this line must still be read, not missed. (The
+# claim marker's equivalent recheck now happens at the break itself, above, since a claim discovered
+# there must extend the wait rather than merely relabel a diagnosis moments before it fires anyway.)
 $r = Get-UmRunResultIfPresent -Path $resultFile
 if ($null -ne $r) { return $r }
 

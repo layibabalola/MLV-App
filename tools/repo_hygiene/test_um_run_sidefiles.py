@@ -11,6 +11,7 @@ The placement code is exercised two ways:
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import os
@@ -62,7 +63,8 @@ class _Share(unittest.TestCase):
     def drop(self, copier: str, *, side: list[Path] | None = None, job_id: str = "demo",
              job_timeout_sec: int | None = None, orphan_grace_sec: int | None = None,
              before_job_visible: str | None = None,
-             after_meta_tmp_written: str | None = None) -> subprocess.CompletedProcess:
+             after_meta_tmp_written: str | None = None,
+             after_share_clock_probe: str | None = None) -> subprocess.CompletedProcess:
         sides = ",".join(_q(p) for p in (side if side is not None else [self.side]))
         timeout_arg = "" if job_timeout_sec is None else f" -JobTimeoutSec {job_timeout_sec}"
         grace_arg = "" if orphan_grace_sec is None else f" -OrphanMetaGraceSec {orphan_grace_sec}"
@@ -80,6 +82,9 @@ class _Share(unittest.TestCase):
         if after_meta_tmp_written is not None:
             preamble += f"$afterMetaTmpWritten = {after_meta_tmp_written}\n"
             hook_args += " -TestHookAfterMetaTmpWritten $afterMetaTmpWritten"
+        if after_share_clock_probe is not None:
+            preamble += f"$afterShareClockProbe = {after_share_clock_probe}\n"
+            hook_args += " -TestHookAfterShareClockProbe $afterShareClockProbe"
         script.write_text(
             preamble +
             "try {\n"
@@ -221,6 +226,62 @@ class UmRunDropModuleTests(_Share):
         self.assertEqual((self.inbox / "demo.job.ps1").read_text(encoding="utf-8"), "Write-Output concurrent")
         self.assertEqual(self.names(), ["demo.job.ps1"],
                          "a lost job-rename race must roll back this call's own metadata, not leave it behind")
+
+    def test_a_rollback_deletion_failure_is_surfaced_not_silently_swallowed(self) -> None:
+        # sol round 6 minor, re-raised independently by both keys at round 7: reverting the rollback
+        # deletion's -ErrorAction Stop + folded message back to SilentlyContinue fails no existing
+        # test -- test_a_stale_orphan_that_cannot_be_removed_... below covers a DIFFERENT removal
+        # site (the pre-existing-orphan self-heal), never the rollback path exercised by
+        # test_a_racing_job_rename_with_a_budget_rolls_back_its_own_metadata above. This forces THAT
+        # removal itself to fail: -TestHookBeforeJobVisible opens this submission's own just-placed
+        # demo.meta.json with FileShare.None (an exclusive lock held for the rest of this process)
+        # and then plants a concurrent demo.job.ps1, so the module's own final rename loses its race
+        # exactly as in the passing case above, but this time its rollback's Remove-Item hits a real
+        # sharing violation and must surface it, not silently continue as if cleanup had succeeded.
+        hook = (
+            "{ "
+            f"$script:umrunTestLock = [IO.File]::Open({_q(self.inbox / 'demo.meta.json')}, 'Open', 'Read', 'None'); "
+            f"[IO.File]::WriteAllText({_q(self.inbox / 'demo.job.ps1')}, 'Write-Output concurrent') "
+            "}"
+        )
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, before_job_visible=hook)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("THREW UMRUN_JOBID_IN_USE", combined, combined)
+        self.assertIn("could not be removed during rollback", combined, combined)
+        self.assertIn("may outlive this refused submission", combined, combined)
+        self.assertEqual((self.inbox / "demo.job.ps1").read_text(encoding="utf-8"), "Write-Output concurrent")
+        # The lock made removal genuinely fail -- the metadata must still be sitting there, proving
+        # the folded message describes a real failure and not a lucky-looking string.
+        self.assertTrue((self.inbox / "demo.meta.json").exists(),
+                         "a surfaced rollback failure must mean the metadata really was left behind")
+
+    def test_the_orphan_age_check_reads_a_genuine_share_clock_reading_not_a_constant(self) -> None:
+        # round 6 fable minor, re-raised independently by both keys at round 7: "no test fails if the
+        # share-clock probe reverts to Get-Date" -- true of every OTHER test here, since submitter
+        # and share sit on one filesystem and clock in this suite and are therefore indistinguishable
+        # by final state alone. -TestHookAfterShareClockProbe lives INSIDE the probe's own try block
+        # (tools/profiling/UmRunDrop.psm1), so a revert that removes the probe removes this hook's
+        # only call site too -- proving the mechanism actually ran, not merely that its final answer
+        # happened to be right, is exactly what a same-clock final-state assertion cannot do.
+        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":99}', encoding="ascii")
+        before = time.time()
+        hook = (
+            "{ param($t) "
+            f"Add-Content -LiteralPath {_q(self.log)} "
+            "-Value ('PROBE=' + $t.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')) "
+            "}"
+        )
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, orphan_grace_sec=0,
+                          after_share_clock_probe=hook)
+        after = time.time()
+        self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
+        lines = [ln for ln in self.log.read_text(encoding="utf-8").splitlines() if ln.startswith("PROBE=")]
+        self.assertEqual(len(lines), 1, "the probe hook must fire exactly once, on the orphan-check path")
+        probed = time.strptime(lines[0][len("PROBE="):], "%Y-%m-%dT%H:%M:%SZ")
+        probed_epoch = calendar.timegm(probed)
+        self.assertLess(abs(probed_epoch - before), 120, "the probed value must be a genuine reading of now")
+        self.assertLessEqual(before - 1, probed_epoch, lines[0])
+        self.assertLessEqual(probed_epoch, after + 1, lines[0])
 
     def test_a_torn_metadata_write_is_rejected_by_readback_verification(self) -> None:
         # sol round 4 minor: "removing metadata readback verification would not fail any test" --
@@ -535,6 +596,81 @@ class UmRunEndToEndTests(_Share):
         combined = (stdout or "") + (stderr or "")
         self.assertIn("claimed by the agent", combined, combined)
         self.assertNotIn("was never claimed", combined, combined)
+
+    def test_a_clock_skewed_claim_marker_does_not_shrink_the_clients_patience(self) -> None:
+        # sol/fable blocker (round 7): claimedAt used to come from the marker's own startedUtc field
+        # -- a timestamp stamped by the AGENT HOST's clock -- while the deadline built from it is
+        # compared against THIS CLIENT's Get-Date. Simulates a badly-skewed (or merely very slow to
+        # publish) agent host: the marker's declared startedUtc is an hour in the past relative to
+        # real time, even though the client is only NOW observing it. Under the OLD, marker-anchored
+        # behaviour, execDeadline (claim + 5s budget + 5s grace, evaluated off a claim an hour in the
+        # past) would already be ~3590s in the past the instant this marker is observed, so the
+        # client would throw within the very next poll. The fix anchors purely to the client's OWN
+        # observation, so it must still be alive well past that point.
+        running_dir = self.share / "running"
+        proc = subprocess.Popen(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
+             "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
+             "-TimeoutSec", "5", "-PollSeconds", "1", "-MaxQueueWaitSec", "10", "-JobId", "demo"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(1.0)
+            running_dir.mkdir(parents=True, exist_ok=True)
+            skewed = time.gmtime(time.time() - 3600)
+            marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", skewed)}
+            (running_dir / "demo.started.json").write_text(json.dumps(marker), encoding="ascii")
+            # Two more poll cycles: under the old behaviour the client would already have thrown on
+            # the very first check after observing this marker.
+            time.sleep(2.0)
+            self.assertIsNone(proc.poll(), "a stale agent-clock stamp must not shrink the client's own patience")
+            stdout, stderr = proc.communicate(timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        combined = (stdout or "") + (stderr or "")
+        self.assertIn("claimed by the agent", combined, combined)
+        self.assertNotIn("was never claimed", combined, combined)
+
+    def test_a_claim_landing_exactly_at_the_queue_deadline_is_not_misreported_as_never_claimed(self) -> None:
+        # sol blocker (round 7): the final recheck before throwing only ever re-read the RESULT file,
+        # despite its own comment promising a receipt-OR-claim recheck -- a claim landing in the
+        # instant between the loop's last (negative) marker check and the throw was still reported
+        # as "never claimed". That window is normally sub-millisecond and cannot be hit reliably from
+        # outside the process; -TestHookAtQueueDeadline (test-only, fires exactly there) closes it
+        # deterministically. um-run.ps1 is invoked here via '&' from a wrapper script -- not '-File'
+        # -- specifically so an actual scriptblock, not a CLI string, can be passed through.
+        running_dir = self.share / "running"
+        wrapper = self.tmp / "run-with-hook.ps1"
+        hook = (
+            "{ "
+            f"New-Item -ItemType Directory -Force -Path {_q(running_dir)} | Out-Null; "
+            "$marker = @{ jobId = 'demo'; startedUtc = (Get-Date).ToUniversalTime().ToString('o') } "
+            "| ConvertTo-Json -Compress; "
+            f"Set-Content -LiteralPath {_q(running_dir / 'demo.started.json')} -Value $marker "
+            "-Encoding ascii -NoNewline "
+            "}"
+        )
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 1 -PollSeconds 1 -MaxQueueWaitSec 0 -JobId 'demo' "
+            "-TestHookAtQueueDeadline $hook\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                               capture_output=True, text=True, timeout=30)
+        combined = proc.stdout + proc.stderr
+        self.assertTrue(running_dir.joinpath("demo.started.json").exists(), combined)
+        self.assertNotIn("was never claimed", combined, combined)
+        # -MaxQueueWaitSec 0 means the queue deadline is judged reached on the very first check,
+        # before any sleep -- so reaching this point at all, with a claim marker now on disk (written
+        # by the hook), proves the hook's write was seen: the run must diagnose CLAIMED, not QUEUED.
+        self.assertIn("THREW Timed out", combined, combined)
+        self.assertIn("claimed by the agent", combined, combined)
 
     def test_a_receipt_written_during_the_final_sleep_is_still_read(self) -> None:
         # fable/sol major 3 (second half): the old loop tested its deadline BEFORE sleeping, so a

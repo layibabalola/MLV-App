@@ -168,7 +168,13 @@ function Invoke-UmRunDrop {
         # Test-only: invoked with the metadata temp file's path immediately after it is written,
         # before the write-back verification -- lets a test corrupt it to prove that verification
         # actually rejects a torn write rather than merely being present and untested.
-        [scriptblock]$TestHookAfterMetaTmpWritten = $null
+        [scriptblock]$TestHookAfterMetaTmpWritten = $null,
+        # Test-only: invoked with the round-6 share-clock probe's computed value immediately after
+        # it is read, still inside the probe's own try block -- proves this branch actually executes
+        # and yields a genuine clock reading (round 6/7 fable minor: "no test fails if this reverts
+        # to Get-Date", true of every other test here, since submitter and share sit on one
+        # filesystem and clock and are therefore indistinguishable by final state alone).
+        [scriptblock]$TestHookAfterShareClockProbe = $null
     )
 
     if ($JobId -and $JobId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "UMRUN_JOBID_INVALID '$JobId'" }
@@ -211,6 +217,7 @@ function Invoke-UmRunDrop {
         try {
             Set-Content -LiteralPath $shareNowProbe -Value '' -Encoding ascii -NoNewline
             $shareNowUtc = (Get-Item -LiteralPath $shareNowProbe -Force).LastWriteTimeUtc
+            if ($TestHookAfterShareClockProbe) { & $TestHookAfterShareClockProbe $shareNowUtc }
         } finally {
             Remove-Item -LiteralPath $shareNowProbe -Force -ErrorAction SilentlyContinue
         }
