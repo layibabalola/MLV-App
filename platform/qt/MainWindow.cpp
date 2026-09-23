@@ -1988,7 +1988,9 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
 #include "GpuDebayer.h"
 #include "GpuDisplayViewport.h"
 #include "GpuDisplayWindow.h"
+#include "GpuTexturePresentAvailabilityPolicy.h"
 #include "MainWindowGpuPreviewPolicy.h"
+#include "PlaybackFramePopulationPolicy.h"
 #include "PlaybackQualityPolicy.h"
 #include "PlaybackScaling.h"
 #include "ZebraThresholds.h"
@@ -24970,7 +24972,11 @@ void MainWindow::notePlaybackSmokePresentedFrame(
          * from `timing`, not present-and-false) -- misreporting non-execution
          * as an attempted-and-failed fallback. Distinguish all four states:
          * not executed / unavailable (attempted, neither component) /
-         * partial (attempted, exactly one component) / measured (both). */
+         * partial (attempted, exactly one component) / measured (both). The
+         * classification itself lives in GpuTexturePresentAvailabilityPolicy
+         * so it is unit-tested
+         * (tests/console/test_gpu_texture_present_availability_policy.cpp)
+         * without the GUI or a GPU. */
         const bool texturePresentAttempted =
             timing.contains(
                 QStringLiteral("gpu_playback_recon_texture_present_available") );
@@ -24984,28 +24990,31 @@ void MainWindow::notePlaybackSmokePresentedFrame(
             telemetryBoolValue(
                 timing, "gpu_playback_recon_texture_present_amaze_component_available" );
         QString texturePresentUploadMsBasis;
-        if( !texturePresentAttempted )
+        switch( GpuTexturePresentAvailabilityPolicy::classify(
+                    texturePresentAttempted,
+                    texturePresentReconAvailable,
+                    texturePresentAmazeAvailable ) )
         {
+        case GpuTexturePresentTimingBasis::NotExecuted:
             texturePresentUploadMsBasis =
                 QStringLiteral("not_executed_no_texture_present_this_frame");
-        }
-        else if( !texturePresentAvailable )
-        {
+            break;
+        case GpuTexturePresentTimingBasis::Unavailable:
             texturePresentUploadMsBasis =
                 QStringLiteral("unavailable_fallback_to_whole_call_wall_ms");
-        }
-        else if( texturePresentReconAvailable && texturePresentAmazeAvailable )
-        {
+            break;
+        case GpuTexturePresentTimingBasis::Measured:
             texturePresentUploadMsBasis = QStringLiteral("measured");
-        }
-        else
-        {
+            break;
+        case GpuTexturePresentTimingBasis::Partial:
+        default:
             /* A combined flag may never upgrade a partial reading to
              * "measured" -- exactly one of recon/AMaZE reported, and the
              * other's contribution to the summed upload/kernel/interop/total
              * fields is a silent 0.0 fill. */
             texturePresentUploadMsBasis =
                 QStringLiteral("partial_component_unavailable_zero_filled");
+            break;
         }
         QStringList timingValidityFields;
         timingValidityFields
@@ -25192,34 +25201,30 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
      * skippedOrUnpresentedBySerial are kept for backward compatibility and
      * bounded-above accounting (informational, not the gate); the
      * target-only figures below are the authoritative population and skip
-     * count. */
-    const uint64_t requestedFramesBySerial =
-        m_nextRenderRequestSerial >= m_playbackSmokeStartRequestSerial
-            ? m_nextRenderRequestSerial - m_playbackSmokeStartRequestSerial
-            : 0;
-    const qint64 skippedOrUnpresentedBySerialSigned =
-        static_cast<qint64>( requestedFramesBySerial )
-            - static_cast<qint64>( m_playbackSmokePresentedFrames );
+     * count. The arithmetic itself lives in PlaybackFramePopulationPolicy so
+     * it is unit-tested
+     * (tests/console/test_playback_frame_population_policy.cpp) without the
+     * GUI. */
+    const PlaybackFramePopulation framePopulation =
+        PlaybackFramePopulationPolicy::compute(
+            m_nextRenderRequestSerial,
+            m_playbackSmokeStartRequestSerial,
+            m_nextTargetRenderRequestSerial,
+            m_playbackSmokeStartTargetRequestSerial,
+            static_cast<uint64_t>( qMax( 0, m_playbackSmokePresentedFrames ) ) );
+    const uint64_t requestedFramesBySerial = framePopulation.requestedFramesBySerial;
     const qulonglong skippedOrUnpresentedBySerial =
-        static_cast<qulonglong>( qMax<qint64>( 0, skippedOrUnpresentedBySerialSigned ) );
+        static_cast<qulonglong>( framePopulation.skippedOrUnpresentedBySerial );
     /* Authoritative population: m_nextTargetRenderRequestSerial advances only
      * at the one target request drawFrame() issues per call, never for a
      * speculative lookahead, so this denominator is both wrap-immune (same
      * monotonic-counter argument as requestedFramesBySerial) and free of the
      * lookahead overcount above. */
     const uint64_t requestedTargetFramesBySerial =
-        m_nextTargetRenderRequestSerial >= m_playbackSmokeStartTargetRequestSerial
-            ? m_nextTargetRenderRequestSerial - m_playbackSmokeStartTargetRequestSerial
-            : 0;
-    const qint64 skippedOrUnpresentedByTargetSerialSigned =
-        static_cast<qint64>( requestedTargetFramesBySerial )
-            - static_cast<qint64>( m_playbackSmokePresentedFrames );
+        framePopulation.requestedTargetFramesBySerial;
     const qulonglong skippedOrUnpresentedByTargetSerial =
-        static_cast<qulonglong>( qMax<qint64>( 0, skippedOrUnpresentedByTargetSerialSigned ) );
-    const uint64_t lookaheadRequestsBySerial =
-        requestedFramesBySerial >= requestedTargetFramesBySerial
-            ? requestedFramesBySerial - requestedTargetFramesBySerial
-            : 0;
+        static_cast<qulonglong>( framePopulation.skippedOrUnpresentedByTargetSerial );
+    const uint64_t lookaheadRequestsBySerial = framePopulation.lookaheadRequestsBySerial;
     const double presentedFps =
         elapsedSeconds > 0.0
             ? static_cast<double>( m_playbackSmokePresentedFrames )
