@@ -95,8 +95,31 @@ $startedMarker = Join-Path $running "$jobId.started.json"
 # queue wait plus the agent's own result write; a caller that wants the agent to stop sooner lowers
 # -TimeoutSec, which lowers both.
 # Proportional, so a 1-second probe does not wait three minutes for a receipt that will never come,
-# and an hour-long placement still gets a usable margin. Floor 5 s covers the queue-and-write gap.
-$clientGraceSec = [math]::Min(180, [math]::Max(5, [int]($TimeoutSec * 0.1)))
+# and an hour-long placement still gets a usable margin.
+#
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 8 (sol BLOCKER, fable minor): the old 5 s floor was a
+# round number, not a bound on what it has to cover. NONE of the following, all in
+# ultra-magnus-agent.ps1, are inside the agent's own -TimeoutSec countdown -- $deadline is set only
+# AFTER setup, and everything after $deadline fires still has to complete before the receipt can
+# land:
+#   - setup (claim marker write, metadata read, Start-Process, one Get-ProcessIdentity CIM query
+#     before the countdown even starts): CIM/WMI queries and a fresh pwsh.exe launch can each take
+#     low seconds under load -- bounded here at 5 s;
+#   - poll-slice detection lag: the agent's own wait loop is capped at
+#     [Math]::Min(5000, ...) regardless of -PollSeconds, so this is a HARD 5 s ceiling, not a guess;
+#   - process-tree termination (Stop-ProcessTree: a CIM enumeration pass plus one
+#     Test-ProcessIdentityMatch CIM call and one Stop-Process per process): bounded at 5 s for the
+#     small process trees these jobs actually spawn;
+#   - receipt publication (JSON-encode the result, Set-Content to the outbox share, then an atomic
+#     rename): bounded at 5 s to allow for a slow SMB write.
+# Sum: 20 s. That is the floor -- derived from what it has to outlast, not rounded from nothing.
+# At the large budgets this board actually uses for staging (attr3-footage-stage.ps1 requests
+# 30..86400 s; a real placement is typically hundreds to thousands of seconds), 10% of -TimeoutSec
+# passes 20 s once -TimeoutSec exceeds 200 s and reaches the 180 s cap once -TimeoutSec reaches
+# 1800 s -- so the 20 s floor matters only for small/probe-sized budgets, exactly where the fixed
+# per-job overhead above is proportionally largest; every staging-scale job rides the proportional
+# term or the 180 s cap, both of which already dwarf the same bounded overhead by a wide margin.
+$clientGraceSec = [math]::Min(180, [math]::Max(20, [int]($TimeoutSec * 0.1)))
 
 # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol major 3): the agent's own deadline starts
 # when it CLAIMS the job, not when this client submitted it, and jobs on a shared agent are

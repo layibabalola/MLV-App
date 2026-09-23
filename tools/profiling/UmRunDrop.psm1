@@ -174,7 +174,17 @@ function Invoke-UmRunDrop {
         # and yields a genuine clock reading (round 6/7 fable minor: "no test fails if this reverts
         # to Get-Date", true of every other test here, since submitter and share sit on one
         # filesystem and clock and are therefore indistinguishable by final state alone).
-        [scriptblock]$TestHookAfterShareClockProbe = $null
+        [scriptblock]$TestHookAfterShareClockProbe = $null,
+        # Test-only: invoked with the probe file's path immediately after it is written, BEFORE its
+        # LastWriteTimeUtc is read. Round 8 (sol minor, narrower than round 6/7's): on one machine,
+        # the share's clock and the submitter's own clock read as the same value, so no assertion on
+        # the FINAL probed timestamp alone can tell "read from the probe file" apart from "the
+        # submitter's own Get-Date" -- replacing the read below with a client Get-Date, while still
+        # calling -TestHookAfterShareClockProbe with it, satisfies every prior assertion. This hook
+        # lets a test stamp the probe file with a timestamp that CANNOT arise from Get-Date (e.g. a
+        # fixed date years away), so the probed value can only match if it truly came from reading
+        # the file back off the share.
+        [scriptblock]$TestHookAfterShareProbeWritten = $null
     )
 
     if ($JobId -and $JobId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "UMRUN_JOBID_INVALID '$JobId'" }
@@ -216,6 +226,7 @@ function Invoke-UmRunDrop {
         $shareNowProbe = Join-Path $Inbox ".umrun-clock-probe.$([guid]::NewGuid().ToString('N'))"
         try {
             Set-Content -LiteralPath $shareNowProbe -Value '' -Encoding ascii -NoNewline
+            if ($TestHookAfterShareProbeWritten) { & $TestHookAfterShareProbeWritten $shareNowProbe }
             $shareNowUtc = (Get-Item -LiteralPath $shareNowProbe -Force).LastWriteTimeUtc
             if ($TestHookAfterShareClockProbe) { & $TestHookAfterShareClockProbe $shareNowUtc }
         } finally {
@@ -306,10 +317,26 @@ function Invoke-UmRunDrop {
     # job or result exists. $metaPlacedHere tracks ONLY metadata this call itself placed, never a
     # pre-existing file (which already throws UMRUN_JOBID_IN_USE, or is self-healed, before reaching
     # here).
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 8 (sol BLOCKER): the checks at the very top of this
+    # function (metaFinal/final absence) are a single point-in-time snapshot taken BEFORE the
+    # side-file loop and the job's own (possibly multi-GB, possibly slow) copy to its nonce temp
+    # above -- by the time execution reaches here, an unbounded amount of wall-clock time may have
+    # passed. A second submitter racing for this SAME JobId with NO budget of its own (JobTimeoutSec
+    # 0, so it never touches $metaFinal at all) can complete its entire flow -- copy, rename to
+    # $final, become claimable -- inside that window. The old code then still happily wrote THIS
+    # call's metadata into $metaFinal (which the other submitter never touched), so the agent could
+    # read it and apply THIS call's budget to the OTHER submitter's already-visible job -- "metadata
+    # before the job becomes visible" held for every call's OWN job, but never guaranteed which
+    # job a given JobId's metadata actually governs once two submissions raced for it. Re-checking
+    # $final's absence immediately before ever writing metadata narrows the window in which that
+    # cross-contamination is possible from "the whole job copy" down to just this metadata write's
+    # own duration -- the same order-of-magnitude window every other race in this module already
+    # tolerates and self-heals (see the orphan-metadata grace period above).
     $metaPlacedHere = $false
     try {
         if ($JobTimeoutSec -ne 0) {
             if (Test-Path -LiteralPath $metaFinal) { throw "UMRUN_JOBID_IN_USE inbox already holds $id.meta.json" }
+            if (Test-Path -LiteralPath $final) { throw "UMRUN_JOBID_IN_USE inbox already holds $id.job.ps1" }
             $metaTmp = Join-Path $Inbox "$id.$nonce.meta.tmp"
             $metaJson = [ordered]@{ jobId = $id; timeoutSec = $JobTimeoutSec } | ConvertTo-Json -Compress
             try {
