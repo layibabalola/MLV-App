@@ -791,6 +791,23 @@ private:
     bool m_frameChanged;
     int m_currentFrameIndex;
     double m_newPosDropMode;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
+     * RESOLVED): monotonic, wrap-immune accumulator of how many source frames
+     * the CLIP/TIMELINE offered during playback -- real elapsed playback time
+     * converted to frame units, independent of whether any request was ever
+     * issued for them. Incremented at the exact sites playbackHandling()
+     * advances the position (the +1-per-call normal-mode step, and drop-frame
+     * mode's getFramerate()*timeDiff/1000 catch-up step, using the RAW
+     * pre-wrap-subtraction delta so a loop wrap never loses distance
+     * travelled). This is the missing "offered" denominator: every existing
+     * population figure (m_nextRenderRequestSerial,
+     * m_nextTargetRenderRequestSerial) only sees frames that BECAME a
+     * request, so a frame drop-frame catch-up skipped over before ever
+     * issuing a request for it was invisible to all of them. Never reset;
+     * PlaybackFramePopulationPolicy::computeSourceFramePopulation() takes the
+     * session-start/current delta, matching the existing serial-counter
+     * pattern. */
+    double m_playbackTimelineSourceFramesOffered = 0.0;
     bool m_dontDraw;
     bool m_frameStillDrawing;
     bool m_fileLoaded = false;
@@ -1021,6 +1038,15 @@ private:
     int m_dualIsoWarmupTelemetryPresentedFrames = 0;
     uint64_t m_playbackSmokeStartRequestSerial = 0;
     uint64_t m_playbackSmokeStartTargetRequestSerial = 0;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 3: session-start snapshot of
+     * m_playbackTimelineSourceFramesOffered, and the per-session presented-
+     * frame split by request origin, both consumed by
+     * PlaybackFramePopulationPolicy::computeSourceFramePopulation() in
+     * finishPlaybackSmokeTelemetry(). Reset at playback start alongside the
+     * other smoke counters. */
+    double m_playbackSmokeStartTimelineSourceFramesOffered = 0.0;
+    int m_playbackSmokePresentedViaTargetFrames = 0;
+    int m_playbackSmokePresentedViaLookaheadFrames = 0;
     uint64_t m_playbackSmokeStartDecodeRequestsIssued = 0;
     uint64_t m_playbackSmokeStartPrepStaleDrops = 0;
     uint64_t m_playbackSmokeStartPrepGenerationDrops = 0;

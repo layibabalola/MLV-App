@@ -10045,6 +10045,18 @@ void MainWindow::playbackHandling(int timeDiff)
                 ui->horizontalSliderPosition->setValue( cutInFrame );
                 m_playbackInternalSliderAdvance = false;
                 m_frameChanged = true;
+                /* CUDA-ATTRIBUTION-BASELINE-1 round 3: only credit the wrap
+                 * step here for normal (non-drop-frame) mode -- drop-frame
+                 * mode's own catch-up step below already folds its loop wrap
+                 * into the raw delta it adds to
+                 * m_playbackTimelineSourceFramesOffered, and by the time that
+                 * branch wraps, this position-based check no longer fires for
+                 * it (see the accumulator's declaration comment), so crediting
+                 * it again here would double count. */
+                if( !ui->actionDropFrameMode->isChecked() )
+                {
+                    m_playbackTimelineSourceFramesOffered += 1.0;
+                }
                 if( ui->actionAudioOutput->isChecked()
                  || ( repairDisabled && ui->actionDropFrameMode->isChecked() ) )
                 {
@@ -10075,12 +10087,27 @@ void MainWindow::playbackHandling(int timeDiff)
                     m_playbackInternalSliderAdvance = false;
                     m_newPosDropMode = ui->horizontalSliderPosition->value(); //track it also, for mode changing
                     m_frameChanged = true;
+                    // CUDA-ATTRIBUTION-BASELINE-1 round 3: normal mode requests
+                    // every source frame one at a time -- no skip is possible
+                    // by construction, so this step always offers exactly 1.
+                    m_playbackTimelineSourceFramesOffered += 1.0;
                 }
                 //Drop Frame Mode: calc picture for actual time
                 else
                 {
                 //This is the exact frame we need on the time line NOW!
-                m_newPosDropMode += (getFramerate() * (double)timeDiff / 1000.0);
+                /* CUDA-ATTRIBUTION-BASELINE-1 round 3: capture the RAW advance
+                 * before the loop-wrap subtraction/end-clamp below touch
+                 * m_newPosDropMode, and add that same raw amount to the
+                 * wrap-immune offered accumulator. This is exactly the
+                 * "wrap-aware progress accounting" astra's round-2 major
+                 * finding 4 asked for: a loop wrap only changes the POSITION
+                 * value, never how much source-frame distance was actually
+                 * travelled to get there. */
+                const double dropFrameSourceFramesAdvanced =
+                    getFramerate() * (double)timeDiff / 1000.0;
+                m_newPosDropMode += dropFrameSourceFramesAdvanced;
+                m_playbackTimelineSourceFramesOffered += dropFrameSourceFramesAdvanced;
                 //Loop!
                 if( ui->actionLoop->isChecked() && ( m_newPosDropMode >= ui->spinBoxCutOut->value() - 1 ) )
                 {
@@ -22518,6 +22545,9 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeLoopWrapCount = 0;
     m_playbackSmokeStartRequestSerial = m_nextRenderRequestSerial;
     m_playbackSmokeStartTargetRequestSerial = m_nextTargetRenderRequestSerial;
+    m_playbackSmokeStartTimelineSourceFramesOffered = m_playbackTimelineSourceFramesOffered;
+    m_playbackSmokePresentedViaTargetFrames = 0;
+    m_playbackSmokePresentedViaLookaheadFrames = 0;
     m_playbackSmokeStartDecodeRequestsIssued =
         m_pRenderThread ? m_pRenderThread->decodeRequestsIssuedCount() : 0;
     m_playbackSmokeStartPrepStaleDrops =
@@ -22833,6 +22863,21 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeLastPresentedTime = now;
     m_playbackSmokeLastPresentedFrame = static_cast<int>( displayFrame );
     ++m_playbackSmokePresentedFrames;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 3: split presented frames by request
+     * origin so finishPlaybackSmokeTelemetry() can tell a target request that
+     * was actually shown apart from one that was superseded/discarded --
+     * round 2's skippedOrUnpresentedByTargetSerial subtracted the TOTAL
+     * presented count (target- and lookahead-served alike) from the
+     * target-only request count, which could hide genuine target skips
+     * whenever any lookahead-served frame was presented in the same session. */
+    if( requestContext.playbackLookaheadRequest )
+    {
+        ++m_playbackSmokePresentedViaLookaheadFrames;
+    }
+    else
+    {
+        ++m_playbackSmokePresentedViaTargetFrames;
+    }
     const auto avgSmokeMs = [this]( double sum ) -> double
     {
         return m_playbackSmokePresentedFrames > 0
@@ -25235,6 +25280,36 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
     const qulonglong skippedOrUnpresentedByTargetSerial =
         static_cast<qulonglong>( framePopulation.skippedOrUnpresentedByTargetSerial );
     const uint64_t lookaheadRequestsBySerial = framePopulation.lookaheadRequestsBySerial;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
+     * RESOLVED): requestedTargetFramesBySerial above only sees frames that
+     * BECAME a target request -- a source frame drop-frame catch-up skipped
+     * over before ever issuing a request for it is invisible to it. This is
+     * the first-class, named accounting of THAT: it starts from
+     * m_playbackTimelineSourceFramesOffered (how many source frames the
+     * clip/timeline offered over this session, independent of request
+     * activity) and partitions it into four buckets that are proven, not
+     * assumed, to sum back to it -- see PlaybackSourceFramePopulation::
+     * partitionSound. This is the gate figure now; see
+     * playback_smoke.source_frame_population below and its use in
+     * run-release-gui-smoke.ps1. */
+    const PlaybackSourceFramePopulation sourceFramePopulation =
+        PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+            m_playbackTimelineSourceFramesOffered,
+            m_playbackSmokeStartTimelineSourceFramesOffered,
+            requestedTargetFramesBySerial,
+            lookaheadRequestsBySerial,
+            static_cast<uint64_t>( qMax( 0, m_playbackSmokePresentedViaTargetFrames ) ),
+            static_cast<uint64_t>( qMax( 0, m_playbackSmokePresentedViaLookaheadFrames ) ) );
+    const double sourceFrameLossRatio =
+        sourceFramePopulation.offeredSourceFrames > 0
+            ? static_cast<double>(
+                  sourceFramePopulation.offeredSourceFrames
+                  >= sourceFramePopulation.presentedFrames
+                      ? sourceFramePopulation.offeredSourceFrames
+                        - sourceFramePopulation.presentedFrames
+                      : 0 )
+              / static_cast<double>( sourceFramePopulation.offeredSourceFrames )
+            : 0.0;
     const double presentedFps =
         elapsedSeconds > 0.0
             ? static_cast<double>( m_playbackSmokePresentedFrames )
@@ -25488,6 +25563,58 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( skippedOrUnpresentedByTargetSerial )
                .arg( static_cast<qulonglong>( lookaheadRequestsBySerial ) );
 
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
+     * RESOLVED): a SEPARATE qInfo() line, not more positional %N args on
+     * either line above -- same arg-count-ceiling reason as
+     * playback_smoke.frame_population's own comment. This is now the
+     * AUTHORITATIVE gate figure (source_frame_loss_ratio); see
+     * run-release-gui-smoke.ps1's use of it. */
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.source_frame_population session=%1 "
+               "offered_source_frames=%2 never_requested_source_frames=%3 "
+               "requested_then_discarded_lookahead_frames=%4 "
+               "requested_then_skipped_target_frames=%5 "
+               "presented_via_target_frames=%6 "
+               "presented_via_lookahead_frames=%7 presented_frames=%8 "
+               "partition_sound=%9 source_frame_loss_ratio=%10 "
+               "population_basis=\"offered_source_frames is "
+               "MainWindow::m_playbackTimelineSourceFramesOffered's session "
+               "delta -- real elapsed playback time converted to frame units "
+               "at the exact sites playbackHandling() advances the position, "
+               "using the raw pre-wrap-subtraction delta so a loop wrap never "
+               "loses distance travelled. It is independent of whether any "
+               "request was ever issued, unlike every other population "
+               "figure on this line's companion playback_smoke."
+               "frame_population -- this is the fix for the source-frame "
+               "loss those figures cannot see: a frame drop-frame catch-up "
+               "skips over before issuing a request for it. The four named "
+               "buckets (never_requested_source_frames, "
+               "requested_then_discarded_lookahead_frames, "
+               "requested_then_skipped_target_frames, presented_frames) sum "
+               "exactly to offered_source_frames whenever partition_sound is "
+               "true; when false, treat every bucket on this line as UNKNOWN "
+               "attribution rather than trusted, and fail closed. "
+               "source_frame_loss_ratio=(offered_source_frames-"
+               "presented_frames)/offered_source_frames is the authoritative "
+               "playback-quality gate figure, replacing "
+               "skipped_or_unpresented_frames_by_target_serial's ratio on "
+               "playback_smoke.frame_population above -- see that field's "
+               "own comment for why it can pass while this fails\"" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+               .arg( static_cast<qulonglong>( sourceFramePopulation.offeredSourceFrames ) )
+               .arg( static_cast<qulonglong>( sourceFramePopulation.neverRequestedSourceFrames ) )
+               .arg( static_cast<qulonglong>(
+                   sourceFramePopulation.requestedThenDiscardedLookaheadFrames ) )
+               .arg( static_cast<qulonglong>(
+                   sourceFramePopulation.requestedThenSkippedTargetFrames ) )
+               .arg( static_cast<qulonglong>( sourceFramePopulation.presentedViaTargetFrames ) )
+               .arg( static_cast<qulonglong>(
+                   sourceFramePopulation.presentedViaLookaheadFrames ) )
+               .arg( static_cast<qulonglong>( sourceFramePopulation.presentedFrames ) )
+               .arg( bool01( sourceFramePopulation.partitionSound ) )
+               .arg( sourceFrameLossRatio, 0, 'f', 6 );
+
     qInfo().noquote()
         << QStringLiteral(
                "playback_smoke.gpu_summary session=%1 cpu_frames=%2 "
@@ -25608,6 +25735,16 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                          QString::fromLatin1( reason ? reason : "unknown" ) );
         fieldLog.insert( QStringLiteral("presented_fps"), presentedFps );
         fieldLog.insert( QStringLiteral("timeline_fps"), timelineFps );
+        /* CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra minor, prior finding 5
+         * PARTIAL): mark this exported consumer surface too -- timeline_fps
+         * is built from the same timeline-position endpoint delta that is
+         * unsound across loop wraps (see finishPlaybackSmokeTelemetry's
+         * skippedOrUnpresented comment near the top of this function).
+         * Additive field, schema-compatible with mlvapp.perf-field-log.v1. */
+        fieldLog.insert( QStringLiteral("timeline_fps_authoritative"), false );
+        fieldLog.insert( QStringLiteral("source_frame_loss_ratio"), sourceFrameLossRatio );
+        fieldLog.insert( QStringLiteral("source_frame_loss_ratio_partition_sound"),
+                         sourceFramePopulation.partitionSound );
         fieldLog.insert( QStringLiteral("no_readback_percent"), noReadbackPercent );
         fieldLog.insert( QStringLiteral("fallback_count"),
                          m_playbackSmokeFallbackCount );

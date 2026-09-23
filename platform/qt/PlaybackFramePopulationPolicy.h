@@ -31,6 +31,39 @@ struct PlaybackFramePopulation
     uint64_t lookaheadRequestsBySerial = 0;
 };
 
+/*! CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
+ *  RESOLVED): every field above is derived from REQUEST counters, so a
+ *  source frame drop-frame catch-up skipped over before ever issuing a
+ *  request for it is invisible to all of them -- an "optimisation" that
+ *  quietly requests fewer source frames passes cleanly. This struct starts
+ *  instead from offeredSourceFrames (how many source frames the
+ *  clip/timeline actually offered over the measured window, tracked by
+ *  MainWindow::m_playbackTimelineSourceFramesOffered independent of request
+ *  activity) and partitions it into four named, non-overlapping buckets that
+ *  are PROVEN -- not assumed -- to sum back to it; see partitionSound. */
+struct PlaybackSourceFramePopulation
+{
+    uint64_t offeredSourceFrames = 0;
+    uint64_t neverRequestedSourceFrames = 0;
+    uint64_t requestedThenDiscardedLookaheadFrames = 0;
+    uint64_t requestedThenSkippedTargetFrames = 0;
+    uint64_t presentedViaTargetFrames = 0;
+    uint64_t presentedViaLookaheadFrames = 0;
+    uint64_t presentedFrames = 0;
+    /*! True iff none of the three internal non-negative-delta clamps below
+     *  had to fire -- i.e. neverRequestedSourceFrames +
+     *  requestedThenDiscardedLookaheadFrames + requestedThenSkippedTargetFrames
+     *  + presentedFrames == offeredSourceFrames is not just numerically true
+     *  (the clamps make that trivially true whenever they fire, by
+     *  construction) but SOUND: every input counter behaved the way the
+     *  bucket definitions assume. False means one of those assumptions broke
+     *  (for example more presentations were classified against a request
+     *  class than that class ever issued) and the partition, while it still
+     *  sums, should be treated as UNKNOWN attribution rather than trusted --
+     *  the third-state rule this card also applies to timing. */
+    bool partitionSound = false;
+};
+
 class PlaybackFramePopulationPolicy
 {
 public:
@@ -72,6 +105,78 @@ public:
             result.requestedFramesBySerial >= result.requestedTargetFramesBySerial
                 ? result.requestedFramesBySerial - result.requestedTargetFramesBySerial
                 : 0;
+        return result;
+    }
+
+    /*! \param timelineSourceFramesOfferedNow the current value of
+     *         MainWindow::m_playbackTimelineSourceFramesOffered -- a
+     *         monotonic, request-independent accumulator of source-frame-
+     *         units of elapsed playback time (see its declaration comment).
+     *  \param timelineSourceFramesOfferedStart that accumulator's value when
+     *         the smoke session started.
+     *  \param requestedTargetFramesBySerialThisSession the session's target-
+     *         request EVENT count (PlaybackFramePopulation::
+     *         requestedTargetFramesBySerial) -- every drawFrame() call issues
+     *         exactly one, including duplicates re-requesting a source frame
+     *         a prior call already requested (this can and does happen: drop-
+     *         frame mode sets m_frameChanged on every timer tick regardless
+     *         of whether the computed source position crossed a whole-frame
+     *         boundary since the previous tick).
+     *  \param lookaheadRequestsBySerialThisSession the session's speculative-
+     *         lookahead request EVENT count (PlaybackFramePopulation::
+     *         lookaheadRequestsBySerial).
+     *  \param presentedViaTargetFramesThisSession presentations this session
+     *         whose PresentationContext::playbackLookaheadRequest was false.
+     *  \param presentedViaLookaheadFramesThisSession presentations this
+     *         session whose PresentationContext::playbackLookaheadRequest was
+     *         true.
+     */
+    static PlaybackSourceFramePopulation computeSourceFramePopulation(
+        double timelineSourceFramesOfferedNow,
+        double timelineSourceFramesOfferedStart,
+        uint64_t requestedTargetFramesBySerialThisSession,
+        uint64_t lookaheadRequestsBySerialThisSession,
+        uint64_t presentedViaTargetFramesThisSession,
+        uint64_t presentedViaLookaheadFramesThisSession )
+    {
+        PlaybackSourceFramePopulation result;
+        const double rawOffered =
+            timelineSourceFramesOfferedNow - timelineSourceFramesOfferedStart;
+        result.offeredSourceFrames =
+            rawOffered > 0.0
+                ? static_cast<uint64_t>( rawOffered + 0.5 )
+                : 0;
+        result.presentedViaTargetFrames = presentedViaTargetFramesThisSession;
+        result.presentedViaLookaheadFrames = presentedViaLookaheadFramesThisSession;
+        result.presentedFrames =
+            presentedViaTargetFramesThisSession + presentedViaLookaheadFramesThisSession;
+
+        const bool targetBucketSound =
+            requestedTargetFramesBySerialThisSession >= presentedViaTargetFramesThisSession;
+        result.requestedThenSkippedTargetFrames =
+            targetBucketSound
+                ? requestedTargetFramesBySerialThisSession - presentedViaTargetFramesThisSession
+                : 0;
+
+        const bool lookaheadBucketSound =
+            lookaheadRequestsBySerialThisSession >= presentedViaLookaheadFramesThisSession;
+        result.requestedThenDiscardedLookaheadFrames =
+            lookaheadBucketSound
+                ? lookaheadRequestsBySerialThisSession - presentedViaLookaheadFramesThisSession
+                : 0;
+
+        const uint64_t accountedFor =
+            result.presentedFrames
+            + result.requestedThenDiscardedLookaheadFrames
+            + result.requestedThenSkippedTargetFrames;
+        const bool offeredBucketSound = result.offeredSourceFrames >= accountedFor;
+        result.neverRequestedSourceFrames =
+            offeredBucketSound
+                ? result.offeredSourceFrames - accountedFor
+                : 0;
+
+        result.partitionSound =
+            targetBucketSound && lookaheadBucketSound && offeredBucketSound;
         return result;
     }
 };
