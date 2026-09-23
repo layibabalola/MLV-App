@@ -724,6 +724,7 @@ function Read-SmokeSummary {
     if ($null -eq $presentedFrames) {
         $presentedFrames = Convert-ToNullableInt64 (Get-NestedValue $json "validation.presentedFrames")
     }
+    $summaryLegacyFieldsNotAuthoritative = Get-NestedValue $json "log.summaryLegacyFieldsNotAuthoritative"
     $logPath = Get-NestedValue $json "log.path"
     $gpuTextureNoReadbackFrames = $null
     $gpuTextureReadbackFrames = $null
@@ -828,6 +829,15 @@ function Read-SmokeSummary {
         presentedFrames = $presentedFrames
         presentedFps = Convert-ToNullableDouble (Get-NestedValue $summary "presented_fps")
         timelineFps = Convert-ToNullableDouble (Get-NestedValue $summary "timeline_fps")
+        # CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra minor, round-3 PARTIAL):
+        # carry the source's non-authoritative label forward instead of
+        # dropping it. Fails closed to $false (not authoritative) whenever
+        # the source JSON predates log.summaryLegacyFieldsNotAuthoritative --
+        # an absent label is not evidence the field is safe.
+        timelineFpsAuthoritative = (
+            ($null -ne $summaryLegacyFieldsNotAuthoritative) -and
+            -not (@($summaryLegacyFieldsNotAuthoritative) -contains "timeline_fps")
+        )
         guiStatusText = Get-NestedValue $json "playbackFps.guiStatusText"
         guiStatusFps = Convert-ToNullableDouble (Get-NestedValue $json "playbackFps.guiStatusValue")
         visibleGuiStatusText = Get-NestedValue $json "playbackFps.visibleBottomLeftGuiStatusText"

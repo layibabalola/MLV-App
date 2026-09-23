@@ -1281,6 +1281,14 @@ exit `$LASTEXITCODE
             presentedFrames = if ($result) { $result.log.summary.presented_frames } else { $null }
             presentedFps = if ($result) { $result.log.summary.presented_fps } else { $null }
             timelineFps = if ($result) { $result.log.summary.timeline_fps } else { $null }
+            # CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra minor, round-3
+            # PARTIAL): carry the source's non-authoritative label forward
+            # instead of dropping it. Fails closed to $false whenever the
+            # source JSON predates log.summaryLegacyFieldsNotAuthoritative --
+            # an absent label is not evidence the field is safe.
+            timelineFpsAuthoritative = if ($result -and $null -ne $result.log.summaryLegacyFieldsNotAuthoritative) {
+                -not (@($result.log.summaryLegacyFieldsNotAuthoritative) -contains "timeline_fps")
+            } else { $false }
             gpuTextureNoReadbackFrames = $noReadbackFrames
             gpuTextureReadbackFrames = $textureReadbackFrames
             noReadbackCandidateFrameCount = $noReadbackCandidateFrameCount

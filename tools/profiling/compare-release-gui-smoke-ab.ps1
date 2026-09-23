@@ -422,7 +422,13 @@ function Convert-ToNullableDouble {
 function New-DeltaObject {
     param(
         [object]$BeforeValue,
-        [object]$AfterValue
+        [object]$AfterValue,
+        # CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra minor, round-3
+        # PARTIAL): optional authoritativeness label to carry forward from
+        # the source leg(s) instead of dropping it -- $null (the default)
+        # means "no claim made", not "authoritative".
+        [AllowNull()][object]$Authoritative = $null,
+        [string]$Note = $null
     )
 
     $beforeDouble = Convert-ToNullableDouble $BeforeValue
@@ -436,12 +442,19 @@ function New-DeltaObject {
         }
     }
 
-    [pscustomobject]@{
+    $result = [ordered]@{
         before = $beforeDouble
         after = $afterDouble
         delta = $delta
         deltaPercent = $deltaPercent
     }
+    if ($null -ne $Authoritative) {
+        $result["authoritative"] = [bool]$Authoritative
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Note)) {
+        $result["note"] = $Note
+    }
+    [pscustomobject]$result
 }
 
 function New-ValueChangeObject {
@@ -862,9 +875,18 @@ $result = [pscustomobject]@{
         smokePresentedFps = New-DeltaObject `
             -BeforeValue (Get-NestedValue $beforeSmoke "playbackFps.smokePresentedFps") `
             -AfterValue (Get-NestedValue $afterSmoke "playbackFps.smokePresentedFps")
+        # CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra minor, round-3
+        # PARTIAL): carry playbackFps.smokeTimelineFpsAuthoritative forward
+        # from each leg instead of dropping it. Fails closed to
+        # non-authoritative unless BOTH legs affirmatively mark it $true.
         smokeTimelineFps = New-DeltaObject `
             -BeforeValue (Get-NestedValue $beforeSmoke "playbackFps.smokeTimelineFps") `
-            -AfterValue (Get-NestedValue $afterSmoke "playbackFps.smokeTimelineFps")
+            -AfterValue (Get-NestedValue $afterSmoke "playbackFps.smokeTimelineFps") `
+            -Authoritative (
+                (Get-NestedValue $beforeSmoke "playbackFps.smokeTimelineFpsAuthoritative") -eq $true -and
+                (Get-NestedValue $afterSmoke "playbackFps.smokeTimelineFpsAuthoritative") -eq $true
+            ) `
+            -Note "NOT authoritative for playback-quality gating -- shares skippedOrUnpresentedRatio's loop-wrap unsoundness; see sourceFrameLossRatio."
     }
     quality = [pscustomobject]@{
         beforeMode = Get-NestedValue $beforeSmoke "visualQuality.qualityModeLast"
