@@ -1167,13 +1167,25 @@ _PS_BLOCK_COMMENT_RX = re.compile(r"<#.*?#>", re.S)
 @unittest.skipIf(PWSH is None, "pwsh is not on PATH")
 @unittest.skipUnless(os.name == "nt", "the emitted job targets a Windows measurement host")
 class SameJobIdRulingPremiseTests(unittest.TestCase):
-    """ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 9 (hub scope ruling, not a redesign): rounds 6-8
-    both keys re-filed the same-JobId check-then-publish race. The hub ruled it unreachable from
-    production because the ONLY production caller of tools/profiling/um-run.ps1 -- this
-    generator -- mints a jobId with a fresh random component on every submission, so two
-    submitters sharing a JobId requires a GUID collision; residual filed as a hardening card, not
-    closed here (see summary.md). This class pins that premise two ways, neither by regex over
-    prose:
+    """ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 9 (hub scope ruling) -- SUPERSEDED at round 10.
+    The round-9 ruling read below is WRONG and no longer the reason the same-JobId race is closed:
+    sol proved both of its premises false (docs/playback-attr-3-cuda.md documents manual
+    submissions with OPERATOR-CHOSEN, non-random JobIds -- see the fixture-rehearsal workflow's own
+    -JobId <stageJobId> -- and attr3-footage-stage.ps1's own presence-preflight budget already
+    lands in the range round-9 called "residual only at probe budgets"). Round 10 closes the race
+    BY CONSTRUCTION instead (UmRunDrop.psm1's claim-first ownership: every submission claims
+    inbox\\<id>.meta.json via an atomic no-overwrite rename before touching a side-file or the job,
+    so of two racing submitters for the same JobId exactly one can ever proceed, regardless of
+    whether the JobId happens to collide) -- see that module's own header and
+    test_two_racing_claims_for_the_same_jobid_exactly_one_proceeds_metadata_belongs_to_the_winner
+    in test_um_run_sidefiles.py for the real mechanism and its own test.
+
+    This class's own checks -- the generator is the only tracked automated caller, and it mints a
+    fresh random jobId on every call -- remain TRUE and cheap to keep proving, so they stay as a
+    secondary guard (defense in depth: even if claim-first were ever weakened, this generator's own
+    jobId freshness still holds), not because either one is load-bearing for correctness any more.
+    Kept below verbatim for the historical record of what the (now-superseded) round-9 ruling
+    argued, pinned two ways, neither by regex over prose:
       1. enumerates every tracked, non-test, non-comment line under tools/ that names
          um-run.ps1 and asserts the generator is the only one that actually builds a path to it --
          so a new caller is caught here before anyone trusts the stale ruling for it;

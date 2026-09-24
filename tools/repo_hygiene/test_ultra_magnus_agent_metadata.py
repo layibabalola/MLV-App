@@ -73,23 +73,16 @@ class UltraMagnusAgentMetadataFallbackTests(unittest.TestCase):
         )
 
     def test_missing_metadata_falls_back_to_the_agents_own_default(self) -> None:
-        # sol major 3's decided contract: -TimeoutSec 0 means "no metadata" at the module level, and
-        # the public client's own zero-rejection (um-run.ps1) does not apply to internal module
-        # callers -- but um-run.ps1 itself always forwards a positive -TimeoutSec. To exercise the
-        # AGENT's missing-metadata fallback specifically (not the client's own zero-rejection), drop
-        # the job directly through UmRunDrop.psm1 with JobTimeoutSec 0, bypassing um-run.ps1 -- the
-        # same "no budget requested" shape a caller with no opinion produces today.
-        drop = self.tmp / "drop.ps1"
-        drop.write_text(
-            "$ErrorActionPreference = 'Stop'\n"
-            f"Import-Module '{ROOT / 'tools' / 'profiling' / 'UmRunDrop.psm1'}' -Force\n"
-            f"Invoke-UmRunDrop -Inbox '{self.share / 'inbox'}' -Outbox '{self.share / 'outbox'}' "
-            f"-ScriptPath '{self.job}' -JobId 'demo' -JobTimeoutSec 0 | Out-Null\n",
-            encoding="utf-8",
-        )
-        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(drop)],
-                               capture_output=True, text=True)
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: UmRunDrop.psm1 now claims
+        # inbox\<id>.meta.json for EVERY submission, even with no budget (JobTimeoutSec 0 just
+        # omits `timeoutSec` -- see test_metadata_is_still_claimed_when_no_budget_is_requested_but_
+        # omits_timeoutsec in test_um_run_sidefiles.py), so a normal drop can no longer produce
+        # "genuinely no metadata file at all". This still exercises the AGENT's OWN missing-
+        # metadata fallback (Get-JobMetadata's `missing` branch) directly and race-free, the same
+        # way its unparseable-metadata sibling below already does: write ONLY the job file to the
+        # inbox, bypassing UmRunDrop.psm1 (and its claim) entirely.
+        (self.share / "inbox").mkdir(parents=True, exist_ok=True)
+        (self.share / "inbox" / "demo.job.ps1").write_bytes(self.job.read_bytes())
         self.assertFalse((self.share / "inbox" / "demo.meta.json").exists(),
                           "this scenario is only meaningful with no metadata present")
 
