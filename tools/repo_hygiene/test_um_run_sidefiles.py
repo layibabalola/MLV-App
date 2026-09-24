@@ -133,7 +133,10 @@ class UmRunDropModuleTests(_Share):
         # unique per-submission temporary names, never the bare shared forms
         self.assertNotIn("demo-source.zip.sidepart", copies)
         self.assertNotIn("demo.job.tmp", copies)
-        self.assertEqual(self.names(), ["demo-build.json", "demo-source.zip", "demo.job.ps1"])
+        # round 10: every submission claims inbox\<id>.meta.json first, with or without a budget --
+        # this call passed none, so the claim's own metadata omits `timeoutSec` (see
+        # test_metadata_is_still_claimed_when_no_budget_is_requested_but_omits_timeoutsec below).
+        self.assertEqual(self.names(), ["demo-build.json", "demo-source.zip", "demo.job.ps1", "demo.meta.json"])
 
     # ---- agent-side job budget (ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1) --------------------------
     # The agent reads inbox\<id>.meta.json when it claims a job and honours timeoutSec in 1..86400,
@@ -160,28 +163,39 @@ class UmRunDropModuleTests(_Share):
         self.assertEqual(meta["timeoutSec"], 3600)
         self.assertEqual(meta["jobId"], "demo")
 
-    def test_the_jobs_own_bytes_are_copied_before_metadata_is_written(self) -> None:
-        # The other half of the round-4 reorder: at the moment the job's OWN temporary is copied,
-        # metadata must NOT yet exist -- it is published only once those bytes already sit on the
-        # share, narrowing the window in which metadata is visible with no job to the rename alone.
-        #
-        # sol round 5 minor: the previous version of this test only counted logged `.job.tmp`
-        # copies and never inspected metadata state during the copy, so reversing the ordering (the
-        # exact crash-window regression this test exists to prevent) left it green. The copier below
-        # observes the live inbox for `demo.meta.json` at the instant it copies the job's own
-        # temporary -- reversing the module's ordering would make it observe True and fail here.
-        copier = ("{ param($s, $d) if ($d -like '*.job.tmp') { Add-Content -LiteralPath " + _q(self.log) +
-                  " -Value ('meta-present-during-job-copy=' + (Test-Path -LiteralPath (Join-Path " +
+    def test_metadata_is_claimed_before_any_side_file_or_job_byte_is_copied(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: this INVERTS the pre-round-10 ordering test
+        # (metadata was published only after the job's bytes already sat on the share, narrowing
+        # the "visible with no job" window to a single rename). Round 10 needs the opposite: the
+        # claim is the FIRST thing written, before a single side-file or job byte -- see this
+        # module's own header. The copier below observes the live inbox for demo.meta.json at the
+        # instant it copies EITHER the side-file's own temporary OR the job's -- proving the claim
+        # is already on disk before both, not just before the job's.
+        copier = ("{ param($s, $d) if ($d -like '*.sidepart' -or $d -like '*.job.tmp') { "
+                  "Add-Content -LiteralPath " + _q(self.log) +
+                  " -Value (($(if ($d -like '*.sidepart') { 'sidefile' } else { 'job' })) + "
+                  "'-copy meta-present=' + (Test-Path -LiteralPath (Join-Path " +
                   _q(self.inbox) + " 'demo.meta.json'))) }; Copy-Item -LiteralPath $s -Destination $d }")
-        proc = self.drop(copier, side=[], job_timeout_sec=3600)
+        proc = self.drop(copier, job_timeout_sec=3600)   # self.side is a real side-file by default
         self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
         lines = self.log.read_text(encoding="utf-8").splitlines()
-        self.assertIn("meta-present-during-job-copy=False", lines, lines)
+        self.assertIn("sidefile-copy meta-present=True", lines, lines)
+        self.assertIn("job-copy meta-present=True", lines, lines)
 
-    def test_no_metadata_is_written_when_no_budget_is_requested(self) -> None:
+    def test_metadata_is_still_claimed_when_no_budget_is_requested_but_omits_timeoutsec(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: before this round, no budget meant no
+        # metadata at all -- round 10's claim-first ownership needs EVERY submission to claim the
+        # JobId, with or without a budget, so the claim's own metadata is still written, just with
+        # `timeoutSec` omitted -- which both the tracked and deployed agents already treat as "fall
+        # back to my own default" (confirmed against the deployed agent; see summary.md), so this
+        # is not a new parser rule.
         proc = self.drop(OBSERVING, side=[])
         self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
-        self.assertEqual(self.names(), ["demo.job.ps1"],
+        self.assertEqual(self.names(), ["demo.job.ps1", "demo.meta.json"],
+                         "a caller that names no budget must still claim the JobId")
+        meta = json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))
+        self.assertEqual(meta["jobId"], "demo")
+        self.assertNotIn("timeoutSec", meta,
                          "a caller that names no budget must leave the agent on its own default")
 
     def test_a_budget_outside_the_agents_accepted_range_is_refused_and_nothing_is_placed(self) -> None:
@@ -230,29 +244,24 @@ class UmRunDropModuleTests(_Share):
         self.assertEqual(self.names(), ["demo.job.ps1"],
                          "a lost job-rename race must roll back this call's own metadata, not leave it behind")
 
-    def test_metadata_is_never_attempted_once_a_racing_job_is_already_visible(self) -> None:
-        # sol round 8 BLOCKER: the previous test above only proves the FINAL state is clean, which
-        # is true whether metadata was (a) never attempted, because $final was rechecked before
-        # writing it, or (b) written and then rolled back after losing the final rename -- sol's own
-        # words: "the present test checks eventual rollback but never observes whether the agent
-        # claims the already-visible job". Those two are NOT equivalent: in (b), there is a real
-        # window, however small, during which $final (a job with NO metadata of its own, since
-        # RACING_JOB writes it directly with no budget) sits next to THIS call's metadata -- exactly
-        # long enough for a concurrently polling agent to read it and apply this call's budget to a
-        # job it was never meant to govern. RACING_JOB's side effect fires during the job's OWN
-        # temp copy, i.e. before this call has even reached the metadata section, so if metadata is
-        # EVER written after that point the race is still open. -TestHookAfterMetaTmpWritten only
-        # fires once metadata's own temp file has actually been written to disk; asserting it never
-        # fires here proves metadata publication was refused outright, not merely undone afterwards.
-        hook = "{ param($p) Add-Content -LiteralPath " + _q(self.log) + " -Value 'META_TMP_WRITTEN' }"
-        proc = self.drop(RACING_JOB, side=[], job_timeout_sec=3600, after_meta_tmp_written=hook)
+    def test_two_racing_claims_for_the_same_jobid_exactly_one_proceeds_metadata_belongs_to_the_winner(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10 (item 3's required concurrency test):
+        # claim-first moves the sole tiebreaker for two submitters racing the same JobId to the
+        # metadata rename itself, at the very start of the call -- before either has touched a
+        # side-file or job byte (round-4/8 era code raced at the JOB's own final rename instead,
+        # after side-files and the job's own copy had already happened for BOTH submitters; that
+        # race no longer exists to test, since the loser here never reaches it). Simulates a second
+        # submitter's own claim landing in between this call's meta.tmp write and its own rename to
+        # demo.meta.json -- -TestHookAfterMetaTmpWritten fires at exactly that instant.
+        hook = ("{ param($p) [IO.File]::WriteAllText(" + _q(self.inbox / 'demo.meta.json') +
+                ", '{\"jobId\":\"demo\",\"nonce\":\"winner-nonce\"}') }")
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, after_meta_tmp_written=hook)
         self.assertIn("THREW UMRUN_JOBID_IN_USE", proc.stdout, proc.stdout + proc.stderr)
-        self.assertEqual((self.inbox / "demo.job.ps1").read_text(encoding="utf-8"), "Write-Output concurrent")
-        self.assertEqual(self.names(), ["demo.job.ps1"],
-                         "the racing job's visibility must never be paired with this call's metadata")
-        logged = self.log.read_text(encoding="utf-8") if self.log.exists() else ""
-        self.assertNotIn("META_TMP_WRITTEN", logged,
-                         "metadata must never be attempted once a same-ID job is already visible")
+        meta = json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))
+        self.assertEqual(meta["nonce"], "winner-nonce",
+                         "the loser's own claim must never overwrite the winner's")
+        self.assertEqual(self.names(), ["demo.meta.json"],
+                         "the loser must touch no side-file or job byte once its own claim is refused")
 
     def test_a_rollback_deletion_failure_is_surfaced_not_silently_swallowed(self) -> None:
         # sol round 6 minor, re-raised independently by both keys at round 7: reverting the rollback
@@ -479,7 +488,7 @@ class UmRunDropModuleTests(_Share):
         clip = self.repo_fixture()
         proc = self.drop(OBSERVING, side=[clip])
         self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
-        self.assertEqual(self.names(), sorted(["demo.job.ps1", clip.name]))
+        self.assertEqual(self.names(), sorted(["demo.job.ps1", "demo.meta.json", clip.name]))
         self.assertEqual(
             hashlib.sha256((self.inbox / clip.name).read_bytes()).hexdigest(),
             hashlib.sha256(clip.read_bytes()).hexdigest(),
