@@ -160,6 +160,12 @@ function Get-UmRunAgentLiveness {
     $ageSec = ($shareNowUtc - $heartbeatUtc).TotalSeconds
     $jobMismatch = $false
     $otherJobId = $null
+    # The agent's own heartbeat write (Write-AsciiFileWithRetry) is not atomic across processes --
+    # a read landing mid-write could in principle see a torn line. Not retried here: the failure
+    # mode is a missed `job=` match (treated as "no tag present", never a false mismatch, since
+    # $jobMismatch only ever flips true on an ACTUAL different id), which self-corrects on the
+    # very next poll and never produces a wrong FINAL outcome -- only, at worst, one extra
+    # PollSeconds of this client second-guessing an otherwise-fresh heartbeat.
     $line = Get-Content -LiteralPath $HeartbeatPath -Raw -ErrorAction SilentlyContinue
     if ($line -and $line -match '(?:^|\s)job=(\S+)\s*$') {
         if ($Matches[1] -ne $JobId) { $jobMismatch = $true; $otherJobId = $Matches[1] }
