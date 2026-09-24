@@ -855,6 +855,76 @@ class GuiSmokeResultCarriesHostLoadTests(unittest.TestCase):
 
 
 @requires_pwsh
+class GuiSmokeObservedMaxSampleGapGuardExecutesTests(_ProbeCase):
+    """round 7 (astra MAJOR, exact repro): "Flipping max-gap '-gt' to '-lt' ... passes all four
+    GUI wiring tests, while timestamps 0/4/11/15 seconds change UNKNOWN to quiet." The tests in
+    GuiSmokeResultCarriesHostLoadTests above only check that certain substrings (including the
+    literal text "-gt") are PRESENT in the source, in the right relative order -- a mutation that
+    keeps every one of those substrings intact (there is no "-gt" token check at all; the only
+    thing asserted is that the computation and the call site exist) sails through unnoticed. This
+    extracts the REAL max-gap-tracking loop out of the live script by literal text search and
+    EXECUTES it against astra's exact timestamps, so a `-gt` -> `-lt` mutation changes what this
+    test actually observes (7000ms, the true max gap) rather than what substrings are present."""
+
+    script = SMOKE_SCRIPT
+    functions: list[str] = []
+
+    START_MARKER = "$hostLoadSampleSequence = @($hostLoadBefore)"
+    END_MARKER = "}\n$hostLoadVerdict = Get-HostLoadVerdict"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="hostload-maxgap-probe-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        source = self.script.read_text(encoding="utf-8")
+        self.guard_block = _extract_block(source, self.START_MARKER, self.END_MARKER, trailing_lines=0)
+        self.assertIn("-gt $hostLoadObservedMaxSampleGapMs", self.guard_block)
+
+    def _run(self, offsets_seconds: list[float]) -> subprocess.CompletedProcess:
+        def snap(offset: float) -> str:
+            return (
+                "[pscustomobject]@{ capturedAtUtc = "
+                f"(Get-Date '2026-01-01T00:00:00Z').AddSeconds({offset}).ToString('o') }}"
+            )
+        script = self.tmp / "run.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hostLoadBefore = {snap(offsets_seconds[0])}\n"
+            "$hostLoadDuringSamples = @(" +
+            ", ".join(snap(o) for o in offsets_seconds[1:-1]) +
+            ")\n"
+            f"$hostLoadAfter = {snap(offsets_seconds[-1])}\n"
+            f"{self.guard_block}\n"
+            "Write-Host \"MAXGAP=$hostLoadObservedMaxSampleGapMs\"\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(script)],
+            capture_output=True, text=True,
+        )
+
+    def test_astras_exact_repro_the_true_maximum_gap_is_7000ms_not_4000ms(self) -> None:
+        # Timestamps at 0, 4, 11, 15 seconds -> gaps of 4000, 7000, 4000 ms. The correct algorithm
+        # (running max, "-gt") must report 7000. A "-lt" mutant instead ends up reporting 4000 (the
+        # first gap, since 7000 is not "-lt" the running value and never replaces it) -- astra's
+        # own description: "changes UNKNOWN to quiet", because 4000ms no longer exceeds a 4000ms
+        # cadence's 1.5x (6000ms) threshold while the true 7000ms gap does.
+        proc = self._run([0, 4, 11, 15])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("MAXGAP=7000", proc.stdout)
+
+    def test_a_single_gap_still_reports_correctly(self) -> None:
+        # Regression guard / other side of the boundary: with only one gap, "running max" and a
+        # "running min" mutant would coincidentally agree (there is nothing to compare against on
+        # the first iteration) -- this alone would NOT catch the mutation, which is exactly why the
+        # test above uses three gaps of differing size instead of just before/after.
+        proc = self._run([0, 4])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("MAXGAP=4000", proc.stdout)
+
+
+@requires_pwsh
 class CompareGuiSmokeAbHostLoadRefusalTests(_ProbeCase):
     """tools/profiling/compare-release-gui-smoke-ab.ps1's Get-HostLoadComparisonEvidence."""
 
@@ -1737,6 +1807,76 @@ class P3ValidationSpeedValidatedWiringTests(unittest.TestCase):
             add_failure_index, else_index,
             "the floor-breach Add-Failure must live in the non-provisional else branch",
         )
+
+
+@requires_pwsh
+class P3ValidationSpeedValidatedGuardExecutesTests(_ProbeCase):
+    """round 7 (astra MAJOR, exact repro): "adding -not before P3's [bool]$_.hostLoadProvisional
+    ... passes all four P3 wiring tests." test_speed_validated_excludes_host_load_provisional_clips
+    above only checks that the substring "[bool]$_.hostLoadProvisional" is PRESENT in the source --
+    a mutation that inverts the guard by prepending "-not" still contains that exact substring, so
+    the static check stays green while the guard's actual behaviour flips. This extracts the real
+    $speedValidated Where-Object clause by literal text search and EXECUTES it against a clip that
+    is otherwise clean on every OTHER disqualifying condition, on both sides of the
+    hostLoadProvisional boundary -- a real "-not" mutation changes what this test observes
+    (speedValidated flips to True for a provisional clip), not just what substrings are present."""
+
+    script = P3_VALIDATION_SCRIPT
+    functions: list[str] = []
+
+    START_MARKER = "$speedValidated =\n"
+    END_MARKER = "}).Count -eq 0)"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="hostload-p3-speedvalidated-probe-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        source = self.script.read_text(encoding="utf-8")
+        self.guard_block = _extract_block(source, self.START_MARKER, self.END_MARKER, trailing_lines=0)
+        self.assertIn("[bool]$_.hostLoadProvisional", self.guard_block)
+        self.assertNotIn("-not [bool]$_.hostLoadProvisional", self.guard_block)
+
+    def _clip(self, host_load_provisional: bool) -> str:
+        # Clean on every OTHER disqualifying condition -- the only thing under test is
+        # hostLoadProvisional itself.
+        provisional_literal = "$true" if host_load_provisional else "$false"
+        return (
+            "[pscustomobject]@{ status = 'success'; presentedFps = 30.0; "
+            "gpuTextureNoReadbackFrames = 10; fallbackFrameCount = 0; "
+            "cudaAmazeAcceptedTextureSourceFrameCount = 10; activeNoReadbackFrameCount = 10; "
+            f"hostLoadProvisional = {provisional_literal} }}"
+        )
+
+    def _run(self, host_load_provisional: bool) -> subprocess.CompletedProcess:
+        script = self.tmp / "run.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            "$receiptRawFixesEnabled = $true\n"
+            "$SpeedLeg = $true\n"
+            "$status = 'success'\n"
+            "$DryRun = $false\n"
+            "$MinPresentedFps = 1.0\n"
+            f"$clipResults = @({self._clip(host_load_provisional)})\n"
+            f"{self.guard_block}\n"
+            "Write-Host \"SPEED_VALIDATED=$speedValidated\"\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(script)],
+            capture_output=True, text=True,
+        )
+
+    def test_provisional_clip_that_is_otherwise_clean_is_not_speed_validated(self) -> None:
+        proc = self._run(host_load_provisional=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("SPEED_VALIDATED=False", proc.stdout)
+
+    def test_non_provisional_clean_clip_is_speed_validated(self) -> None:
+        # Other side of the boundary: the fix must not turn every clean clip unvalidated.
+        proc = self._run(host_load_provisional=False)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("SPEED_VALIDATED=True", proc.stdout)
 
 
 class P3ValidationImportIndependentlyChecksHostLoadTests(unittest.TestCase):
