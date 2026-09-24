@@ -90,6 +90,41 @@ function Wait-GuiSmokeProcessBounded {
             if ($terminationConfirmed -or $stopwatch.ElapsedMilliseconds -ge $TimeoutMs) {
                 break
             }
+            # round 6 (sol MAJOR, astra MAJOR -- "collection is not bounded as a whole"): $OnSample
+            # itself runs synchronously with no deadline of its own -- PowerShell has no
+            # cooperative-cancellation point inside a scriptblock invoked with `&` in the caller's
+            # own runspace, so a callback that never returns cannot be preempted from here (true
+            # preemption would need a separate runspace with independently-duplicated session
+            # state -- Get-HostLoadSnapshot and its helper functions live in the CALLING script's
+            # scope, not this module's -- judged out of scope for this round's smallest-diff
+            # mandate; disclosed here and in the round 6 summary, same class as round 5's disclosed
+            # dilution residual). What IS bounded now: once a call DOES return, its own duration is
+            # measured, and a call that took far longer than its declared cadence stops the loop
+            # from scheduling further chunks/callbacks rather than silently continuing to
+            # compound. The overrun is surfaced explicitly here AND (independently)
+            # Get-HostLoadVerdict's round-5 observed-max-sample-gap check already forces the whole
+            # leg's coverage to "unknown" once the gap between this sample's capturedAtUtc and the
+            # next one's exceeds 1.5x the declared cadence -- this early break is what lets that
+            # next, huge gap actually happen instead of the loop trying (and likely again
+            # overrunning) another chunk immediately afterward.
+            # round 6 (sol MAJOR, astra MAJOR -- "collection is not bounded as a whole"): $OnSample
+            # itself runs synchronously with no deadline of its own -- PowerShell has no
+            # cooperative-cancellation point inside a scriptblock invoked with `&` in the caller's
+            # own runspace, so a callback that never returns cannot be preempted from here (true
+            # preemption would need a separate runspace with independently-duplicated session
+            # state -- Get-HostLoadSnapshot and its helper functions live in the CALLING script's
+            # scope, not this module's -- judged out of scope for this round's smallest-diff
+            # mandate; disclosed here and in the round 6 summary, same class as round 5's disclosed
+            # dilution residual). What IS bounded now: once a call DOES return, its own duration is
+            # measured, and a call that took far longer than its declared cadence stops the loop
+            # from scheduling further chunks/callbacks rather than silently continuing to
+            # compound. The overrun is surfaced explicitly here AND (independently)
+            # Get-HostLoadVerdict's round-5 observed-max-sample-gap check already forces the whole
+            # leg's coverage to "unknown" once the gap between this sample's capturedAtUtc and the
+            # next one's exceeds 1.5x the declared cadence -- this early break is what lets that
+            # next, huge gap actually happen instead of the loop trying (and likely again
+            # overrunning) another chunk immediately afterward.
+            $onSampleStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
             try {
                 & $OnSample
             }
@@ -99,6 +134,15 @@ function Wait-GuiSmokeProcessBounded {
                 # the receipt via processBoundary.failures -> the summary JSON. Record only the
                 # exception's TYPE.
                 $failures.Add("Host-load sample during leg failed: $($_.Exception.GetType().Name)")
+            }
+            $onSampleStopwatch.Stop()
+            if ($onSampleStopwatch.ElapsedMilliseconds -gt ($SampleIntervalMs * 3)) {
+                $failures.Add(
+                    "Host-load sample during leg took $($onSampleStopwatch.ElapsedMilliseconds) ms, " +
+                    "far exceeding its $SampleIntervalMs ms declared sampling cadence; treating " +
+                    "remaining coverage for this leg as unknown rather than scheduling further " +
+                    "samples.")
+                break
             }
         }
     }

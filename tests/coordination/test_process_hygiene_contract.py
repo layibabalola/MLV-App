@@ -559,6 +559,78 @@ $stopwatch.Stop()
     assert observed["elapsedMs"] < 2400, observed["elapsedMs"]
 
 
+def test_gui_smoke_process_boundary_stops_scheduling_after_a_wildly_overrunning_onsample(tmp_path: Path) -> None:
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 6 (sol MAJOR, astra MAJOR -- "collection is not
+    # bounded as a whole"): OnSample runs synchronously with no deadline of its own; a callback
+    # that never returns cannot be preempted mid-flight from this thread (disclosed residual, see
+    # the module's own comment and the round 6 summary). What IS now bounded: once a call DOES
+    # return, a duration far past its declared cadence (here SampleIntervalMs=300, so the 3x
+    # threshold is 900ms, and OnSample deliberately sleeps 2000ms) must be surfaced in failures AND
+    # stop the loop from scheduling a second, likely-also-overrunning chunk.
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+
+    module_literal = str(GUI_SMOKE_PROCESS_BOUNDARY).replace("'", "''")
+    python_literal = str(sys.executable).replace("'", "''")
+    command = rf"""
+Import-Module '{module_literal}' -Force
+
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = '{python_literal}'
+$start.UseShellExecute = $false
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+[void]$start.ArgumentList.Add('-c')
+[void]$start.ArgumentList.Add('import time; time.sleep(30)')
+$p = [Diagnostics.Process]::new()
+$p.StartInfo = $start
+[void]$p.Start()
+$stdoutTask = $p.StandardOutput.ReadToEndAsync()
+$stderrTask = $p.StandardError.ReadToEndAsync()
+$script:onSampleCalls = 0
+$onSample = {{ $script:onSampleCalls++; Start-Sleep -Milliseconds 2000 }}
+$stopwatch = [Diagnostics.Stopwatch]::StartNew()
+$result = Wait-GuiSmokeProcessBounded -Process $p -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 6000 -TerminationGraceMs 5000 -StreamDrainMs 5000 -SampleIntervalMs 300 -OnSample $onSample
+$stopwatch.Stop()
+
+[pscustomobject]@{{
+    elapsedMs = $stopwatch.ElapsedMilliseconds
+    onSampleCalls = $script:onSampleCalls
+    failures = @($result.failures)
+}} | ConvertTo-Json -Depth 8 -Compress
+"""
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    observed = json.loads(completed.stdout.strip())
+    # Exactly one OnSample call: the overrun is detected right after that first call returns, and
+    # the loop must not attempt a second one (which would only compound the overrun further).
+    assert observed["onSampleCalls"] == 1, observed
+    failures = observed["failures"]
+    if isinstance(failures, str):
+        failures = [failures]
+    assert any(
+        "far exceeding its" in f and "declared sampling cadence" in f for f in failures
+    ), failures
+
+
 @pytest.mark.skipif(os.name != "nt", reason="MLV-App process ownership is Windows-specific")
 def test_gui_smoke_process_boundary_sanitizes_onsample_exception_message(tmp_path: Path) -> None:
     # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 5 (sol minor, fable minor -- same class as round 4's

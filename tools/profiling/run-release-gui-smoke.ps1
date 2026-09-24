@@ -316,7 +316,14 @@ function Get-HostLoadSnapshot {
     param(
         [int]$TopProcessCount = 8,
         [int]$OperationTimeoutSec = 2,
-        [AllowNull()][System.Nullable[int]]$SubjectProcessId = $null
+        [AllowNull()][System.Nullable[int]]$SubjectProcessId = $null,
+        # round 6 (sol MAJOR, astra MAJOR -- "collection is not bounded as a whole"): the two CIM
+        # calls above carry -OperationTimeoutSec, but Get-Process's per-process TotalProcessorTime
+        # reads below did not carry any bound of their own -- enumerating and reading every process
+        # on a heavily loaded host could itself take unboundedly long. This caps that loop's OWN
+        # wall-clock budget; processes not yet read when the budget expires are counted as
+        # unreadable (see below) rather than silently omitted from an apparently-complete sum.
+        [int]$ProcessEnumerationBudgetMs = 1500
     )
 
     $capturedAtUtc = [datetime]::UtcNow
@@ -385,7 +392,20 @@ function Get-HostLoadSnapshot {
         $totalCpuSeconds = 0.0
         $processCpuSecondsById = @{}
         $unreadableProcessCount = 0
-        foreach ($p in $processes) {
+        # round 6: bounds THIS loop's own wall-clock cost, independent of the two CIM calls' own
+        # -OperationTimeoutSec above -- a slow per-process property read (or simply a very large
+        # process count) cannot silently extend collection past a budget this snapshot itself
+        # enforces.
+        $processEnumerationStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $processList = @($processes)
+        for ($processIndex = 0; $processIndex -lt $processList.Count; $processIndex++) {
+            if ($processEnumerationStopwatch.ElapsedMilliseconds -ge $ProcessEnumerationBudgetMs) {
+                # Budget exhausted -- every remaining, not-yet-read process is unreadable for THIS
+                # snapshot (not silently absent from the sum as if it simply didn't exist).
+                $unreadableProcessCount += ($processList.Count - $processIndex)
+                break
+            }
+            $p = $processList[$processIndex]
             try {
                 $seconds = [double]$p.TotalProcessorTime.TotalSeconds
                 $totalCpuSeconds += $seconds

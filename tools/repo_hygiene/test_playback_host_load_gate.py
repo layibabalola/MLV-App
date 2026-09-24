@@ -142,6 +142,53 @@ class HostLoadSnapshotTests(_ProbeCase):
         else:
             self.assertIn("COLLECTED=False", proc.stdout)
 
+    def test_process_enumeration_budget_bounds_a_slow_per_process_loop(self) -> None:
+        # round 6 (sol MAJOR, astra MAJOR -- "collection is not bounded as a whole"): the two CIM
+        # calls carry -OperationTimeoutSec, but the per-process TotalProcessorTime loop had no
+        # bound of its own. Mocks Get-CimInstance (deterministic, fast) and Get-Process (100
+        # synthetic processes whose TotalProcessorTime getter genuinely sleeps 100ms each -- a real
+        # wall-clock cost, not a simulated one -- 10 real seconds if read to completion) to prove
+        # the default 1500ms -ProcessEnumerationBudgetMs actually stops the loop early: some
+        # processes get read, not all of them, the shortfall is recorded as unreadableProcessCount
+        # (not silently dropped), and the WHOLE call returns in a small fraction of the 10s
+        # unbounded cost.
+        proc = self.run_snippet(
+            "function Get-CimInstance {\n"
+            "    param([string]$ClassName, $ErrorAction, $OperationTimeoutSec)\n"
+            "    if ($ClassName -eq 'Win32_Processor') { return @([pscustomobject]@{ LoadPercentage = 10 }) }\n"
+            "    return [pscustomobject]@{ FreePhysicalMemory = 1000000; TotalVisibleMemorySize = 2000000 }\n"
+            "}\n"
+            "function Get-Process {\n"
+            "    param($ErrorAction)\n"
+            "    for ($i = 1; $i -le 100; $i++) {\n"
+            "        $o = [pscustomobject]@{ Id = $i; ProcessName = \"proc$i\"; CPU = 0 }\n"
+            "        $o | Add-Member -MemberType ScriptProperty -Name TotalProcessorTime -Value {\n"
+            "            Start-Sleep -Milliseconds 100; [TimeSpan]::FromSeconds(1)\n"
+            "        }.GetNewClosure()\n"
+            "        $o\n"
+            "    }\n"
+            "}\n"
+            "$callStopwatch = [System.Diagnostics.Stopwatch]::StartNew()\n"
+            "$s = Get-HostLoadSnapshot -TopProcessCount 6\n"
+            "$callStopwatch.Stop()\n"
+            "Write-Host \"COLLECTED=$($s.collected)\"\n"
+            "Write-Host \"READ_COUNT=$($s.processCpuSecondsById.Count)\"\n"
+            "Write-Host \"UNREADABLE_COUNT=$($s.unreadableProcessCount)\"\n"
+            "Write-Host \"ELAPSED_MS=$($callStopwatch.ElapsedMilliseconds)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("COLLECTED=True", proc.stdout)
+        read_count = int(next(l for l in proc.stdout.splitlines() if l.startswith("READ_COUNT=")).split("=")[1])
+        unreadable_count = int(next(l for l in proc.stdout.splitlines() if l.startswith("UNREADABLE_COUNT=")).split("=")[1])
+        elapsed_ms = int(next(l for l in proc.stdout.splitlines() if l.startswith("ELAPSED_MS=")).split("=")[1])
+        self.assertEqual(read_count + unreadable_count, 100)
+        self.assertGreater(read_count, 0, "the budget must not starve the loop entirely")
+        self.assertLess(read_count, 100, "the budget must actually cut the loop short")
+        self.assertGreater(unreadable_count, 0)
+        # The unbounded cost would have been ~10000ms (100 * 100ms); the budget must keep the
+        # WHOLE call to a small fraction of that -- generous ceiling to avoid CI flakiness.
+        self.assertLess(elapsed_ms, 5000, "the process-enumeration budget did not actually bound the call")
+
     def test_snapshot_records_a_timestamp(self) -> None:
         proc = self.run_snippet(
             "$s = Get-HostLoadSnapshot -TopProcessCount 1\n"
@@ -420,6 +467,21 @@ class HostLoadVerdictTests(_ProbeCase):
         proc = self._verdict_with_gap(quiet, quiet, during, sample_interval_ms=4000, observed_gap_ms=4200)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
+
+    def test_spacing_tolerance_is_pinned_at_one_point_five_x_not_looser(self) -> None:
+        # round 6 (sol MAJOR, exact repro): "Pin the 1.5x spacing tolerance with a test that fails
+        # if it is loosened (sol: 1.5 -> 1.7 passed)." Neither test above pins the MULTIPLIER
+        # itself -- 7000/4000=1.75x is caught by any tolerance below 1.75x (including a loosened
+        # 1.7x), and 4200/4000=1.05x passes under any reasonable tolerance at all, so a mutation
+        # widening 1.5x to 1.7x would leave both existing tests green. This uses a gap strictly
+        # BETWEEN the two: 6400/4000 = 1.6x declared cadence. Under the correct 1.5x tolerance
+        # (bar: 6000ms), 6400ms must already read unknown; under a loosened 1.7x tolerance (bar:
+        # 6800ms), it would incorrectly still read quiet.
+        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
+        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 })"
+        proc = self._verdict_with_gap(quiet, quiet, during, sample_interval_ms=4000, observed_gap_ms=6400)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
 
     def test_missing_observed_sample_gap_is_backward_compatible(self) -> None:
         # Every test above this one, and every caller written before round 5, never passes
