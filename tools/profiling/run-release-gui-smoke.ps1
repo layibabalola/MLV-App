@@ -331,6 +331,8 @@ function Get-HostLoadSnapshot {
         topCpuConsumers = @()
         subjectCpuSeconds = $null
         totalCpuSeconds = $null
+        processCpuSecondsById = $null
+        unreadableProcessCount = $null
     }
     try {
         $cpuLoad = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop `
@@ -369,14 +371,32 @@ function Get-HostLoadSnapshot {
         # subject contribution from a point-in-time (~last-second) Win32_Processor.LoadPercentage
         # reading. A per-process access failure (a protected/exited process) must not blank the
         # whole total -- skip that one process rather than aborting the snapshot.
+        #
+        # round 6 (sol BLOCKER, astra MAJOR): skipping a failed process here used to leave
+        # totalCpuSeconds looking like a complete, trustworthy sum -- indistinguishable from a
+        # host that genuinely only had that much CPU activity. Two things are recorded now instead:
+        # unreadableProcessCount (how many processes this snapshot could NOT account for, so a
+        # consumer can refuse to treat totalCpuSeconds as complete) and processCpuSecondsById (each
+        # readable process's cumulative seconds keyed by PID, so a later matched-BY-PROCESS delta
+        # can be computed across two snapshots instead of differencing two aggregate totals -- the
+        # aggregate-diff approach let a process that exited between snapshots silently cancel out
+        # another process's genuine current usage, since its earlier CPU-seconds inflated the
+        # PREVIOUS total but were entirely absent from the CURRENT one).
         $totalCpuSeconds = 0.0
+        $processCpuSecondsById = @{}
+        $unreadableProcessCount = 0
         foreach ($p in $processes) {
             try {
-                $totalCpuSeconds += $p.TotalProcessorTime.TotalSeconds
+                $seconds = [double]$p.TotalProcessorTime.TotalSeconds
+                $totalCpuSeconds += $seconds
+                $processCpuSecondsById[[string]$p.Id] = $seconds
             } catch {
+                $unreadableProcessCount++
             }
         }
         $snapshot.totalCpuSeconds = $totalCpuSeconds
+        $snapshot.processCpuSecondsById = $processCpuSecondsById
+        $snapshot.unreadableProcessCount = $unreadableProcessCount
     }
     catch {
         $snapshot.collected = $false
@@ -387,6 +407,27 @@ function Get-HostLoadSnapshot {
         }
     }
     [pscustomobject]$snapshot
+}
+
+function Get-HostLoadProcessCpuSecondsPairs {
+    # round 6: processCpuSecondsById is built as a Hashtable in Get-HostLoadSnapshot, but a
+    # snapshot that has round-tripped through ConvertTo-Json/ConvertFrom-Json (the real receipt
+    # path) comes back as a PSCustomObject with string-named properties instead -- and hand-built
+    # test fixtures may use either shape. Normalize both to a flat array of {Id; Seconds} pairs so
+    # Get-HostLoadNonSubjectCpuLoadPercent's matched-process walk below never has to know which
+    # representation it received.
+    param([object]$ProcessCpuSecondsById)
+    if ($null -eq $ProcessCpuSecondsById) {
+        return @()
+    }
+    if ($ProcessCpuSecondsById -is [System.Collections.IDictionary]) {
+        return @($ProcessCpuSecondsById.GetEnumerator() | ForEach-Object {
+            [pscustomobject]@{ Id = [string]$_.Key; Seconds = [double]$_.Value }
+        })
+    }
+    return @($ProcessCpuSecondsById.PSObject.Properties | ForEach-Object {
+        [pscustomobject]@{ Id = [string]$_.Name; Seconds = [double]$_.Value }
+    })
 }
 
 function Get-HostLoadNonSubjectCpuLoadPercent {
@@ -404,13 +445,24 @@ function Get-HostLoadNonSubjectCpuLoadPercent {
     # windows are not safe to subtract. sol's repro: raw=96%, 4 elapsed seconds, 4 processors,
     # subjectCpuSeconds delta=12.8s -> subjectPercent=80% -> nonSubject=16%, reading a 96% RAW
     # sample as quiet under a 75% bar. Fixed by requiring BOTH sides of the subtraction to be
-    # cumulative CPU-time deltas over the IDENTICAL [previous, current] window: totalCpuSeconds
-    # (every process, see Get-HostLoadSnapshot) minus subjectCpuSeconds, both diffed against the
-    # same $PreviousSnapshot. When either snapshot lacks totalCpuSeconds (a fixture built before
-    # this round, a caller that never populated it, or exactly sol's literal repro object), no
-    # subtraction is attempted at all -- fall straight back to RAW, which is the same fail-closed
-    # answer this function has always given for an input it cannot confidently use, and directly
-    # resolves sol's repro (96 > a 75 bar) without a mismatched-window subtraction to hide behind.
+    # cumulative CPU-time deltas over the IDENTICAL [previous, current] window.
+    #
+    # round 6 (sol BLOCKER, astra MAJOR -- partial collection folds into quiet): round 5's fix
+    # diffed two AGGREGATE totals (totalCpuSeconds current minus previous). That has two remaining
+    # failure modes, both of which read as an honest low number instead of an incomplete one: (1) a
+    # process whose CPU time could not be read is silently skipped, so totalCpuSeconds undercounts
+    # without recording that it did, and (2) a process that exited between snapshots drops out of
+    # the CURRENT total entirely while its earlier time is still baked into the PREVIOUS total, so
+    # its own past CPU usage can cancel another process's genuine current usage in the subtraction.
+    # Fixed two ways: refuse the exclusion outright (fall back to RAW) when either snapshot's
+    # unreadableProcessCount is nonzero or absent, since an incomplete snapshot cannot be trusted to
+    # bound non-subject load from below; and when both snapshots ARE complete, sum matched-BY-PID
+    # deltas (Get-HostLoadProcessCpuSecondsPairs) instead of an aggregate total-minus-total diff --
+    # a process present in only one snapshot (exited or newly started) simply contributes nothing to
+    # either side, so it cannot cancel a different, still-present process's usage. When either
+    # snapshot lacks processCpuSecondsById at all (a fixture built before this round, or any
+    # pre-round-6 caller), no subtraction is attempted -- fall straight back to RAW, the same
+    # fail-closed answer this function has always given for an input it cannot confidently use.
     param(
         [object]$CurrentSnapshot,
         [object]$PreviousSnapshot,
@@ -424,7 +476,11 @@ function Get-HostLoadNonSubjectCpuLoadPercent {
     $rawLoad = [double]$CurrentSnapshot.cpuLoadPercent
     if ($null -eq $CurrentSnapshot.subjectCpuSeconds -or $null -eq $PreviousSnapshot -or
         $null -eq $PreviousSnapshot.capturedAtUtc -or $ProcessorCount -le 0 -or
-        $null -eq $CurrentSnapshot.totalCpuSeconds -or $null -eq $PreviousSnapshot.totalCpuSeconds) {
+        $null -eq $CurrentSnapshot.processCpuSecondsById -or $null -eq $PreviousSnapshot.processCpuSecondsById) {
+        return $rawLoad
+    }
+    if ($null -eq $CurrentSnapshot.unreadableProcessCount -or [int]$CurrentSnapshot.unreadableProcessCount -gt 0 -or
+        $null -eq $PreviousSnapshot.unreadableProcessCount -or [int]$PreviousSnapshot.unreadableProcessCount -gt 0) {
         return $rawLoad
     }
     $previousSubjectSeconds = if ($null -ne $PreviousSnapshot.subjectCpuSeconds) {
@@ -437,8 +493,19 @@ function Get-HostLoadNonSubjectCpuLoadPercent {
         return $rawLoad
     }
     $subjectDeltaSeconds = [Math]::Max(0.0, [double]$CurrentSnapshot.subjectCpuSeconds - $previousSubjectSeconds)
-    $totalDeltaSeconds = [Math]::Max(
-        0.0, [double]$CurrentSnapshot.totalCpuSeconds - [double]$PreviousSnapshot.totalCpuSeconds)
+    $previousById = @{}
+    foreach ($pair in (Get-HostLoadProcessCpuSecondsPairs $PreviousSnapshot.processCpuSecondsById)) {
+        $previousById[$pair.Id] = $pair.Seconds
+    }
+    $totalDeltaSeconds = 0.0
+    foreach ($pair in (Get-HostLoadProcessCpuSecondsPairs $CurrentSnapshot.processCpuSecondsById)) {
+        if ($previousById.ContainsKey($pair.Id)) {
+            $delta = $pair.Seconds - [double]$previousById[$pair.Id]
+            if ($delta -gt 0) {
+                $totalDeltaSeconds += $delta
+            }
+        }
+    }
     $nonSubjectDeltaSeconds = [Math]::Max(0.0, $totalDeltaSeconds - $subjectDeltaSeconds)
     100.0 * $nonSubjectDeltaSeconds / ($elapsedSec * $ProcessorCount)
 }

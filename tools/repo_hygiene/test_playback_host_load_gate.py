@@ -446,7 +446,9 @@ class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
     """tools/profiling/run-release-gui-smoke.ps1's Get-HostLoadNonSubjectCpuLoadPercent."""
 
     script = SMOKE_SCRIPT
-    functions = ["Get-HostLoadNonSubjectCpuLoadPercent"]
+    # round 6: the function now depends on Get-HostLoadProcessCpuSecondsPairs to normalize
+    # processCpuSecondsById -- both must be spliced into the probe.
+    functions = ["Get-HostLoadProcessCpuSecondsPairs", "Get-HostLoadNonSubjectCpuLoadPercent"]
 
     def _percent(self, current: str, previous: str, processor_count: int = 4) -> subprocess.CompletedProcess:
         return self.run_snippet(
@@ -460,15 +462,19 @@ class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
     def test_subject_consuming_all_the_load_leaves_non_subject_near_zero(self) -> None:
         # Over 4 elapsed seconds on a 4-core host, the subject accrued 4*4=16 processor-seconds --
         # 100% of the machine's capacity for that window -- while raw cpuLoadPercent read 100%.
-        # round 5: totalCpuSeconds now required for the matched-window path -- the subject IS the
-        # entire load here, so totalCpuSeconds delta equals subjectCpuSeconds delta (16.0).
+        # round 6: totalCpuSeconds/processCpuSecondsById now required (with unreadableProcessCount
+        # = 0) for the matched-window path -- a single process (the subject, pid 1) accounts for
+        # the entire load here, so its matched delta equals subjectCpuSeconds delta (16.0).
         current = (
             "[pscustomobject]@{ collected = $true; cpuLoadPercent = 100.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 16.0; totalCpuSeconds = 16.0 }"
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 16.0; "
+            "unreadableProcessCount = 0; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 16.0 } }"
         )
         previous = (
             "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
-            "totalCpuSeconds = 0.0 }"
+            "unreadableProcessCount = 0; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0 } }"
         )
         proc = self._percent(current, previous, processor_count=4)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -494,15 +500,15 @@ class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PERCENT=55", proc.stdout)
 
-    def test_missing_total_cpu_seconds_falls_back_to_raw_load_not_mismatched_subtraction(self) -> None:
+    def test_missing_process_cpu_seconds_by_id_falls_back_to_raw_load_not_mismatched_subtraction(self) -> None:
         # round 5 (sol MAJOR): sol's exact repro, in the card's own units -- raw cpuLoadPercent=96,
         # four elapsed seconds, four processors, subjectCpuSeconds delta=12.8. Round 4's
         # subtraction (a POINT raw sample minus an INTERVAL-AVERAGE subject share) produced
         # subjectPercent=80 -> nonSubject=16, reading a 96% sample as quiet under a 75% bar. This
-        # object has no totalCpuSeconds (exactly what round 4's fixtures, and any pre-round-5
-        # caller, look like) -- round 5 requires totalCpuSeconds on both sides for ANY subtraction,
-        # so this now falls straight back to the RAW 96, which correctly exceeds a 75% bar instead
-        # of being silently masked.
+        # object has no processCpuSecondsById at all (exactly what round 4's fixtures, and any
+        # pre-round-6 caller, look like) -- round 6 requires processCpuSecondsById on both sides
+        # for ANY subtraction, so this now falls straight back to the RAW 96, which correctly
+        # exceeds a 75% bar instead of being silently masked.
         current = (
             "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
             "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 12.8 }"
@@ -515,27 +521,176 @@ class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
         self.assertIn("PERCENT=96", proc.stdout)
 
     def test_matched_window_subtracts_commensurate_cumulative_deltas(self) -> None:
-        # round 5 (fable minor -- matched-window subtraction): 4s tick, 8 processors (capacity 32
-        # processor-seconds). The subject burned 16 processor-seconds over the interval (50% of
-        # capacity); ALL processes together (subject included) burned 24 processor-seconds (75% of
-        # capacity, e.g. an exogenous burst diluted across the same window). Both terms are
-        # cumulative deltas over the IDENTICAL window, so the subtraction is dimensionally sound:
-        # nonSubject = (24-16)/32*100 = 25%. A point-sample-vs-interval-average calculation (round
-        # 4's mismatched-window subtraction, using a raw point sample instead of totalCpuSeconds)
-        # could produce a different, incommensurate number for the same underlying load -- this
-        # test pins the matched-window arithmetic itself, independent of whatever the point sample
-        # happened to read.
+        # round 5 (fable minor -- matched-window subtraction), updated round 6 for the
+        # per-process-keyed shape. 4s tick, 8 processors (capacity 32 processor-seconds). The
+        # subject (pid 1) burned 16 processor-seconds over the interval (50% of capacity); one
+        # other process (pid 2) burned 8 processor-seconds (present in both snapshots, delta
+        # 8 = 24-16... i.e. together subject+other = 24 processor-seconds, 75% of capacity, e.g. an
+        # exogenous burst diluted across the same window). Both processes are present in BOTH
+        # snapshots, so their matched deltas sum exactly like the old aggregate diff did for this
+        # no-churn case: nonSubject = (24-16)/32*100 = 25%.
         current = (
             "[pscustomobject]@{ collected = $true; cpuLoadPercent = 60.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 16.0; totalCpuSeconds = 24.0 }"
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 16.0; "
+            "unreadableProcessCount = 0; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 16.0; '2' = 8.0 } }"
         )
         previous = (
             "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
-            "totalCpuSeconds = 0.0 }"
+            "unreadableProcessCount = 0; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0; '2' = 0.0 } }"
         )
         proc = self._percent(current, previous, processor_count=8)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PERCENT=25", proc.stdout)
+
+    def test_unreadable_process_on_either_bracket_falls_back_to_raw_not_an_undercount(self) -> None:
+        # round 6 (astra MAJOR, exact repro): "a raw 96% interior sample, four seconds/four
+        # processors, and only the subject's 0.16 CPU-seconds readable" -- every OTHER process's
+        # TotalProcessorTime getter throws. The old code silently skipped those failures and
+        # totalCpuSeconds ended up equal to subjectCpuSeconds, so the subtraction produced
+        # effective=0 (quiet). unreadableProcessCount > 0 on the current snapshot must now refuse
+        # the exclusion outright and fall back to RAW 96, which correctly exceeds a 75% bar.
+        current = (
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 0.16; "
+            "unreadableProcessCount = 3; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.16 } }"
+        )
+        previous = (
+            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
+            "unreadableProcessCount = 0; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0 } }"
+        )
+        proc = self._percent(current, previous, processor_count=4)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=96", proc.stdout)
+
+    def test_unreadable_process_on_the_previous_bracket_also_falls_back_to_raw(self) -> None:
+        # round 6: incompleteness on EITHER side of the window is disqualifying -- a clean current
+        # snapshot cannot rescue a previous snapshot that could not fully account for its processes.
+        current = (
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 90.0; "
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 1.0; "
+            "unreadableProcessCount = 0; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 1.0 } }"
+        )
+        previous = (
+            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
+            "unreadableProcessCount = 2; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0 } }"
+        )
+        proc = self._percent(current, previous, processor_count=4)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=90", proc.stdout)
+
+    def test_a_process_that_exited_between_snapshots_cannot_cancel_a_survivors_usage(self) -> None:
+        # round 6 (sol BLOCKER: "differencing two totals over a CHANGING process set lets
+        # exited-process history cancel current usage"). Previous snapshot: pid 1 (subject, 0.0s)
+        # and pid 999 (a short-lived process that had already burned 50.0 processor-seconds by the
+        # previous snapshot, then exited before the current one was taken). Current snapshot: pid 1
+        # (subject, 4.0s) and pid 2 (a NEW process that started after the previous snapshot, 12.0s)
+        # -- pid 999 is simply absent, not present with a lower value. Under the OLD aggregate-diff
+        # approach this would have been totalCurrent=16.0 minus totalPrevious=50.0 = -34.0, clamped
+        # to 0 -- pid 999's past history completely hides pid 2's real, current 12.0s of usage. The
+        # matched-BY-PID approach only sums pid 1 (delta 4.0, all subject) because pid 2 and pid 999
+        # are each present in only one snapshot and contribute nothing: nonSubject = (4.0-4.0)/16
+        # = 0%. This is deliberately NOT a claim that pid 2's usage is captured (it cannot be, from
+        # only two snapshots) -- it is the claim that pid 999's exit no longer produces a NEGATIVE,
+        # clamped-to-zero total that could mask unrelated genuine usage elsewhere. See the
+        # complementary Get-HostLoadVerdict-level test below for why raw is what actually protects
+        # this case end to end.
+        current = (
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 4.0; "
+            "unreadableProcessCount = 0; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 4.0; '2' = 12.0 } }"
+        )
+        previous = (
+            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
+            "unreadableProcessCount = 0; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0; '999' = 50.0 } }"
+        )
+        proc = self._percent(current, previous, processor_count=4)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=0", proc.stdout)
+
+
+@requires_pwsh
+class HostLoadPartialCollectionEndToEndVerdictTests(_ProbeCase):
+    """round 6 (sol BLOCKER, astra MAJOR): chains Get-HostLoadNonSubjectCpuLoadPercent's output
+    into Get-HostLoadVerdict exactly the way run-release-gui-smoke.ps1's real $hostLoadOnSample
+    scriptblock does (compute nonSubjectCpuLoadPercent from two chronological snapshots, Add-Member
+    it onto the later sample, then judge the bar on that sample -- see run-release-gui-smoke.ps1
+    around line 1450) -- proving BOTH keys' exact partial-collection repros no longer read quiet
+    end to end, not just at the helper-function level tested above."""
+
+    script = SMOKE_SCRIPT
+    functions = [
+        "Get-HostLoadProcessCpuSecondsPairs",
+        "Get-HostLoadNonSubjectCpuLoadPercent",
+        "Get-HostLoadVerdict",
+    ]
+
+    def _verdict_via_real_wiring(self, before: str, during_current: str, bar: float = 75) -> subprocess.CompletedProcess:
+        return self.run_snippet(
+            f"$before = {before}\n"
+            f"$duringSample = {during_current}\n"
+            "$nonSubject = Get-HostLoadNonSubjectCpuLoadPercent -CurrentSnapshot $duringSample "
+            "-PreviousSnapshot $before -ProcessorCount 4\n"
+            "$duringSample | Add-Member -MemberType NoteProperty -Name nonSubjectCpuLoadPercent "
+            "-Value $nonSubject\n"
+            f"$v = Get-HostLoadVerdict -Before $before -After $before -During @($duringSample) -Bar {bar}\n"
+            "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional) "
+            "NONSUBJECT=$nonSubject MAX=$($v.maxCpuLoadPercent)\"\n"
+        )
+
+    def test_astra_exact_repro_unreadable_processes_no_longer_reads_quiet(self) -> None:
+        # astra's exact repro: "a raw 96% interior sample, four seconds/four processors, and only
+        # the subject's 0.16 CPU-seconds readable" -- three other processes' TotalProcessorTime
+        # getters throw. Old behaviour: totalCpuSeconds silently ended up equal to subjectCpuSeconds
+        # (the undercount), so nonSubject computed to 0 and the leg read quiet under a 75% bar.
+        before = (
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 20.0; "
+            "capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
+            "unreadableProcessCount = 0; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0 } }"
+        )
+        during_current = (
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 0.16; "
+            "unreadableProcessCount = 3; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.16 } }"
+        )
+        proc = self._verdict_via_real_wiring(before, during_current)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NONSUBJECT=96", proc.stdout)
+        self.assertIn("STATE=exceeded PROVISIONAL=True", proc.stdout)
+        self.assertNotIn("STATE=quiet", proc.stdout)
+
+    def test_sols_exact_repro_undercounted_total_no_longer_reads_quiet(self) -> None:
+        # sol's exact repro numbers, round 6 brief: "raw 96, subject delta 0, total delta 3.84, 4
+        # procs -> read quiet." Constructed as an incomplete snapshot -- several CPU-consuming
+        # processes unreadable, leaving only a small readable remainder (3.84 processor-seconds
+        # worth from one other process) that made the old aggregate totalCpuSeconds look
+        # deceptively low relative to the true 96% raw reading.
+        before = (
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 20.0; "
+            "capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
+            "unreadableProcessCount = 0; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0 } }"
+        )
+        during_current = (
+            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
+            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 0.0; "
+            "unreadableProcessCount = 5; "
+            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0; '2' = 3.84 } }"
+        )
+        proc = self._verdict_via_real_wiring(before, during_current)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("NONSUBJECT=96", proc.stdout)
+        self.assertIn("STATE=exceeded PROVISIONAL=True", proc.stdout)
+        self.assertNotIn("STATE=quiet", proc.stdout)
 
 
 @requires_pwsh
