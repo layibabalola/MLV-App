@@ -276,6 +276,16 @@ class UmRunDropModuleTests(_Share):
         self.assertIn("THREW UMRUN_JOBID_IN_USE", combined, combined)
         self.assertIn("could not be removed during rollback", combined, combined)
         self.assertIn("may outlive this refused submission", combined, combined)
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 9 (sol/astra test-strength minor): every
+        # assertion above also passes if $($originalError.Exception.Message) in the fold is
+        # replaced by the literal "UMRUN_JOBID_IN_USE" -- both the "THREW" prefix and the two
+        # static fold-suffix strings are unaffected by that substitution, since the real original
+        # message here ALSO starts with the literal "UMRUN_JOBID_IN_USE". What only the real
+        # $originalError.Exception.Message carries is the rest of the job-rename-race throw's own
+        # DISTINCT text (UmRunDrop.psm1's "inbox\<id>.job.ps1 appeared concurrently; refusing to
+        # replace it") -- asserting on that proves the actual original exception's message, not a
+        # constant standing in for it, survived the fold.
+        self.assertIn("inbox\\demo.job.ps1 appeared concurrently; refusing to replace it", combined, combined)
         self.assertEqual((self.inbox / "demo.job.ps1").read_text(encoding="utf-8"), "Write-Output concurrent")
         # The lock made removal genuinely fail -- the metadata must still be sitting there, proving
         # the folded message describes a real failure and not a lucky-looking string.
