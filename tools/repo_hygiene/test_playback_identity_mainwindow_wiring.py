@@ -66,6 +66,44 @@ PLAYBACK_HANDLING_SIGNATURE = "void MainWindow::playbackHandling(int timeDiff)"
 
 REUSE_BRANCH_MARKER = "playbackLookaheadCoversCurrent"
 
+# CUDA-ATTRIBUTION-BASELINE-1 round 9 (sol + astra MAJOR, "the census
+# protects call presence, not the values that flow into the tracker"):
+# exact-text statements for every VALUE SOURCE feeding the six call sites
+# above -- the epoch producer, both epoch assignments, the lap
+# accumulation, the wrap increments/reset, and the EOF-policy's exact
+# arguments. A one-token mutation to any of these (e.g. replacing the RHS
+# with a constant, or deleting the statement) leaves every test above
+# green, because those tests only check that SOME live-looking expression
+# is passed -- not that the expression is fed by the right upstream
+# statement. sol's repro: `requestContext.playbackSmokeLoopEpoch = 0;`
+# passes all 13 pre-round-9 tests. astra's repro: deleting
+# `lookaheadContext.playbackSmokeLoopEpoch = lookaheadLoopEpoch;`, deleting
+# `lookaheadLoopEpoch += wrapped.lapsAhead;`, removing either wrap
+# increment, or replacing offeredAdvance()'s `ui->actionLoop->isChecked()`
+# argument with the constant `true` all pass too.
+LOOKAHEAD_EPOCH_SEED_STATEMENT = (
+    "uint64_t lookaheadLoopEpoch = baseContext.playbackSmokeLoopEpoch;"
+)
+LOOKAHEAD_EPOCH_WRAP_ACCUMULATE_STATEMENT = (
+    "lookaheadLoopEpoch += wrapped.lapsAhead;"
+)
+LOOKAHEAD_CONTEXT_EPOCH_ASSIGN_STATEMENT = (
+    "lookaheadContext.playbackSmokeLoopEpoch = lookaheadLoopEpoch;"
+)
+REQUEST_CONTEXT_EPOCH_ASSIGN_STATEMENT = (
+    "requestContext.playbackSmokeLoopEpoch = m_playbackSmokeLoopWrapCount;"
+)
+WRAP_COUNT_INCREMENT_STATEMENT = (
+    "if( m_playbackSmokeActive ) ++m_playbackSmokeLoopWrapCount;"
+)
+WRAP_COUNT_RESET_STATEMENT = "m_playbackSmokeLoopWrapCount = 0;"
+DROP_FRAME_ADVANCE_EXACT_ARGS = [
+    "m_newPosDropMode",
+    "dropFrameSourceFramesAdvanced",
+    "ui->actionLoop->isChecked()",
+    "ui->spinBoxCutOut->value() - 1",
+]
+
 NUMERIC_LITERAL_RE = re.compile(r"^-?\d+(\.\d+)?[fFuUlL]*$")
 
 
@@ -354,6 +392,16 @@ class MainWindowWiringTests(unittest.TestCase):
                 arg, NUMERIC_LITERAL_RE,
                 "offeredAdvance(...) argument %r must be a live expression, "
                 "not a hardcoded constant" % arg)
+        # round 9 (sol + astra MAJOR): the per-arg numeric-literal check
+        # above does not catch a live-looking BOOLEAN constant substituted
+        # for the loop-checked argument -- replacing
+        # ui->actionLoop->isChecked() with the bare token `true` passed the
+        # round-8 census. Pin every argument to its exact required
+        # expression so that mutation is caught too.
+        self.assertEqual(
+            args, DROP_FRAME_ADVANCE_EXACT_ARGS,
+            "offeredAdvance(...) must be called with the exact required "
+            "live arguments, not a constant substitute for any of them")
 
     def test_drop_frame_advance_policy_result_feeds_the_offered_accumulator(self):
         # The call's return value must be added into
@@ -388,6 +436,103 @@ class MainWindowWiringTests(unittest.TestCase):
                           "the telemetry-measured flag must be the live session "
                           "flag, not a hardcoded true -- see round 7's unmeasured "
                           "third-state fix")
+
+    # ---- round 9: value sources feeding the epoch, not just its plumbing ---
+    # sol + astra MAJOR: the round-8 census proved every call site receives
+    # SOME live-looking expression, but never traced that expression back to
+    # its producer. These tests pin the exact upstream statements a mutation
+    # would have to survive; each one is independently mutation-tested in
+    # the round-9 summary's mutation table.
+
+    def test_request_context_epoch_is_assigned_from_the_live_wrap_counter(self):
+        self.assertEqual(
+            self.source.count(REQUEST_CONTEXT_EPOCH_ASSIGN_STATEMENT), 1,
+            "expected exactly 1 occurrence of the exact statement assigning "
+            "requestContext.playbackSmokeLoopEpoch from the live wrap "
+            "counter -- replacing the right-hand side with a constant (e.g. "
+            "0) must fail this test")
+        span = _function_body_span(self.source, DRAW_FRAME_SIGNATURE)
+        offset = self.source.index(REQUEST_CONTEXT_EPOCH_ASSIGN_STATEMENT)
+        self.assertTrue(call_within(span, offset),
+                         "the epoch assignment must be inside drawFrame()")
+
+    def test_lookahead_epoch_is_seeded_from_the_live_base_context_epoch(self):
+        self.assertEqual(
+            self.source.count(LOOKAHEAD_EPOCH_SEED_STATEMENT), 1,
+            "expected exactly 1 occurrence of the exact statement seeding "
+            "lookaheadLoopEpoch from baseContext.playbackSmokeLoopEpoch")
+        span = _function_body_span(self.source, QUEUE_LOOKAHEAD_SIGNATURE)
+        offset = self.source.index(LOOKAHEAD_EPOCH_SEED_STATEMENT)
+        self.assertTrue(call_within(span, offset),
+                         "the lookahead epoch seed must be inside "
+                         "queuePlaybackLookaheadRequests()")
+
+    def test_lookahead_epoch_accumulates_laps_ahead_on_wrap(self):
+        self.assertEqual(
+            self.source.count(LOOKAHEAD_EPOCH_WRAP_ACCUMULATE_STATEMENT), 1,
+            "expected exactly 1 occurrence of the exact statement adding "
+            "wrapped.lapsAhead into lookaheadLoopEpoch -- deleting this "
+            "statement silently drops the wrap credit for a lookahead that "
+            "crosses cut-out into a later lap")
+        span = _function_body_span(self.source, QUEUE_LOOKAHEAD_SIGNATURE)
+        offset = self.source.index(LOOKAHEAD_EPOCH_WRAP_ACCUMULATE_STATEMENT)
+        self.assertTrue(call_within(span, offset),
+                         "the lap accumulation must be inside "
+                         "queuePlaybackLookaheadRequests()")
+
+    def test_lookahead_context_epoch_is_assigned_from_the_accumulated_local(self):
+        self.assertEqual(
+            self.source.count(LOOKAHEAD_CONTEXT_EPOCH_ASSIGN_STATEMENT), 1,
+            "expected exactly 1 occurrence of the exact statement copying "
+            "the accumulated lookaheadLoopEpoch into "
+            "lookaheadContext.playbackSmokeLoopEpoch -- without it, "
+            "lookaheadContext keeps baseContext's un-wrapped epoch (it is "
+            "copy-constructed from baseContext just above), silently "
+            "losing the wrap credit for every downstream reader of "
+            "requestContext.playbackSmokeLoopEpoch on that request")
+        span = _function_body_span(self.source, QUEUE_LOOKAHEAD_SIGNATURE)
+        offset = self.source.index(LOOKAHEAD_CONTEXT_EPOCH_ASSIGN_STATEMENT)
+        self.assertTrue(call_within(span, offset),
+                         "the lookahead context epoch assignment must be "
+                         "inside queuePlaybackLookaheadRequests()")
+        # It must happen AFTER the accumulation, so it copies the wrapped
+        # value rather than the pre-wrap seed.
+        seed_offset = self.source.index(LOOKAHEAD_EPOCH_WRAP_ACCUMULATE_STATEMENT)
+        self.assertGreater(
+            offset, seed_offset,
+            "lookaheadContext.playbackSmokeLoopEpoch must be assigned AFTER "
+            "the lap accumulation, not before it")
+
+    def test_wrap_counter_is_incremented_exactly_twice_guarded_inside_playback_handling(self):
+        matches = [
+            m.start() for m in re.finditer(
+                re.escape(WRAP_COUNT_INCREMENT_STATEMENT), self.source)
+        ]
+        self.assertEqual(
+            len(matches), 2,
+            "expected exactly 2 occurrences of the guarded wrap-count "
+            "increment (normal-mode loop wrap and drop-frame-mode loop "
+            "wrap) -- deleting either one leaves that mode's laps "
+            "collapsed onto a stale epoch")
+        span = _function_body_span(self.source, PLAYBACK_HANDLING_SIGNATURE)
+        for offset in matches:
+            self.assertTrue(call_within(span, offset),
+                             "each wrap-count increment must be inside "
+                             "playbackHandling()")
+
+    def test_wrap_counter_is_reset_inside_begin_playback_smoke_telemetry(self):
+        self.assertEqual(
+            self.source.count(WRAP_COUNT_RESET_STATEMENT), 1,
+            "expected exactly 1 occurrence of the exact statement "
+            "resetting m_playbackSmokeLoopWrapCount to 0 -- without it a "
+            "stale wrap count from a previous session leaks into the next "
+            "session's epochs, exactly the cross-session leak the sibling "
+            "identity-tracker reset (tested above) already guards against")
+        span = _function_body_span(self.source, BEGIN_TELEMETRY_SIGNATURE)
+        offset = self.source.index(WRAP_COUNT_RESET_STATEMENT)
+        self.assertTrue(call_within(span, offset),
+                         "the wrap-count reset must be inside "
+                         "beginPlaybackSmokeTelemetry()")
 
 
 if __name__ == "__main__":
