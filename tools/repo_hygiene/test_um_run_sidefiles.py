@@ -776,6 +776,76 @@ class UmRunEndToEndTests(_Share):
         self.assertNotIn("THREW", combined, combined)
         self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
 
+    def test_a_clock_skewed_claim_marker_observed_at_the_queue_deadline_does_not_shrink_the_clients_patience(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 9 (astra test-strength minor): the round-7 clock-
+        # skew test above (test_a_clock_skewed_claim_marker_does_not_shrink_the_clients_patience)
+        # only ever exercises the FIRST claimedAt assignment (the one at the top of the poll loop,
+        # while claimedAt is still null and the marker is discovered on an ordinary iteration). It
+        # never reaches the SECOND, separate `$claimedAt = Get-Date` at the queue-deadline recheck
+        # (um-run.ps1, inside `if ($null -eq $claimedAt) { ... if (Test-Path $startedMarker) {
+        # $claimedAt = Get-Date; ...; continue } }`), which only runs when the marker appears
+        # exactly at/after the queue deadline -- reached here the same way
+        # test_a_claim_landing_exactly_at_the_queue_deadline_is_not_misreported_as_never_claimed
+        # above reaches it, via -TestHookAtQueueDeadline with -MaxQueueWaitSec 0, except this hook's
+        # marker declares a startedUtc an hour in the past (same skew as round 7's test). If that
+        # second assignment were ever changed to read the marker's own stale startedUtc instead of
+        # the client's own Get-Date, execDeadline would already be ~3600s in the past the instant it
+        # is computed, and the very next loop iteration would throw almost immediately -- long
+        # before this client's real budget (2s + >= 20s grace) could possibly be exhausted.
+        running_dir = self.share / "running"
+        wrapper = self.tmp / "run-with-hook-skewed.ps1"
+        hook = (
+            "{ "
+            f"New-Item -ItemType Directory -Force -Path {_q(running_dir)} | Out-Null; "
+            "$marker = @{ jobId = 'demo'; startedUtc = (Get-Date).AddHours(-1).ToUniversalTime().ToString('o') } "
+            "| ConvertTo-Json -Compress; "
+            f"Set-Content -LiteralPath {_q(running_dir / 'demo.started.json')} -Value $marker "
+            "-Encoding ascii -NoNewline "
+            "}"
+        )
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  $r = & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 3 -PollSeconds 1 -MaxQueueWaitSec 0 -JobId 'demo' "
+            "-TestHookAtQueueDeadline $hook\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode)\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.Popen([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            marker_path = running_dir / "demo.started.json"
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not marker_path.exists():
+                time.sleep(0.1)
+            self.assertTrue(marker_path.exists(), "the hook never wrote the skewed claim marker")
+            # A client that (wrongly) anchored claimedAt to the marker's own hour-old startedUtc
+            # would already be past its execDeadline on the very next poll -- well under 2s away.
+            # Still alive at 2s proves this run's patience came from the client's OWN observation.
+            time.sleep(2.0)
+            self.assertIsNone(
+                proc.poll(),
+                "a stale agent-clock stamp observed at the queue deadline must not shrink the "
+                "client's own patience",
+            )
+            result = {"jobId": "demo", "exitCode": 0, "stdout": "late but real", "stderr": "",
+                      "timeoutSec": 3, "timedOut": False}
+            tmp = self.outbox / "demo.result.tmp"
+            tmp.write_text(json.dumps(result), encoding="ascii")
+            tmp.replace(self.outbox / "demo.result.json")
+            stdout, stderr = proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        combined = (stdout or "") + (stderr or "")
+        self.assertNotIn("was never claimed", combined, combined)
+        self.assertNotIn("THREW", combined, combined)
+        self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
+
     def test_a_receipt_written_during_the_final_sleep_is_still_read(self) -> None:
         # fable/sol major 3 (second half): the old loop tested its deadline BEFORE sleeping, so a
         # receipt published during the final poll sleep was skipped -- the deadline had already
