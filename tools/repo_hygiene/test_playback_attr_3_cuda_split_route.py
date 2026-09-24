@@ -411,7 +411,7 @@ class SmokeRunnerPinTests(unittest.TestCase):
     still could not launch it, because the runner dot-sources four siblings and imports a
     module, all resolved via $PSScriptRoot, and none of those five was ever staged. Round 1/2
     then derived the closure by SCANNING; round 3 (NARROW BY REDESIGN) replaced discovery with
-    an EXPLICITLY PINNED six-file manifest (Get-AttrCudaSmokeRunnerClosureManifest) -- never
+    an EXPLICITLY PINNED seven-file manifest (Get-AttrCudaSmokeRunnerClosureManifest) -- never
     mechanically derived -- proved complete by an AST census (Assert-AttrCudaClosureComplete) at
     generation time -- every file in it is still hash-pinned from the committed git blob at
     -SourceCommit -- the same bytes attr3-stage-smoke-runner-job.ps1 stages -- never from a
