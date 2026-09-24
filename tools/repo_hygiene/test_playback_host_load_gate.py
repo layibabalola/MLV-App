@@ -1170,6 +1170,19 @@ class CompareGuiSmokeAbHostLoadRefusalTests(_ProbeCase):
         self.assertNotIn("FAILURES=0", proc.stdout)
         self.assertIn("before smoke host load is PROVISIONAL", proc.stdout)
 
+    def test_provisional_false_with_exceeded_state_is_still_refused_not_read_as_clean(self) -> None:
+        # round 8 (sol MAJOR item 3), exact repro: an internally inconsistent (or fabricated)
+        # exceeded/false leg previously read clean here -- only state=="unknown" forced
+        # provisional=true, so state=="exceeded" alongside provisional=false fell through as
+        # FAILURES=0. Clean now requires state=="quiet" AND provisional==false.
+        contradictory = "[pscustomobject]@{ hostLoad = [pscustomobject]@{ provisional = $false; state = 'exceeded'; reason = 'CPU 96%' } }"
+        quiet = "[pscustomobject]@{ hostLoad = [pscustomobject]@{ provisional = $false; state = 'quiet'; reason = $null } }"
+        proc = self._compare(contradictory, quiet)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("BEFORE_STATE=exceeded", proc.stdout)
+        self.assertNotIn("FAILURES=0", proc.stdout)
+        self.assertIn("before smoke host load is PROVISIONAL", proc.stdout)
+
 
 @requires_pwsh
 class SmokeSummaryHostLoadFieldsTests(_ProbeCase):
@@ -1215,6 +1228,14 @@ class SmokeSummaryHostLoadFieldsTests(_ProbeCase):
         proc = self._fields("[pscustomobject]@{ provisional = $false }")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PROVISIONAL=True STATE=unknown", proc.stdout)
+
+    def test_provisional_false_with_exceeded_state_reads_as_provisional_not_clean(self) -> None:
+        # round 8 (sol MAJOR item 3), exact repro: an exceeded/false leg previously read clean here
+        # -- only state=="unknown" forced provisional=true. Clean now requires state=="quiet" AND
+        # provisional==false.
+        proc = self._fields("[pscustomobject]@{ provisional = $false; state = 'exceeded' }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True STATE=exceeded", proc.stdout)
 
 
 @requires_pwsh
@@ -1453,6 +1474,24 @@ class CompareMachinePerfPlaybackAbHostLoadRefusalTests(_ProbeCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PROVISIONAL=True BASELINE=True", proc.stdout)
 
+    def test_provisional_false_with_exceeded_state_is_still_refused_not_read_as_clean(self) -> None:
+        # round 8 (sol MAJOR item 3), exact repro: an internally inconsistent exceeded/false leg
+        # previously read clean here -- only hostLoadState=="unknown" forced provisional=true.
+        # Clean now requires hostLoadState=="quiet" AND hostLoadProvisional==false.
+        record = (
+            "[pscustomobject]@{ "
+            "baseline = [pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'exceeded' }; "
+            f"candidate = {self._leg(False)}; candidateSpeed = $null; "
+            "compare = [pscustomobject]@{ presentedFps = [pscustomobject]@{ deltaPercent = -40.0 } } }"
+        )
+        proc = self.run_snippet(
+            f"$record = {record}\n"
+            "$r = Get-PlaybackAbHostLoadRefusal -Record $record\n"
+            "Write-Host \"PROVISIONAL=$($r.provisional) BASELINE=$($r.baselineProvisional)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True BASELINE=True", proc.stdout)
+
 
 @requires_pwsh
 class CompareMachinePerfPlaybackAbFpsDeltaRefusalTests(_ProbeCase):
@@ -1529,6 +1568,24 @@ class CompareMachinePerfPlaybackAbFpsDeltaRefusalTests(_ProbeCase):
         self.assertIn("REASON=", proc.stdout)
         self.assertNotIn("REASON=host_load_provisional", proc.stdout)
         self.assertIn("PROVISIONAL=False", proc.stdout)
+
+    def test_exceeded_false_baseline_still_refuses_the_delta(self) -> None:
+        # round 8 (sol MAJOR item 3), exact repro: "baseline hostLoadState='exceeded',
+        # hostLoadProvisional=false; candidate quiet/false; FPS 10 vs 20, deltaPercent=100" used to
+        # publish host_load_provisional=false, playback_fps_delta_pct=100, no refusal reason.
+        record = (
+            "[pscustomobject]@{ schema = 'mlvapp-cuda-playback-ab.v1'; status = 'success'; "
+            "machineFingerprint = [pscustomobject]@{ schema = 'machine-fingerprint.v1'; "
+            "hostname = 'H'; cpu = 'x'; gpu = 'y'; os = 'z'; build_sha = 'abc1234' }; "
+            "baseline = [pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'exceeded' }; "
+            f"candidate = {self._leg(False)}; candidateSpeed = $null; "
+            "compare = [pscustomobject]@{ presentedFps = [pscustomobject]@{ "
+            "baseline = 10.0; candidate = 20.0; deltaPercent = 100.0 } } }"
+        )
+        proc = self._row(record)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("DELTA= REASON=host_load_provisional:", proc.stdout)
+        self.assertIn("PROVISIONAL=True", proc.stdout)
 
 
 class CompareMachinePerfHostLoadWiringTests(unittest.TestCase):
@@ -1925,6 +1982,14 @@ class P3ValidationSmokeSummaryHostLoadFieldsTests(_ProbeCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PROVISIONAL=True STATE=unknown", proc.stdout)
 
+    def test_provisional_false_with_exceeded_state_reads_as_provisional_not_clean(self) -> None:
+        # round 8 (sol MAJOR item 3), exact repro: an exceeded/false leg previously read clean here
+        # -- only state=="unknown" forced provisional=true. Clean now requires state=="quiet" AND
+        # provisional==false.
+        proc = self._fields("[pscustomobject]@{ provisional = $false; state = 'exceeded' }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROVISIONAL=True STATE=exceeded", proc.stdout)
+
 
 class P3ValidationSpeedValidatedWiringTests(unittest.TestCase):
     """Static structural check: speedValidated (the card's own "acceptance signal" language,
@@ -2059,7 +2124,8 @@ class P3ValidationImportIndependentlyChecksHostLoadTests(unittest.TestCase):
         source = P3_VALIDATION_SCRIPT.read_text(encoding="utf-8")
         import_speed_start = source.index('if ($isSpeedProof) {\n                $minSpeedFps')
         # round 5: widened from 1800 to fit the state-check addition below the flag-only read.
-        import_speed_block = source[import_speed_start:import_speed_start + 3200]
+        # round 8: widened again from 3200 to fit the item-3 canonical-predicate comment.
+        import_speed_block = source[import_speed_start:import_speed_start + 3600]
         self.assertIn('$clip.PSObject.Properties["hostLoadProvisional"]', import_speed_block)
         self.assertIn("host load was PROVISIONAL or unrecorded", import_speed_block)
         # round 5 (sol BLOCKER): the flag alone is not enough -- hostLoadState must also gate.
@@ -2142,6 +2208,14 @@ class P3ValidationImportSpeedFloorGuardExecutesTests(_ProbeCase):
         proc = self._run("[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'quiet' }")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("REFUSED=False", proc.stdout)
+
+    def test_provisional_false_with_exceeded_state_is_refused(self) -> None:
+        # round 8 (sol MAJOR item 3), exact repro: a SIXTH reader site sharing the same
+        # exceeded/false bug -- only hostLoadState=="unknown" forced provisional=true. Clean now
+        # requires hostLoadState=="quiet" AND hostLoadProvisional==false.
+        proc = self._run("[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'exceeded' }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REFUSED=True", proc.stdout)
 
 
 @requires_pwsh
@@ -2261,11 +2335,14 @@ class LocalCudaProofSummarizerHostLoadGuardTests(unittest.TestCase):
         # round 5 (sol BLOCKER): reading hostLoadProvisional alone repeats the exact inconsistency
         # round 4 closed at the producer -- a leg with hostLoadProvisional=false and
         # hostLoadState='unknown' (or missing) must still be treated as provisional here.
+        # round 8 (sol MAJOR item 3): state is now checked against the canonical predicate
+        # (clean iff state=="quiet") rather than only excluding state=="unknown" -- see
+        # LocalCudaProofSummarizerGuardExecutesTests for the executable exceeded/false repro.
         source = CUDA_PROOF_SUMMARIZER_SCRIPT.read_text(encoding="utf-8")
         host_load_guard_index = source.index("$playbackAbHostLoadLegs = @(")
-        guard_block = source[host_load_guard_index:host_load_guard_index + 1600]
+        guard_block = source[host_load_guard_index:host_load_guard_index + 1900]
         self.assertIn('Get-Field $legEntry.Leg "hostLoadState"', guard_block)
-        self.assertIn('$legState -eq "unknown"', guard_block)
+        self.assertIn('$legState -ne "quiet"', guard_block)
 
     def test_fps_not_improved_diagnostic_is_skipped_when_host_load_is_provisional(self) -> None:
         source = CUDA_PROOF_SUMMARIZER_SCRIPT.read_text(encoding="utf-8")
@@ -2345,6 +2422,17 @@ class LocalCudaProofSummarizerGuardExecutesTests(_ProbeCase):
     def test_missing_state_property_on_either_leg_is_refused(self) -> None:
         proc = self._run(
             "[pscustomobject]@{ hostLoadProvisional = $false }",
+            "[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'quiet' }",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REFUSED=True BLOCKERS=1", proc.stdout)
+
+    def test_baseline_provisional_false_with_exceeded_state_is_refused(self) -> None:
+        # round 8 (sol MAJOR item 3), exact repro: an exceeded/false leg previously read clean here
+        # -- only hostLoadState=="unknown" forced provisional=true. Clean now requires
+        # hostLoadState=="quiet" AND hostLoadProvisional==false.
+        proc = self._run(
+            "[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'exceeded' }",
             "[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'quiet' }",
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)

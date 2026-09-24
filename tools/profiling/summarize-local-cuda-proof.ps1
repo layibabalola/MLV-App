@@ -662,6 +662,12 @@ else {
     # alongside a missing/blank/"unknown" hostLoadState is a legacy or degenerate leg, not a clean
     # one. sol's repro: hostLoadProvisional=false with hostLoadState='unknown' checked only the
     # boolean here. Combine both fields, same as Get-Field's other callers in this section.
+    # round 8 (sol MAJOR item 3): that fix only special-cased hostLoadState=="unknown" -- a leg
+    # with hostLoadState="exceeded" and an inconsistent/fabricated hostLoadProvisional=false still
+    # read clean. THE CANONICAL PREDICATE (identical at every one of this card's six sites --
+    # see compare-machine-perf.ps1's Get-PlaybackAbLegHostLoadProvisional for the full cross-file
+    # note): clean iff state=="quiet" AND provisional==false; every other combination is
+    # provisional.
     $playbackAbHostLoadProvisional = $false
     foreach ($legEntry in $playbackAbHostLoadLegs) {
         $legProvisionalValue = Get-Field $legEntry.Leg "hostLoadProvisional"
@@ -672,7 +678,7 @@ else {
         } else {
             [string]$legStateValue
         }
-        $legProvisional = ($legProvisionalDeclared -or $legState -eq "unknown")
+        $legProvisional = ($legProvisionalDeclared -or $legState -ne "quiet")
         if ($legProvisional) {
             $playbackAbHostLoadProvisional = $true
             [void]$playbackAbBlockers.Add("playback A/B $($legEntry.Name) leg host load was PROVISIONAL or unrecorded")

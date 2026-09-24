@@ -421,6 +421,25 @@ function Get-PlaybackAbLegHostLoadProvisional {
     # off a leg (every other reader -- Get-PlaybackAbHostLoadRefusal, New-RemoteP3SummaryRow via
     # its per-clip Where-Object -- calls through this one), so folding the state check in here
     # closes it everywhere at once rather than adding a third duplicated check.
+    #
+    # round 8 (sol MAJOR item 3 -- "contradictory legs accepted as clean"): the round-5 fix only
+    # special-cased state=="unknown"; a leg carrying hostLoadState="exceeded" alongside an
+    # (inconsistent, legacy, or fabricated) hostLoadProvisional=false read as CLEAN here, exactly
+    # backwards. THE CANONICAL PREDICATE, applied identically at every reader across the six sites
+    # (in five standalone .ps1 scripts) that each carry their own copy of this check
+    # (compare-machine-perf.ps1 here; compare-release-gui-smoke-ab.ps1's
+    # Get-HostLoadComparisonEvidence; run-release-cuda-playback-ab.ps1 and
+    # run-ultramagnus-p3-validation.ps1's two copies -- Get-SmokeSummaryHostLoadFields AND the
+    # separate per-clip import guard; summarize-local-cuda-proof.ps1's inline playback-ab leg loop
+    # -- see each site's own round-8 comment) is: a leg is CLEAN iff state=="quiet" AND
+    # provisional==false; every OTHER combination (exceeded/false, missing/false, unknown/false,
+    # exceeded/true, etc.) is provisional. This file has no shared PowerShell module to factor the
+    # predicate into (every one of these sites is a standalone script with no shared import -- see
+    # run-ultramagnus-p3-validation.ps1's own Get-SmokeSummaryHostLoadFields comment on why -- and
+    # the test harness that verifies each of them dot-sources a verbatim splice of the exact
+    # function/block out of its own file, which a cross-file shared function would break), so "one
+    # shared predicate" here means the identical corrected expression at every site, not a single
+    # shared symbol.
     param([object]$Leg)
 
     if ($null -eq $Leg) {
@@ -438,7 +457,7 @@ function Get-PlaybackAbLegHostLoadProvisional {
     } else {
         [string]$stateProperty.Value
     }
-    ($provisionalDeclared -or $state -eq "unknown")
+    ($provisionalDeclared -or $state -ne "quiet")
 }
 
 function Get-PlaybackAbHostLoadRefusal {

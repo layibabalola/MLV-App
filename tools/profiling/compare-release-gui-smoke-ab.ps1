@@ -419,11 +419,17 @@ function Get-HostLoadComparisonEvidence {
         # block carrying an explicit provisional=false alongside a missing/blank state read as
         # state=unknown PROVISIONAL=false -- an inconsistent, clean-reading combination that let
         # UNKNOWN enter comparison unrefused. state=unknown now always forces provisional=true.
+        # round 8 (sol MAJOR item 3): that fix only special-cased state=="unknown" -- a leg with
+        # state="exceeded" and an inconsistent/fabricated provisional=false still read clean. THE
+        # CANONICAL PREDICATE (identical at every one of this card's six sites -- see
+        # compare-machine-perf.ps1's Get-PlaybackAbLegHostLoadProvisional for the full cross-file
+        # note): clean iff state=="quiet" AND provisional==false; every other combination is
+        # provisional.
         $legProvisionalRaw = if ($null -eq $legHostLoad) { $null } else { Get-NestedValue $legHostLoad "provisional" }
         $legProvisionalDeclared = if ($null -eq $legHostLoad -or $null -eq $legProvisionalRaw) { $true } else { [bool]$legProvisionalRaw }
         $legStateRaw = if ($null -eq $legHostLoad) { $null } else { Get-NestedValue $legHostLoad "state" }
         $legState = if ($null -eq $legHostLoad -or [string]::IsNullOrWhiteSpace([string]$legStateRaw)) { "unknown" } else { [string]$legStateRaw }
-        $legProvisional = ($legProvisionalDeclared -or $legState -eq "unknown")
+        $legProvisional = ($legProvisionalDeclared -or $legState -ne "quiet")
         $legReason = if ($null -eq $legHostLoad) {
             "no hostLoad telemetry recorded in the smoke result"
         } else {

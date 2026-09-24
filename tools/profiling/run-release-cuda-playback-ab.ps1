@@ -760,11 +760,17 @@ function Get-SmokeSummaryHostLoadFields {
     # carrying an explicit provisional=false alongside a missing/blank state read as
     # state=unknown PROVISIONAL=false -- an inconsistent, clean-reading combination that let
     # UNKNOWN enter an fps comparison unrefused. state=unknown now always forces provisional=true.
+    # round 8 (sol MAJOR item 3): that fix only special-cased state=="unknown" -- a leg with
+    # state="exceeded" and an inconsistent/fabricated provisional=false still read clean. THE
+    # CANONICAL PREDICATE (identical at every one of this card's six sites -- see
+    # compare-machine-perf.ps1's Get-PlaybackAbLegHostLoadProvisional for the full cross-file
+    # note): clean iff state=="quiet" AND provisional==false; every other combination is
+    # provisional.
     $provisionalRaw = if ($null -eq $HostLoad) { $null } else { Get-NestedValue $HostLoad "provisional" }
     $provisionalDeclared = if ($null -eq $HostLoad -or $null -eq $provisionalRaw) { $true } else { [bool]$provisionalRaw }
     $stateRaw = if ($null -eq $HostLoad) { $null } else { Get-NestedValue $HostLoad "state" }
     $state = if ($null -eq $HostLoad -or [string]::IsNullOrWhiteSpace([string]$stateRaw)) { "unknown" } else { [string]$stateRaw }
-    $provisional = ($provisionalDeclared -or $state -eq "unknown")
+    $provisional = ($provisionalDeclared -or $state -ne "quiet")
     $reason = if ($null -eq $HostLoad) {
         "no hostLoad telemetry recorded in the smoke result"
     } else {

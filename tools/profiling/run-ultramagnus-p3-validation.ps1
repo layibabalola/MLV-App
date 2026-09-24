@@ -196,6 +196,12 @@ function Get-SmokeSummaryHostLoadFields {
     # carrying an explicit provisional=false alongside a missing/blank state read as
     # state=unknown PROVISIONAL=false -- an inconsistent, clean-reading combination that let
     # UNKNOWN enter an fps comparison unrefused. state=unknown now always forces provisional=true.
+    # round 8 (sol MAJOR item 3): that fix only special-cased state=="unknown" -- a leg with
+    # state="exceeded" and an inconsistent/fabricated provisional=false still read clean. THE
+    # CANONICAL PREDICATE (identical at every one of this card's six sites -- see
+    # compare-machine-perf.ps1's Get-PlaybackAbLegHostLoadProvisional for the full cross-file
+    # note): clean iff state=="quiet" AND provisional==false; every other combination is
+    # provisional.
     $provisionalProperty = $HostLoad.PSObject.Properties["provisional"]
     $provisionalDeclared = if ($null -eq $provisionalProperty -or $null -eq $provisionalProperty.Value) {
         $true
@@ -208,7 +214,7 @@ function Get-SmokeSummaryHostLoadFields {
     } else {
         [string]$stateProperty.Value
     }
-    $provisional = ($provisionalDeclared -or $state -eq "unknown")
+    $provisional = ($provisionalDeclared -or $state -ne "quiet")
     $reasonProperty = $HostLoad.PSObject.Properties["reason"]
     $reason = if ($null -eq $reasonProperty) { $null } else { [string]$reasonProperty.Value }
 
@@ -658,6 +664,12 @@ function Import-EvidencePacket {
                 # unrefused. Combine both properties the same way Get-SmokeSummaryHostLoadFields
                 # already does above in this file, so reading the flag without the state is not
                 # possible here either.
+                # round 8 (sol MAJOR item 3): that fix only special-cased hostLoadState=="unknown"
+                # -- a clip with hostLoadState="exceeded" and an inconsistent/fabricated
+                # hostLoadProvisional=false still passed unrefused. THE CANONICAL PREDICATE
+                # (identical at every one of this card's readers -- see compare-machine-perf.ps1's
+                # Get-PlaybackAbLegHostLoadProvisional for the full cross-file note): clean iff
+                # state=="quiet" AND provisional==false; every other combination is provisional.
                 $clipHostLoadProvisionalProperty = $clip.PSObject.Properties["hostLoadProvisional"]
                 $clipHostLoadProvisionalDeclared = if ($null -eq $clipHostLoadProvisionalProperty -or
                     $null -eq $clipHostLoadProvisionalProperty.Value) {
@@ -672,7 +684,7 @@ function Import-EvidencePacket {
                 } else {
                     [string]$clipHostLoadStateProperty.Value
                 }
-                $clipHostLoadProvisional = ($clipHostLoadProvisionalDeclared -or $clipHostLoadState -eq "unknown")
+                $clipHostLoadProvisional = ($clipHostLoadProvisionalDeclared -or $clipHostLoadState -ne "quiet")
                 if ($clipHostLoadProvisional) {
                     Add-Failure $importFailures "$clipName host load was PROVISIONAL or unrecorded (hostLoadProvisional=$clipHostLoadProvisional); an fps number measured under provisional host load is not proof of speed, regardless of the floor."
                 }
