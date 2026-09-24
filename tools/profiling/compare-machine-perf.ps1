@@ -913,12 +913,29 @@ function New-PlaybackAbSummaryRow {
     $candidatePresented = Convert-ToNullableDouble $speedCompare.presentedFps.candidate
     $deltaPct = Convert-ToNullableDouble $speedCompare.presentedFps.deltaPercent
     $analysis = Get-PlaybackAbAnalysis -Record $Record
-    # MARKS, does not refuse: the raw fps numbers stay visible (this table is advisory, and the
-    # gate that actually fails a run already ran in run-release-cuda-playback-ab.ps1), but a reader
-    # can see host_load_provisional right next to them instead of having to cross-reference the
-    # source JSON's proofFailures. Get-PlaybackAbAnalysis above already REFUSES the derived
-    # dominant_bottleneck/suggested_optimization when this is true.
+    # round 3: MARKS, does not refuse the raw per-leg fps numbers -- baseline_presented_fps and
+    # presented_fps are each a single leg's OWN measurement, not a comparison between two legs, so
+    # a provisional leg does not make either number meaningless on its own (the gate that actually
+    # fails a run already ran in run-release-cuda-playback-ab.ps1); a reader can see
+    # host_load_provisional right next to them instead of having to cross-reference the source
+    # JSON's proofFailures.
+    #
+    # round 7 (both keys MAJOR -- "a provisional pair must not publish an fps delta"): unlike the
+    # per-leg numbers above, playback_fps_delta_pct genuinely IS a comparison -- it compares two
+    # legs' presented fps against each other -- and a delta computed from a leg whose host load was
+    # provisional (exceeded or unknown) is exactly the kind of number this whole card exists to
+    # keep out of a regression/acceptance signal. Get-PlaybackAbAnalysis (above) already refuses
+    # the DERIVED dominant_bottleneck/suggested_optimization for this same reason; this closes the
+    # matching gap for the raw delta number itself. Refused to $null, with an explicit reason
+    # field (not just an absence a reader could mistake for "not computed yet").
     $hostLoadRefusal = Get-PlaybackAbHostLoadRefusal -Record $Record
+    $fpsDeltaRefused = [bool]$hostLoadRefusal.provisional
+    $fpsDeltaRefusedReason = if ($fpsDeltaRefused) {
+        "host_load_provisional: an fps delta computed against a leg whose host load was " +
+            "exceeded or could not be measured is never usable as a regression or acceptance signal."
+    } else {
+        $null
+    }
     $suggestion = if ([string]::IsNullOrWhiteSpace([string]$analysis.suggestedOptimization)) {
         if ([string]$Record.status -ne "success") {
             "fix_playback_ab_proof_failures"
@@ -936,7 +953,8 @@ function New-PlaybackAbSummaryRow {
         playback_comparison_basis = $playbackComparisonBasis
         baseline_presented_fps = if ($null -ne $baselinePresented) { [math]::Round($baselinePresented, 3) } else { $null }
         presented_fps = if ($null -ne $candidatePresented) { [math]::Round($candidatePresented, 3) } else { $null }
-        playback_fps_delta_pct = if ($null -ne $deltaPct) { [math]::Round($deltaPct, 3) } else { $null }
+        playback_fps_delta_pct = if ($fpsDeltaRefused -or $null -eq $deltaPct) { $null } else { [math]::Round($deltaPct, 3) }
+        playback_fps_delta_refused_reason = $fpsDeltaRefusedReason
         no_readback_pct = $null
         fallback_pct = $null
         fallback_count = $null

@@ -1213,6 +1213,83 @@ class CompareMachinePerfPlaybackAbHostLoadRefusalTests(_ProbeCase):
         self.assertIn("PROVISIONAL=True BASELINE=True", proc.stdout)
 
 
+@requires_pwsh
+class CompareMachinePerfPlaybackAbFpsDeltaRefusalTests(_ProbeCase):
+    """tools/profiling/compare-machine-perf.ps1's New-PlaybackAbSummaryRow -- round 7 (both keys
+    MAJOR -- "a provisional pair must not publish an fps delta"): playback_fps_delta_pct is a
+    CROSS-LEG comparison, unlike baseline_presented_fps/presented_fps (each a single leg's OWN
+    measurement, not a comparison, and deliberately left visible for either leg alone -- round 3's
+    original stance, unchanged here). A pair where either leg's host load was provisional
+    (exceeded or unmeasurable) must refuse the delta to $null with an explicit reason, the same
+    way Get-PlaybackAbAnalysis already refuses the derived dominant_bottleneck."""
+
+    script = COMPARE_MACHINE_PERF_SCRIPT
+    functions = [
+        "Convert-ToNullableDouble",
+        "Get-MachineLabel",
+        "Assert-MachineFingerprint",
+        "Get-PlaybackAbLegHostLoadProvisional",
+        "Get-PlaybackAbHostLoadRefusal",
+        "Get-CompareDeltaPercent",
+        "Test-DeltaAtLeast",
+        "Get-PlaybackAbAnalysis",
+        "New-PlaybackAbSummaryRow",
+    ]
+
+    def _leg(self, provisional: bool, state: str = None) -> str:
+        resolved_state = state if state is not None else ("exceeded" if provisional else "quiet")
+        provisional_literal = "$true" if provisional else "$false"
+        return (
+            "[pscustomobject]@{ hostLoadProvisional = " + provisional_literal +
+            "; hostLoadState = '" + resolved_state + "' }"
+        )
+
+    def _record(
+        self, baseline_provisional: bool, candidate_provisional: bool,
+        baseline_fps: float = 10.0, candidate_fps: float = 20.0, delta_pct: float = 100.0,
+    ) -> str:
+        baseline_leg = self._leg(baseline_provisional)
+        candidate_leg = self._leg(candidate_provisional)
+        return (
+            "[pscustomobject]@{ schema = 'mlvapp-cuda-playback-ab.v1'; status = 'success'; "
+            "machineFingerprint = [pscustomobject]@{ schema = 'machine-fingerprint.v1'; "
+            "hostname = 'H'; cpu = 'x'; gpu = 'y'; os = 'z'; build_sha = 'abc1234' }; "
+            f"baseline = {baseline_leg}; candidate = {candidate_leg}; candidateSpeed = $null; "
+            "compare = [pscustomobject]@{ presentedFps = [pscustomobject]@{ "
+            f"baseline = {baseline_fps}; candidate = {candidate_fps}; deltaPercent = {delta_pct} }} }} }}"
+        )
+
+    def _row(self, record: str) -> subprocess.CompletedProcess:
+        return self.run_snippet(
+            f"$record = {record}\n"
+            "$r = New-PlaybackAbSummaryRow -Record $record -Source 'test'\n"
+            "Write-Host \"BASELINE_FPS=$($r.baseline_presented_fps) CANDIDATE_FPS=$($r.presented_fps) "
+            "DELTA=$($r.playback_fps_delta_pct) REASON=$($r.playback_fps_delta_refused_reason) "
+            "PROVISIONAL=$($r.host_load_provisional)\"\n"
+        )
+
+    def test_provisional_baseline_refuses_the_delta_but_keeps_per_leg_fps(self) -> None:
+        proc = self._row(self._record(baseline_provisional=True, candidate_provisional=False))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("BASELINE_FPS=10", proc.stdout)
+        self.assertIn("CANDIDATE_FPS=20", proc.stdout)
+        self.assertIn("DELTA= REASON=host_load_provisional:", proc.stdout)
+        self.assertIn("PROVISIONAL=True", proc.stdout)
+
+    def test_provisional_candidate_also_refuses_the_delta(self) -> None:
+        proc = self._row(self._record(baseline_provisional=False, candidate_provisional=True))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("DELTA= REASON=host_load_provisional:", proc.stdout)
+
+    def test_clean_pair_still_publishes_a_real_delta(self) -> None:
+        proc = self._row(self._record(baseline_provisional=False, candidate_provisional=False))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("DELTA=100", proc.stdout)
+        self.assertIn("REASON=", proc.stdout)
+        self.assertNotIn("REASON=host_load_provisional", proc.stdout)
+        self.assertIn("PROVISIONAL=False", proc.stdout)
+
+
 class CompareMachinePerfHostLoadWiringTests(unittest.TestCase):
     """Static structural checks: the human-facing table and JSON rows must actually carry
     host_load_provisional, not just the underlying analysis function."""
@@ -2014,6 +2091,53 @@ class ConsumerSweepUltraMagnusAndLocalGpuCapabilityRowsTests(unittest.TestCase):
         row_block = source[row_start:row_end]
         self.assertNotIn("fps =", row_block)
         self.assertIn("host_load_provisional = $null", row_block)
+
+    @requires_pwsh
+    def test_local_gpu_capability_console_projection_carries_host_load_provisional(self) -> None:
+        # round 7 (both keys MAJOR -- "console projection drops host_load_provisional"): the row
+        # object has carried host_load_provisional since round 6 (proven above), but the ONE place
+        # a human actually reads these fps numbers -- the console Select-Object | Format-Table --
+        # silently dropped it. A source-text token check ("does 'host_load_provisional' appear
+        # anywhere near Select-Object") would not have caught this: the property genuinely existed
+        # on the row object the whole time, just not in the PROJECTION. This EXECUTES the real
+        # extracted Select-Object/Format-Table pipeline against a synthetic row and inspects the
+        # actual rendered console text, proving the property survives the real projection, not
+        # merely that its name appears somewhere in the file.
+        #
+        # round 7 (continued): the first fix attempt appended host_load_provisional at the END of
+        # the Select-Object list, right after fps -- and this exact live test caught that
+        # Format-Table -AutoSize silently drops BOTH trailing columns on a normal 120-column
+        # console (verified: -Wrap does not help). The production fix moves both columns earlier
+        # in the projection; this test's assertions below pin that they render together, not
+        # merely that the property name is present in source.
+        source = LOCAL_GPU_CAPABILITY_SCRIPT.read_text(encoding="utf-8")
+        block = _extract_block(
+            source,
+            "$allRows |\n    Select-Object label,",
+            "Format-Table -AutoSize",
+            trailing_lines=0,
+        )
+        self.assertIn("host_load_provisional", block, "extraction marker drifted from the real source")
+        with tempfile.TemporaryDirectory(prefix="local-gpu-capability-probe-") as tmp:
+            script = Path(tmp) / "run.ps1"
+            script.write_text(
+                "$ErrorActionPreference = 'Stop'\n"
+                "$allRows = @([pscustomobject]@{ label = 'current'; run = 'cpu_baseline'; "
+                "renderer_verdict = 'nvidia-hardware-gl'; gpu_proc_active = $true; "
+                "gpu_deb_active = $true; llrawproc_ms = 1.0; processing_ms = 1.0; "
+                "debayer_ms = 1.0; render_ms = 1.0; cadence_ms = 10.0; fps = 100.0; "
+                "host_load_provisional = $true })\n"
+                f"{block} | Out-String -Width 4096\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(script)],
+                capture_output=True, text=True,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("host_load_provisional", proc.stdout)
+        self.assertIn("fps", proc.stdout)
 
 
 @requires_pwsh

@@ -387,8 +387,20 @@ $summary | ConvertTo-Json -Depth 10 | Set-Content -Encoding ASCII $summaryPath
 
 Write-Host ""
 Write-Host "=================== PROFILE SUMMARY ==================="
+# round 7 (both keys MAJOR -- "console projection drops host_load_provisional"): the JSON row
+# already carries host_load_provisional (round 6), but this Select-Object -- the ONLY place a
+# human actually reads these fps numbers at the console -- dropped it entirely, so a reader
+# watching the terminal never saw the flag sitting right next to fps in the JSON. Simply
+# appending it at the end (where fps already was) is not enough: Format-Table -AutoSize computes
+# column widths against the console's reported buffer width (120 here) and SILENTLY drops
+# trailing columns that do not fit -- verified live that a 12-column table with fps and
+# host_load_provisional both left at the end drops BOTH of them with no warning at all, on a
+# perfectly ordinary 120-column console. fps and host_load_provisional are moved right after
+# run/renderer_verdict -- the two columns this round's fix exists to protect -- so they are never
+# among the trailing columns AutoSize discards; -Wrap does not change this behaviour (verified),
+# only column ORDER does.
 $allRows |
-    Select-Object label, run, renderer_verdict, gpu_proc_active, gpu_deb_active, llrawproc_ms, processing_ms, debayer_ms, render_ms, cadence_ms, fps |
+    Select-Object label, run, fps, host_load_provisional, renderer_verdict, gpu_proc_active, gpu_deb_active, llrawproc_ms, processing_ms, debayer_ms, render_ms, cadence_ms |
     Format-Table -AutoSize
 Write-Host "======================================================="
 Write-Host "summary JSON: $summaryPath"
