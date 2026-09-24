@@ -200,7 +200,11 @@ if ($null -ne $r) { return $r }
 
 if ($null -ne $claimedAt) {
     $execElapsedSec = [int]((Get-Date) - $claimedAt).TotalSeconds
-    throw "Timed out ${execElapsedSec}s after $jobId was claimed by the agent (budget ${TimeoutSec}s + ${clientGraceSec}s grace); $resultFile still has not appeared -- the agent claimed the job but has not finished or published a result"
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 9 (client honesty at the deadline): this is THIS
+    # CLIENT giving up on waiting, never a diagnosis that the job itself timed out or died -- the
+    # agent still owns $jobId (it claimed it and this client has no way to know it has stopped),
+    # so its receipt may still land at $resultFile after this client has already given up on it.
+    throw "Timed out ${execElapsedSec}s after $jobId was claimed by the agent (budget ${TimeoutSec}s + ${clientGraceSec}s grace); $resultFile still has not appeared -- this client is giving up, but the agent still owns $jobId and its receipt may still land at $resultFile after this"
 } else {
     $queuedElapsedSec = [int]((Get-Date) - $submittedAt).TotalSeconds
     throw "Timed out after ${queuedElapsedSec}s: $jobId was never claimed (no $startedMarker marker appeared) and $resultFile never appeared -- it may still be queued behind other work on the agent, or the agent may be unreachable"

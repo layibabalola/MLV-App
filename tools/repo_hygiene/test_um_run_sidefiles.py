@@ -670,6 +670,12 @@ class UmRunEndToEndTests(_Share):
         combined = (stdout or "") + (stderr or "")
         self.assertIn("claimed by the agent", combined, combined)
         self.assertNotIn("was never claimed", combined, combined)
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 9: this is THIS CLIENT's own patience running
+        # out, not a diagnosis the client cannot make -- the message must say the agent still owns
+        # the job and that its receipt may still arrive in the outbox under this jobId.
+        self.assertIn("this client is giving up", combined, combined)
+        self.assertIn("the agent still owns demo", combined, combined)
+        self.assertIn("its receipt may still land at", combined, combined)
 
     def test_a_clock_skewed_claim_marker_does_not_shrink_the_clients_patience(self) -> None:
         # sol/fable blocker (round 7): claimedAt used to come from the marker's own startedUtc field
