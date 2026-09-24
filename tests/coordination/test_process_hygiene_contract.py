@@ -406,10 +406,20 @@ Start-Sleep -Milliseconds 200
 
 
 @pytest.mark.skipif(os.name != "nt", reason="MLV-App process ownership is Windows-specific")
-def test_gui_smoke_process_boundary_samples_during_a_live_wait(tmp_path: Path) -> None:
-    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 3: before/after snapshots alone only bracket a
-    # leg -- Wait-GuiSmokeProcessBounded must be able to sample DURING the wait too, via
-    # -SampleIntervalMs/-OnSample, without changing behaviour for callers that don't opt in.
+def test_gui_smoke_process_boundary_no_longer_accepts_a_sampling_callback(tmp_path: Path) -> None:
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 7 (sol + astra MAJOR -- "the new budget does not
+    # bound collection as a whole, and a non-returning sampler prevents both timeout handling and
+    # receipt publication"): rounds 3-6 gave this module a -SampleIntervalMs/-OnSample pair so
+    # run-release-gui-smoke.ps1 could sample host load DURING the wait, invoked synchronously
+    # inside this module's own scope with no way to preempt a callback that never returned. Item 1
+    # (replacing per-process CPU accounting with one GetSystemTimes syscall plus one process-handle
+    # read) made a host-load sample cheap and self-bounded enough that the sampling loop moved OUT
+    # of this module entirely and into run-release-gui-smoke.ps1's own scope, sampling inline
+    # between chunked waits it drives itself -- see that script's sampling loop, immediately before
+    # its (now parameter-less-for-sampling) call into this function. This function goes back to
+    # being exactly its round-3 default branch: one bounded wait, then the stream-drain/kill-tree
+    # finalize. Passing -SampleIntervalMs/-OnSample now fails to bind (the parameters no longer
+    # exist) -- proving the removal is real, not merely unused.
     pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
     if not pwsh:
         pytest.skip("PowerShell 7 is unavailable")
@@ -419,41 +429,35 @@ def test_gui_smoke_process_boundary_samples_during_a_live_wait(tmp_path: Path) -
     command = rf"""
 Import-Module '{module_literal}' -Force
 
-function New-SleepProcess {{
-    $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = '{python_literal}'
-    $start.UseShellExecute = $false
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    [void]$start.ArgumentList.Add('-c')
-    [void]$start.ArgumentList.Add('import time; time.sleep(1.5)')
-    $p = [Diagnostics.Process]::new()
-    $p.StartInfo = $start
-    [void]$p.Start()
-    $p
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = '{python_literal}'
+$start.UseShellExecute = $false
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+[void]$start.ArgumentList.Add('-c')
+[void]$start.ArgumentList.Add('import time; time.sleep(0.2)')
+$p = [Diagnostics.Process]::new()
+$p.StartInfo = $start
+[void]$p.Start()
+$stdoutTask = $p.StandardOutput.ReadToEndAsync()
+$stderrTask = $p.StandardError.ReadToEndAsync()
+$onSample = {{ }}
+$outcome = 'BOUND'
+$errorMessage = ''
+$errorId = ''
+try {{
+    Wait-GuiSmokeProcessBounded -Process $p -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 3000 -TerminationGraceMs 3000 -StreamDrainMs 3000 -SampleIntervalMs 300 -OnSample $onSample | Out-Null
+}} catch {{
+    $outcome = 'REJECTED'
+    $errorMessage = $_.Exception.Message
+    $errorId = $_.FullyQualifiedErrorId
 }}
-
-$sampled = New-SleepProcess
-$stdoutTask = $sampled.StandardOutput.ReadToEndAsync()
-$stderrTask = $sampled.StandardError.ReadToEndAsync()
-$global:sampleCount = 0
-$onSample = {{ $global:sampleCount++ }}
-$sampledResult = Wait-GuiSmokeProcessBounded -Process $sampled -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 8000 -TerminationGraceMs 5000 -StreamDrainMs 5000 -SampleIntervalMs 300 -OnSample $onSample
-
-$unsampled = New-SleepProcess
-$stdoutTask2 = $unsampled.StandardOutput.ReadToEndAsync()
-$stderrTask2 = $unsampled.StandardError.ReadToEndAsync()
-$global:sampleCount2 = 0
-$onSample2 = {{ $global:sampleCount2++ }}
-$unsampledResult = Wait-GuiSmokeProcessBounded -Process $unsampled -StandardOutputTask $stdoutTask2 -StandardErrorTask $stderrTask2 -TimeoutMs 8000 -TerminationGraceMs 5000 -StreamDrainMs 5000
+if ($outcome -eq 'BOUND') {{ $p.Kill($true) }}
 
 [pscustomobject]@{{
-    sampledTimedOut = $sampledResult.timedOut
-    sampledTerminationConfirmed = $sampledResult.terminationConfirmed
-    sampleCount = $sampleCount
-    unsampledTimedOut = $unsampledResult.timedOut
-    unsampledTerminationConfirmed = $unsampledResult.terminationConfirmed
-    sampleCount2 = $sampleCount2
+    outcome = $outcome
+    errorMessage = $errorMessage
+    errorId = $errorId
 }} | ConvertTo-Json -Depth 8 -Compress
 """
     completed = subprocess.run(
@@ -476,128 +480,45 @@ $unsampledResult = Wait-GuiSmokeProcessBounded -Process $unsampled -StandardOutp
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     observed = json.loads(completed.stdout.strip())
-    # A ~1.5s leg sampled every 300ms should yield roughly 3-5 interior samples; a wide but
-    # bounded range keeps this robust to scheduler jitter while still proving sampling happened
-    # more than once (ruling out an accidental single-shot) and did not run away unboundedly.
-    assert observed["sampledTimedOut"] is False
-    assert observed["sampledTerminationConfirmed"] is True
-    assert 2 <= observed["sampleCount"] <= 8
-    # -SampleIntervalMs omitted (defaults to 0) must reproduce the original single blocking wait
-    # exactly -- zero interior samples, same as every pre-round-3 caller of this function.
-    assert observed["unsampledTimedOut"] is False
-    assert observed["unsampledTerminationConfirmed"] is True
-    assert observed["sampleCount2"] == 0
+    assert observed["outcome"] == "REJECTED", observed
+    error_message = observed["errorMessage"]
+    assert "SampleIntervalMs" in error_message or "OnSample" in error_message, error_message
+    assert observed["errorId"], observed
+    assert "NamedParameterNotFound" in observed["errorId"], observed
+    assert "Wait-GuiSmokeProcessBounded" in observed["errorId"], observed
 
 
 @pytest.mark.skipif(os.name != "nt", reason="MLV-App process ownership is Windows-specific")
-def test_gui_smoke_process_boundary_bounds_total_wait_despite_slow_onsample(tmp_path: Path) -> None:
-    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 5 (sol MAJOR): round 3/4 accumulated the wait loop's
-    # elapsed time as a sum of NOMINAL chunk lengths, never counting $OnSample's own execution
-    # time -- a slow callback (each real one is a Get-HostLoadSnapshot: two CIM queries plus a
-    # Get-Process enumeration/sort) let the total wait drift arbitrarily far past -TimeoutMs. Here
-    # each 300ms sampling chunk is paired with a 400ms OnSample callback against a process that
-    # deliberately outlives the whole test, so every iteration is real overhead the OLD nominal
-    # accounting would have hidden -- with the round-5 wall-clock stopwatch fix, total real elapsed
-    # must land close to -TimeoutMs (1200ms) plus at most one in-flight chunk+callback, not the
-    # ~2.3x compounding overrun the old accounting allowed.
+def test_gui_smoke_process_boundary_sanitizes_process_handle_exceptions(tmp_path: Path) -> None:
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 7 (sol MINOR -- "remaining process-boundary catches
+    # still append raw Exception.Message"): three catches in Wait-GuiSmokeProcessBounded itself
+    # (the main WaitForExit, Process.Kill, and the post-kill grace WaitForExit) still recorded the
+    # raw exception message, same class already sanitized round 5/6 for OnSample and the
+    # stdout/stderr task drain. A [Diagnostics.Process] that was constructed but never Start()'d
+    # has no associated OS process -- WaitForExit/Kill both throw a real, natural (not mocked)
+    # exception ("No process is associated with this object") for exactly this reason, giving a
+    # live way to exercise all three catches in one call: the main wait fails closed into the
+    # timeout branch, Kill then fails, and the post-kill grace wait fails identically.
     pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
     if not pwsh:
         pytest.skip("PowerShell 7 is unavailable")
 
     module_literal = str(GUI_SMOKE_PROCESS_BOUNDARY).replace("'", "''")
-    python_literal = str(sys.executable).replace("'", "''")
     command = rf"""
 Import-Module '{module_literal}' -Force
 
-$start = [Diagnostics.ProcessStartInfo]::new()
-$start.FileName = '{python_literal}'
-$start.UseShellExecute = $false
-$start.RedirectStandardOutput = $true
-$start.RedirectStandardError = $true
-[void]$start.ArgumentList.Add('-c')
-[void]$start.ArgumentList.Add('import time; time.sleep(30)')
 $p = [Diagnostics.Process]::new()
-$p.StartInfo = $start
-[void]$p.Start()
-$stdoutTask = $p.StandardOutput.ReadToEndAsync()
-$stderrTask = $p.StandardError.ReadToEndAsync()
-$onSample = {{ Start-Sleep -Milliseconds 400 }}
-$stopwatch = [Diagnostics.Stopwatch]::StartNew()
-$result = Wait-GuiSmokeProcessBounded -Process $p -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 1200 -TerminationGraceMs 5000 -StreamDrainMs 5000 -SampleIntervalMs 300 -OnSample $onSample
-$stopwatch.Stop()
+$stdoutTask = [System.Threading.Tasks.Task]::FromResult('')
+$stderrTask = [System.Threading.Tasks.Task]::FromResult('')
+$result = Wait-GuiSmokeProcessBounded -Process $p -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 300 -TerminationGraceMs 300 -StreamDrainMs 3000
 
 [pscustomobject]@{{
-    timedOut = $result.timedOut
-    elapsedMs = $stopwatch.ElapsedMilliseconds
-}} | ConvertTo-Json -Depth 8 -Compress
-"""
-    completed = subprocess.run(
-        [
-            pwsh,
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            command,
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    observed = json.loads(completed.stdout.strip())
-    assert observed["timedOut"] is True
-    # Old (buggy) nominal-sum accounting needed ~4 iterations of 300ms-wait + 400ms-callback to
-    # reach a nominal 1200ms, i.e. ~2800ms real. The round-5 wall-clock fix bounds this to roughly
-    # TimeoutMs plus one chunk+callback (~1900ms); 2400ms leaves headroom for scheduler jitter
-    # while still failing against the old behaviour.
-    assert observed["elapsedMs"] < 2400, observed["elapsedMs"]
-
-
-def test_gui_smoke_process_boundary_stops_scheduling_after_a_wildly_overrunning_onsample(tmp_path: Path) -> None:
-    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 6 (sol MAJOR, astra MAJOR -- "collection is not
-    # bounded as a whole"): OnSample runs synchronously with no deadline of its own; a callback
-    # that never returns cannot be preempted mid-flight from this thread (disclosed residual, see
-    # the module's own comment and the round 6 summary). What IS now bounded: once a call DOES
-    # return, a duration far past its declared cadence (here SampleIntervalMs=300, so the 3x
-    # threshold is 900ms, and OnSample deliberately sleeps 2000ms) must be surfaced in failures AND
-    # stop the loop from scheduling a second, likely-also-overrunning chunk.
-    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
-    if not pwsh:
-        pytest.skip("PowerShell 7 is unavailable")
-
-    module_literal = str(GUI_SMOKE_PROCESS_BOUNDARY).replace("'", "''")
-    python_literal = str(sys.executable).replace("'", "''")
-    command = rf"""
-Import-Module '{module_literal}' -Force
-
-$start = [Diagnostics.ProcessStartInfo]::new()
-$start.FileName = '{python_literal}'
-$start.UseShellExecute = $false
-$start.RedirectStandardOutput = $true
-$start.RedirectStandardError = $true
-[void]$start.ArgumentList.Add('-c')
-[void]$start.ArgumentList.Add('import time; time.sleep(30)')
-$p = [Diagnostics.Process]::new()
-$p.StartInfo = $start
-[void]$p.Start()
-$stdoutTask = $p.StandardOutput.ReadToEndAsync()
-$stderrTask = $p.StandardError.ReadToEndAsync()
-$script:onSampleCalls = 0
-$onSample = {{ $script:onSampleCalls++; Start-Sleep -Milliseconds 2000 }}
-$stopwatch = [Diagnostics.Stopwatch]::StartNew()
-$result = Wait-GuiSmokeProcessBounded -Process $p -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 6000 -TerminationGraceMs 5000 -StreamDrainMs 5000 -SampleIntervalMs 300 -OnSample $onSample
-$stopwatch.Stop()
-
-[pscustomobject]@{{
-    elapsedMs = $stopwatch.ElapsedMilliseconds
-    onSampleCalls = $script:onSampleCalls
     failures = @($result.failures)
+    timedOut = $result.timedOut
+    exitCode = $result.exitCode
+    treeKillAttempted = $result.treeKillAttempted
+    treeKillSucceeded = $result.treeKillSucceeded
+    terminationConfirmed = $result.terminationConfirmed
 }} | ConvertTo-Json -Depth 8 -Compress
 """
     completed = subprocess.run(
@@ -620,77 +541,42 @@ $stopwatch.Stop()
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     observed = json.loads(completed.stdout.strip())
-    # Exactly one OnSample call: the overrun is detected right after that first call returns, and
-    # the loop must not attempt a second one (which would only compound the overrun further).
-    assert observed["onSampleCalls"] == 1, observed
     failures = observed["failures"]
     if isinstance(failures, str):
         failures = [failures]
-    assert any(
-        "far exceeding its" in f and "declared sampling cadence" in f for f in failures
-    ), failures
-
-
-@pytest.mark.skipif(os.name != "nt", reason="MLV-App process ownership is Windows-specific")
-def test_gui_smoke_process_boundary_sanitizes_onsample_exception_message(tmp_path: Path) -> None:
-    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 5 (sol minor, fable minor -- same class as round 4's
-    # hostLoad.*.error sanitization): a raw $_.Exception.Message can embed a path or host
-    # identifier and used to reach processBoundary.failures -> the summary receipt verbatim.
-    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
-    if not pwsh:
-        pytest.skip("PowerShell 7 is unavailable")
-
-    module_literal = str(GUI_SMOKE_PROCESS_BOUNDARY).replace("'", "''")
-    python_literal = str(sys.executable).replace("'", "''")
-    command = rf"""
-Import-Module '{module_literal}' -Force
-
-$start = [Diagnostics.ProcessStartInfo]::new()
-$start.FileName = '{python_literal}'
-$start.UseShellExecute = $false
-$start.RedirectStandardOutput = $true
-$start.RedirectStandardError = $true
-[void]$start.ArgumentList.Add('-c')
-[void]$start.ArgumentList.Add('import time; time.sleep(1.5)')
-$p = [Diagnostics.Process]::new()
-$p.StartInfo = $start
-[void]$p.Start()
-$stdoutTask = $p.StandardOutput.ReadToEndAsync()
-$stderrTask = $p.StandardError.ReadToEndAsync()
-$onSample = {{ throw "collection failed for host BACHELOR at C:\Users\owner\secret" }}
-$result = Wait-GuiSmokeProcessBounded -Process $p -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 8000 -TerminationGraceMs 5000 -StreamDrainMs 5000 -SampleIntervalMs 300 -OnSample $onSample
-
-[pscustomobject]@{{
-    failures = @($result.failures)
-}} | ConvertTo-Json -Depth 8 -Compress
-"""
-    completed = subprocess.run(
-        [
-            pwsh,
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            command,
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    observed = json.loads(completed.stdout.strip())
-    failures = observed["failures"]
-    assert any("Host-load sample during leg failed:" in f for f in failures), failures
     joined = " ".join(failures)
-    assert "secret" not in joined
-    assert "BACHELOR" not in joined
-    assert "C:\\" not in joined
-    assert any(f.endswith("RuntimeException") for f in failures), failures
+
+    wait_failures = [f for f in failures if f.startswith("Process wait failed:")]
+    assert len(wait_failures) == 1, failures
+    wait_type_name = wait_failures[0].split(": ", 1)[1]
+    assert " " not in wait_type_name, wait_failures[0]
+
+    kill_failures = [f for f in failures if f.startswith("MLVApp process-tree termination failed:")]
+    assert len(kill_failures) == 1, failures
+    kill_type_name = kill_failures[0].split(": ", 1)[1]
+    assert " " not in kill_type_name, kill_failures[0]
+
+    postkill_failures = [f for f in failures if f.startswith("MLVApp post-kill wait failed:")]
+    assert len(postkill_failures) == 1, failures
+    postkill_type_name = postkill_failures[0].split(": ", 1)[1]
+    assert " " not in postkill_type_name, postkill_failures[0]
+
+    # All three arise from the identical root cause (no associated OS process), so they should be
+    # the same underlying exception type -- a further structural check on the sanitized shape.
+    assert wait_type_name == kill_type_name == postkill_type_name, failures
+
+    # The sanitized shape must never leak the underlying .NET message text -- exactly what a
+    # future catch reverting to raw $_.Exception.Message would reintroduce.
+    assert "No process" not in joined, joined
+    assert "associated" not in joined, joined
+
+    # Unrelated invariants must still hold for this never-started-process case: the wait never
+    # confirmed termination, so this is treated identically to a genuine hung-process timeout.
+    assert observed["timedOut"] is True
+    assert observed["exitCode"] == 124
+    assert observed["treeKillAttempted"] is True
+    assert observed["treeKillSucceeded"] is False
+    assert observed["terminationConfirmed"] is False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="MLV-App process ownership is Windows-specific")

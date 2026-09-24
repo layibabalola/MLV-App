@@ -100,94 +100,109 @@ class _ProbeCase(unittest.TestCase):
 
 @requires_pwsh
 class HostLoadSnapshotTests(_ProbeCase):
-    """tools/profiling/run-release-gui-smoke.ps1's Get-HostLoadSnapshot."""
+    """tools/profiling/run-release-gui-smoke.ps1's Get-HostLoadSnapshot and
+    Get-HostLoadSystemTimes -- round 7's replacement for the round 4-6 per-process CPU
+    accounting mechanism."""
 
     script = SMOKE_SCRIPT
-    functions = ["Get-HostLoadSnapshot"]
+    functions = ["Get-HostLoadSystemTimes", "Get-HostLoadSnapshot"]
 
     @unittest.skipUnless(
         os.name == "nt",
-        "Get-HostLoadSnapshot's Win32_Processor/Win32_OperatingSystem CIM collection is "
-        "Windows-only; on other hosts it correctly reports collected=False (see "
-        "HostLoadSnapshotUnknownWhereCollectionIsImpossibleTests below).",
+        "GetSystemTimes and Win32_Processor/Win32_OperatingSystem CIM collection are "
+        "Windows-only; on other hosts collected/systemTimesCollected correctly report False "
+        "(see HostLoadSnapshotUnknownWhereCollectionIsImpossibleTests below).",
     )
-    def test_real_snapshot_collects_or_reports_uncollectable_never_paths_or_command_lines(self) -> None:
-        # round 4 (sol major): a restricted Windows host (locked-down CIM/WMI, no admin rights, a
-        # sandboxed runner) can legitimately fail to collect telemetry -- this is a valid third
-        # outcome on Windows too, not something the test should assume away. This review lane
-        # itself observed collected=false on every direct probe. Accept either outcome; only
-        # assert the shape and privacy properties that must hold regardless of which one occurs.
+    def test_real_snapshot_collects_system_times_and_never_leaks_paths_or_command_lines(self) -> None:
+        # round 7: unlike CIM (which a locked-down/sandboxed host can legitimately block), a plain
+        # user-mode kernel32.dll syscall has no such failure mode, so this can assert
+        # SYSTEM_TIMES_COLLECTED=True deterministically on any real Windows host, not merely
+        # "either outcome" -- collected is now systemTimesCollected verbatim (see
+        # Get-HostLoadSnapshot), so COLLECTED tracks it exactly.
         proc = self.run_snippet(
             "$s = Get-HostLoadSnapshot -TopProcessCount 6\n"
             "Write-Host \"COLLECTED=$($s.collected)\"\n"
-            "Write-Host \"PROC_COUNT=$($s.processCount)\"\n"
+            "Write-Host \"SYSTEM_TIMES_COLLECTED=$($s.systemTimesCollected)\"\n"
+            "Write-Host \"IDLE=$($s.systemIdleSeconds) KERNEL=$($s.systemKernelSeconds) USER=$($s.systemUserSeconds)\"\n"
             "Write-Host \"TOP_COUNT=$($s.topCpuConsumers.Count)\"\n"
             "Write-Host \"TOP=$($s.topCpuConsumers -join '|')\"\n"
             "Write-Host \"ERROR=$($s.error)\"\n"
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertRegex(proc.stdout, r"COLLECTED=(True|False)")
+        self.assertIn("COLLECTED=True", proc.stdout)
+        self.assertIn("SYSTEM_TIMES_COLLECTED=True", proc.stdout)
+        self.assertRegex(proc.stdout, r"IDLE=\d")
+        self.assertRegex(proc.stdout, r"KERNEL=\d")
         top_line = next(l for l in proc.stdout.splitlines() if l.startswith("TOP="))
         # Top consumers are recorded BY NAME ONLY: no path separators, no drive letters, no
-        # command-line argument text -- this is host-load evidence, not process forensics. This
-        # holds whether or not collection actually succeeded (an uncollectable snapshot's
-        # topCpuConsumers is simply empty).
+        # command-line argument text -- this is host-load evidence, not process forensics, and it
+        # no longer feeds the quiet/exceeded decision at all (see Get-HostLoadNonSubjectCpuLoadPercent).
         for name in [n for n in top_line[len("TOP="):].split("|") if n]:
             self.assertNotIn("\\", name)
             self.assertNotIn("/", name)
             self.assertNotIn(":", name)
-        if "COLLECTED=True" in proc.stdout:
-            self.assertRegex(proc.stdout, r"PROC_COUNT=\d+")
-            self.assertIn("ERROR=", proc.stdout)
-        else:
-            self.assertIn("COLLECTED=False", proc.stdout)
 
-    def test_process_enumeration_budget_bounds_a_slow_per_process_loop(self) -> None:
-        # round 6 (sol MAJOR, astra MAJOR -- "collection is not bounded as a whole"): the two CIM
-        # calls carry -OperationTimeoutSec, but the per-process TotalProcessorTime loop had no
-        # bound of its own. Mocks Get-CimInstance (deterministic, fast) and Get-Process (100
-        # synthetic processes whose TotalProcessorTime getter genuinely sleeps 100ms each -- a real
-        # wall-clock cost, not a simulated one -- 10 real seconds if read to completion) to prove
-        # the default 1500ms -ProcessEnumerationBudgetMs actually stops the loop early: some
-        # processes get read, not all of them, the shortfall is recorded as unreadableProcessCount
-        # (not silently dropped), and the WHOLE call returns in a small fraction of the 10s
-        # unbounded cost.
+    def test_a_throwing_get_process_during_top_consumers_gathering_does_not_block_collection(self) -> None:
+        # round 7: the per-process ENUMERATION that used to drive the load decision itself
+        # (rounds 4-6's totalCpuSeconds/processCpuSecondsById summing loop) is retired entirely --
+        # the only remaining Get-Process call in this function gathers topCpuConsumers, purely
+        # evidentiary, wrapped in its own try/catch. A throwing Get-Process here must NOT prevent
+        # collection of the load-relevant data (systemTimesCollected, cpuLoadPercent).
         proc = self.run_snippet(
-            "function Get-CimInstance {\n"
-            "    param([string]$ClassName, $ErrorAction, $OperationTimeoutSec)\n"
-            "    if ($ClassName -eq 'Win32_Processor') { return @([pscustomobject]@{ LoadPercentage = 10 }) }\n"
-            "    return [pscustomobject]@{ FreePhysicalMemory = 1000000; TotalVisibleMemorySize = 2000000 }\n"
-            "}\n"
-            "function Get-Process {\n"
-            "    param($ErrorAction)\n"
-            "    for ($i = 1; $i -le 100; $i++) {\n"
-            "        $o = [pscustomobject]@{ Id = $i; ProcessName = \"proc$i\"; CPU = 0 }\n"
-            "        $o | Add-Member -MemberType ScriptProperty -Name TotalProcessorTime -Value {\n"
-            "            Start-Sleep -Milliseconds 100; [TimeSpan]::FromSeconds(1)\n"
-            "        }.GetNewClosure()\n"
-            "        $o\n"
-            "    }\n"
-            "}\n"
-            "$callStopwatch = [System.Diagnostics.Stopwatch]::StartNew()\n"
+            "function Get-Process { param($ErrorAction, $Id) throw [System.InvalidOperationException]::new('synthetic') }\n"
             "$s = Get-HostLoadSnapshot -TopProcessCount 6\n"
-            "$callStopwatch.Stop()\n"
             "Write-Host \"COLLECTED=$($s.collected)\"\n"
-            "Write-Host \"READ_COUNT=$($s.processCpuSecondsById.Count)\"\n"
-            "Write-Host \"UNREADABLE_COUNT=$($s.unreadableProcessCount)\"\n"
-            "Write-Host \"ELAPSED_MS=$($callStopwatch.ElapsedMilliseconds)\"\n"
+            "Write-Host \"SYSTEM_TIMES_COLLECTED=$($s.systemTimesCollected)\"\n"
+            "Write-Host \"TOP_COUNT=$($s.topCpuConsumers.Count)\"\n"
+            "Write-Host \"PROC_COUNT=$($s.processCount)\"\n"
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("COLLECTED=True", proc.stdout)
-        read_count = int(next(l for l in proc.stdout.splitlines() if l.startswith("READ_COUNT=")).split("=")[1])
-        unreadable_count = int(next(l for l in proc.stdout.splitlines() if l.startswith("UNREADABLE_COUNT=")).split("=")[1])
-        elapsed_ms = int(next(l for l in proc.stdout.splitlines() if l.startswith("ELAPSED_MS=")).split("=")[1])
-        self.assertEqual(read_count + unreadable_count, 100)
-        self.assertGreater(read_count, 0, "the budget must not starve the loop entirely")
-        self.assertLess(read_count, 100, "the budget must actually cut the loop short")
-        self.assertGreater(unreadable_count, 0)
-        # The unbounded cost would have been ~10000ms (100 * 100ms); the budget must keep the
-        # WHOLE call to a small fraction of that -- generous ceiling to avoid CI flakiness.
-        self.assertLess(elapsed_ms, 5000, "the process-enumeration budget did not actually bound the call")
+        self.assertIn("SYSTEM_TIMES_COLLECTED=True", proc.stdout)
+        self.assertIn("TOP_COUNT=0", proc.stdout)
+        self.assertIn("PROC_COUNT=", proc.stdout)
+        proc_count_line = next(l for l in proc.stdout.splitlines() if l.startswith("PROC_COUNT="))
+        self.assertEqual(proc_count_line, "PROC_COUNT=")
+
+    def test_subject_not_yet_started_records_zero_not_unreadable(self) -> None:
+        # round 7: the BEFORE snapshot is captured before the subject process exists -- its
+        # cumulative CPU time is definitionally zero, a distinct input from "unreadable" (which
+        # must stay $null, see the next test).
+        proc = self.run_snippet(
+            "$s = Get-HostLoadSnapshot -TopProcessCount 1 -SubjectNotYetStarted\n"
+            "Write-Host \"SUBJECT=$($s.subjectCpuSeconds)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("SUBJECT=0", proc.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "spawns a real Windows child process")
+    def test_subject_process_handle_is_read_directly_and_reports_unreadable_once_disposed(self) -> None:
+        # round 7: -SubjectProcess reads the CALLER's own held [System.Diagnostics.Process] handle
+        # directly (never a fresh Get-Process -Id lookup, which would fail once the subject has
+        # exited and dropped out of the live process table). Proven two ways in one process
+        # lifecycle: (1) a live, real handle reads a real non-negative cumulative CPU value; (2)
+        # once that SAME handle is explicitly Dispose()d, the next read throws and
+        # subjectCpuSeconds must fall back to $null (third state), never a stale or zero value.
+        proc = self.run_snippet(
+            "$p = Start-Process -FilePath 'powershell.exe' "
+            "-ArgumentList '-NoProfile','-Command','Start-Sleep -Milliseconds 300' -PassThru\n"
+            "Start-Sleep -Milliseconds 150\n"
+            "$live = Get-HostLoadSnapshot -TopProcessCount 1 -SubjectProcess $p\n"
+            "Write-Host \"LIVE_SUBJECT=$($live.subjectCpuSeconds)\"\n"
+            "$p.WaitForExit()\n"
+            "$p.Dispose()\n"
+            "$disposed = Get-HostLoadSnapshot -TopProcessCount 1 -SubjectProcess $p\n"
+            "Write-Host \"DISPOSED_SUBJECT=$($disposed.subjectCpuSeconds)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        live_line = next(l for l in proc.stdout.splitlines() if l.startswith("LIVE_SUBJECT="))
+        self.assertNotEqual(live_line, "LIVE_SUBJECT=", "a live handle must report a real value, not null")
+        self.assertIn("DISPOSED_SUBJECT=", proc.stdout)
+        disposed_line = next(l for l in proc.stdout.splitlines() if l.startswith("DISPOSED_SUBJECT="))
+        self.assertEqual(
+            disposed_line, "DISPOSED_SUBJECT=",
+            "an unreadable subject handle must stay null (unknown), never guess zero",
+        )
 
     def test_snapshot_records_a_timestamp(self) -> None:
         proc = self.run_snippet(
@@ -212,11 +227,16 @@ class HostLoadSnapshotUnknownWhereCollectionIsImpossibleTests(_ProbeCase):
     fixture standing in for a collection failure."""
 
     script = SMOKE_SCRIPT
-    functions = ["Get-HostLoadSnapshot", "Get-HostLoadVerdict"]
+    functions = [
+        "Get-HostLoadSystemTimes",
+        "Get-HostLoadSnapshot",
+        "Get-HostLoadNonSubjectCpuLoadPercent",
+        "Get-HostLoadVerdict",
+    ]
 
     def test_real_uncollectable_snapshot_is_classified_unknown_and_provisional(self) -> None:
         proc = self.run_snippet(
-            "$before = Get-HostLoadSnapshot -TopProcessCount 1\n"
+            "$before = Get-HostLoadSnapshot -TopProcessCount 1 -SubjectNotYetStarted\n"
             "$after = Get-HostLoadSnapshot -TopProcessCount 1\n"
             "Write-Host \"BEFORE_COLLECTED=$($before.collected)\"\n"
             "Write-Host \"AFTER_COLLECTED=$($after.collected)\"\n"
@@ -254,7 +274,7 @@ class HostLoadSnapshotPrivacyTests(_ProbeCase):
     exception message would actually surface in a receipt) was never checked."""
 
     script = SMOKE_SCRIPT
-    functions = ["Get-HostLoadSnapshot"]
+    functions = ["Get-HostLoadSystemTimes", "Get-HostLoadSnapshot"]
 
     def test_full_serialized_snapshot_carries_no_path_or_drive_text(self) -> None:
         proc = self.run_snippet(
@@ -272,36 +292,82 @@ class HostLoadSnapshotPrivacyTests(_ProbeCase):
 @requires_pwsh
 class HostLoadVerdictTests(_ProbeCase):
     """tools/profiling/run-release-gui-smoke.ps1's Get-HostLoadVerdict -- the bar and the three
-    outcomes (quiet / exceeded / unknown), never two."""
+    outcomes (quiet / exceeded / unknown), never two.
+
+    round 7 (both keys BLOCKER -- replace per-process accounting BY CONSTRUCTION): fixtures are
+    now Get-HostLoadSnapshot-shaped (systemIdleSeconds/systemKernelSeconds/systemUserSeconds/
+    subjectCpuSeconds), not bare cpuLoadPercent numbers -- Get-HostLoadVerdict computes each
+    consecutive pair's non-subject load ITSELF now (via Get-HostLoadNonSubjectCpuLoadPercent),
+    rather than reading a pre-attached property or falling back to a raw cpuLoadPercent number
+    (that raw fallback is exactly what rounds 4-6 relied on and what let an honest-looking LOW
+    number actually be an INCOMPLETE one)."""
 
     script = SMOKE_SCRIPT
-    functions = ["Get-HostLoadVerdict"]
+    functions = ["Get-HostLoadNonSubjectCpuLoadPercent", "Get-HostLoadVerdict"]
 
-    def _verdict(self, before: str, after: str, bar: float = 75) -> subprocess.CompletedProcess:
+    PROCESSOR_COUNT = 4
+
+    @staticmethod
+    def _snap(
+        offset_seconds: float,
+        kernel_seconds: float,
+        subject_seconds,
+        idle_seconds: float = 0.0,
+        user_seconds: float = 0.0,
+        collected: bool = True,
+        system_times_collected: bool = True,
+    ) -> str:
+        # subject_seconds=None means untracked/unreadable (the third-state input this round
+        # exists to refuse); pass 0.0 explicitly for "not yet started", a legitimate zero.
+        collected_literal = "$true" if collected else "$false"
+        stc_literal = "$true" if system_times_collected else "$false"
+        subject_literal = "$null" if subject_seconds is None else repr(float(subject_seconds))
+        return (
+            "[pscustomobject]@{ "
+            f"collected = {collected_literal}; "
+            f"capturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({offset_seconds}).ToString('o'); "
+            f"systemTimesCollected = {stc_literal}; "
+            f"systemIdleSeconds = {idle_seconds!r}; systemKernelSeconds = {kernel_seconds!r}; "
+            f"systemUserSeconds = {user_seconds!r}; subjectCpuSeconds = {subject_literal}; "
+            "cpuLoadPercent = 0.0 }"
+        )
+
+    def _flat(self, offset_seconds: float) -> str:
+        """A snapshot whose cumulative counters never change relative to any other _flat() call
+        -- any two of these always produce a 0% ("quiet") interval, regardless of elapsed time."""
+        return self._snap(offset_seconds, kernel_seconds=0.0, subject_seconds=0.0)
+
+    def _verdict(
+        self, before: str, after: str, during: str = "@()", bar: float = 75,
+        sample_interval_ms=None, observed_gap_ms=None,
+    ) -> subprocess.CompletedProcess:
+        extra = f" -ProcessorCount {self.PROCESSOR_COUNT}"
+        if sample_interval_ms is not None:
+            extra += f" -SampleIntervalMs {sample_interval_ms}"
+        if observed_gap_ms is not None:
+            extra += f" -ObservedMaxSampleGapMs {observed_gap_ms}"
         return self.run_snippet(
             f"$before = {before}\n"
             f"$after = {after}\n"
-            f"$v = Get-HostLoadVerdict -Before $before -After $after -Bar {bar}\n"
+            f"$during = {during}\n"
+            f"$v = Get-HostLoadVerdict -Before $before -After $after -During $during -Bar {bar}{extra}\n"
             "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional) "
             "MAX=$($v.maxCpuLoadPercent) REASON=$($v.reason)\"\n"
         )
 
     def test_quiet_host_is_not_provisional(self) -> None:
-        proc = self._verdict(
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }",
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 15.0 }",
-        )
+        proc = self._verdict(self._flat(0), self._flat(4))
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
 
     def test_fixture_mirroring_the_measured_96_percent_sample_exceeds_the_bar(self) -> None:
         # 2026-09-22T17:55Z evidence: CPU_LOAD_PCT=96 on BACHELOR turned a 4.8fps reference into
-        # 1.2fps. The declared bar must fail this sample -- that is the card's own acceptance test.
-        proc = self._verdict(
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 40.0 }",
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0 }",
-            bar=75,
-        )
+        # 1.2fps. The declared bar must fail this sample -- that is the card's own acceptance
+        # test. 4 elapsed seconds * 4 processors = 16 processor-seconds capacity; 15.36 busy
+        # processor-seconds is 96% of that, all non-subject.
+        before = self._snap(0, kernel_seconds=0.0, subject_seconds=0.0)
+        after = self._snap(4, kernel_seconds=15.36, subject_seconds=0.0)
+        proc = self._verdict(before, after, bar=75)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=exceeded PROVISIONAL=True", proc.stdout)
         self.assertIn("MAX=96", proc.stdout)
@@ -310,87 +376,65 @@ class HostLoadVerdictTests(_ProbeCase):
     def test_unknown_telemetry_is_provisional_never_quiet(self) -> None:
         # RESUME.md STEP 4: "when you add a check, name its three outcomes." Telemetry that could
         # not be collected must never silently read as a passing "quiet" host.
-        proc = self._verdict(
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }",
-            "[pscustomobject]@{ collected = $false; cpuLoadPercent = $null }",
-        )
+        before = self._flat(0)
+        after = self._snap(4, kernel_seconds=0.0, subject_seconds=None, collected=False, system_times_collected=False)
+        proc = self._verdict(before, after)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
         self.assertNotIn("STATE=quiet", proc.stdout)
 
     def test_both_snapshots_unknown_is_still_unknown_not_exceeded(self) -> None:
-        proc = self._verdict(
-            "[pscustomobject]@{ collected = $false; cpuLoadPercent = $null }",
-            "[pscustomobject]@{ collected = $false; cpuLoadPercent = $null }",
-        )
+        snap = self._snap(0, kernel_seconds=0.0, subject_seconds=None, collected=False, system_times_collected=False)
+        proc = self._verdict(snap, snap)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
 
     def test_mid_leg_burst_is_missed_by_bracketing_alone_but_caught_by_sampling(self) -> None:
         # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 3: this is the exact case in point. A burst
-        # that starts after the before-snapshot and ends before the after-snapshot is invisible
-        # to bracketing alone (round 2's behaviour -- calling Get-HostLoadVerdict with no -During
-        # samples) but must be caught once interior samples are supplied (round 3's behaviour).
-        # The rule is PEAK across all samples, not average or sustained-for-N: a single 96%
-        # interior sample marks the whole leg exceeded/provisional even though before/after are
-        # both quiet.
-        before = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
-        after = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 14.0 }"
-        burst_during = (
-            "@("
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 }, "
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0 }, "
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 13.0 }"
-            ")"
-        )
+        # confined to the interior is invisible to bracketing alone (a single [before,after]
+        # interval averages it away over the whole 24s span: 15.36 busy processor-seconds over
+        # 24s*4proc=96 capacity is only 16%) but must be caught once interior samples split that
+        # span into sub-intervals (round 3's behaviour). The rule is PEAK across every measured
+        # INTERVAL, not average or sustained-for-N: one 96% interval marks the whole leg
+        # exceeded/provisional even though the two flanking intervals are both quiet.
+        before = self._snap(0, kernel_seconds=0.0, subject_seconds=0.0)
+        during1 = self._snap(10, kernel_seconds=0.0, subject_seconds=0.0)  # [0,10]: quiet
+        during2 = self._snap(14, kernel_seconds=15.36, subject_seconds=0.0)  # [10,14]: 96% burst
+        after = self._snap(24, kernel_seconds=15.36, subject_seconds=0.0)  # [14,24]: quiet
+        during_literal = f"@({during1}, {during2})"
         proc = self.run_snippet(
             f"$before = {before}\n"
             f"$after = {after}\n"
-            f"$during = {burst_during}\n"
-            "$bracketedOnly = Get-HostLoadVerdict -Before $before -After $after -Bar 75\n"
+            f"$during = {during_literal}\n"
+            f"$bracketedOnly = Get-HostLoadVerdict -Before $before -After $after -Bar 75 "
+            f"-ProcessorCount {self.PROCESSOR_COUNT}\n"
             "Write-Host \"BRACKETED_STATE=$($bracketedOnly.state) "
-            "BRACKETED_PROVISIONAL=$($bracketedOnly.provisional)\"\n"
-            "$sampled = Get-HostLoadVerdict -Before $before -After $after -During $during -Bar 75\n"
+            "BRACKETED_PROVISIONAL=$($bracketedOnly.provisional) BRACKETED_MAX=$($bracketedOnly.maxCpuLoadPercent)\"\n"
+            f"$sampled = Get-HostLoadVerdict -Before $before -After $after -During $during -Bar 75 "
+            f"-ProcessorCount {self.PROCESSOR_COUNT}\n"
             "Write-Host \"SAMPLED_STATE=$($sampled.state) "
             "SAMPLED_PROVISIONAL=$($sampled.provisional) SAMPLED_MAX=$($sampled.maxCpuLoadPercent)\"\n"
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("BRACKETED_STATE=quiet BRACKETED_PROVISIONAL=False", proc.stdout)
+        self.assertIn("BRACKETED_MAX=16", proc.stdout)
         self.assertIn("SAMPLED_STATE=exceeded SAMPLED_PROVISIONAL=True", proc.stdout)
         self.assertIn("SAMPLED_MAX=96", proc.stdout)
 
     def test_an_uncollected_interior_sample_is_unknown_not_silently_dropped(self) -> None:
-        before = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
-        after = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
-        during = "@([pscustomobject]@{ collected = $false; cpuLoadPercent = $null })"
-        proc = self.run_snippet(
-            f"$before = {before}\n$after = {after}\n$during = {during}\n"
-            "$v = Get-HostLoadVerdict -Before $before -After $after -During $during -Bar 75\n"
-            "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional)\"\n"
-        )
+        before = self._flat(0)
+        after = self._flat(4)
+        during_sample = self._snap(2, kernel_seconds=0.0, subject_seconds=None, collected=False, system_times_collected=False)
+        proc = self._verdict(before, after, during=f"@({during_sample})")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
-
-    def _verdict_with_sampling(
-        self, before: str, after: str, during: str, sample_interval_ms, bar: float = 75
-    ) -> subprocess.CompletedProcess:
-        interval_literal = "$null" if sample_interval_ms is None else str(sample_interval_ms)
-        return self.run_snippet(
-            f"$before = {before}\n"
-            f"$after = {after}\n"
-            f"$during = {during}\n"
-            f"$v = Get-HostLoadVerdict -Before $before -After $after -During $during "
-            f"-Bar {bar} -SampleIntervalMs {interval_literal}\n"
-            "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional) REASON=$($v.reason)\"\n"
-        )
 
     def test_sampling_disabled_forces_unknown_even_when_bracket_is_quiet(self) -> None:
         # round 4 (sol BLOCKER), repro case 1: "Run a leg with HostLoadSampleIntervalMs=0 ...
         # while before/after snapshots remain below 75%; ... Get-HostLoadVerdict returns
         # quiet/provisional=false." Declaring SampleIntervalMs=0 must now force unknown/provisional
         # even though bracketing alone reads quiet.
-        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
-        proc = self._verdict_with_sampling(quiet, quiet, "@()", sample_interval_ms=0)
+        proc = self._verdict(self._flat(0), self._flat(4), sample_interval_ms=0)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
         self.assertIn("sampling was disabled", proc.stdout)
@@ -399,8 +443,7 @@ class HostLoadVerdictTests(_ProbeCase):
         # round 4 (sol BLOCKER), repro case 2: a leg short enough that not even one interior tick
         # occurred never rose above bracket-only coverage either, even though sampling was
         # nominally enabled.
-        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
-        proc = self._verdict_with_sampling(quiet, quiet, "@()", sample_interval_ms=4000)
+        proc = self._verdict(self._flat(0), self._flat(4), sample_interval_ms=4000)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
         self.assertIn("collected zero samples", proc.stdout)
@@ -409,52 +452,39 @@ class HostLoadVerdictTests(_ProbeCase):
         # Regression guard: once sampling is enabled AND it actually produced interior coverage,
         # a genuinely quiet leg must still read quiet -- the new coverage rule must not turn every
         # leg provisional.
-        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
-        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 })"
-        proc = self._verdict_with_sampling(quiet, quiet, during, sample_interval_ms=4000)
+        during = f"@({self._flat(2)})"
+        proc = self._verdict(self._flat(0), self._flat(4), during=during, sample_interval_ms=4000)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
 
     def test_sampling_enabled_still_catches_a_covered_burst(self) -> None:
-        # Regression guard: the coverage rule must not weaken the round-3 peak-of-samples catch
-        # for a burst that WAS covered by an interior tick.
-        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
-        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0 })"
-        proc = self._verdict_with_sampling(quiet, quiet, during, sample_interval_ms=4000)
+        # Regression guard: the coverage rule must not weaken the round-3 peak-of-intervals catch
+        # for a burst that WAS covered by an interior tick. 2s * 4proc = 8 capacity; 15.36 busy
+        # processor-seconds vastly exceeds it (clamped to 100%), well past the 75% bar.
+        before = self._snap(0, kernel_seconds=0.0, subject_seconds=0.0)
+        during = f"@({self._snap(2, kernel_seconds=15.36, subject_seconds=0.0)})"
+        after = self._snap(4, kernel_seconds=15.36, subject_seconds=0.0)
+        proc = self._verdict(before, after, during=during, sample_interval_ms=4000)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=exceeded PROVISIONAL=True", proc.stdout)
 
     def test_callers_that_omit_sample_interval_ms_are_unaffected(self) -> None:
-        # Backward compatibility: every caller/fixture that predates round 4 (and every other
-        # round-3 test in this file) never passes -SampleIntervalMs at all; the new coverage rule
-        # must stay inert for them, preserving bracket-only round-2/3 semantics exactly.
-        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
-        proc = self._verdict_with_sampling(quiet, quiet, "@()", sample_interval_ms=None)
+        # Backward compatibility: every caller/fixture that predates round 4 never passes
+        # -SampleIntervalMs at all; the new coverage rule must stay inert for them, preserving
+        # bracket-only round-2/3 semantics exactly.
+        proc = self._verdict(self._flat(0), self._flat(4), sample_interval_ms=None)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
 
-    def _verdict_with_gap(
-        self, before: str, after: str, during: str, sample_interval_ms, observed_gap_ms, bar: float = 75
-    ) -> subprocess.CompletedProcess:
-        interval_literal = "$null" if sample_interval_ms is None else str(sample_interval_ms)
-        gap_literal = "$null" if observed_gap_ms is None else str(observed_gap_ms)
-        return self.run_snippet(
-            f"$before = {before}\n"
-            f"$after = {after}\n"
-            f"$during = {during}\n"
-            f"$v = Get-HostLoadVerdict -Before $before -After $after -During $during "
-            f"-Bar {bar} -SampleIntervalMs {interval_literal} -ObservedMaxSampleGapMs {gap_literal}\n"
-            "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional) REASON=$($v.reason)\"\n"
-        )
-
     def test_observed_sample_gap_far_exceeding_declared_cadence_forces_unknown(self) -> None:
-        # round 5 (sol MAJOR), exact repro: a 4000ms wait followed by a 3000ms OnSample callback
-        # puts ~7000ms between snapshot starts while the declared cadence was 4000ms -- a 1.75x
+        # round 5 (sol MAJOR), exact repro: a 4000ms wait followed by a 3000ms callback puts
+        # ~7000ms between snapshot starts while the declared cadence was 4000ms -- a 1.75x
         # overrun. Coverage cannot certify quiet when the caller's own disclosed bound was not
         # honored.
-        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
-        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 })"
-        proc = self._verdict_with_gap(quiet, quiet, during, sample_interval_ms=4000, observed_gap_ms=7000)
+        during = f"@({self._flat(2)})"
+        proc = self._verdict(
+            self._flat(0), self._flat(4), during=during, sample_interval_ms=4000, observed_gap_ms=7000
+        )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
         self.assertIn("did not actually meet the declared cadence", proc.stdout)
@@ -462,9 +492,10 @@ class HostLoadVerdictTests(_ProbeCase):
     def test_observed_sample_gap_within_tolerance_of_declared_cadence_stays_quiet(self) -> None:
         # Regression guard: ordinary scheduling jitter (well under the 1.5x tolerance) must not
         # turn every real leg provisional.
-        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
-        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 })"
-        proc = self._verdict_with_gap(quiet, quiet, during, sample_interval_ms=4000, observed_gap_ms=4200)
+        during = f"@({self._flat(2)})"
+        proc = self._verdict(
+            self._flat(0), self._flat(4), during=during, sample_interval_ms=4000, observed_gap_ms=4200
+        )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
 
@@ -477,58 +508,77 @@ class HostLoadVerdictTests(_ProbeCase):
         # BETWEEN the two: 6400/4000 = 1.6x declared cadence. Under the correct 1.5x tolerance
         # (bar: 6000ms), 6400ms must already read unknown; under a loosened 1.7x tolerance (bar:
         # 6800ms), it would incorrectly still read quiet.
-        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
-        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 })"
-        proc = self._verdict_with_gap(quiet, quiet, during, sample_interval_ms=4000, observed_gap_ms=6400)
+        during = f"@({self._flat(2)})"
+        proc = self._verdict(
+            self._flat(0), self._flat(4), during=during, sample_interval_ms=4000, observed_gap_ms=6400
+        )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
 
     def test_missing_observed_sample_gap_is_backward_compatible(self) -> None:
         # Every test above this one, and every caller written before round 5, never passes
         # -ObservedMaxSampleGapMs at all -- the new spacing rule must stay inert for them.
-        quiet = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 12.0 }"
-        during = "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 11.0 })"
-        proc = self._verdict_with_gap(quiet, quiet, during, sample_interval_ms=4000, observed_gap_ms=None)
+        during = f"@({self._flat(2)})"
+        proc = self._verdict(
+            self._flat(0), self._flat(4), during=during, sample_interval_ms=4000, observed_gap_ms=None
+        )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
 
     def test_cpu_heavy_subject_on_a_quiet_host_is_not_provisional(self) -> None:
         # round 4 (fable minor), required test 1: "a CPU-heavy SUBJECT on a quiet host must NOT
-        # be provisional." A sample carrying a high raw cpuLoadPercent but a low
-        # nonSubjectCpuLoadPercent (the rest of the host is quiet; the load is the measured
-        # process's own legitimate decode work) must read quiet.
-        before = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
-        after = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
-        during = (
-            "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 92.0; "
-            "nonSubjectCpuLoadPercent = 8.0 })"
-        )
-        proc = self._verdict_with_sampling(before, after, during, sample_interval_ms=4000)
+        # be provisional." 4s*4proc=16 capacity; busy=14 (87.5% raw) but the subject itself
+        # accounts for 13 of that 14 -- non-subject is only (14-13)/16=6.25%, must read quiet.
+        before = self._snap(0, kernel_seconds=0.0, subject_seconds=0.0)
+        during = f"@({self._snap(4, kernel_seconds=14.0, subject_seconds=13.0)})"
+        after = self._snap(8, kernel_seconds=14.0, subject_seconds=13.0)  # no further change: quiet
+        proc = self._verdict(before, after, during=during, sample_interval_ms=4000)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=quiet PROVISIONAL=False", proc.stdout)
 
     def test_busy_host_is_still_provisional_even_with_a_quiet_subject(self) -> None:
-        # round 4 (fable minor), required test 2: "a busy host must be [provisional]." A sample
-        # whose OTHER processes (not the subject) are driving the load must still exceed the bar.
-        before = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
-        after = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 10.0 }"
-        during = (
-            "@([pscustomobject]@{ collected = $true; cpuLoadPercent = 92.0; "
-            "nonSubjectCpuLoadPercent = 90.0 })"
-        )
-        proc = self._verdict_with_sampling(before, after, during, sample_interval_ms=4000)
+        # round 4 (fable minor), required test 2: "a busy host must be [provisional]." Same 14
+        # busy processor-seconds, but the subject itself only accounts for 1 of them -- non-subject
+        # is (14-1)/16=81.25%, must exceed the 75% bar despite the subject being quiet.
+        before = self._snap(0, kernel_seconds=0.0, subject_seconds=0.0)
+        during = f"@({self._snap(4, kernel_seconds=14.0, subject_seconds=1.0)})"
+        after = self._snap(8, kernel_seconds=14.0, subject_seconds=1.0)  # no further change: quiet
+        proc = self._verdict(before, after, during=during, sample_interval_ms=4000)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("STATE=exceeded PROVISIONAL=True", proc.stdout)
 
 
 @requires_pwsh
 class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
-    """tools/profiling/run-release-gui-smoke.ps1's Get-HostLoadNonSubjectCpuLoadPercent."""
+    """tools/profiling/run-release-gui-smoke.ps1's Get-HostLoadNonSubjectCpuLoadPercent -- round 7
+    (both keys BLOCKER) replaces the round 4-6 per-process-sum mechanism with system-wide busy
+    time (Win32 GetSystemTimes: kernel INCLUDES idle, so busy = (kernel-idle)+user) minus the
+    subject's own CPU time, both as cumulative deltas over the identical window. There is no
+    process list anywhere in this function's inputs, so throwing per-process getters, a process
+    present in only one snapshot, and PID reuse are not merely fixed here -- they are not
+    expressible as inputs to this function at all."""
 
     script = SMOKE_SCRIPT
-    # round 6: the function now depends on Get-HostLoadProcessCpuSecondsPairs to normalize
-    # processCpuSecondsById -- both must be spliced into the probe.
-    functions = ["Get-HostLoadProcessCpuSecondsPairs", "Get-HostLoadNonSubjectCpuLoadPercent"]
+    functions = ["Get-HostLoadNonSubjectCpuLoadPercent"]
+
+    @staticmethod
+    def _snap(
+        offset_seconds: float,
+        idle_seconds: float,
+        kernel_seconds: float,
+        user_seconds: float,
+        subject_seconds,
+        system_times_collected: bool = True,
+    ) -> str:
+        stc_literal = "$true" if system_times_collected else "$false"
+        subject_literal = "$null" if subject_seconds is None else repr(float(subject_seconds))
+        return (
+            "[pscustomobject]@{ "
+            f"capturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({offset_seconds}).ToString('o'); "
+            f"systemTimesCollected = {stc_literal}; "
+            f"systemIdleSeconds = {idle_seconds!r}; systemKernelSeconds = {kernel_seconds!r}; "
+            f"systemUserSeconds = {user_seconds!r}; subjectCpuSeconds = {subject_literal} }}"
+        )
 
     def _percent(self, current: str, previous: str, processor_count: int = 4) -> subprocess.CompletedProcess:
         return self.run_snippet(
@@ -536,241 +586,183 @@ class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
             f"$previous = {previous}\n"
             f"$p = Get-HostLoadNonSubjectCpuLoadPercent -CurrentSnapshot $current "
             f"-PreviousSnapshot $previous -ProcessorCount {processor_count}\n"
-            "Write-Host \"PERCENT=$p\"\n"
+            "Write-Host \"PERCENT=$(if ($null -eq $p) { 'NULL' } else { $p })\"\n"
         )
 
     def test_subject_consuming_all_the_load_leaves_non_subject_near_zero(self) -> None:
-        # Over 4 elapsed seconds on a 4-core host, the subject accrued 4*4=16 processor-seconds --
-        # 100% of the machine's capacity for that window -- while raw cpuLoadPercent read 100%.
-        # round 6: totalCpuSeconds/processCpuSecondsById now required (with unreadableProcessCount
-        # = 0) for the matched-window path -- a single process (the subject, pid 1) accounts for
-        # the entire load here, so its matched delta equals subjectCpuSeconds delta (16.0).
-        current = (
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 100.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 16.0; "
-            "unreadableProcessCount = 0; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 16.0 } }"
-        )
-        previous = (
-            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
-            "unreadableProcessCount = 0; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0 } }"
-        )
+        # Over 4 elapsed seconds on a 4-core host, capacity is 16 processor-seconds; the subject
+        # alone accounts for all 16 busy processor-seconds (idle/user held flat), so non-subject
+        # must read ~0%.
+        previous = self._snap(0, idle_seconds=0.0, kernel_seconds=0.0, user_seconds=0.0, subject_seconds=0.0)
+        current = self._snap(4, idle_seconds=0.0, kernel_seconds=16.0, user_seconds=0.0, subject_seconds=16.0)
         proc = self._percent(current, previous, processor_count=4)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PERCENT=0", proc.stdout)
 
-    def test_no_subject_tracking_falls_back_to_raw_load(self) -> None:
-        current = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 55.0; capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = $null }"
-        previous = "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = $null }"
+    def test_missing_system_times_on_current_snapshot_returns_unknown_not_raw(self) -> None:
+        # round 7: there is no raw cpuLoadPercent fallback anywhere in this function -- a snapshot
+        # whose system times could not be collected (GetSystemTimes failed) makes the WHOLE
+        # interval unknown, per the brief: "it must not feed the quiet decision on its own."
+        previous = self._snap(0, idle_seconds=0.0, kernel_seconds=0.0, user_seconds=0.0, subject_seconds=0.0)
+        current = self._snap(
+            4, idle_seconds=0.0, kernel_seconds=0.0, user_seconds=0.0, subject_seconds=0.0,
+            system_times_collected=False,
+        )
         proc = self._percent(current, previous)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("PERCENT=55", proc.stdout)
+        self.assertIn("PERCENT=NULL", proc.stdout)
 
-    def test_missing_previous_sample_falls_back_to_raw_load(self) -> None:
-        current = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 55.0; capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 2.0 }"
-        proc = self._percent(current, "$null")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("PERCENT=55", proc.stdout)
-
-    def test_non_positive_elapsed_time_falls_back_to_raw_load(self) -> None:
-        current = "[pscustomobject]@{ collected = $true; cpuLoadPercent = 55.0; capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 2.0 }"
-        previous = "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0 }"
+    def test_missing_system_times_on_previous_snapshot_also_returns_unknown(self) -> None:
+        previous = self._snap(
+            0, idle_seconds=0.0, kernel_seconds=0.0, user_seconds=0.0, subject_seconds=0.0,
+            system_times_collected=False,
+        )
+        current = self._snap(4, idle_seconds=0.0, kernel_seconds=16.0, user_seconds=0.0, subject_seconds=0.0)
         proc = self._percent(current, previous)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("PERCENT=55", proc.stdout)
+        self.assertIn("PERCENT=NULL", proc.stdout)
 
-    def test_missing_process_cpu_seconds_by_id_falls_back_to_raw_load_not_mismatched_subtraction(self) -> None:
-        # round 5 (sol MAJOR): sol's exact repro, in the card's own units -- raw cpuLoadPercent=96,
-        # four elapsed seconds, four processors, subjectCpuSeconds delta=12.8. Round 4's
-        # subtraction (a POINT raw sample minus an INTERVAL-AVERAGE subject share) produced
-        # subjectPercent=80 -> nonSubject=16, reading a 96% sample as quiet under a 75% bar. This
-        # object has no processCpuSecondsById at all (exactly what round 4's fixtures, and any
-        # pre-round-6 caller, look like) -- round 6 requires processCpuSecondsById on both sides
-        # for ANY subtraction, so this now falls straight back to the RAW 96, which correctly
-        # exceeds a 75% bar instead of being silently masked.
-        current = (
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 12.8 }"
-        )
-        previous = (
-            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0 }"
-        )
-        proc = self._percent(current, previous, processor_count=4)
+    def test_unreadable_subject_on_current_snapshot_returns_unknown_not_zero(self) -> None:
+        # round 7 (third state): the subject having exited mid-interval without a final reading
+        # must never silently read as "0 subject CPU used" (which would UNDERCOUNT the subject and
+        # OVERCOUNT non-subject load) -- this is the exact contract Get-HostLoadSnapshot's own
+        # $null-on-unreadable default is designed to trip here.
+        previous = self._snap(0, idle_seconds=0.0, kernel_seconds=0.0, user_seconds=0.0, subject_seconds=0.0)
+        current = self._snap(4, idle_seconds=0.0, kernel_seconds=16.0, user_seconds=0.0, subject_seconds=None)
+        proc = self._percent(current, previous)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("PERCENT=96", proc.stdout)
+        self.assertIn("PERCENT=NULL", proc.stdout)
 
-    def test_matched_window_subtracts_commensurate_cumulative_deltas(self) -> None:
-        # round 5 (fable minor -- matched-window subtraction), updated round 6 for the
-        # per-process-keyed shape. 4s tick, 8 processors (capacity 32 processor-seconds). The
-        # subject (pid 1) burned 16 processor-seconds over the interval (50% of capacity); one
-        # other process (pid 2) burned 8 processor-seconds (present in both snapshots, delta
-        # 8 = 24-16... i.e. together subject+other = 24 processor-seconds, 75% of capacity, e.g. an
-        # exogenous burst diluted across the same window). Both processes are present in BOTH
-        # snapshots, so their matched deltas sum exactly like the old aggregate diff did for this
-        # no-churn case: nonSubject = (24-16)/32*100 = 25%.
-        current = (
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 60.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 16.0; "
-            "unreadableProcessCount = 0; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 16.0; '2' = 8.0 } }"
-        )
-        previous = (
-            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
-            "unreadableProcessCount = 0; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0; '2' = 0.0 } }"
-        )
+    def test_unreadable_subject_on_previous_snapshot_also_returns_unknown(self) -> None:
+        previous = self._snap(0, idle_seconds=0.0, kernel_seconds=0.0, user_seconds=0.0, subject_seconds=None)
+        current = self._snap(4, idle_seconds=0.0, kernel_seconds=16.0, user_seconds=0.0, subject_seconds=0.0)
+        proc = self._percent(current, previous)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=NULL", proc.stdout)
+
+    def test_non_positive_elapsed_time_returns_unknown(self) -> None:
+        previous = self._snap(0, idle_seconds=0.0, kernel_seconds=0.0, user_seconds=0.0, subject_seconds=0.0)
+        current = self._snap(0, idle_seconds=0.0, kernel_seconds=4.0, user_seconds=0.0, subject_seconds=0.0)
+        proc = self._percent(current, previous)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=NULL", proc.stdout)
+
+    def test_kernel_time_includes_idle_and_is_subtracted_out(self) -> None:
+        # 4s * 8 processors = 32 processor-seconds capacity. Idle climbs by 20 (mostly-idle host);
+        # kernel (which INCLUDES idle) climbs by 24; user climbs by 4. Busy = (24-20)+4 = 8. The
+        # subject contributed 0. nonSubject = 8/32*100 = 25%. A mutation that forgot to subtract
+        # idle from kernel would instead compute (24+4)/32=87.5%, so this pins that subtraction.
+        previous = self._snap(0, idle_seconds=0.0, kernel_seconds=0.0, user_seconds=0.0, subject_seconds=0.0)
+        current = self._snap(4, idle_seconds=20.0, kernel_seconds=24.0, user_seconds=4.0, subject_seconds=0.0)
         proc = self._percent(current, previous, processor_count=8)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PERCENT=25", proc.stdout)
 
-    def test_unreadable_process_on_either_bracket_falls_back_to_raw_not_an_undercount(self) -> None:
-        # round 6 (astra MAJOR, exact repro): "a raw 96% interior sample, four seconds/four
-        # processors, and only the subject's 0.16 CPU-seconds readable" -- every OTHER process's
-        # TotalProcessorTime getter throws. The old code silently skipped those failures and
-        # totalCpuSeconds ended up equal to subjectCpuSeconds, so the subtraction produced
-        # effective=0 (quiet). unreadableProcessCount > 0 on the current snapshot must now refuse
-        # the exclusion outright and fall back to RAW 96, which correctly exceeds a 75% bar.
-        current = (
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 0.16; "
-            "unreadableProcessCount = 3; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.16 } }"
-        )
-        previous = (
-            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
-            "unreadableProcessCount = 0; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0 } }"
-        )
+    def test_a_process_that_exited_between_snapshots_is_still_correctly_accounted(self) -> None:
+        # round 7: this is what round 6's "a process that exited between snapshots cannot cancel a
+        # survivor's usage" repro becomes under the new mechanism -- it is no longer a special case
+        # requiring its own guard, because system-wide counters are monotonic OS-maintained totals,
+        # never rebuilt from a per-process list that could lose an exited process's contribution.
+        # 80% background (from a mix of surviving and now-exited processes, indistinguishable and
+        # irrelevant at the system-wide level) plus 20% subject over 4s*4proc=16 capacity: busy=16,
+        # subject=3.2 -> nonSubject=(16-3.2)/16*100=80%, correctly exceeding a 75% bar.
+        previous = self._snap(0, idle_seconds=0.0, kernel_seconds=0.0, user_seconds=0.0, subject_seconds=0.0)
+        current = self._snap(4, idle_seconds=0.0, kernel_seconds=16.0, user_seconds=0.0, subject_seconds=3.2)
         proc = self._percent(current, previous, processor_count=4)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("PERCENT=96", proc.stdout)
-
-    def test_unreadable_process_on_the_previous_bracket_also_falls_back_to_raw(self) -> None:
-        # round 6: incompleteness on EITHER side of the window is disqualifying -- a clean current
-        # snapshot cannot rescue a previous snapshot that could not fully account for its processes.
-        current = (
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 90.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 1.0; "
-            "unreadableProcessCount = 0; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 1.0 } }"
-        )
-        previous = (
-            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
-            "unreadableProcessCount = 2; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0 } }"
-        )
-        proc = self._percent(current, previous, processor_count=4)
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("PERCENT=90", proc.stdout)
-
-    def test_a_process_that_exited_between_snapshots_cannot_cancel_a_survivors_usage(self) -> None:
-        # round 6 (sol BLOCKER: "differencing two totals over a CHANGING process set lets
-        # exited-process history cancel current usage"). Previous snapshot: pid 1 (subject, 0.0s)
-        # and pid 999 (a short-lived process that had already burned 50.0 processor-seconds by the
-        # previous snapshot, then exited before the current one was taken). Current snapshot: pid 1
-        # (subject, 4.0s) and pid 2 (a NEW process that started after the previous snapshot, 12.0s)
-        # -- pid 999 is simply absent, not present with a lower value. Under the OLD aggregate-diff
-        # approach this would have been totalCurrent=16.0 minus totalPrevious=50.0 = -34.0, clamped
-        # to 0 -- pid 999's past history completely hides pid 2's real, current 12.0s of usage. The
-        # matched-BY-PID approach only sums pid 1 (delta 4.0, all subject) because pid 2 and pid 999
-        # are each present in only one snapshot and contribute nothing: nonSubject = (4.0-4.0)/16
-        # = 0%. This is deliberately NOT a claim that pid 2's usage is captured (it cannot be, from
-        # only two snapshots) -- it is the claim that pid 999's exit no longer produces a NEGATIVE,
-        # clamped-to-zero total that could mask unrelated genuine usage elsewhere. See the
-        # complementary Get-HostLoadVerdict-level test below for why raw is what actually protects
-        # this case end to end.
-        current = (
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 4.0; "
-            "unreadableProcessCount = 0; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 4.0; '2' = 12.0 } }"
-        )
-        previous = (
-            "[pscustomobject]@{ capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
-            "unreadableProcessCount = 0; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0; '999' = 50.0 } }"
-        )
-        proc = self._percent(current, previous, processor_count=4)
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("PERCENT=0", proc.stdout)
+        self.assertIn("PERCENT=80", proc.stdout)
 
 
 @requires_pwsh
 class HostLoadPartialCollectionEndToEndVerdictTests(_ProbeCase):
-    """round 6 (sol BLOCKER, astra MAJOR): chains Get-HostLoadNonSubjectCpuLoadPercent's output
-    into Get-HostLoadVerdict exactly the way run-release-gui-smoke.ps1's real $hostLoadOnSample
-    scriptblock does (compute nonSubjectCpuLoadPercent from two chronological snapshots, Add-Member
-    it onto the later sample, then judge the bar on that sample -- see run-release-gui-smoke.ps1
-    around line 1450) -- proving BOTH keys' exact partial-collection repros no longer read quiet
-    end to end, not just at the helper-function level tested above."""
+    """round 7 (both keys BLOCKER): rerun of both keys' round-6 repros -- adapted to the new
+    mechanism -- chained through the real Get-HostLoadNonSubjectCpuLoadPercent -> Get-HostLoadVerdict
+    wiring, proving neither one reads quiet under the new system-wide mechanism. PID reuse (round
+    6's third repro) has no equivalent here at all: there is no PID-keyed map anywhere in this
+    computation for a reused PID to corrupt -- see the class docstring below for why that is a
+    structural property, not merely a fix."""
 
     script = SMOKE_SCRIPT
-    functions = [
-        "Get-HostLoadProcessCpuSecondsPairs",
-        "Get-HostLoadNonSubjectCpuLoadPercent",
-        "Get-HostLoadVerdict",
-    ]
+    functions = ["Get-HostLoadNonSubjectCpuLoadPercent", "Get-HostLoadVerdict"]
 
-    def _verdict_via_real_wiring(self, before: str, during_current: str, bar: float = 75) -> subprocess.CompletedProcess:
+    @staticmethod
+    def _snap(offset_seconds: float, kernel_seconds: float, subject_seconds, collected: bool = True) -> str:
+        collected_literal = "$true" if collected else "$false"
+        subject_literal = "$null" if subject_seconds is None else repr(float(subject_seconds))
+        return (
+            "[pscustomobject]@{ "
+            f"collected = {collected_literal}; "
+            f"capturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({offset_seconds}).ToString('o'); "
+            "systemTimesCollected = $true; systemIdleSeconds = 0.0; "
+            f"systemKernelSeconds = {kernel_seconds!r}; systemUserSeconds = 0.0; "
+            f"subjectCpuSeconds = {subject_literal}; cpuLoadPercent = 0.0 }}"
+        )
+
+    def _verdict_via_real_wiring(self, before: str, after: str, bar: float = 75) -> subprocess.CompletedProcess:
+        # A single [before, after] interval is enough to prove each repro -- both keys' original
+        # findings were about the SUBTRACTION itself reading falsely clean, not about multi-sample
+        # sequencing, so this stays minimal rather than reusing `before` as a bogus "after" that
+        # would create a chronologically-backward (negative-elapsed) second interval.
         return self.run_snippet(
             f"$before = {before}\n"
-            f"$duringSample = {during_current}\n"
-            "$nonSubject = Get-HostLoadNonSubjectCpuLoadPercent -CurrentSnapshot $duringSample "
-            "-PreviousSnapshot $before -ProcessorCount 4\n"
-            "$duringSample | Add-Member -MemberType NoteProperty -Name nonSubjectCpuLoadPercent "
-            "-Value $nonSubject\n"
-            f"$v = Get-HostLoadVerdict -Before $before -After $before -During @($duringSample) -Bar {bar}\n"
-            "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional) "
-            "NONSUBJECT=$nonSubject MAX=$($v.maxCpuLoadPercent)\"\n"
+            f"$after = {after}\n"
+            f"$v = Get-HostLoadVerdict -Before $before -After $after -Bar {bar} -ProcessorCount 4\n"
+            "Write-Host \"STATE=$($v.state) PROVISIONAL=$($v.provisional) MAX=$($v.maxCpuLoadPercent)\"\n"
         )
 
-    def test_astra_exact_repro_unreadable_processes_no_longer_reads_quiet(self) -> None:
-        # astra's exact repro: "a raw 96% interior sample, four seconds/four processors, and only
-        # the subject's 0.16 CPU-seconds readable" -- three other processes' TotalProcessorTime
-        # getters throw. Old behaviour: totalCpuSeconds silently ended up equal to subjectCpuSeconds
-        # (the undercount), so nonSubject computed to 0 and the leg read quiet under a 75% bar.
-        before = (
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 20.0; "
-            "capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
-            "unreadableProcessCount = 0; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0 } }"
-        )
-        during_current = (
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 0.16; "
-            "unreadableProcessCount = 3; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.16 } }"
-        )
-        proc = self._verdict_via_real_wiring(before, during_current)
+    def test_astras_exact_repro_a_new_loader_contributing_15_36_cpu_seconds_no_longer_reads_quiet(self) -> None:
+        # astra's round-7 exact repro: "a new loader contributing 15.36 CPU-seconds over 4 s x 4
+        # procs" -- under the OLD per-process mechanism, a loader present only in the CURRENT
+        # snapshot contributed nothing to the matched-by-PID sum (round 6's own residual, closed
+        # here by construction: system-wide busy time counts it automatically, with no per-process
+        # matching step to omit it from). 15.36 busy processor-seconds over 16 capacity = 96%.
+        before = self._snap(0, kernel_seconds=0.0, subject_seconds=0.0)
+        after = self._snap(4, kernel_seconds=15.36, subject_seconds=0.0)
+        proc = self._verdict_via_real_wiring(before, after)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("NONSUBJECT=96", proc.stdout)
+        self.assertIn("MAX=96", proc.stdout)
         self.assertIn("STATE=exceeded PROVISIONAL=True", proc.stdout)
         self.assertNotIn("STATE=quiet", proc.stdout)
 
-    def test_sols_exact_repro_undercounted_total_no_longer_reads_quiet(self) -> None:
-        # sol's exact repro numbers, round 6 brief: "raw 96, subject delta 0, total delta 3.84, 4
-        # procs -> read quiet." Constructed as an incomplete snapshot -- several CPU-consuming
-        # processes unreadable, leaving only a small readable remainder (3.84 processor-seconds
-        # worth from one other process) that made the old aggregate totalCpuSeconds look
-        # deceptively low relative to the true 96% raw reading.
-        before = (
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 20.0; "
-            "capturedAtUtc = '2026-01-01T00:00:00Z'; subjectCpuSeconds = 0.0; "
-            "unreadableProcessCount = 0; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0 } }"
-        )
-        during_current = (
-            "[pscustomobject]@{ collected = $true; cpuLoadPercent = 96.0; "
-            "capturedAtUtc = '2026-01-01T00:00:04Z'; subjectCpuSeconds = 0.0; "
-            "unreadableProcessCount = 5; "
-            "processCpuSecondsById = [pscustomobject]@{ '1' = 0.0; '2' = 3.84 } }"
-        )
-        proc = self._verdict_via_real_wiring(before, during_current)
+    def test_sols_exact_repro_a_raw_96_percent_load_with_the_subject_unreadable_no_longer_reads_quiet(self) -> None:
+        # sol's round-7 exact repro: "a raw-96 loader with a throwing getter." Re-expressed for the
+        # new mechanism: the subject's own CPU time is unreadable this sample (its process-handle
+        # read failed -- see Get-HostLoadSnapshot's third-state handling), while the SYSTEM-WIDE
+        # busy time genuinely reflects 96% load (15.36 of 16 processor-seconds). Under the OLD
+        # mechanism a throwing per-process getter could be silently counted as zero, undercounting
+        # the total; here, an unreadable SUBJECT correctly refuses to compute a value at all
+        # (Get-HostLoadNonSubjectCpuLoadPercent returns $null), which Get-HostLoadVerdict must
+        # treat as unknown/provisional -- never quiet, and never silently substituting a raw number.
+        before = self._snap(0, kernel_seconds=0.0, subject_seconds=0.0)
+        after = self._snap(4, kernel_seconds=15.36, subject_seconds=None)
+        proc = self._verdict_via_real_wiring(before, after)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("NONSUBJECT=96", proc.stdout)
-        self.assertIn("STATE=exceeded PROVISIONAL=True", proc.stdout)
+        self.assertIn("STATE=unknown PROVISIONAL=True", proc.stdout)
         self.assertNotIn("STATE=quiet", proc.stdout)
+
+    def test_pid_reuse_has_no_expressible_repro_under_the_new_mechanism(self) -> None:
+        # round 6's third repro -- "reusing a PID whose previous cumulative value is higher
+        # produced the same false-clean result" -- required a PID-keyed map of per-process
+        # cumulative seconds that a stale/reused key could corrupt. Get-HostLoadNonSubjectCpuLoadPercent
+        # accepts exactly four numeric system-wide fields and one subject-handle-derived number; no
+        # PID, process name, or process identity of any kind is an input to this function. This
+        # test proves the ABSENCE of the field itself: constructing a fixture that HAS no PID-keyed
+        # property at all still produces the correct, unambiguous answer -- there is no field left
+        # for a reused PID to have corrupted in the first place.
+        previous = self._snap(0, kernel_seconds=0.0, subject_seconds=0.0)
+        current = self._snap(4, kernel_seconds=15.36, subject_seconds=0.0)
+        proc = self.run_snippet(
+            f"$previous = {previous}\n"
+            f"$current = {current}\n"
+            "$hasPidKeyedProperty = $null -ne $current.PSObject.Properties['processCpuSecondsById']\n"
+            "Write-Host \"HAS_PID_KEYED_PROPERTY=$hasPidKeyedProperty\"\n"
+            "$p = Get-HostLoadNonSubjectCpuLoadPercent -CurrentSnapshot $current "
+            "-PreviousSnapshot $previous -ProcessorCount 4\n"
+            "Write-Host \"PERCENT=$p\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("HAS_PID_KEYED_PROPERTY=False", proc.stdout)
+        self.assertIn("PERCENT=96", proc.stdout)
 
 
 @requires_pwsh
@@ -795,17 +787,44 @@ class GuiSmokeResultCarriesHostLoadTests(unittest.TestCase):
 
     def test_leg_wait_is_wired_to_sample_host_load_during_the_leg(self) -> None:
         # round 3: bracketing alone (before Process::Start, after WaitForExit) is not enough --
-        # Wait-GuiSmokeProcessBounded must be given a sampling cadence and callback so it can
-        # take interior snapshots too, and the verdict must actually consume them.
+        # interior snapshots must be taken WHILE the leg runs, and the verdict must actually
+        # consume them.
+        #
+        # round 7 (sol + astra MAJOR -- "a non-returning sampler prevents both timeout handling
+        # and receipt publication"): the sampling loop moved OUT of Wait-GuiSmokeProcessBounded
+        # (which no longer takes -SampleIntervalMs/-OnSample at all -- see
+        # test_wait_call_no_longer_passes_sampling_parameters below) and INTO this script's own
+        # scope, sampling inline between chunked waits it drives itself.
         source = SMOKE_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("-SampleIntervalMs $HostLoadSampleIntervalMs", source)
-        self.assertIn("-OnSample $hostLoadOnSample", source)
-        # round 4: $OnSample now assigns to $newSample first (so Get-HostLoadNonSubjectCpuLoadPercent
-        # can diff it against the previous sample) before adding it to the list.
-        self.assertIn("$newSample = Get-HostLoadSnapshot", source)
+        self.assertIn("if ($process.WaitForExit($hostLoadChunkMs)) {", source)
+        self.assertIn(
+            "$newSample = Get-HostLoadSnapshot -TopProcessCount $HostLoadTopProcessCount -SubjectProcess $process",
+            source,
+        )
         self.assertIn("$hostLoadDuringSamples.Add($newSample)", source)
         self.assertIn("-During @($hostLoadDuringSamples)", source)
         self.assertIn("during = @($hostLoadDuringSamples)", source)
+
+    def test_wait_call_no_longer_passes_sampling_parameters(self) -> None:
+        # round 7: proves the removal is real at the CALL SITE, not merely that the module's
+        # signature changed elsewhere -- the actual $processBoundary = Wait-GuiSmokeProcessBounded
+        # invocation here must not pass -SampleIntervalMs or -OnSample (both parameters no longer
+        # exist on that function at all -- see gui-smoke-process-boundary.psm1).
+        source = SMOKE_SCRIPT.read_text(encoding="utf-8")
+        call_start = source.index("$processBoundary = Wait-GuiSmokeProcessBounded")
+        call_end = source.index("\n$stdout = $processBoundary.stdout", call_start)
+        call_text = source[call_start:call_end]
+        self.assertNotIn("-SampleIntervalMs", call_text)
+        self.assertNotIn("-OnSample", call_text)
+        self.assertIn("-TimeoutMs $hostLoadFinalizeTimeoutMs", call_text)
+        # And the finalize timeout must trace back to the sampling loop's own elapsed time, not an
+        # independent/unbound value.
+        finalize_computation = source.index("$hostLoadFinalizeTimeoutMs = [Math]::Max(1,")
+        self.assertLess(
+            finalize_computation, call_start,
+            "hostLoadFinalizeTimeoutMs must be computed from the sampling loop's real elapsed "
+            "time before the finalize call consumes it",
+        )
 
     def test_verdict_call_is_wired_with_the_observed_max_sample_gap(self) -> None:
         # round 6 (astra MAJOR -- "enforcement tests check TOKENS, not behaviour"): astra's exact
