@@ -104,6 +104,20 @@ DROP_FRAME_ADVANCE_EXACT_ARGS = [
     "ui->spinBoxCutOut->value() - 1",
 ]
 
+# CUDA-ATTRIBUTION-BASELINE-1 round 10 (fable MINOR, "census
+# insertion-blindness"): the offered-accumulator feed was checked only by an
+# 80-char proximity `assertIn`, so inserting `0 * ` between the `+=` and the
+# call survived; computeSourceFramePopulation's args 0-1 (the offered
+# accumulator pair) were the only call arguments left unpinned; and the
+# upstream dropFrameSourceFramesAdvanced producer had no test at all.
+ACCUMULATOR_ASSIGN_PREFIX = "m_playbackTimelineSourceFramesOffered +="
+DROP_FRAME_SOURCE_FRAMES_ADVANCED_DECL = (
+    "const double dropFrameSourceFramesAdvanced ="
+)
+DROP_FRAME_SOURCE_FRAMES_ADVANCED_EXPECTED_RHS = (
+    "getFramerate() * (double)timeDiff / 1000.0"
+)
+
 NUMERIC_LITERAL_RE = re.compile(r"^-?\d+(\.\d+)?[fFuUlL]*$")
 
 
@@ -410,9 +424,54 @@ class MainWindowWiringTests(unittest.TestCase):
         # normal-mode +=1.0 above it, and the read side at
         # PlaybackFramePopulationPolicy::computeSourceFramePopulation()'s
         # first argument below).
+        #
+        # round 10 (fable MINOR): an 80-char proximity `assertIn` survives
+        # `m_playbackTimelineSourceFramesOffered += 0 * PlaybackDropFrame...`
+        # -- the token is still "in the preceding 80 characters" even though
+        # the accumulator is now permanently fed zero. Require nothing but
+        # whitespace between the `+=` and the call.
         marker_offset = self.source.index(DROP_FRAME_POLICY_MARKER)
-        preceding = self.source[max(0, marker_offset - 80):marker_offset]
-        self.assertIn("m_playbackTimelineSourceFramesOffered +=", preceding)
+        accumulator_offset = self.source.rindex(
+            ACCUMULATOR_ASSIGN_PREFIX, 0, marker_offset)
+        between = self.source[
+            accumulator_offset + len(ACCUMULATOR_ASSIGN_PREFIX):marker_offset]
+        self.assertRegex(
+            between, r"^\s*$",
+            "the accumulator must be fed DIRECTLY by offeredAdvance(...)'s "
+            "return value with nothing else (e.g. a `0 * ` multiplier) "
+            "between the `+=` and the call -- got %r" % between)
+
+    def test_drop_frame_source_frames_advanced_is_computed_from_the_live_frame_rate_and_time_diff(self):
+        # round 10 (fable MINOR): the upstream producer of
+        # dropFrameSourceFramesAdvanced -- the value offeredAdvance()
+        # actually credits into the accumulator -- had no test at all.
+        occurrences = [
+            m.start() for m in re.finditer(
+                re.escape(DROP_FRAME_SOURCE_FRAMES_ADVANCED_DECL), self.source)
+        ]
+        self.assertEqual(
+            len(occurrences), 1,
+            "expected exactly 1 declaration of dropFrameSourceFramesAdvanced")
+        decl_offset = occurrences[0]
+        semicolon_offset = self.source.index(";", decl_offset)
+        statement = self.source[decl_offset:semicolon_offset]
+        rhs = statement.split("=", 1)[1]
+        normalized_rhs = re.sub(r"\s+", " ", rhs).strip()
+        self.assertEqual(
+            normalized_rhs, DROP_FRAME_SOURCE_FRAMES_ADVANCED_EXPECTED_RHS,
+            "dropFrameSourceFramesAdvanced must be computed live from "
+            "getFramerate() and timeDiff, not a hardcoded/wrong-source "
+            "substitute -- got %r" % normalized_rhs)
+        span = _function_body_span(self.source, PLAYBACK_HANDLING_SIGNATURE)
+        self.assertTrue(
+            call_within(span, decl_offset),
+            "dropFrameSourceFramesAdvanced must be computed inside "
+            "playbackHandling()")
+        marker_offset = self.source.index(DROP_FRAME_POLICY_MARKER)
+        self.assertLess(
+            decl_offset, marker_offset,
+            "dropFrameSourceFramesAdvanced must be computed before "
+            "offeredAdvance(...) consumes it")
 
     # ---- bonus: the read side is wired too ----------------------------------
     def test_compute_source_frame_population_reads_all_identity_accessors_live(self):
@@ -426,6 +485,18 @@ class MainWindowWiringTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         args = calls[0][1]
         self.assertEqual(len(args), 9)
+        # round 10 (fable MINOR): args 0-1 (the offered-accumulator pair)
+        # were the only call arguments left unpinned -- a constant
+        # substitute for either survives every other check in this test.
+        self.assertEqual(
+            args[0], "m_playbackTimelineSourceFramesOffered",
+            "the offered-frames argument must be the live session "
+            "accumulator, not a hardcoded/wrong-source substitute")
+        self.assertEqual(
+            args[1], "m_playbackSmokeStartTimelineSourceFramesOffered",
+            "the session-start-offset argument must be the live "
+            "session-start snapshot, not a hardcoded/wrong-source "
+            "substitute")
         self.assertEqual(args[2], TRACKER_MEMBER + ".requestedOccurrenceUnionCount()")
         self.assertEqual(args[3], TRACKER_MEMBER + ".distinctTargetPresentedCount()")
         self.assertEqual(args[4], TRACKER_MEMBER + ".distinctLookaheadPresentedCount()")
