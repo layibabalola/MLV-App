@@ -693,6 +693,73 @@ $result = Wait-GuiSmokeProcessBounded -Process $p -StandardOutputTask $stdoutTas
     assert any(f.endswith("RuntimeException") for f in failures), failures
 
 
+@pytest.mark.skipif(os.name != "nt", reason="MLV-App process ownership is Windows-specific")
+def test_gui_smoke_process_boundary_sanitizes_faulted_stdout_task_exception_message(tmp_path: Path) -> None:
+    # PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 6 (sol MINOR, same class as round 5's OnSample
+    # sanitization above): Get-GuiSmokeTaskText's own catch block (used to drain BOTH the stdout
+    # and stderr tasks) still recorded the raw $_.Exception.Message -- sol's exact repro: "a
+    # faulted stdout task whose synthetic exception includes a sentinel path... result.failures
+    # reproduces the raw sentinel." Passes a Task that is ALREADY faulted (constructed via
+    # Task.FromException, carrying a sentinel path in its message) as -StandardOutputTask.
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+
+    module_literal = str(GUI_SMOKE_PROCESS_BOUNDARY).replace("'", "''")
+    python_literal = str(sys.executable).replace("'", "''")
+    command = rf"""
+Import-Module '{module_literal}' -Force
+
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = '{python_literal}'
+$start.UseShellExecute = $false
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+[void]$start.ArgumentList.Add('-c')
+[void]$start.ArgumentList.Add('import time; time.sleep(0.2)')
+$p = [Diagnostics.Process]::new()
+$p.StartInfo = $start
+[void]$p.Start()
+$sentinelException = [System.Exception]::new('stdout drain failed for host BACHELOR at C:\Users\owner\secret')
+$faultedStdoutTask = [System.Threading.Tasks.Task]::FromException($sentinelException)
+$stderrTask = $p.StandardError.ReadToEndAsync()
+$result = Wait-GuiSmokeProcessBounded -Process $p -StandardOutputTask $faultedStdoutTask -StandardErrorTask $stderrTask -TimeoutMs 8000 -TerminationGraceMs 5000 -StreamDrainMs 5000
+
+[pscustomobject]@{{
+    stdoutDrained = $result.stdoutDrained
+    failures = @($result.failures)
+}} | ConvertTo-Json -Depth 8 -Compress
+"""
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    observed = json.loads(completed.stdout.strip())
+    assert observed["stdoutDrained"] is False
+    failures = observed["failures"]
+    assert any("stdout drain failed:" in f for f in failures), failures
+    joined = " ".join(failures)
+    assert "secret" not in joined
+    assert "owner" not in joined
+    assert "BACHELOR" not in joined
+    assert "C:\\" not in joined
+
+
 @pytest.mark.skipif(os.name != "nt", reason="MLV-App GUI smoke comparer is PowerShell-based")
 def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None:
     pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")

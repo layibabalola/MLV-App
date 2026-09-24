@@ -25,10 +25,15 @@ function Get-GuiSmokeTaskText {
         }
     }
     catch {
+        # round 6 (sol MINOR, same class as round 5's OnSample sanitization): a faulted
+        # stdout/stderr drain task's exception message can embed a path or host identifier (e.g. a
+        # file-in-use error naming the exact file path) -- this string flowed unsanitized into
+        # result.failures -> validation.failures -> the receipt/summary JSON. Record only the
+        # exception's TYPE, never its message text.
         return [pscustomobject]@{
             completed = $false
             text = ""
-            failure = "$Label drain failed: $($_.Exception.Message)"
+            failure = "$Label drain failed: $($_.Exception.GetType().Name)"
         }
     }
 }
@@ -90,23 +95,6 @@ function Wait-GuiSmokeProcessBounded {
             if ($terminationConfirmed -or $stopwatch.ElapsedMilliseconds -ge $TimeoutMs) {
                 break
             }
-            # round 6 (sol MAJOR, astra MAJOR -- "collection is not bounded as a whole"): $OnSample
-            # itself runs synchronously with no deadline of its own -- PowerShell has no
-            # cooperative-cancellation point inside a scriptblock invoked with `&` in the caller's
-            # own runspace, so a callback that never returns cannot be preempted from here (true
-            # preemption would need a separate runspace with independently-duplicated session
-            # state -- Get-HostLoadSnapshot and its helper functions live in the CALLING script's
-            # scope, not this module's -- judged out of scope for this round's smallest-diff
-            # mandate; disclosed here and in the round 6 summary, same class as round 5's disclosed
-            # dilution residual). What IS bounded now: once a call DOES return, its own duration is
-            # measured, and a call that took far longer than its declared cadence stops the loop
-            # from scheduling further chunks/callbacks rather than silently continuing to
-            # compound. The overrun is surfaced explicitly here AND (independently)
-            # Get-HostLoadVerdict's round-5 observed-max-sample-gap check already forces the whole
-            # leg's coverage to "unknown" once the gap between this sample's capturedAtUtc and the
-            # next one's exceeds 1.5x the declared cadence -- this early break is what lets that
-            # next, huge gap actually happen instead of the loop trying (and likely again
-            # overrunning) another chunk immediately afterward.
             # round 6 (sol MAJOR, astra MAJOR -- "collection is not bounded as a whole"): $OnSample
             # itself runs synchronously with no deadline of its own -- PowerShell has no
             # cooperative-cancellation point inside a scriptblock invoked with `&` in the caller's
