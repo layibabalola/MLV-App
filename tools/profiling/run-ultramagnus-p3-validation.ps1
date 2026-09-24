@@ -1251,7 +1251,7 @@ exit `$LASTEXITCODE
         # that dragged presented_fps under the hard floor was recorded as a genuine clipFailures
         # entry, conflating "we couldn't get a clean signal" with "the build is broken", exactly
         # backwards from this card's own rule that host load MARKS, never fails, a run.
-        $hostLoadFields = Get-SmokeSummaryHostLoadFields -HostLoad (if ($result) { $result.hostLoad } else { $null })
+        $hostLoadFields = Get-SmokeSummaryHostLoadFields -HostLoad $(if ($result) { $result.hostLoad } else { $null })
 
         if ($receiptRawFixesEnabled) {
             if ($noReadbackFrames -le 0) {

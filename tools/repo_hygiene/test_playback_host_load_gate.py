@@ -1279,7 +1279,11 @@ class P3ValidationSpeedValidatedWiringTests(unittest.TestCase):
         source = P3_VALIDATION_SCRIPT.read_text(encoding="utf-8")
         host_load_fields_index = source.index(
             "$hostLoadFields = Get-SmokeSummaryHostLoadFields -HostLoad "
-            "(if ($result) { $result.hostLoad } else { $null })"
+            # round 6 (astra MAJOR / production crash): the bare "(if ...)" form below was being
+            # executed by PowerShell as an attempt to invoke a command literally named "if"
+            # (CommandNotFoundException) -- the fix wraps it as a subexpression, "$(if ...)". See
+            # P3ValidationHostLoadFieldsAssignmentExecutesTests below for the executable regression.
+            "$(if ($result) { $result.hostLoad } else { $null })"
         )
         floor_check_index = source.index('was below hard floor {1:N3} fps."')
         self.assertLess(
@@ -1323,6 +1327,76 @@ class P3ValidationImportIndependentlyChecksHostLoadTests(unittest.TestCase):
         host_load_check_index = import_speed_block.index("$clipHostLoadProvisionalProperty")
         floor_check_index = import_speed_block.index("[double]$clip.presentedFps -lt $minSpeedFps")
         self.assertLess(host_load_check_index, floor_check_index)
+
+
+@requires_pwsh
+class P3ValidationHostLoadFieldsAssignmentExecutesTests(_ProbeCase):
+    """round 6 (astra MAJOR, production crash): the $hostLoadFields assignment above lives in
+    run-ultramagnus-p3-validation.ps1's top-level script body (not inside a named function), so it
+    cannot be regex-extracted via _extract_functions like the rest of this file's probes. The old
+    form -- `-HostLoad (if ($result) { $result.hostLoad } else { $null })` -- PARSES cleanly
+    (single-line if/else blocks are valid PowerShell), which is exactly why the round-5 static
+    token/regex checks above stayed green while every real P3 validation run threw
+    CommandNotFoundException at runtime: PowerShell parses a bare parenthesized `(if ...)` passed
+    as a command argument as an attempt to *invoke* a command literally named `if`. This class
+    extracts the exact production assignment line out of the live file by literal text search (the
+    same technique the structural tests above already use to locate it) and actually EXECUTES it
+    under pwsh against a mocked Get-SmokeSummaryHostLoadFields and both a populated and a null
+    $result -- it fails against the pre-round-6 source (CommandNotFoundException, non-zero exit)
+    and passes against the fix."""
+
+    script = P3_VALIDATION_SCRIPT
+    functions: list[str] = []
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="hostload-p3-assign-probe-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        source = self.script.read_text(encoding="utf-8")
+        marker = "$hostLoadFields = Get-SmokeSummaryHostLoadFields -HostLoad "
+        start = source.index(marker)
+        end = source.index("\n", start)
+        self.production_line = source[start:end]
+        self.probe = self.tmp / "probe.ps1"
+        self.probe.write_text(
+            "function Get-SmokeSummaryHostLoadFields {\n"
+            "    param($HostLoad)\n"
+            "    [pscustomobject]@{ provisional = $false; state = 'quiet'; reason = $null; "
+            "hostLoadWasNull = ($null -eq $HostLoad) }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+    def _run(self, result_snippet: str) -> subprocess.CompletedProcess:
+        script = self.tmp / "run.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f". '{self.probe}'\n"
+            f"{result_snippet}\n"
+            f"{self.production_line}\n"
+            "$hostLoadFields | ConvertTo-Json -Compress\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(script)],
+            capture_output=True, text=True,
+        )
+
+    def test_production_assignment_executes_with_a_populated_result(self) -> None:
+        proc = self._run(
+            "$result = [pscustomobject]@{ hostLoad = [pscustomobject]@{ provisional = $false; "
+            "state = 'quiet' } }"
+        )
+        self.assertEqual(proc.returncode, 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}")
+        payload = json.loads(proc.stdout)
+        self.assertFalse(payload["hostLoadWasNull"])
+
+    def test_production_assignment_executes_when_result_is_null(self) -> None:
+        proc = self._run("$result = $null")
+        self.assertEqual(proc.returncode, 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}")
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["hostLoadWasNull"])
 
 
 class RequireCandidateImprovesPresentedFpsHostLoadGuardTests(unittest.TestCase):
