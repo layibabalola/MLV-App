@@ -793,6 +793,60 @@ class UmRunEndToEndTests(_Share):
                          "a continuously fresh heartbeat must never be diagnosed as liveness-lost")
         self.assertIn("the agent still owns demo", combined, combined)
 
+    def test_a_fresh_heartbeat_naming_a_different_job_is_treated_as_liveness_lost_for_this_one(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: a heartbeat can be FRESH (age-wise) while
+        # naming a job that is not ours -- proof the agent process itself is alive, but not proof
+        # it is still working on OUR job. Age-freshness alone must not be enough once the heartbeat
+        # explicitly names a different job: that is liveness-lost for THIS job specifically, and
+        # must be diagnosed as such (not silently trusted, and not the generic "no heartbeat" or
+        # plain staleness wording).
+        running_dir = self.share / "running"
+        proc = subprocess.Popen(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
+             "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
+             "-TimeoutSec", "1", "-PollSeconds", "1", "-MaxQueueWaitSec", "5", "-JobId", "demo"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(1.0)
+            running_dir.mkdir(parents=True, exist_ok=True)
+            marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            (running_dir / "demo.started.json").write_text(json.dumps(marker), encoding="ascii")
+            # Fresh, but for a DIFFERENT job -- keep it refreshed so any throw can only be the
+            # mismatch, never plain staleness.
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and proc.poll() is None:
+                self.touch_heartbeat(job_id="someone-elses-job")
+                time.sleep(0.4)
+            stdout, stderr = proc.communicate(timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        combined = (stdout or "") + (stderr or "")
+        self.assertNotEqual(proc.returncode, 0, combined)
+        self.assertIn("claimed by the agent", combined, combined)
+        self.assertIn("DIFFERENT job (someone-elses-job)", combined, combined)
+        self.assertNotIn("stopped proving liveness", combined,
+                         "a job-mismatch is its own diagnosis, distinct from plain staleness")
+        self.assertIn("moved on without ever publishing", combined, combined)
+
+    def test_um_run_forwards_its_own_orphanmetagracesec_argument_to_the_module(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: -OrphanMetaGraceSec is now a real, forwarded
+        # public parameter (docs/playback-attr-3-cuda.md's manual fixture workflow relies on this
+        # reaching Invoke-UmRunDrop, not just existing on um-run.ps1's own param block). A
+        # pre-existing "orphaned" metadata file aged past a small explicit -OrphanMetaGraceSec, but
+        # nowhere near the module's own 60s default, is reclaimed only if the argument actually
+        # propagates -- proving the plumbing, not just that the parameter parses.
+        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","nonce":"stale"}', encoding="ascii")
+        time.sleep(1.2)   # older than the -OrphanMetaGraceSec below, comfortably under the 60s default
+        proc = self.submit("-JobId", "demo", "-OrphanMetaGraceSec", "1", timeout_sec="1", max_queue_wait_sec="2")
+        combined = proc.stdout + proc.stderr
+        self.assertIn("removed orphaned metadata", combined, combined)
+        self.assertIn("was never claimed", combined, combined)   # fake share, no real agent
+        meta = json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))
+        self.assertEqual(meta["jobId"], "demo")
+        self.assertNotEqual(meta.get("nonce"), "stale", "the retry's own fresh claim, never the stale orphan's")
+
     def test_a_claim_landing_exactly_at_the_queue_deadline_is_not_misreported_as_never_claimed(self) -> None:
         # sol blocker (round 7): the final recheck before throwing only ever re-read the RESULT file,
         # despite its own comment promising a receipt-OR-claim recheck -- a claim landing in the
