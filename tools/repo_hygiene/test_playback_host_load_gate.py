@@ -33,6 +33,8 @@ CUDA_AB_SCRIPT = ROOT / "tools" / "profiling" / "run-release-cuda-playback-ab.ps
 COMPARE_MACHINE_PERF_SCRIPT = ROOT / "tools" / "profiling" / "compare-machine-perf.ps1"
 P3_VALIDATION_SCRIPT = ROOT / "tools" / "profiling" / "run-ultramagnus-p3-validation.ps1"
 CUDA_PROOF_SUMMARIZER_SCRIPT = ROOT / "tools" / "profiling" / "summarize-local-cuda-proof.ps1"
+ULTRA_MAGNUS_PROFILE_SCRIPT = ROOT / "tools" / "profiling" / "run-ultra-magnus-profile.ps1"
+LOCAL_GPU_CAPABILITY_SCRIPT = ROOT / "tools" / "profiling" / "run-local-gpu-capability.ps1"
 
 PWSH = shutil.which("pwsh")
 requires_pwsh = unittest.skipIf(PWSH is None, "pwsh is not on PATH")
@@ -1883,6 +1885,56 @@ class LocalCudaProofSummarizerGuardExecutesTests(_ProbeCase):
 GUI_SMOKE_PROCESS_BOUNDARY_MODULE = ROOT / "tools" / "profiling" / "gui-smoke-process-boundary.psm1"
 
 
+class ConsumerSweepUltraMagnusAndLocalGpuCapabilityRowsTests(unittest.TestCase):
+    """round 6 (astra MAJOR -- "consumer sweep omits..."): run-ultra-magnus-profile.ps1 and
+    run-local-gpu-capability.ps1 each publish a multi-run fps table (console Format-Table plus a
+    summary.json) with NO PLAYBACK-MEASURE-HOST-LOAD-GATE-1 telemetry at all -- neither file calls
+    Get-HostLoadSnapshot, and neither is a New-*Row function inside compare-machine-perf.ps1, so
+    CompareMachinePerfRowHostLoadCensusTests above cannot see them (that census's own docstring
+    already discloses this exact class of gap). Per the round-6 brief's own fallback ("mark
+    provisional/unrecorded like New-ProfileRow, or bring under the census, and say which"): both
+    rows are now marked host_load_provisional = $true (run-ultra-magnus-profile.ps1's single row
+    kind; run-local-gpu-capability.ps1's "ok" row kind) or $null where there is no fps signal at
+    all (run-local-gpu-capability.ps1's "missing-json" row kind) -- the same stance
+    compare-machine-perf.ps1's New-ProfileRow/New-FieldLogRow/New-RemoteCdngSummaryRow already
+    take, rather than bringing either script under real host-load sampling this round.
+
+    Boundary disclosed, not silently assumed away: this does not extend the machine-perf census's
+    regex scan to a repo-wide sweep of tools/profiling/*.ps1 for fps-emitting row/table producers.
+    A repo-wide PowerShell-aware scan (distinguishing a genuine ranking/gating row from unrelated
+    telemetry-only output across an open set of files with no shared row-function naming
+    convention) was judged infeasible to do soundly within this round's smallest-diff scope; these
+    two named files are handled directly instead, matching fable's round-4 line already drawn
+    around run-local-cuda-playback-dng-smoke.ps1 and detect-playback-artifacts.ps1 (telemetry-only,
+    never rank or gate, therefore out of scope entirely). A THIRD script astra did not name could
+    still be missed by both this test and the census; that residual boundary is the same one the
+    census's own docstring already discloses."""
+
+    def test_ultra_magnus_profile_row_carries_host_load_provisional(self) -> None:
+        source = ULTRA_MAGNUS_PROFILE_SCRIPT.read_text(encoding="utf-8")
+        row_start = source.index("$rows += [pscustomobject]@{")
+        row_end = source.index("\n    }\n", row_start)
+        row_block = source[row_start:row_end]
+        self.assertIn("fps            =", row_block)
+        self.assertIn("host_load_provisional = $true", row_block)
+
+    def test_local_gpu_capability_ok_row_carries_host_load_provisional(self) -> None:
+        source = LOCAL_GPU_CAPABILITY_SCRIPT.read_text(encoding="utf-8")
+        row_start = source.index('status = "ok"')
+        row_end = source.index("\n            }\n", row_start)
+        row_block = source[row_start:row_end]
+        self.assertIn("fps = if ($cadenceMs", row_block)
+        self.assertIn("host_load_provisional = $true", row_block)
+
+    def test_local_gpu_capability_missing_json_row_has_no_fps_signal_to_gate(self) -> None:
+        source = LOCAL_GPU_CAPABILITY_SCRIPT.read_text(encoding="utf-8")
+        row_start = source.index('status = "missing-json"')
+        row_end = source.index("\n                }\n", row_start)
+        row_block = source[row_start:row_end]
+        self.assertNotIn("fps =", row_block)
+        self.assertIn("host_load_provisional = $null", row_block)
+
+
 @requires_pwsh
 class WholeFileParseSafetyNetTests(unittest.TestCase):
     """round 5: fable's round-3 finding was that the splice-based extraction technique this whole
@@ -1904,6 +1956,11 @@ class WholeFileParseSafetyNetTests(unittest.TestCase):
         P3_VALIDATION_SCRIPT,
         CUDA_PROOF_SUMMARIZER_SCRIPT,
         GUI_SMOKE_PROCESS_BOUNDARY_MODULE,
+        # round 6 (astra MAJOR, consumer sweep): both scripts newly carry a
+        # host_load_provisional literal in a row object -- added to the parse safety net
+        # alongside that change, same as every other file this card touches.
+        ULTRA_MAGNUS_PROFILE_SCRIPT,
+        LOCAL_GPU_CAPABILITY_SCRIPT,
     )
 
     @staticmethod
@@ -1918,7 +1975,7 @@ class WholeFileParseSafetyNetTests(unittest.TestCase):
 
     @requires_pwsh
     def test_every_host_load_gate_script_parses_cleanly(self) -> None:
-        self.assertEqual(len(self.FILES), 7, "the file list drifted -- update it alongside the card's file set")
+        self.assertEqual(len(self.FILES), 9, "the file list drifted -- update it alongside the card's file set")
         for path in self.FILES:
             self.assertTrue(path.is_file(), f"missing file: {path}")
             proc = subprocess.run(

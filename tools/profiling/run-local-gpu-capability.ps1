@@ -210,6 +210,10 @@ function Run-ProfileMatrix {
                     run = $run.tag
                     status = "missing-json"
                     stdout = $stdoutLog
+                    # round 6 (astra MAJOR, consumer sweep): no fps signal here at all (the run
+                    # never produced a JSON to read one from) -- mirrors New-RemoteCdngSummaryRow's
+                    # "nothing to report" stance rather than New-ProfileRow's "unrecorded" one.
+                    host_load_provisional = $null
                 }
                 continue
             }
@@ -237,6 +241,13 @@ function Run-ProfileMatrix {
                 fps = if ($cadenceMs -and $cadenceMs -gt 0) { [math]::Round(1000.0 / $cadenceMs, 2) } else { $null }
                 json = $json
                 stdout = $stdoutLog
+                # round 6 (astra MAJOR, consumer sweep): this script has no PLAYBACK-MEASURE-HOST-
+                # LOAD-GATE-1 telemetry at all -- fps above was never checked against host load.
+                # Mark unrecorded/provisional, same stance as compare-machine-perf.ps1's
+                # New-ProfileRow/New-FieldLogRow. See PLAYBACK-MEASURE-HOST-LOAD-GATE-1 round 6
+                # summary for why this is marked rather than brought under real host-load sampling
+                # this round.
+                host_load_provisional = $true
             }
         }
     } finally {
