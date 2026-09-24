@@ -164,6 +164,52 @@ class HostLoadSnapshotTests(_ProbeCase):
         proc_count_line = next(l for l in proc.stdout.splitlines() if l.startswith("PROC_COUNT="))
         self.assertEqual(proc_count_line, "PROC_COUNT=")
 
+    def test_skip_evidence_collection_calls_neither_cim_nor_get_process(self) -> None:
+        # round 8 (sol MAJOR item 2): -SkipEvidenceCollection must skip the ENTIRE evidence block
+        # -- both CIM calls and Get-Process -- so a during-leg sample really is just the syscall
+        # plus the subject-handle read. Overrides Get-CimInstance/Get-Process to record whether
+        # they were invoked at all, rather than merely tolerating a throw from them.
+        proc = self.run_snippet(
+            "$script:cimCalled = $false\n"
+            "$script:getProcessCalled = $false\n"
+            "function Get-CimInstance { param($ClassName, $Filter, $ErrorAction, $OperationTimeoutSec) "
+            "$script:cimCalled = $true; throw [System.InvalidOperationException]::new('must not be called') }\n"
+            "function Get-Process { param($ErrorAction, $Id) "
+            "$script:getProcessCalled = $true; throw [System.InvalidOperationException]::new('must not be called') }\n"
+            "$s = Get-HostLoadSnapshot -TopProcessCount 6 -SkipEvidenceCollection -SubjectNotYetStarted\n"
+            "Write-Host \"CIM_CALLED=$script:cimCalled\"\n"
+            "Write-Host \"GET_PROCESS_CALLED=$script:getProcessCalled\"\n"
+            "Write-Host \"COLLECTED=$($s.collected)\"\n"
+            "Write-Host \"SYSTEM_TIMES_COLLECTED=$($s.systemTimesCollected)\"\n"
+            "Write-Host \"ERROR=$($s.error)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("CIM_CALLED=False", proc.stdout)
+        self.assertIn("GET_PROCESS_CALLED=False", proc.stdout)
+        self.assertIn("SYSTEM_TIMES_COLLECTED=True", proc.stdout)
+        self.assertIn("COLLECTED=True", proc.stdout)
+        self.assertIn("ERROR=", proc.stdout)
+        error_line = next(l for l in proc.stdout.splitlines() if l.startswith("ERROR="))
+        self.assertEqual(error_line, "ERROR=", "skipping evidence collection must not itself be an error")
+
+    def test_without_the_switch_evidence_collection_still_runs(self) -> None:
+        # Regression guard on the guard: omitting -SkipEvidenceCollection (the before/after bracket
+        # calls' shape) must still exercise the full evidence path.
+        proc = self.run_snippet(
+            "$script:cimCalled = $false\n"
+            "$script:getProcessCalled = $false\n"
+            "function Get-CimInstance { param($ClassName, $Filter, $ErrorAction, $OperationTimeoutSec) "
+            "$script:cimCalled = $true; [pscustomobject]@{ LoadPercentage = 5; FreePhysicalMemory = 1024; "
+            "TotalVisibleMemorySize = 2048 } }\n"
+            "function Get-Process { param($ErrorAction, $Id) $script:getProcessCalled = $true; @() }\n"
+            "$s = Get-HostLoadSnapshot -TopProcessCount 6 -SubjectNotYetStarted\n"
+            "Write-Host \"CIM_CALLED=$script:cimCalled\"\n"
+            "Write-Host \"GET_PROCESS_CALLED=$script:getProcessCalled\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("CIM_CALLED=True", proc.stdout)
+        self.assertIn("GET_PROCESS_CALLED=True", proc.stdout)
+
     def test_subject_not_yet_started_records_zero_not_unreadable(self) -> None:
         # round 7: the BEFORE snapshot is captured before the subject process exists -- its
         # cumulative CPU time is definitionally zero, a distinct input from "unreadable" (which
@@ -316,17 +362,25 @@ class HostLoadVerdictTests(_ProbeCase):
         user_seconds: float = 0.0,
         collected: bool = True,
         system_times_collected: bool = True,
+        system_times_offset_seconds: float | None = None,
     ) -> str:
         # subject_seconds=None means untracked/unreadable (the third-state input this round
         # exists to refuse); pass 0.0 explicitly for "not yet started", a legitimate zero.
+        # round 8 (item 1 -- window misalignment): systemTimesCapturedAtUtc defaults to the same
+        # instant as the general capturedAtUtc (matching the production Get-HostLoadSnapshot
+        # contract, where they diverge only by pre-syscall collection latency) -- pass
+        # system_times_offset_seconds explicitly to model that divergence, per
+        # HostLoadWindowAlignmentTests below.
         collected_literal = "$true" if collected else "$false"
         stc_literal = "$true" if system_times_collected else "$false"
         subject_literal = "$null" if subject_seconds is None else repr(float(subject_seconds))
+        stc_offset = offset_seconds if system_times_offset_seconds is None else system_times_offset_seconds
         return (
             "[pscustomobject]@{ "
             f"collected = {collected_literal}; "
             f"capturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({offset_seconds}).ToString('o'); "
             f"systemTimesCollected = {stc_literal}; "
+            f"systemTimesCapturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({stc_offset}).ToString('o'); "
             f"systemIdleSeconds = {idle_seconds!r}; systemKernelSeconds = {kernel_seconds!r}; "
             f"systemUserSeconds = {user_seconds!r}; subjectCpuSeconds = {subject_literal}; "
             "cpuLoadPercent = 0.0 }"
@@ -569,13 +623,19 @@ class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
         user_seconds: float,
         subject_seconds,
         system_times_collected: bool = True,
+        system_times_offset_seconds: float | None = None,
     ) -> str:
+        # round 8 (item 1): systemTimesCapturedAtUtc defaults to offset_seconds (the pre-round-8
+        # behaviour, where the two timestamps coincided) -- pass system_times_offset_seconds
+        # explicitly to model the misalignment this round fixes.
         stc_literal = "$true" if system_times_collected else "$false"
         subject_literal = "$null" if subject_seconds is None else repr(float(subject_seconds))
+        stc_offset = offset_seconds if system_times_offset_seconds is None else system_times_offset_seconds
         return (
             "[pscustomobject]@{ "
             f"capturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({offset_seconds}).ToString('o'); "
             f"systemTimesCollected = {stc_literal}; "
+            f"systemTimesCapturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({stc_offset}).ToString('o'); "
             f"systemIdleSeconds = {idle_seconds!r}; systemKernelSeconds = {kernel_seconds!r}; "
             f"systemUserSeconds = {user_seconds!r}; subjectCpuSeconds = {subject_literal} }}"
         )
@@ -674,6 +734,95 @@ class HostLoadNonSubjectCpuLoadPercentTests(_ProbeCase):
 
 
 @requires_pwsh
+class HostLoadWindowAlignmentTests(_ProbeCase):
+    """round 8 (sol BLOCKER = fable minor 1): elapsed time must be taken from the SAME instants as
+    the two GetSystemTimes calls it is dividing a busy-delta by, never from the caller's general
+    capturedAtUtc (stamped before that snapshot's own CIM/Get-Process evidence work). Reproduces
+    sol's exact repro against the real Get-HostLoadNonSubjectCpuLoadPercent: a continuously
+    100%-busy 4-logical-CPU host whose PREVIOUS snapshot's evidence collection was slow (its
+    systemTimesCapturedAtUtc lands well after its general capturedAtUtc), while the CURRENT
+    snapshot's collection was fast (the two coincide). Before this round's fix, dividing by
+    (current.capturedAtUtc - previous.capturedAtUtc) -- the wider, timestamp-to-timestamp window --
+    diluted a genuinely 100%-busy interval below the 75% bar; after the fix, dividing by
+    (current.systemTimesCapturedAtUtc - previous.systemTimesCapturedAtUtc) -- the narrower,
+    syscall-to-syscall window the busy-delta actually spans -- reads the true 100%."""
+
+    script = SMOKE_SCRIPT
+    functions = ["Get-HostLoadNonSubjectCpuLoadPercent"]
+
+    @staticmethod
+    def _snap(
+        general_offset_seconds: float,
+        system_times_offset_seconds: float,
+        kernel_seconds: float,
+        subject_seconds: float = 0.0,
+    ) -> str:
+        subject_literal = repr(float(subject_seconds))
+        return (
+            "[pscustomobject]@{ "
+            f"capturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({general_offset_seconds}).ToString('o'); "
+            "systemTimesCollected = $true; "
+            f"systemTimesCapturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({system_times_offset_seconds}).ToString('o'); "
+            f"systemIdleSeconds = 0.0; systemKernelSeconds = {kernel_seconds!r}; systemUserSeconds = 0.0; "
+            f"subjectCpuSeconds = {subject_literal} }}"
+        )
+
+    def _percent(self, current: str, previous: str, processor_count: int = 4) -> subprocess.CompletedProcess:
+        return self.run_snippet(
+            f"$current = {current}\n"
+            f"$previous = {previous}\n"
+            f"$p = Get-HostLoadNonSubjectCpuLoadPercent -CurrentSnapshot $current "
+            f"-PreviousSnapshot $previous -ProcessorCount {processor_count}\n"
+            "Write-Host \"PERCENT=$(if ($null -eq $p) { 'NULL' } else { $p })\"\n"
+        )
+
+    def test_sols_exact_repro_slow_previous_collection_no_longer_dilutes_a_fully_busy_interval(self) -> None:
+        # sol's repro: previous snapshot's evidence collection (CIM + Get-Process, ahead of its
+        # GetSystemTimes call) took long enough that its systemTimesCapturedAtUtc lands 1.112s
+        # after its general capturedAtUtc (mirroring the 2.127s-vs-1.015s gap sol measured); the
+        # current snapshot's collection was fast, so its two timestamps coincide. The syscalls
+        # genuinely bracket a 1.015s, fully-busy (4 logical CPUs) window: busy = 1.015*4 = 4.06
+        # processor-seconds. Pre-round-8, dividing by the general-timestamp gap (2.127s) yields
+        # 4.06/(2.127*4)*100 = 47.72% (quiet); post-round-8, dividing by the systemTimesCapturedAtUtc
+        # gap (1.015s) yields 4.06/(1.015*4)*100 = 100% (correctly exceeded).
+        previous = self._snap(
+            general_offset_seconds=0.0, system_times_offset_seconds=1.112, kernel_seconds=0.0)
+        current = self._snap(
+            general_offset_seconds=2.127, system_times_offset_seconds=2.127, kernel_seconds=4.06)
+        proc = self._percent(current, previous, processor_count=4)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=100", proc.stdout)
+        self.assertNotIn("PERCENT=47", proc.stdout)
+
+    def test_falling_load_shape_is_not_diluted_either(self) -> None:
+        # fable's disclosed residual direction: a falling-load pattern where the PREVIOUS sample's
+        # collection was slow. Busy is 3.0 processor-seconds over a true 1.0s syscall-to-syscall
+        # window on a 4-core host = 75% exactly at the bar; the general-timestamp window is wider
+        # (3.0s), which would previously have diluted this to 25% (quiet) instead of exceeded.
+        previous = self._snap(
+            general_offset_seconds=0.0, system_times_offset_seconds=2.0, kernel_seconds=0.0)
+        current = self._snap(
+            general_offset_seconds=3.0, system_times_offset_seconds=3.0, kernel_seconds=3.0)
+        proc = self._percent(current, previous, processor_count=4)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PERCENT=75", proc.stdout)
+
+    def test_missing_system_times_captured_at_utc_returns_unknown_not_raw(self) -> None:
+        previous = self._snap(0.0, 0.0, kernel_seconds=0.0)
+        current_missing = self.run_snippet(
+            f"$previous = {previous}\n"
+            "$current = [pscustomobject]@{ capturedAtUtc = (Get-Date '2026-01-01T00:00:04Z').ToString('o'); "
+            "systemTimesCollected = $true; systemTimesCapturedAtUtc = $null; systemIdleSeconds = 0.0; "
+            "systemKernelSeconds = 4.0; systemUserSeconds = 0.0; subjectCpuSeconds = 0.0 }\n"
+            "$p = Get-HostLoadNonSubjectCpuLoadPercent -CurrentSnapshot $current "
+            "-PreviousSnapshot $previous -ProcessorCount 4\n"
+            "Write-Host \"PERCENT=$(if ($null -eq $p) { 'NULL' } else { $p })\"\n"
+        )
+        self.assertEqual(current_missing.returncode, 0, current_missing.stdout + current_missing.stderr)
+        self.assertIn("PERCENT=NULL", current_missing.stdout)
+
+
+@requires_pwsh
 class HostLoadPartialCollectionEndToEndVerdictTests(_ProbeCase):
     """round 7 (both keys BLOCKER): rerun of both keys' round-6 repros -- adapted to the new
     mechanism -- chained through the real Get-HostLoadNonSubjectCpuLoadPercent -> Get-HostLoadVerdict
@@ -687,6 +836,8 @@ class HostLoadPartialCollectionEndToEndVerdictTests(_ProbeCase):
 
     @staticmethod
     def _snap(offset_seconds: float, kernel_seconds: float, subject_seconds, collected: bool = True) -> str:
+        # round 8: systemTimesCapturedAtUtc coincides with capturedAtUtc here -- none of this
+        # class's repros are about window alignment (that is HostLoadWindowAlignmentTests below).
         collected_literal = "$true" if collected else "$false"
         subject_literal = "$null" if subject_seconds is None else repr(float(subject_seconds))
         return (
@@ -694,6 +845,7 @@ class HostLoadPartialCollectionEndToEndVerdictTests(_ProbeCase):
             f"collected = {collected_literal}; "
             f"capturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({offset_seconds}).ToString('o'); "
             "systemTimesCollected = $true; systemIdleSeconds = 0.0; "
+            f"systemTimesCapturedAtUtc = (Get-Date '2026-01-01T00:00:00Z').AddSeconds({offset_seconds}).ToString('o'); "
             f"systemKernelSeconds = {kernel_seconds!r}; systemUserSeconds = 0.0; "
             f"subjectCpuSeconds = {subject_literal}; cpuLoadPercent = 0.0 }}"
         )
@@ -804,6 +956,25 @@ class GuiSmokeResultCarriesHostLoadTests(unittest.TestCase):
         self.assertIn("$hostLoadDuringSamples.Add($newSample)", source)
         self.assertIn("-During @($hostLoadDuringSamples)", source)
         self.assertIn("during = @($hostLoadDuringSamples)", source)
+
+    def test_interior_samples_skip_evidence_collection_but_brackets_do_not(self) -> None:
+        # round 8 (sol MAJOR item 2): the interior sampling-loop call must pass
+        # -SkipEvidenceCollection (so a during-leg sample is the syscall plus the subject-handle
+        # read only, per Get-HostLoadSnapshot's own round-8 contract) -- the before/after bracket
+        # calls must NOT pass it, since the receipt still needs their full CIM/Get-Process evidence.
+        source = SMOKE_SCRIPT.read_text(encoding="utf-8")
+        interior_call_start = source.index("$newSample = Get-HostLoadSnapshot -TopProcessCount $HostLoadTopProcessCount -SubjectProcess $process")
+        interior_call_end = source.index("\n        $hostLoadDuringSamples.Add($newSample)", interior_call_start)
+        interior_call = source[interior_call_start:interior_call_end]
+        self.assertIn("-SkipEvidenceCollection", interior_call)
+
+        before_call_start = source.index("$hostLoadBefore = Get-HostLoadSnapshot")
+        before_call_end = source.index("\n", before_call_start)
+        self.assertNotIn("-SkipEvidenceCollection", source[before_call_start:before_call_end])
+
+        after_call_start = source.index("$hostLoadAfter = Get-HostLoadSnapshot")
+        after_call_end = source.index("\n", after_call_start)
+        self.assertNotIn("-SkipEvidenceCollection", source[after_call_start:after_call_end])
 
     def test_wait_call_no_longer_passes_sampling_parameters(self) -> None:
         # round 7: proves the removal is real at the CALL SITE, not merely that the module's
@@ -2250,6 +2421,12 @@ class ConsumerSweepUltraMagnusAndLocalGpuCapabilityRowsTests(unittest.TestCase):
         # console (verified: -Wrap does not help). The production fix moves both columns earlier
         # in the projection; this test's assertions below pin that they render together, not
         # merely that the property name is present in source.
+        #
+        # round 8 (fable minor 4): the round-7 fix rendered this probe at `Out-String -Width 4096`,
+        # which pins projection MEMBERSHIP only -- re-appending both columns at the end of the
+        # Select-Object list (the exact truncation defect this test exists to catch) would still
+        # pass at 4096 columns wide while genuinely truncating on a real 120-column console. Render
+        # at the real width the defect was found at instead.
         source = LOCAL_GPU_CAPABILITY_SCRIPT.read_text(encoding="utf-8")
         block = _extract_block(
             source,
@@ -2267,7 +2444,7 @@ class ConsumerSweepUltraMagnusAndLocalGpuCapabilityRowsTests(unittest.TestCase):
                 "gpu_deb_active = $true; llrawproc_ms = 1.0; processing_ms = 1.0; "
                 "debayer_ms = 1.0; render_ms = 1.0; cadence_ms = 10.0; fps = 100.0; "
                 "host_load_provisional = $true })\n"
-                f"{block} | Out-String -Width 4096\n",
+                f"{block} | Out-String -Width 120\n",
                 encoding="utf-8",
             )
             proc = subprocess.run(

@@ -269,7 +269,11 @@ function Wait-SystemCpuSettle {
             $cpuPercent = Get-SystemCpuPercent
         }
         catch {
-            $result.failure = $_.Exception.Message
+            # round 8 (fable minor 2): raw exception TEXT can embed a host/namespace identifier
+            # (the same CIM-connection-failure class Get-HostLoadSnapshot already sanitizes below);
+            # this result flows into the receipt via preLaunchSystemCpuSettle, so record the
+            # exception's TYPE only, matching every other sanitized catch in this file.
+            $result.failure = $_.Exception.GetType().Name
             break
         }
 
@@ -343,6 +347,11 @@ namespace HostLoadNative {
     $idleTicks = [int64]0
     $kernelTicks = [int64]0
     $userTicks = [int64]0
+    # round 8 (sol BLOCKER = fable minor 1 -- window misalignment): stamped immediately adjacent to
+    # the syscall itself, not by the caller before its own CIM/Get-Process evidence work -- see
+    # Get-HostLoadNonSubjectCpuLoadPercent, which now computes elapsed time from THIS timestamp on
+    # both sides of an interval, never from Get-HostLoadSnapshot's top-of-function capturedAtUtc.
+    $syscallAtUtc = [datetime]::UtcNow
     try {
         $ok = [HostLoadNative.NativeMethods]::GetSystemTimes([ref]$idleTicks, [ref]$kernelTicks, [ref]$userTicks)
     } catch {
@@ -355,6 +364,7 @@ namespace HostLoadNative {
         idleSeconds = $idleTicks / 1e7
         kernelSeconds = $kernelTicks / 1e7
         userSeconds = $userTicks / 1e7
+        capturedAtUtc = $syscallAtUtc
     }
 }
 
@@ -407,7 +417,17 @@ function Get-HostLoadSnapshot {
         # leaves subjectCpuSeconds at its $null/untracked default) -- conflating the two would
         # either wrongly force the process-start interval to read unknown forever, or wrongly
         # attribute a genuine read failure elsewhere to "zero used".
-        [switch]$SubjectNotYetStarted
+        [switch]$SubjectNotYetStarted,
+        # round 8 (sol MAJOR item 2 -- evidence-only enumeration runs inside every measured leg,
+        # unbounded): topCpuConsumers/processCount (Get-Process, unbounded) and cpuLoadPercent/
+        # memory (CIM, bounded but still a round-trip) are receipt-only evidence -- neither feeds
+        # the quiet/exceeded decision (see Get-HostLoadNonSubjectCpuLoadPercent). An interior
+        # during-leg sample needs none of it, so when this switch is set the ENTIRE evidence block
+        # below is skipped and a sample is exactly the syscall plus the subject-handle read: two
+        # direct reads, no CIM round-trip, no process-table walk, nothing left inside a during-leg
+        # sample that can hang or perturb the leg it is measuring. Before/after brackets are called
+        # without this switch and keep full evidence for the receipt.
+        [switch]$SkipEvidenceCollection
     )
 
     $capturedAtUtc = [datetime]::UtcNow
@@ -422,35 +442,38 @@ function Get-HostLoadSnapshot {
         topCpuConsumers = @()
         subjectCpuSeconds = $null
         systemTimesCollected = $false
+        systemTimesCapturedAtUtc = $null
         systemIdleSeconds = $null
         systemKernelSeconds = $null
         systemUserSeconds = $null
     }
     try {
-        $cpuLoad = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop `
-            -OperationTimeoutSec $OperationTimeoutSec |
-            Measure-Object -Property LoadPercentage -Average).Average
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop `
-            -OperationTimeoutSec $OperationTimeoutSec
-        if ($null -eq $cpuLoad) {
-            $snapshot.error = "LoadPercentage unavailable from Win32_Processor."
-        }
-        else {
-            $snapshot.cpuLoadPercent = [double]$cpuLoad
-        }
-        $snapshot.freePhysicalMemoryMb = [Math]::Round($os.FreePhysicalMemory / 1024.0, 1)
-        $snapshot.totalVisibleMemoryMb = [Math]::Round($os.TotalVisibleMemorySize / 1024.0, 1)
+        if (-not $SkipEvidenceCollection) {
+            $cpuLoad = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop `
+                -OperationTimeoutSec $OperationTimeoutSec |
+                Measure-Object -Property LoadPercentage -Average).Average
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop `
+                -OperationTimeoutSec $OperationTimeoutSec
+            if ($null -eq $cpuLoad) {
+                $snapshot.error = "LoadPercentage unavailable from Win32_Processor."
+            }
+            else {
+                $snapshot.cpuLoadPercent = [double]$cpuLoad
+            }
+            $snapshot.freePhysicalMemoryMb = [Math]::Round($os.FreePhysicalMemory / 1024.0, 1)
+            $snapshot.totalVisibleMemoryMb = [Math]::Round($os.TotalVisibleMemorySize / 1024.0, 1)
 
-        try {
-            $processes = Get-Process -ErrorAction Stop
-            $snapshot.processCount = [int]$processes.Count
-            $snapshot.topCpuConsumers = @(
-                $processes | Sort-Object CPU -Descending | Select-Object -First $TopProcessCount |
-                    ForEach-Object { $_.ProcessName }
-            )
-        } catch {
-            # topCpuConsumers/processCount stay at their evidence-only defaults (empty/$null) --
-            # this must never block collection of the load-relevant data below.
+            try {
+                $processes = Get-Process -ErrorAction Stop
+                $snapshot.processCount = [int]$processes.Count
+                $snapshot.topCpuConsumers = @(
+                    $processes | Sort-Object CPU -Descending | Select-Object -First $TopProcessCount |
+                        ForEach-Object { $_.ProcessName }
+                )
+            } catch {
+                # topCpuConsumers/processCount stay at their evidence-only defaults (empty/$null) --
+                # this must never block collection of the load-relevant data below.
+            }
         }
 
         $systemTimes = Get-HostLoadSystemTimes
@@ -458,6 +481,7 @@ function Get-HostLoadSnapshot {
             $snapshot.systemIdleSeconds = [double]$systemTimes.idleSeconds
             $snapshot.systemKernelSeconds = [double]$systemTimes.kernelSeconds
             $snapshot.systemUserSeconds = [double]$systemTimes.userSeconds
+            $snapshot.systemTimesCapturedAtUtc = $systemTimes.capturedAtUtc.ToString("o")
             $snapshot.systemTimesCollected = $true
         }
 
@@ -527,6 +551,15 @@ function Get-HostLoadNonSubjectCpuLoadPercent {
     # LOW number actually be an INCOMPLETE one. cpuLoadPercent is retained on the snapshot purely
     # for the receipt (round 7 brief: "it must not feed the quiet decision on its own") and is never
     # read by this function at all.
+    #
+    # round 8 (sol BLOCKER = fable minor 1 -- window misalignment): elapsed time is now taken from
+    # systemTimesCapturedAtUtc (stamped inside Get-HostLoadSystemTimes, immediately adjacent to the
+    # GetSystemTimes syscall itself), never from the snapshot's general capturedAtUtc (stamped at
+    # the TOP of Get-HostLoadSnapshot, before up to ~4s of CIM/Get-Process evidence work that
+    # precedes the syscall). Busy-delta and elapsed must describe the SAME window; using the
+    # earlier caller timestamp let variable pre-syscall collection latency stretch or shrink the
+    # denominator independently of the numerator (sol's repro: a continuously 100%-busy host's
+    # 1.015s counter interval divided by a 2.127s timestamp interval read 47.7%/quiet).
     param(
         [object]$CurrentSnapshot,
         [object]$PreviousSnapshot,
@@ -547,10 +580,10 @@ function Get-HostLoadNonSubjectCpuLoadPercent {
     if ($null -eq $CurrentSnapshot.subjectCpuSeconds -or $null -eq $PreviousSnapshot.subjectCpuSeconds) {
         return $null
     }
-    if ($null -eq $CurrentSnapshot.capturedAtUtc -or $null -eq $PreviousSnapshot.capturedAtUtc) {
+    if ($null -eq $CurrentSnapshot.systemTimesCapturedAtUtc -or $null -eq $PreviousSnapshot.systemTimesCapturedAtUtc) {
         return $null
     }
-    $elapsedSec = ([datetime]$CurrentSnapshot.capturedAtUtc - [datetime]$PreviousSnapshot.capturedAtUtc).TotalSeconds
+    $elapsedSec = ([datetime]$CurrentSnapshot.systemTimesCapturedAtUtc - [datetime]$PreviousSnapshot.systemTimesCapturedAtUtc).TotalSeconds
     if ($elapsedSec -le 0) {
         return $null
     }
@@ -1499,11 +1532,18 @@ $stderrTask = $process.StandardError.ReadToEndAsync()
 # (a slow CIM query near its own timeout ceiling), THIS loop is still bounded overall by
 # $effectiveProcessTimeoutMs -- $hostLoadRemainingMs is recomputed every iteration, so a slow
 # sample simply shortens (never lengthens past its own worst case) how much chunked-wait budget is
-# left, and the loop still terminates. Cost: each sample is one Get-HostLoadSnapshot call (2 CIM
-# queries, each bounded by -OperationTimeoutSec, plus one syscall and one process-handle read); at
-# the default 4000ms cadence a 24-30s leg takes ~6-7 samples, spending well under 1% of the leg's
-# wall clock on collection and adding no extra wall-clock time at all (the sampling happens inside
-# intervals the code was already spending blocked in WaitForExit).
+# left, and the loop still terminates.
+#
+# round 8 (sol MAJOR item 2 -- "evidence-only enumeration runs inside every measured leg,
+# unbounded"): every interior call now passes -SkipEvidenceCollection, so a during-leg sample is
+# EXACTLY the GetSystemTimes syscall plus the subject-handle read -- no CIM round-trip (even a
+# bounded one still perturbed the leg it was measuring), no Get-Process/Sort-Object at all (the
+# one truly unbounded call in the prior shape). Bound on one during-leg sample: two direct,
+# loop-free reads with no I/O and no timeout surface to hang on. Before/after brackets still call
+# without the switch and keep full CIM/Get-Process evidence for the receipt. At the default
+# 4000ms cadence a 24-30s leg still takes ~6-7 interior samples, now at a cost too small to
+# meaningfully measure (no round-trip of any kind), and adding no extra wall-clock time at all
+# (the sampling happens inside intervals the code was already spending blocked in WaitForExit).
 $hostLoadDuringSamples = [System.Collections.Generic.List[object]]::new()
 if ($HostLoadSampleIntervalMs -gt 0) {
     $hostLoadSampleLoopStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1516,7 +1556,8 @@ if ($HostLoadSampleIntervalMs -gt 0) {
         if ($process.WaitForExit($hostLoadChunkMs)) {
             break
         }
-        $newSample = Get-HostLoadSnapshot -TopProcessCount $HostLoadTopProcessCount -SubjectProcess $process
+        $newSample = Get-HostLoadSnapshot -TopProcessCount $HostLoadTopProcessCount -SubjectProcess $process `
+            -SkipEvidenceCollection
         $hostLoadDuringSamples.Add($newSample)
     }
     $hostLoadSampleLoopElapsedMs = [int]$hostLoadSampleLoopStopwatch.ElapsedMilliseconds
@@ -1589,7 +1630,10 @@ if ($CaptureScreenshot) {
             $colorArtifactScan = Get-ScreenshotColorArtifactScan -Path $screenshotPath
         }
         catch {
-            $captureBindingFailures += "GUI smoke screenshot validation failed: $($_.Exception.Message)"
+            # round 8 (fable minor 2): type name only, matching every other sanitized catch in this
+            # file -- raw exception text can embed a path or host identifier beyond what this
+            # receipt already discloses deliberately (e.g. screenshotItem.FullName above).
+            $captureBindingFailures += "GUI smoke screenshot validation failed: $($_.Exception.GetType().Name)"
         }
     }
 }
@@ -1615,7 +1659,8 @@ if (-not [string]::IsNullOrWhiteSpace($windowScreenshotPath)) {
             }
         }
         catch {
-            $captureBindingFailures += "GUI smoke window-screenshot validation failed: $($_.Exception.Message)"
+            # round 8 (fable minor 2): type name only, same rationale as the screenshot catch above.
+            $captureBindingFailures += "GUI smoke window-screenshot validation failed: $($_.Exception.GetType().Name)"
         }
     }
 }
