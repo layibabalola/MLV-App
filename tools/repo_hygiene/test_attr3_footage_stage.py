@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -1152,6 +1153,134 @@ class QueueWaitBoundTests(unittest.TestCase):
             "-MaxQueueWaitSec $timeoutSecValue", text,
             "the placement submission must bound its queue wait to the caller's own -TimeoutSec, "
             "never um-run.ps1's 86400s default",
+        )
+
+
+# PowerShell block-comment stripper for _production_um_run_references below: a `<# ... #>`
+# doc-comment (e.g. a function's .SYNOPSIS/.DESCRIPTION) can mention "um-run.ps1" in prose on a
+# line that carries no leading '#' of its own -- a plain per-line '#'-prefix filter misreads that
+# as code. Replacing each block with the same number of blank lines keeps line numbers aligned
+# (not load-bearing here, but cheap) while removing its text from the scan.
+_PS_BLOCK_COMMENT_RX = re.compile(r"<#.*?#>", re.S)
+
+
+@unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+@unittest.skipUnless(os.name == "nt", "the emitted job targets a Windows measurement host")
+class SameJobIdRulingPremiseTests(unittest.TestCase):
+    """ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 9 (hub scope ruling, not a redesign): rounds 6-8
+    both keys re-filed the same-JobId check-then-publish race. The hub ruled it unreachable from
+    production because the ONLY production caller of tools/profiling/um-run.ps1 -- this
+    generator -- mints a jobId with a fresh random component on every submission, so two
+    submitters sharing a JobId requires a GUID collision; residual filed as a hardening card, not
+    closed here (see summary.md). This class pins that premise two ways, neither by regex over
+    prose:
+      1. enumerates every tracked, non-test, non-comment line under tools/ that names
+         um-run.ps1 and asserts the generator is the only one that actually builds a path to it --
+         so a new caller is caught here before anyone trusts the stale ruling for it;
+      2. calls the SAME jobId-constructing code the generator's real submissions run
+         (New-Attr3FootageStageJob / New-Attr3FootagePresenceJob) twice with byte-identical inputs
+         and proves the two emitted jobIds differ and each carries a GUID-shaped attempt nonce --
+         exercising the code, never asserting on its source text.
+
+    Two OTHER generators legitimately construct a fixed (non-random) jobId --
+    attr3-stage-fixture-job.ps1 (`"attr3-stage-fixture-$ClipStem-$($fixtureSha.Substring(0, 12))"`)
+    and playback-attr-3-cuda-stage-job.ps1 (`"playback-attr-3-cuda-stage-$($names.shortSha)"`) --
+    but neither is a tracked CALLER of um-run.ps1: both only write a <jobId>.job.ps1 file and print
+    it; submission is a documented manual, one-shot CLI step a human operator runs next (see each
+    script's own header/usage comment: "then submit with tools\\profiling\\um-run.ps1 ..."), never
+    an automated or concurrent invocation, so a fixed id there cannot collide with itself.
+    """
+
+    KNOWN_PRODUCTION_CALLERS = {GENERATOR}
+
+    def _production_um_run_references(self) -> set[Path]:
+        proc = subprocess.run(
+            ["git", "grep", "-l", "um-run.ps1", "--", "tools/"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
+        referencing: set[Path] = set()
+        for rel in proc.stdout.splitlines():
+            rel = rel.strip()
+            if not rel:
+                continue
+            if rel.startswith("tools/repo_hygiene/") or rel.startswith("tools/testing/"):
+                continue
+            path = ROOT / rel
+            if path == UM_RUN:
+                continue
+            text = path.read_text(encoding="utf-8")
+            stripped = _PS_BLOCK_COMMENT_RX.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+            for line in stripped.splitlines():
+                if line.strip().startswith("#"):
+                    continue
+                if "um-run.ps1" in line:
+                    referencing.add(path)
+                    break
+        return referencing
+
+    def test_the_generator_is_the_only_tracked_non_test_caller_that_builds_a_path_to_um_run(self) -> None:
+        callers = self._production_um_run_references()
+        self.assertEqual(
+            callers, self.KNOWN_PRODUCTION_CALLERS,
+            "a new non-test, non-comment reference to um-run.ps1 appeared under tools/ outside "
+            "the ruled-on caller -- the round-9 same-JobId scope ruling does not cover it and "
+            "must be re-examined before it is trusted for this file: " + repr(sorted(callers)),
+        )
+
+    def _assert_two_calls_mint_distinct_fresh_jobids(
+        self, module: Path, function: str, clip_id: str, id_prefix: str, *, pass_agent_root: bool,
+    ) -> None:
+        tmp_dir = tempfile.TemporaryDirectory(prefix="umrunjobidfresh-")
+        self.addCleanup(tmp_dir.cleanup)
+        tmp = Path(tmp_dir.name)
+        agent_root = tmp / "agent"
+        agent_root.mkdir()
+        out_dir = tmp / "out"
+        out_dir.mkdir()
+        content = b"synthetic fresh-jobid invariant part " * 11
+        target = agent_root / "spec" / clip_id / "part0.raw"
+        parts_payload = [
+            {"index": 0, "path": str(target), "length": len(content), "sha256": _sha256(content)}
+        ]
+        parts_json_path = tmp / "parts.json"
+        parts_json_path.write_text(json.dumps(parts_payload), encoding="utf-8")
+        agent_root_arg = f" -AgentRoot '{agent_root}'" if pass_agent_root else ""
+        script = (
+            f"Import-Module '{module}' -Force; "
+            f"$parts = @(Get-Content -LiteralPath '{parts_json_path}' -Raw | ConvertFrom-Json); "
+            f"{function} -ClipId '{clip_id}' -Parts $parts -OutDir '{out_dir}'{agent_root_arg} | Out-Null"
+        )
+        for _ in range(2):
+            proc = _run(["-Command", script])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        jobs = sorted(out_dir.glob("*.job.ps1"))
+        self.assertEqual(
+            len(jobs), 2,
+            f"two identical-input calls to {function} must emit two distinct job files: {jobs!r}",
+        )
+        job_ids = [p.name[: -len(".job.ps1")] for p in jobs]
+        self.assertNotEqual(
+            job_ids[0], job_ids[1],
+            f"same ClipId+Parts must still mint distinct jobIds from {function}",
+        )
+        nonce_rx = re.compile(r"^" + re.escape(id_prefix) + r"-.+-[0-9a-f]{10}$")
+        for job_id in job_ids:
+            self.assertRegex(
+                job_id, nonce_rx,
+                f"jobId {job_id!r} from {function} must carry a GUID-shaped attempt nonce",
+            )
+
+    def test_new_attr3_footage_stage_job_mints_a_fresh_random_jobid_every_call(self) -> None:
+        self._assert_two_calls_mint_distinct_fresh_jobids(
+            STAGE_MODULE, "New-Attr3FootageStageJob", "FRESH-0001", "attr3-footage-stage",
+            pass_agent_root=True,
+        )
+
+    def test_new_attr3_footage_presence_job_mints_a_fresh_random_jobid_every_call(self) -> None:
+        self._assert_two_calls_mint_distinct_fresh_jobids(
+            PRESENCE_MODULE, "New-Attr3FootagePresenceJob", "FRESH-0002", "attr3-footage-presence",
+            pass_agent_root=False,
         )
 
 
