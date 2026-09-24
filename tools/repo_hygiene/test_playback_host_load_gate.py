@@ -1650,7 +1650,22 @@ class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
     # round 6: a literal `= $false` (not a variable/expression) is the exact hardcoded-clean-flag
     # shape astra's repro used -- every legitimate hardcode in this file uses $true (fail-toward-
     # provisional), so a hardcoded $false is itself evidence of an unbound/fabricated row.
+    #
+    # round 8 (sol MAJOR item 4, carried from round-7's disclosed residual): the literal-`$false`
+    # match was itself only ONE textual shape -- sol's exact repro replaces the assignment with
+    # `host_load_provisional = ($false)` (a parenthesized wrap) and the bare-`\$false\b` regex does
+    # not match it (the character immediately after `=\s*` is `(`, not `$`), so the row still
+    # censused as bound. Made expression-aware instead of shape-specific: the assignment's RHS
+    # (everything to end of line, this file's own object-literal convention -- see
+    # ASSIGNMENT_RHS_PATTERN) is normalized by stripping balanced outer parentheses and all
+    # whitespace, then compared against a small set of known-constant-false shapes: `$false`
+    # itself, `(-not $true)`/`(!$true)` after normalization, and a falsy `[bool]` numeric cast
+    # (`[bool]0`, `[bool]0.0`). Anything else (a variable, function call, property access,
+    # ternary) is assumed derived and passes, same as before.
     HARDCODED_FALSE_PATTERN = re.compile(r"host_load_provisional\s*=\s*\$false\b")
+    ASSIGNMENT_RHS_PATTERN = re.compile(r"host_load_provisional\s*=\s*([^\n]*)")
+    _HARDCODED_FALSE_LITERALS = {"$false", "-not$true", "!$true"}
+    _HARDCODED_FALSE_NUMERIC_CAST_PATTERN = re.compile(r"^\[bool\]0(\.0+)?$")
 
     TELEMETRY_ONLY_ROW_FUNCTIONS = {"New-RemoteCdngSummaryRow"}
 
@@ -1661,11 +1676,40 @@ class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
         # satisfy the census.
         return "\n".join(re.sub(r"#.*$", "", line) for line in text.splitlines())
 
+    @staticmethod
+    def _strip_balanced_outer_parens(text: str) -> str:
+        # round 8: "($false)" -> "$false", "((-not $true))" -> "-not $true" -- but "(a)+(b)" is
+        # left alone (its outer characters are parens, but they do not wrap the WHOLE expression as
+        # one balanced group, so stripping them would change meaning).
+        while text.startswith("(") and text.endswith(")"):
+            depth = 0
+            wraps_whole_expression = True
+            for ch in text[:-1]:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        wraps_whole_expression = False
+                        break
+            if not wraps_whole_expression:
+                break
+            text = text[1:-1].strip()
+        return text
+
+    def _is_hardcoded_false_literal(self, rhs: str) -> bool:
+        normalized = self._strip_balanced_outer_parens(rhs.strip())
+        normalized = re.sub(r"\s+", "", normalized).lower()
+        if normalized in self._HARDCODED_FALSE_LITERALS:
+            return True
+        return bool(self._HARDCODED_FALSE_NUMERIC_CAST_PATTERN.match(normalized))
+
     def _is_bound(self, body: str) -> bool:
         code_only = self._strip_comments(body)
         if "host_load_provisional" not in code_only:
             return False
-        if self.HARDCODED_FALSE_PATTERN.search(code_only):
+        match = self.ASSIGNMENT_RHS_PATTERN.search(code_only)
+        if match and self._is_hardcoded_false_literal(match.group(1)):
             return False
         return True
 
@@ -1744,6 +1788,81 @@ class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
         self.assertTrue(self.REAL_FPS_PATTERN.search(body))
         self.assertIn("host_load_provisional", body)  # the OLD substring-presence check would pass
         self.assertFalse(self._is_bound(body))  # the round-6 detector must still refuse it
+
+    def test_a_parenthesized_hardcoded_false_would_fail_this_census(self) -> None:
+        # round 8 (sol MAJOR item 4, exact repro): "replace the first host_load_provisional = $true
+        # with host_load_provisional = ($false)" -- the round-6 literal-`\$false\b` regex does not
+        # match text starting with `(`, so this shape passed the prior census unbound.
+        fixture = (
+            "function New-BypassRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "        host_load_provisional = ($false)\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(body))
+        self.assertFalse(self.HARDCODED_FALSE_PATTERN.search(self._strip_comments(body)))  # old regex misses it
+        self.assertFalse(self._is_bound(body))  # the round-8 expression-aware detector must catch it
+
+    def test_a_not_true_hardcoded_false_would_fail_this_census(self) -> None:
+        # round 8 (sol MAJOR item 4): `(-not $true)` is another constant-false shape with no
+        # literal `$false` token anywhere in it.
+        fixture = (
+            "function New-BypassRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "        host_load_provisional = (-not $true)\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(body))
+        self.assertFalse(self._is_bound(body))
+
+    def test_a_bool_cast_zero_hardcoded_false_would_fail_this_census(self) -> None:
+        # round 8 (sol MAJOR item 4): `[bool]0` is a third constant-false shape with no `$false`
+        # token in it either.
+        fixture = (
+            "function New-BypassRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "        host_load_provisional = [bool]0\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(body))
+        self.assertFalse(self._is_bound(body))
+
+    def test_a_derived_expression_still_passes_this_census(self) -> None:
+        # round 8 regression guard: the expression-aware detector must not become so broad it
+        # rejects genuine derived provenance -- a variable, a property access, and the real file's
+        # own `if (...) { $true } else { $null }` shape must all still pass.
+        for rhs in ("$hostLoadProvisional", "$hostLoadRefusal.provisional",
+                    'if ($kind -eq "playback") { $true } else { $null }'):
+            fixture = (
+                "function New-DerivedRow {\n"
+                "    param([object]$Record)\n"
+                "    [pscustomobject]@{\n"
+                "        presented_fps = 99.0\n"
+                f"        host_load_provisional = {rhs}\n"
+                "    }\n"
+                "}\n"
+            )
+            matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+            self.assertEqual(len(matches), 1)
+            self.assertTrue(self._is_bound(matches[0].group(0)), f"rhs={rhs!r} must still be treated as bound")
 
     def test_a_comment_only_mention_would_fail_this_census(self) -> None:
         # round 6 (astra's exact repro): "...or only a comment containing host_load_provisional."
