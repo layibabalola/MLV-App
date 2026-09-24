@@ -328,6 +328,32 @@ class UmRunDropModuleTests(_Share):
                          "the probed value must come from re-reading the share-stamped probe file, "
                          "not from the submitter's own clock")
 
+    def test_the_orphan_age_check_actually_ages_off_the_probed_share_clock_not_just_reads_it(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 9 (astra test-strength minor): the test above
+        # proves the probe file's LastWriteTimeUtc is READ, but it uses -OrphanMetaGraceSec 0, so
+        # the orphan is removed regardless of what $shareNowUtc actually holds (any real clock
+        # reading minus the meta file's own real mtime is >= 0, which already clears a grace of 0)
+        # -- replacing $shareNowUtc at the age subtraction (UmRunDrop.psm1:235) with a plain
+        # (Get-Date).ToUniversalTime() fails no assertion there. A NONZERO grace, plus a probe
+        # stamped decades in the future (so the CORRECT age is enormous and clears the grace by a
+        # wide margin) and a meta.json whose real mtime is "now" (so a client-clock substitution
+        # would compute an age of a few milliseconds, well UNDER the grace), makes the two
+        # behaviours diverge on the actual REMOVE-OR-KEEP outcome.
+        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":99}', encoding="ascii")
+        sentinel = "2099-01-01T00:00:00Z"
+        stamp_hook = (
+            "{ param($p) "
+            f"[IO.File]::SetLastWriteTimeUtc($p, [datetime]::Parse('{sentinel}').ToUniversalTime()) "
+            "}"
+        )
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, orphan_grace_sec=5,
+                          after_share_probe_written=stamp_hook)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("removed orphaned metadata", combined, combined)
+        self.assertNotIn("THREW UMRUN_JOBID_IN_USE", combined, combined)
+        self.assertIn("UMRUN_JOBID=demo", combined, combined)
+        self.assertEqual(self.names(), ["demo.job.ps1", "demo.meta.json"])
+
     def test_a_torn_metadata_write_is_rejected_by_readback_verification(self) -> None:
         # sol round 4 minor: "removing metadata readback verification would not fail any test" --
         # -TestHookAfterMetaTmpWritten corrupts the metadata temp file after it is written but
