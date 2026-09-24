@@ -53,6 +53,22 @@ def _extract_functions(script: Path, names: list[str]) -> str:
     return "\n".join(chunks)
 
 
+def _extract_block(source: str, start_marker: str, end_marker: str, trailing_lines: int = 1) -> str:
+    """Literal-text-search extraction of a script-body block that is NOT inside a named function
+    (so _extract_functions above cannot find it) -- e.g. a guard clause living directly in a
+    foreach loop at script scope. Finds `start_marker`, then `end_marker` after it, then includes
+    `trailing_lines` more full lines past the line containing `end_marker` (to capture closing
+    braces). round 6: used to make the P3-import and local-proof-summarizer host-load guards
+    EXECUTABLE regression targets instead of only string-index-order checks -- a real operator/
+    literal mutation in the live source changes what gets extracted and run, the same way it would
+    change what actually runs in production."""
+    start = source.index(start_marker)
+    end = source.index(end_marker, start)
+    for _ in range(1 + trailing_lines):
+        end = source.index("\n", end) + 1
+    return source[start:end]
+
+
 class _ProbeCase(unittest.TestCase):
     """Base: writes an extracted-function probe script into a temp dir and runs snippets against it."""
 
@@ -727,6 +743,33 @@ class GuiSmokeResultCarriesHostLoadTests(unittest.TestCase):
         self.assertIn("-During @($hostLoadDuringSamples)", source)
         self.assertIn("during = @($hostLoadDuringSamples)", source)
 
+    def test_verdict_call_is_wired_with_the_observed_max_sample_gap(self) -> None:
+        # round 6 (astra MAJOR -- "enforcement tests check TOKENS, not behaviour"): astra's exact
+        # repro against this class -- "Remove the production ObservedMaxSampleGapMs argument; all
+        # three smoke wiring tests pass and the mutant parses." None of the three tests above ever
+        # looked at the actual Get-HostLoadVerdict call site, so a caller that silently dropped
+        # -ObservedMaxSampleGapMs (quietly reverting to round-4's declared-cadence-only coverage
+        # rule) would sail through. Pin the real call site directly: the -Bar argument and the
+        # -ObservedMaxSampleGapMs argument (fed from the real observed-gap computation, not the
+        # declared cadence) must both be present on the SAME Get-HostLoadVerdict invocation.
+        source = SMOKE_SCRIPT.read_text(encoding="utf-8")
+        verdict_call_start = source.index("$hostLoadVerdict = Get-HostLoadVerdict -Before $hostLoadBefore")
+        verdict_call_end = source.index("\n\n", verdict_call_start)
+        verdict_call = source[verdict_call_start:verdict_call_end]
+        self.assertIn("-Bar $HostLoadCpuPercentBar", verdict_call)
+        self.assertIn("-SampleIntervalMs $HostLoadSampleIntervalMs", verdict_call)
+        self.assertIn("-ObservedMaxSampleGapMs $(if ($null -ne $hostLoadObservedMaxSampleGapMs)", verdict_call)
+        # And the value fed in must trace back to the REAL observed gap computation (the max
+        # spacing actually measured between capturedAtUtc timestamps), not merely be present as a
+        # parameter with some other, unbound source.
+        observed_gap_computation = source.index("$hostLoadObservedMaxSampleGapMs = $null")
+        self.assertLess(
+            observed_gap_computation, verdict_call_start,
+            "hostLoadObservedMaxSampleGapMs must be computed from real sample timestamps before "
+            "the verdict call consumes it",
+        )
+        self.assertIn("$gapMs = ([datetime]$hostLoadSampleSequence[$i].capturedAtUtc -", source)
+
 
 @requires_pwsh
 class CompareGuiSmokeAbHostLoadRefusalTests(_ProbeCase):
@@ -1127,14 +1170,46 @@ class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
     parses smoke JSON and computes its own fps ranking outside this file entirely -- that would
     need a repo-wide PowerShell-aware scan this regex-based census does not attempt. fable's Q3
     named exactly this class of exception for run-local-cuda-playback-dng-smoke.ps1 and
-    detect-playback-artifacts.ps1 (both project telemetry only, never rank or gate)."""
+    detect-playback-artifacts.ps1 (both project telemetry only, never rank or gate).
+
+    round 6 (sol + astra MAJOR -- "enforcement tests check TOKENS, not behaviour"): astra's exact
+    repro against the round-5 census -- "append a New-*Row with presented_fps=99 and
+    host_load_provisional=$false, or only a comment containing host_load_provisional; the actual
+    census passes both." A truly general executable test is not possible here (the whole point of
+    this census is to catch an UNKNOWN future row function, so there is no fixed signature to call
+    it with) -- instead the detector itself is hardened against exactly astra's two repro shapes:
+    comment lines are stripped before any match (a mention inside a `#...` comment no longer counts
+    as binding), and a LITERAL `host_load_provisional = $false` is treated as UNBOUND rather than
+    bound (every real row in this file that hardcodes the flag hardcodes $true -- "always
+    unrecorded", the safe direction -- never $false; see New-ProfileRow/New-FieldLogRow below).
+    Both new detection rules are proven against synthetic fixtures below, the same way the
+    round-5 tautology check already proved the base case."""
 
     # Extraction pattern deliberately mirrors _extract_functions above (same file, same
     # column-0-closing-brace convention this codebase already relies on for verbatim splicing).
     ROW_FUNCTION_PATTERN = re.compile(r"function (New-\w*Row) \{.*?\n\}\r?\n", re.DOTALL)
     REAL_FPS_PATTERN = re.compile(r"presented_fps\s*=(?!\s*\$null\b)")
+    # round 6: a literal `= $false` (not a variable/expression) is the exact hardcoded-clean-flag
+    # shape astra's repro used -- every legitimate hardcode in this file uses $true (fail-toward-
+    # provisional), so a hardcoded $false is itself evidence of an unbound/fabricated row.
+    HARDCODED_FALSE_PATTERN = re.compile(r"host_load_provisional\s*=\s*\$false\b")
 
     TELEMETRY_ONLY_ROW_FUNCTIONS = {"New-RemoteCdngSummaryRow"}
+
+    @staticmethod
+    def _strip_comments(text: str) -> str:
+        # round 6: strips a `#...` trailing or whole-line comment from every line so a mention of
+        # host_load_provisional that exists ONLY in a comment (astra's second repro shape) cannot
+        # satisfy the census.
+        return "\n".join(re.sub(r"#.*$", "", line) for line in text.splitlines())
+
+    def _is_bound(self, body: str) -> bool:
+        code_only = self._strip_comments(body)
+        if "host_load_provisional" not in code_only:
+            return False
+        if self.HARDCODED_FALSE_PATTERN.search(code_only):
+            return False
+        return True
 
     def test_every_row_function_with_a_real_presented_fps_carries_host_load_provenance(self) -> None:
         source = COMPARE_MACHINE_PERF_SCRIPT.read_text(encoding="utf-8")
@@ -1154,14 +1229,15 @@ class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
                     "from the allowlist.",
                 )
                 continue
-            if self.REAL_FPS_PATTERN.search(body):
-                (bound if "host_load_provisional" in body else unbound).append(name)
+            if self.REAL_FPS_PATTERN.search(self._strip_comments(body)):
+                (bound if self._is_bound(body) else unbound).append(name)
         self.assertEqual(
             unbound, [],
             "New-*Row function(s) in compare-machine-perf.ps1 emit a real presented_fps without "
-            f"host_load_provisional: {unbound}. Either add host_load_provisional to the row, or "
-            "add the function name to TELEMETRY_ONLY_ROW_FUNCTIONS with a reason if it genuinely "
-            "never carries an fps signal to gate.",
+            f"genuine host_load_provisional provenance: {unbound}. Either add host_load_provisional "
+            "to the row (not a hardcoded $false, and not just a comment), or add the function name "
+            "to TELEMETRY_ONLY_ROW_FUNCTIONS with a reason if it genuinely never carries an fps "
+            "signal to gate.",
         )
         # Round-5 fix regression guard: New-ProfileRow and New-FieldLogRow were the two unbound
         # consumers sol's finding named -- if the census pattern stops matching them, this test
@@ -1188,7 +1264,46 @@ class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         body = matches[0].group(0)
         self.assertTrue(self.REAL_FPS_PATTERN.search(body))
-        self.assertNotIn("host_load_provisional", body)
+        self.assertFalse(self._is_bound(body))
+
+    def test_a_hardcoded_false_provisional_flag_would_fail_this_census(self) -> None:
+        # round 6 (astra's exact repro): "append a New-*Row with presented_fps=99 and
+        # host_load_provisional=$false" -- the OLD census (bare substring presence) would have
+        # classified this as bound purely because the token appears; it must now be caught as
+        # UNBOUND because the flag is a hardcoded clean claim, not derived provenance.
+        fixture = (
+            "function New-BypassRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "        host_load_provisional = $false\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(body))
+        self.assertIn("host_load_provisional", body)  # the OLD substring-presence check would pass
+        self.assertFalse(self._is_bound(body))  # the round-6 detector must still refuse it
+
+    def test_a_comment_only_mention_would_fail_this_census(self) -> None:
+        # round 6 (astra's exact repro): "...or only a comment containing host_load_provisional."
+        fixture = (
+            "function New-CommentOnlyRow {\n"
+            "    param([object]$Record)\n"
+            "    # host_load_provisional is intentionally not tracked for this row yet\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(self._strip_comments(body)))
+        self.assertIn("host_load_provisional", body)  # the OLD substring-presence check would pass
+        self.assertFalse(self._is_bound(body))  # the round-6 detector must still refuse it
 
 
 @requires_pwsh
@@ -1485,6 +1600,80 @@ class P3ValidationImportIndependentlyChecksHostLoadTests(unittest.TestCase):
 
 
 @requires_pwsh
+class P3ValidationImportSpeedFloorGuardExecutesTests(_ProbeCase):
+    """round 6 (sol + astra MAJOR -- "enforcement tests check TOKENS, not behaviour"):
+    P3ValidationImportIndependentlyChecksHostLoadTests above only asserts that certain substrings
+    appear, in the right relative order, in the source text -- astra's exact repro: "Change the
+    P3/summarizer state/flag guards from -or to -and; their respective tests remain green." This
+    class extracts the SAME guard block by literal text search (the boundaries the static test
+    above already locates via source.index) and EXECUTES it against a mocked $clip/$importFailures/
+    Add-Failure, so a real -or/-and or $true/$false mutation in the live source changes what this
+    test actually observes, not just what substrings are present."""
+
+    script = P3_VALIDATION_SCRIPT
+    functions: list[str] = []
+
+    START_MARKER = '$clipHostLoadProvisionalProperty = $clip.PSObject.Properties["hostLoadProvisional"]'
+    END_MARKER = 'an fps number measured under provisional host load is not proof of speed, regardless of the floor."'
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="hostload-p3-import-guard-probe-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        source = self.script.read_text(encoding="utf-8")
+        self.guard_block = _extract_block(source, self.START_MARKER, self.END_MARKER, trailing_lines=1)
+        self.probe = self.tmp / "probe.ps1"
+        self.probe.write_text(
+            "function Add-Failure {\n"
+            "    param($FailureList, [string]$Message)\n"
+            "    [void]$FailureList.Add($Message)\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+    def _run(self, clip_snippet: str) -> subprocess.CompletedProcess:
+        script = self.tmp / "run.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f". '{self.probe}'\n"
+            f"$clip = {clip_snippet}\n"
+            "$clipName = 'probe-clip'\n"
+            "$importFailures = [System.Collections.Generic.List[string]]::new()\n"
+            f"{self.guard_block}\n"
+            "Write-Host \"REFUSED=$($importFailures.Count -gt 0)\"\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(script)],
+            capture_output=True, text=True,
+        )
+
+    def test_provisional_false_with_unknown_state_is_refused(self) -> None:
+        # sol's exact round-5 repro, executed against the real guard block instead of searched
+        # for as source text.
+        proc = self._run("[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'unknown' }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REFUSED=True", proc.stdout)
+
+    def test_provisional_false_with_missing_state_property_is_refused(self) -> None:
+        proc = self._run("[pscustomobject]@{ hostLoadProvisional = $false }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REFUSED=True", proc.stdout)
+
+    def test_provisional_true_is_refused_regardless_of_state(self) -> None:
+        proc = self._run("[pscustomobject]@{ hostLoadProvisional = $true; hostLoadState = 'quiet' }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REFUSED=True", proc.stdout)
+
+    def test_provisional_false_with_quiet_state_is_accepted(self) -> None:
+        # Regression guard: the fix must not turn every clean clip provisional.
+        proc = self._run("[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'quiet' }")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REFUSED=False", proc.stdout)
+
+
+@requires_pwsh
 class P3ValidationHostLoadFieldsAssignmentExecutesTests(_ProbeCase):
     """round 6 (astra MAJOR, production crash): the $hostLoadFields assignment above lives in
     run-ultramagnus-p3-validation.ps1's top-level script body (not inside a named function), so it
@@ -1612,6 +1801,83 @@ class LocalCudaProofSummarizerHostLoadGuardTests(unittest.TestCase):
         guard_start = source.index("if (-not $playbackAbHostLoadProvisional -and")
         guard_block = source[guard_start:guard_start + 500]
         self.assertIn("PLAYBACK_PRESENTED_FPS_NOT_IMPROVED", guard_block)
+
+
+@requires_pwsh
+class LocalCudaProofSummarizerGuardExecutesTests(_ProbeCase):
+    """round 6 (sol + astra MAJOR -- "enforcement tests check TOKENS, not behaviour"): the
+    LocalCudaProofSummarizerHostLoadGuardTests class above only searches source text for
+    substrings/index ordering -- astra's exact repro: changing the summarizer's -or to -and leaves
+    its test green. This class extracts the same per-leg guard block (the foreach loop deciding
+    $playbackAbHostLoadProvisional) by literal text search and EXECUTES it, spliced together with
+    the real Get-Field/New-Diagnostic/Add-Diagnostic functions it actually calls, against a mocked
+    leg list -- so a real -or/-and or $true/$false mutation changes what this test observes."""
+
+    script = CUDA_PROOF_SUMMARIZER_SCRIPT
+    functions = ["Get-Field", "New-Diagnostic", "Add-Diagnostic"]
+
+    START_MARKER = "$playbackAbCandidateLeg = if ($playbackAbComparisonBasis -eq \"candidateSpeed\")"
+    END_MARKER = (
+        "an fps number measured under provisional or unrecorded host load is not a property "
+        "of the build."
+    )
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="hostload-summarizer-guard-probe-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        source = self.script.read_text(encoding="utf-8")
+        guard_block = _extract_block(source, self.START_MARKER, self.END_MARKER, trailing_lines=2)
+        probe_source = _extract_functions(self.script, self.functions)
+        self.probe = self.tmp / "probe.ps1"
+        self.probe.write_text(probe_source, encoding="utf-8")
+        self.guard_block = guard_block
+
+    def _run(self, baseline_snippet: str, candidate_snippet: str) -> subprocess.CompletedProcess:
+        script = self.tmp / "run.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f". '{self.probe}'\n"
+            "$playbackAbComparisonBasis = 'candidate'\n"
+            f"$playbackAb = [pscustomobject]@{{ baseline = {baseline_snippet}; "
+            f"candidate = {candidate_snippet} }}\n"
+            "$playbackAbBlockers = [System.Collections.Generic.List[string]]::new()\n"
+            "$diagnostics = [System.Collections.Generic.List[object]]::new()\n"
+            f"{self.guard_block}\n"
+            "Write-Host \"REFUSED=$playbackAbHostLoadProvisional BLOCKERS=$($playbackAbBlockers.Count)\"\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(script)],
+            capture_output=True, text=True,
+        )
+
+    def test_baseline_provisional_false_with_unknown_state_is_refused(self) -> None:
+        # sol's exact round-5 repro, executed against the real guard block instead of searched
+        # for as source text.
+        proc = self._run(
+            "[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'unknown' }",
+            "[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'quiet' }",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REFUSED=True BLOCKERS=1", proc.stdout)
+
+    def test_both_legs_quiet_and_non_provisional_are_accepted(self) -> None:
+        proc = self._run(
+            "[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'quiet' }",
+            "[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'quiet' }",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REFUSED=False BLOCKERS=0", proc.stdout)
+
+    def test_missing_state_property_on_either_leg_is_refused(self) -> None:
+        proc = self._run(
+            "[pscustomobject]@{ hostLoadProvisional = $false }",
+            "[pscustomobject]@{ hostLoadProvisional = $false; hostLoadState = 'quiet' }",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REFUSED=True BLOCKERS=1", proc.stdout)
 
 
 GUI_SMOKE_PROCESS_BOUNDARY_MODULE = ROOT / "tools" / "profiling" / "gui-smoke-process-boundary.psm1"
