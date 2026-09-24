@@ -25345,9 +25345,11 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
      * waiting on) and never reach presentation -- see
      * m_nextTargetRenderRequestSerial's declaration. requestedFramesBySerial/
      * skippedOrUnpresentedBySerial are kept for backward compatibility and
-     * bounded-above accounting (informational, not the gate); the
-     * target-only figures below are the authoritative population and skip
-     * count. The arithmetic itself lives in PlaybackFramePopulationPolicy so
+     * bounded-above accounting (informational, not the gate). The
+     * target-only figures below are wrap-immune too, but see round 3's
+     * comment on requestedTargetFramesBySerial below: they are NOT the gate
+     * figure either -- source_frame_loss_ratio (computed further down) is.
+     * The arithmetic itself lives in PlaybackFramePopulationPolicy so
      * it is unit-tested
      * (tests/console/test_playback_frame_population_policy.cpp) without the
      * GUI. */
@@ -25361,11 +25363,12 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
     const uint64_t requestedFramesBySerial = framePopulation.requestedFramesBySerial;
     const qulonglong skippedOrUnpresentedBySerial =
         static_cast<qulonglong>( framePopulation.skippedOrUnpresentedBySerial );
-    /* Authoritative population: m_nextTargetRenderRequestSerial advances only
-     * at the one target request drawFrame() issues per call, never for a
-     * speculative lookahead, so this denominator is both wrap-immune (same
+    /* m_nextTargetRenderRequestSerial advances only at the one target
+     * request drawFrame() issues per call, never for a speculative
+     * lookahead, so this denominator is both wrap-immune (same
      * monotonic-counter argument as requestedFramesBySerial) and free of the
-     * lookahead overcount above. */
+     * lookahead overcount above -- but see round 3's comment immediately
+     * below: it is NOT the authoritative population, only wrap-immune. */
     const uint64_t requestedTargetFramesBySerial =
         framePopulation.requestedTargetFramesBySerial;
     const qulonglong skippedOrUnpresentedByTargetSerial =
@@ -25655,18 +25658,24 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "requested_target_frames_by_serial=%8 "
                "skipped_or_unpresented_frames_by_target_serial=%9 "
                "lookahead_requests_by_serial=%10 "
-               "population_basis=\"requested_target_frames_by_serial is the "
-               "authoritative population -- render requests issued at the "
-               "target-request call site only (MainWindow::"
+               "population_basis=\"requested_target_frames_by_serial is a "
+               "wrap-immune population count -- render requests issued at "
+               "the target-request call site only (MainWindow::"
                "m_nextTargetRenderRequestSerial delta, monotonic, immune to "
                "timeline wraps), excluding speculative render-lookahead "
-               "requests; skipped_or_unpresented_frames_by_target_serial is "
-               "the authoritative skip count against it. "
+               "requests -- but it is NOT the authoritative loss figure: it "
+               "only sees frames that already became a target request, so "
+               "it can read zero skip while playback_smoke."
+               "source_frame_population's source_frame_loss_ratio (the "
+               "actual gate figure) shows substantial skip-before-request "
+               "loss. skipped_or_unpresented_frames_by_target_serial is its "
+               "companion skip count, same caveat. "
                "requested_frames_by_serial/skipped_or_unpresented_frames_by_"
                "serial (MainWindow::m_nextRenderRequestSerial delta) also "
                "count discarded speculative lookaheads as skipped and "
-               "overcount loss whenever lookahead_requests_by_serial > 0; "
-               "kept for backward compatibility, NOT the gate figure. "
+               "overcount loss whenever lookahead_requests_by_serial > 0. "
+               "Both pairs are kept for backward compatibility only, NOT "
+               "the gate figure -- source_frame_loss_ratio is. "
                "presented_frames counts frames that actually reached "
                "presentPlaybackPreparedFrame's presentation path; the "
                "difference from either population includes stale/"
