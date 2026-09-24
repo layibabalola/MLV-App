@@ -80,6 +80,63 @@ Assert-Equal 0 $unmeasuredPopulation.source_frame_attribution_measured `
 Assert-Equal 0 $unmeasuredPopulation.partition_sound `
     "partition_sound must be false on an unmeasured record"
 
+# CUDA-ATTRIBUTION-BASELINE-1 round 9 (astra MAJOR, "request-based
+# accounting fails OPEN when the source-frame population record is
+# missing"): Get-SourceFrameAttributionValidationFailures replaces
+# run-release-gui-smoke.ps1's old `if ($null -ne $sourceFramePopulation)`
+# gate, which skipped validation entirely -- and silently fell back to a
+# weaker request-based ratio -- whenever the record was absent, even with
+# -FrameTelemetry requested. astra's repro: 60 offered, 20 presented, 0
+# request-based skips; with the record present the gate reports 66.7% loss
+# and fails; with the record simply missing, the old code produced 0
+# failures. These six cases are the full state matrix: present+sound,
+# present+unsound (a real bucket-arithmetic bug), present+unmeasured (both
+# with and without telemetry requested), and missing (both with and
+# without telemetry requested) -- the last of which is the round-9 fix.
+$soundResult = @(Get-SourceFrameAttributionValidationFailures `
+    -SourceFramePopulation ([pscustomobject]@{ partition_sound = 1 }) `
+    -AttributionMeasured $true -PartitionSound $true -FrameTelemetryRequested $true)
+Assert-Equal 0 $soundResult.Count `
+    "a present, sound, measured record must produce 0 validation failures"
+
+$unsoundResult = @(Get-SourceFrameAttributionValidationFailures `
+    -SourceFramePopulation ([pscustomobject]@{ partition_sound = 0 }) `
+    -AttributionMeasured $true -PartitionSound $false -FrameTelemetryRequested $true)
+Assert-Equal 1 $unsoundResult.Count `
+    "a present, measured-but-unsound record must fail closed"
+if ($unsoundResult.Count -eq 1) {
+    Assert-Equal $true ([bool]($unsoundResult[0] -like "*partition was not sound*")) `
+        "the unsound failure message must name the unsound partition"
+}
+
+$unmeasuredTelemetryOnResult = @(Get-SourceFrameAttributionValidationFailures `
+    -SourceFramePopulation ([pscustomobject]@{ partition_sound = 0 }) `
+    -AttributionMeasured $false -PartitionSound $false -FrameTelemetryRequested $true)
+Assert-Equal 1 $unmeasuredTelemetryOnResult.Count `
+    "a present-but-unmeasured record must fail closed when telemetry was requested (round 7's wiring-failure state)"
+
+$unmeasuredTelemetryOffResult = @(Get-SourceFrameAttributionValidationFailures `
+    -SourceFramePopulation ([pscustomobject]@{ partition_sound = 0 }) `
+    -AttributionMeasured $false -PartitionSound $false -FrameTelemetryRequested $false)
+Assert-Equal 0 $unmeasuredTelemetryOffResult.Count `
+    "a present-but-unmeasured record is legitimate when telemetry was never requested"
+
+$missingTelemetryOnResult = @(Get-SourceFrameAttributionValidationFailures `
+    -SourceFramePopulation $null `
+    -AttributionMeasured $null -PartitionSound $null -FrameTelemetryRequested $true)
+Assert-Equal 1 $missingTelemetryOnResult.Count `
+    "round 9 fix: a MISSING source_frame_population record must fail closed when -FrameTelemetry was requested, never fall back silently"
+if ($missingTelemetryOnResult.Count -eq 1) {
+    Assert-Equal $true ([bool]($missingTelemetryOnResult[0] -like "*did not include a source_frame_population record at all*")) `
+        "the missing-record failure message must say the record was absent, not merely unsound"
+}
+
+$missingTelemetryOffResult = @(Get-SourceFrameAttributionValidationFailures `
+    -SourceFramePopulation $null `
+    -AttributionMeasured $null -PartitionSound $null -FrameTelemetryRequested $false)
+Assert-Equal 0 $missingTelemetryOffResult.Count `
+    "a missing record is legitimate when telemetry was never requested (e.g. -FrameTelemetry:`$false)"
+
 if ($failures.Count -gt 0) {
     foreach ($failure in $failures) {
         Write-Host "[FAIL] $failure"
@@ -87,4 +144,4 @@ if ($failures.Count -gt 0) {
     throw "$($failures.Count) playback-smoke-log-parsing test(s) failed."
 }
 
-Write-Host "[SUMMARY] playback-smoke-log-parsing tests=9 failed=0"
+Write-Host "[SUMMARY] playback-smoke-log-parsing tests=16 failed=0"

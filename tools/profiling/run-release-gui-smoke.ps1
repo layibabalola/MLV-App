@@ -1638,14 +1638,16 @@ if (-not $LaunchOnlyProbe) {
     # telemetry (-FrameTelemetry:$false); when it DID request telemetry
     # ($FrameTelemetry, the default) but the record says unmeasured anyway,
     # that is a wiring failure and must still fail closed.
-    if ($null -ne $sourceFramePopulation) {
-        if ($sourceFrameAttributionMeasured -eq $true -and $sourceFramePopulationSound -ne $true) {
-            $validationFailures += "Source-frame population partition was not sound (partition_sound=$sourceFramePopulationSound); source-frame loss cannot be trusted for this run."
-        }
-        elseif ($sourceFrameAttributionMeasured -ne $true -and $FrameTelemetry) {
-            $validationFailures += "Frame telemetry was requested (-FrameTelemetry) but the source-frame population record reports source_frame_attribution_measured=$sourceFrameAttributionMeasured; source-frame loss cannot be trusted for this run."
-        }
-    }
+    # Round 9 (astra major, "request-based accounting fails OPEN when the
+    # source-frame population record is missing"): a MISSING record must
+    # fail closed too, whenever telemetry was requested -- see
+    # Get-SourceFrameAttributionValidationFailures (playback-smoke-log-parsing.ps1)
+    # for the three-state contract this replaces a two-state (present-only) check with.
+    $validationFailures += Get-SourceFrameAttributionValidationFailures `
+        -SourceFramePopulation $sourceFramePopulation `
+        -AttributionMeasured $sourceFrameAttributionMeasured `
+        -PartitionSound $sourceFramePopulationSound `
+        -FrameTelemetryRequested $FrameTelemetry
     if ($null -eq $skippedOrUnpresentedRatioForGate) {
         $validationFailures += "Playback summary could not establish a skipped/unpresented-frame ratio."
     }
