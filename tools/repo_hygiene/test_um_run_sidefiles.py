@@ -59,6 +59,18 @@ class _Share(unittest.TestCase):
     def names(self) -> list[str]:
         return sorted(p.name for p in self.inbox.iterdir())
 
+    def touch_heartbeat(self, *, job_id: str | None = None) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: rewrites heartbeat.txt with a fresh
+        # LastWriteTimeUtc, mirroring the shape the deployed/tracked agent actually writes
+        # (ultra-magnus-agent.ps1's Write-AgentHeartbeat) closely enough for um-run.ps1's own
+        # ` job=<id>` regex to match -- so a test can simulate "the agent is genuinely still
+        # working on this job" without a real agent process.
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        line = f'alive {now} pid=1 host=TESTHOST generation=1 processStartUtc={now} imagePath="x" agentScript="y"'
+        if job_id:
+            line += f" job={job_id}"
+        (self.share / "heartbeat.txt").write_text(line, encoding="utf-8")
+
     def drop(self, copier: str, *, side: list[Path] | None = None, job_id: str = "demo",
              job_timeout_sec: int | None = None, orphan_grace_sec: int | None = None,
              before_job_visible: str | None = None,
@@ -647,12 +659,18 @@ class UmRunEndToEndTests(_Share):
         self.assertIn("was never claimed", combined, combined)
         self.assertNotIn("the job never ran or the agent is down", combined, combined)
 
-    def test_a_late_claim_extends_the_deadline_past_the_original_queue_wait(self) -> None:
+    def test_a_late_claim_extends_the_wait_past_the_original_queue_ceiling_and_past_budget(self) -> None:
         # fable/sol major 3: the agent's deadline starts at CLAIM, not submission, and jobs are
         # processed sequentially, so a job stuck behind another can be claimed well after this
         # client's naive submit-time deadline would have expired. Simulates a compatible agent's
-        # claim marker (running\<id>.started.json) appearing late, and proves the client's patience
-        # shifts to (claim + budget + grace) instead of giving up at the old, submission-anchored one.
+        # claim marker (running\<id>.started.json) appearing late, past the old queue ceiling.
+        #
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10 (liveness test 1/3 -- "fresh -> keeps
+        # waiting past budget and returns the late receipt"): -TimeoutSec is 1s, so this run is
+        # past its own budget within a second or two of being claimed -- proving the client is
+        # STILL alive well after that, for as long as this test keeps heartbeat.txt looking like a
+        # real agent's (refreshed, tagged with this job's id), is round 10's whole point: patience
+        # no longer comes from a budget+grace constant, it comes from proof of liveness.
         running_dir = self.share / "running"
         proc = subprocess.Popen(
             [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
@@ -664,43 +682,51 @@ class UmRunEndToEndTests(_Share):
             running_dir.mkdir(parents=True, exist_ok=True)
             marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
             (running_dir / "demo.started.json").write_text(json.dumps(marker), encoding="ascii")
-            # By the OLD queue-wait ceiling (3s from submission) the client must still be alive,
-            # because it saw the claim and switched to (claim + 1s budget + grace, >= 20s) instead.
-            time.sleep(2.0)   # ~3.5s since submission: past the 3s queue ceiling
-            self.assertIsNone(proc.poll(), "the client gave up even though the agent had claimed the job")
-            # round 8: grace's floor rose from 5s to 20s (derived from bounded agent-side overhead,
-            # see um-run.ps1), so the client's real patience here is ~claim + 1s budget + 20s grace --
-            # wait long enough to actually observe the natural throw, not just the early liveness check.
-            stdout, stderr = proc.communicate(timeout=30)
+            # Keep the heartbeat fresh and tagged with this job's id for ~4s -- comfortably past
+            # both the old 3s queue ceiling AND the 1s job budget -- the whole time this client
+            # must still be alive, waiting on proof of liveness rather than a fixed cutoff.
+            deadline = time.monotonic() + 4.0
+            while time.monotonic() < deadline:
+                self.touch_heartbeat(job_id="demo")
+                time.sleep(0.4)
+            self.assertIsNone(proc.poll(),
+                              "a fresh, job-matching heartbeat must keep the client waiting past its own budget")
+            result = {"jobId": "demo", "exitCode": 0, "stdout": "late but real", "stderr": "",
+                      "timeoutSec": 1, "timedOut": False}
+            tmp = self.outbox / "demo.result.tmp"
+            tmp.write_text(json.dumps(result), encoding="ascii")
+            tmp.replace(self.outbox / "demo.result.json")
+            stdout, stderr = proc.communicate(timeout=15)
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
         combined = (stdout or "") + (stderr or "")
-        self.assertIn("claimed by the agent", combined, combined)
-        self.assertNotIn("was never claimed", combined, combined)
-        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 9: this is THIS CLIENT's own patience running
-        # out, not a diagnosis the client cannot make -- the message must say the agent still owns
-        # the job and that its receipt may still arrive in the outbox under this jobId.
-        self.assertIn("this client is giving up", combined, combined)
-        self.assertIn("the agent still owns demo", combined, combined)
-        self.assertIn("its receipt may still land at", combined, combined)
+        self.assertEqual(proc.returncode, 0, combined)
+        self.assertNotIn("Timed out", combined, combined)
 
     def test_a_clock_skewed_claim_marker_does_not_shrink_the_clients_patience(self) -> None:
         # sol/fable blocker (round 7): claimedAt used to come from the marker's own startedUtc field
         # -- a timestamp stamped by the AGENT HOST's clock -- while the deadline built from it is
         # compared against THIS CLIENT's Get-Date. Simulates a badly-skewed (or merely very slow to
         # publish) agent host: the marker's declared startedUtc is an hour in the past relative to
-        # real time, even though the client is only NOW observing it. Under the OLD, marker-anchored
-        # behaviour, execDeadline (claim + 5s budget + grace, evaluated off a claim an hour in the
-        # past) would already be far in the past the instant this marker is observed, so the
-        # client would throw within the very next poll. The fix anchors purely to the client's OWN
-        # observation, so it must still be alive well past that point.
+        # real time, even though the client is only NOW observing it. Under a marker-anchored
+        # deadline, that deadline would already be far in the past the instant this marker is
+        # observed, so the client would throw (or, under round 10, misjudge liveness) within the
+        # very next poll. The fix anchors purely to the client's OWN observation, so it must still
+        # be alive well past that point.
+        #
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10 (liveness test 2/3 -- "stale -> stops with
+        # the liveness message"): -MaxHeartbeatAgeSec is set to 2s (explicit and small, so the
+        # natural stale-liveness throw is fast and intentional, not an accidental ~30s coincidence
+        # with the default) and heartbeat.txt is never refreshed after setUp, so it goes stale
+        # almost immediately once the client starts actually checking it (past budget).
         running_dir = self.share / "running"
         proc = subprocess.Popen(
             [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
              "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
-             "-TimeoutSec", "5", "-PollSeconds", "1", "-MaxQueueWaitSec", "10", "-JobId", "demo"],
+             "-TimeoutSec", "2", "-PollSeconds", "1", "-MaxQueueWaitSec", "10",
+             "-MaxHeartbeatAgeSec", "2", "-JobId", "demo"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             time.sleep(1.0)
@@ -708,13 +734,11 @@ class UmRunEndToEndTests(_Share):
             skewed = time.gmtime(time.time() - 3600)
             marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", skewed)}
             (running_dir / "demo.started.json").write_text(json.dumps(marker), encoding="ascii")
-            # Two more poll cycles: under the old behaviour the client would already have thrown on
-            # the very first check after observing this marker.
-            time.sleep(2.0)
+            # One more poll cycle: under a marker-anchored deadline the client would already have
+            # thrown (or misjudged liveness) on the very first check after observing this marker.
+            time.sleep(1.0)
             self.assertIsNone(proc.poll(), "a stale agent-clock stamp must not shrink the client's own patience")
-            # round 8: grace's floor rose from 5s to 20s (see um-run.ps1), so real patience here is
-            # ~claim + 5s budget + 20s grace -- give the natural throw enough time to actually happen.
-            stdout, stderr = proc.communicate(timeout=40)
+            stdout, stderr = proc.communicate(timeout=15)
         finally:
             if proc.poll() is None:
                 proc.kill()
@@ -722,6 +746,52 @@ class UmRunEndToEndTests(_Share):
         combined = (stdout or "") + (stderr or "")
         self.assertIn("claimed by the agent", combined, combined)
         self.assertNotIn("was never claimed", combined, combined)
+        self.assertIn("stopped proving liveness", combined, combined)
+        self.assertIn("MaxHeartbeatAgeSec 2", combined, combined)
+        # round 9 wording, unchanged in spirit under round 10's liveness message: this is THIS
+        # CLIENT's own patience running out, never a diagnosis the client cannot make.
+        self.assertIn("the agent still owns demo", combined, combined)
+        self.assertIn("its receipt may still land at", combined, combined)
+
+    def test_the_outer_ceiling_stops_the_client_even_while_heartbeat_stays_fresh(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10 (liveness test 3/3 -- "outer ceiling ->
+        # stops"): a stuck-but-heartbeating agent must not be trusted forever. -MaxClaimedWaitSec
+        # is set small and explicit (2s) so this client gives up at claimedAt + budget +
+        # -MaxClaimedWaitSec despite a heartbeat this test keeps continuously fresh and correctly
+        # job-tagged throughout -- proving the ceiling fires on its OWN terms, never because
+        # liveness was ever lost.
+        running_dir = self.share / "running"
+        proc = subprocess.Popen(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
+             "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
+             "-TimeoutSec", "1", "-PollSeconds", "1", "-MaxQueueWaitSec", "5",
+             "-MaxClaimedWaitSec", "2", "-JobId", "demo"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(1.0)
+            running_dir.mkdir(parents=True, exist_ok=True)
+            marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            (running_dir / "demo.started.json").write_text(json.dumps(marker), encoding="ascii")
+            # Keep refreshing heartbeat.txt for the whole run -- well past claimedAt + 1s budget +
+            # 2s outer ceiling (~3s from claim) -- so any throw here can only be the outer ceiling,
+            # never a liveness-lost diagnosis.
+            deadline = time.monotonic() + 6.0
+            while time.monotonic() < deadline and proc.poll() is None:
+                self.touch_heartbeat(job_id="demo")
+                time.sleep(0.4)
+            stdout, stderr = proc.communicate(timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        combined = (stdout or "") + (stderr or "")
+        self.assertNotEqual(proc.returncode, 0, combined)
+        self.assertIn("claimed by the agent", combined, combined)
+        self.assertIn("absolute outer ceiling", combined, combined)
+        self.assertIn("MaxClaimedWaitSec (2s)", combined, combined)
+        self.assertNotIn("stopped proving liveness", combined,
+                         "a continuously fresh heartbeat must never be diagnosed as liveness-lost")
+        self.assertIn("the agent still owns demo", combined, combined)
 
     def test_a_claim_landing_exactly_at_the_queue_deadline_is_not_misreported_as_never_claimed(self) -> None:
         # sol blocker (round 7): the final recheck before throwing only ever re-read the RESULT file,
