@@ -1098,19 +1098,29 @@ $envs = @(
 $envList = "'" + ($envs -join "','") + "'"
 function ConvertTo-PsSingleQuoted([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
 $cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted $exePath) -Input $(ConvertTo-PsSingleQuoted $clipPath) -Output $(ConvertTo-PsSingleQuoted $resultPath) -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor 4 -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
-# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2 (sol BLOCKER 2 / fable HARDENING): PresentMon's own
-# TimeInMs=0 origin is its internal trace-session start, which lands somewhere between process
-# creation and Start-PresentMonCapture returning (it blocks up to 3s to confirm the process is
-# still alive) -- neither endpoint of that interval IS the true origin, so the interval is
-# bracketed instead of guessed at as a single instant. $presentMonProc.StartTime is the OS's own
-# report of when the child process itself began (available without any extra probing), and is
-# used as the windowing anchor below: it can only be AT OR BEFORE PresentMon's true trace-session
-# start (process creation necessarily precedes ETW session init), so windowing against it never
-# excludes a row that truly falls inside the playback window -- the one failure direction that
-# would silently under-report a real display rate. The full bracket (pre-spawn wall clock, the
-# OS-reported process start, post-spawn wall clock) and the residual uncertainty it implies are
-# all persisted below, before parsing, so a consumer needing a tighter join than this one can see
-# exactly how much slack to allow rather than trusting a single unbracketed stamp.
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2/3 (sol BLOCKER 2 / fable HARDENING, direction corrected
+# HARNESS-3): PresentMon's own TimeInMs=0 origin is its internal trace-session start, which lands
+# somewhere between process creation and Start-PresentMonCapture returning (it blocks up to 3s to
+# confirm the process is still alive) -- neither endpoint of that interval IS the true origin, so
+# the interval is bracketed instead of guessed at as a single instant. $presentMonProc.StartTime
+# is the OS's own report of when the child process itself began (available without any extra
+# probing); HARNESS-2 anchored windowing on it alone and claimed here that doing so "never
+# excludes a row that truly falls inside the playback window" because it can only be at or before
+# PresentMon's true trace-session start. That direction argument was inverted (fable, HARNESS-2
+# review): an anchor AT OR BEFORE the true origin makes every row's own TimeInMs read SMALLER than
+# it would under the true origin, which shifts the window's comparison threshold LATER and CAN
+# exclude a genuine front-edge row -- the opposite of what was claimed, and exactly the failure
+# direction that would silently under-report a real display rate. Neither endpoint of the bracket
+# is asserted exact in either direction any more:
+# Get-AttrCudaPresentMonDisplayReport instead windows the rows under BOTH endpoints --
+# $presentMonCaptureStartUtc (process creation, or the pre-spawn wall clock below when the OS
+# reported none) and $presentMonPostSpawnUtc (Start-PresentMonCapture returning) -- and reports
+# counts/rates for both plus how many rows disagree on window membership between them, heading the
+# report with whichever endpoint admits more genuinely-presented rows (see .clockBracket on
+# $displayReport below). The full bracket (pre-spawn wall clock, the OS-reported process start,
+# post-spawn wall clock) and the residual uncertainty it implies are all persisted below, before
+# parsing, so a consumer needing a tighter join than this one can see exactly how much slack to
+# allow rather than trusting a single unbracketed stamp.
 $presentMonPreSpawnUtc = (Get-Date).ToUniversalTime()
 $presentMonProc = Start-PresentMonCapture $presentMonPath
 $presentMonPostSpawnUtc = (Get-Date).ToUniversalTime()
@@ -1275,6 +1285,22 @@ try {
     $presentMonWaitError = $_.Exception.Message
 }
 if ($null -ne $presentMonWaitError) {
+    # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (fable HARDENING): a wait failure used to publish
+    # neither the partial presentmon.csv (stable here -- Wait-PresentMonCapture kills the process
+    # before throwing) nor the capture-start bracket sidecar, leaving an operator diagnosing a
+    # PresentMon hang with strictly less evidence than a parse failure below already leaves. Both
+    # are published here too, before the typed terminal, mirroring the parse-failure path exactly.
+    if (Test-Path -LiteralPath $presentMonPath -PathType Leaf) {
+        [void](Publish-AttrCudaFileCopy -Source $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv'))
+    }
+    Save-Json ([ordered]@{
+        schema='playback-attr-3-cuda-presentmon-capture.v2'
+        captureStartUtc=$presentMonCaptureStartUtc.ToString('o')
+        preSpawnUtc=$presentMonPreSpawnUtc.ToString('o')
+        postSpawnUtc=$presentMonPostSpawnUtc.ToString('o')
+        processStartUtc=$(if ($null -ne $presentMonProcessStartUtc) { $presentMonProcessStartUtc.ToString('o') } else { $null })
+        captureStartUncertaintyMs=$presentMonCaptureStartUncertaintyMs
+    }) (Join-Path $Pub 'presentmon-capture.json')
     $displayFailure = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='PRESENTMON_UNAVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
@@ -1374,7 +1400,13 @@ Save-Json ([ordered]@{
     processStartUtc=$(if ($null -ne $presentMonProcessStartUtc) { $presentMonProcessStartUtc.ToString('o') } else { $null })
     captureStartUncertaintyMs=$presentMonCaptureStartUncertaintyMs
 }) (Join-Path $Pub 'presentmon-capture.json')
-$displayReport = Get-AttrCudaPresentMonDisplayReport -CsvPath $presentMonPath -ResultJson $resultJson -CaptureStartUtc $presentMonCaptureStartUtc
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol+fable HARDENING, direction-corrected anchor -- see
+# the bracket comment above): windowed under BOTH endpoints of the capture-start bracket, never
+# just the earlier one. $displayReport.clockBracket carries both endpoints' presented/displayed
+# counts and rates, the headline endpoint actually used for chains/selectedChain/selectedChainRows
+# below, and why -- persisted verbatim into every outcome's summary.json so a reader never has to
+# take the headline number's clock origin on faith.
+$displayReport = Get-AttrCudaPresentMonDisplayReport -CsvPath $presentMonPath -ResultJson $resultJson -EarliestCaptureStartUtc $presentMonCaptureStartUtc -LatestCaptureStartUtc $presentMonPostSpawnUtc
 if ($displayReport.status -ne 'OK') {
     $displayFailure = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result=$displayReport.status
@@ -1382,6 +1414,7 @@ if ($displayReport.status -ne 'OK') {
         reason=$displayReport.reason
         chains=$displayReport.chains
         presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')
+        clockBracket=$displayReport.clockBracket
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $displayFailure (Join-Path $Pub 'summary.json')
@@ -1392,7 +1425,19 @@ if ($displayReport.status -ne 'OK') {
 $pmRows = @($displayReport.selectedChainRows)
 $pmRows | Export-Csv -LiteralPath (Join-Path $legOut 'presentmon-series.csv') -NoTypeInformation
 [void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'presentmon-series.csv') -Destination (Join-Path $Pub 'presentmon-series.csv'))
-$pmStats = Get-Stats @($pmRows | ForEach-Object { [double]$_.msBetweenDisplayChange })
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol BLOCKER): a row displayed only via MsUntilDisplayed
+# (MsBetweenDisplayChange reads NA -- the first present of a capture, before any prior display
+# change exists to measure from) carries msBetweenDisplayChange=$null in $pmRows. [double]$null
+# coerces to 0.0 in PowerShell, so feeding it straight into Get-Stats turned a row with NO
+# interval into a spuriously fast (0ms) one, inflating presentMonStats.meanMs/fpsEquivalentMean
+# downward/upward respectively and counting a non-interval row as a positive sample. Filtered out
+# here, before Get-Stats ever sees the array -- every other consumer of this same interval either
+# already tolerates the null (selectedChainRows/presentmon-series.csv itself: the module leaves
+# msBetweenDisplayChange and displayFpsEquivalent both $null for that row, which Export-Csv writes
+# as an empty cell) or already filters it independently (refresh_period_histogram.py skips blank
+# and non-positive msBetweenDisplayChange cells reading the csv this exports).
+$pmIntervalRows = @($pmRows | Where-Object { $null -ne $_.msBetweenDisplayChange -and $_.msBetweenDisplayChange -gt 0 })
+$pmStats = Get-Stats @($pmIntervalRows | ForEach-Object { [double]$_.msBetweenDisplayChange })
 
 $dllSha256Lower = (Get-Sha $reconDll).ToLowerInvariant()
 # $pendingSymbolPresence came from the build manifest above, whose dll.sha256 was verified
@@ -1434,7 +1479,13 @@ $manifest = [ordered]@{
         # lists every group PresentMon reported inside the playback window, for audit.
         chains=$displayReport.chains
         selectedChain=$displayReport.selectedChain
-        positiveSamples=$pmRows.Count
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol BLOCKER): this is the count of rows that fed
+        # presentMonStats below -- i.e. rows with a positive msBetweenDisplayChange interval, the
+        # same population as $pmIntervalRows -- not $pmRows.Count (every displayed row, including
+        # the interval-less NA-first-present one), which the name previously read from and which
+        # inflated this above the sample size the statistics below were actually computed on.
+        positiveSamples=$pmIntervalRows.Count
+        clockBracket=$displayReport.clockBracket
     }
     environmentBoundary = [ordered]@{ jobTempDir=$Scratch; allChildrenInheritJobTemp=$true }
     cpuQuiescence = [ordered]@{ samples=$loads; meanPercent=$avgLoad; thresholdPercent=20.0; pass=($avgLoad -le 20.0) }
@@ -1463,6 +1514,7 @@ Save-Json ([ordered]@{
     cpuFrames = $gpuSummary.cpuFrames
     presentMonSamples = $pmRows.Count
     presentMonSelectedChain = $displayReport.selectedChain
+    clockBracket = $displayReport.clockBracket
     diagnostics = $diagnostics
     artifactRoot = $Pub
 }) (Join-Path $Pub 'summary.json')

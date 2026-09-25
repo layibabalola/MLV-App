@@ -45,6 +45,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
+ATTRIBUTION_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1"
 
 PWSH = shutil.which("pwsh")
 requires_pwsh = unittest.skipIf(PWSH is None, "pwsh is not on PATH")
@@ -100,6 +101,42 @@ def _csv_row(
     }
 
 
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 3): the EXACT 28-column header the pinned
+# PresentMon 2.5.1 legacy launch emits, read directly from a real Bachelor capture -- never a
+# synthetic column list. Module-level (not just RealPresentMon251HeaderFixtureTests's own copy)
+# so IntervalStatsFilterFixtureTests below can build the same real-shaped fixture.
+REAL_PRESENTMON_HEADER = [
+    "Application", "ProcessID", "SwapChainAddress", "PresentRuntime", "SyncInterval",
+    "PresentFlags", "AllowsTearing", "PresentMode", "TimeInMs", "MsBetweenSimulationStart",
+    "MsBetweenPresents", "MsBetweenDisplayChange", "MsInPresentAPI", "MsRenderPresentLatency",
+    "MsUntilDisplayed", "CPUStartTimeInMs", "MsBetweenAppStart", "MsCPUBusy", "MsCPUWait",
+    "MsGPULatency", "MsGPUTime", "MsGPUBusy", "MsGPUWait", "MsAnimationError", "AnimationTime",
+    "MsFlipDelay", "MsAllInputToPhotonLatency", "MsClickToPhotonLatency",
+]
+
+
+def _real_csv_row(
+    *, process_id: object = TARGET_PID, swap_chain: str = "0xCCC",
+    time_in_ms: object, between_display_change: str = "16.6", until_displayed: str = "8.3",
+) -> dict[str, str]:
+    values = {name: "NA" for name in REAL_PRESENTMON_HEADER}
+    values.update({
+        "Application": "MLVApp.exe",
+        "ProcessID": str(process_id),
+        "SwapChainAddress": swap_chain,
+        "PresentRuntime": "DXGI",
+        "SyncInterval": "0",
+        "PresentFlags": "512",
+        "AllowsTearing": "0",
+        "PresentMode": "Composed: Flip",
+        "TimeInMs": str(time_in_ms),
+        "MsBetweenPresents": "16.6",
+        "MsBetweenDisplayChange": between_display_change,
+        "MsUntilDisplayed": until_displayed,
+    })
+    return values
+
+
 class _ReportCase(unittest.TestCase):
     def setUp(self) -> None:
         if PWSH is None:
@@ -123,7 +160,14 @@ class _ReportCase(unittest.TestCase):
     def call(
         self, csv_path: Path | None, result_json: dict | None, *,
         capture_start: str = CAPTURE_START_UTC,
+        latest_capture_start: str | None = None,
     ) -> dict:
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3: the function now windows under TWO bracket
+        # endpoints. Every sibling test below that only cares about single-anchor behaviour
+        # passes latest_capture_start=None, which degenerates the bracket to one point (both
+        # endpoints equal) -- identical windowing to before this round, so none of those
+        # assertions needed to change. Only the dedicated bracket tests further down pass two
+        # distinct endpoints.
         out_path = self.tmp / "report-out.json"
         csv_literal = "$null" if csv_path is None else "'" + str(csv_path) + "'"
         result_json_expr = "$null"
@@ -133,16 +177,20 @@ class _ReportCase(unittest.TestCase):
             result_json_expr = (
                 "(Get-Content -LiteralPath '" + str(result_json_path) + "' -Raw | ConvertFrom-Json)"
             )
+        latest = latest_capture_start if latest_capture_start is not None else capture_start
         script = self.tmp / "probe.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             f"Import-Module '{MODULE}' -Force\n"
-            f"$captureStart = [datetime]::Parse('{capture_start}', $null, "
+            f"$earliestCaptureStart = [datetime]::Parse('{capture_start}', $null, "
+            "[Globalization.DateTimeStyles]::RoundtripKind)\n"
+            f"$latestCaptureStart = [datetime]::Parse('{latest}', $null, "
             "[Globalization.DateTimeStyles]::RoundtripKind)\n"
             f"$csvPath = {csv_literal}\n"
             f"$resultJson = {result_json_expr}\n"
             "$report = Get-AttrCudaPresentMonDisplayReport -CsvPath $csvPath "
-            "-ResultJson $resultJson -CaptureStartUtc $captureStart\n"
+            "-ResultJson $resultJson -EarliestCaptureStartUtc $earliestCaptureStart "
+            "-LatestCaptureStartUtc $latestCaptureStart\n"
             f"$report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath '{out_path}' -Encoding UTF8\n"
             "Write-Output 'PROBE_DONE'\n",
             encoding="utf-8",
@@ -151,6 +199,14 @@ class _ReportCase(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("PROBE_DONE", proc.stdout, proc.stdout + proc.stderr)
         return json.loads(out_path.read_text(encoding="utf-8"))
+
+    def _write_real_csv(self, rows: list[dict[str, str]]) -> Path:
+        path = self.tmp / "presentmon.csv"
+        lines = [",".join(REAL_PRESENTMON_HEADER)]
+        for row in rows:
+            lines.append(",".join(row[name] for name in REAL_PRESENTMON_HEADER))
+        path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+        return path
 
 
 @requires_pwsh
@@ -229,6 +285,11 @@ class ZeroDisplayedFixtureTests(_ReportCase):
         report = self.call(path, _result_json())
         self.assertEqual(report["status"], "PRESENTMON_UNAVAILABLE")
         self.assertIn("playback window", report["reason"])
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3: clockBracket is carried on this typed refusal
+        # too, not only on OK/DISPLAY_ASLEEP -- a reader refused here still learns both endpoints
+        # genuinely found nothing, not just one of them.
+        self.assertIsNotNone(report["clockBracket"])
+        self.assertEqual(report["clockBracket"]["earliest"]["presentedCount"], 0)
 
 
 @requires_pwsh
@@ -305,6 +366,12 @@ class TwoSwapChainFixtureTests(_ReportCase):
         self.assertEqual(report["status"], "PRESENTMON_UNAVAILABLE")
         self.assertIn(str(TARGET_PID), report["reason"])
         self.assertEqual(len(report["chains"]), 1)
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3: clockBracket is carried here too -- both
+        # endpoints agree MLVApp presented 0 rows in this fixture (only the foreign chain is in
+        # the window), so both read 0, not just the headline one.
+        self.assertIsNotNone(report["clockBracket"])
+        self.assertEqual(report["clockBracket"]["earliest"]["presentedCount"], 0)
+        self.assertEqual(report["clockBracket"]["latest"]["presentedCount"], 0)
 
 
 @requires_pwsh
@@ -319,47 +386,9 @@ class RealPresentMon251HeaderFixtureTests(_ReportCase):
     for a metric it could not compute (observed for MsBetweenDisplayChange/MsUntilDisplayed on
     the very first present of a real capture)."""
 
-    _REAL_HEADER = [
-        "Application", "ProcessID", "SwapChainAddress", "PresentRuntime", "SyncInterval",
-        "PresentFlags", "AllowsTearing", "PresentMode", "TimeInMs", "MsBetweenSimulationStart",
-        "MsBetweenPresents", "MsBetweenDisplayChange", "MsInPresentAPI", "MsRenderPresentLatency",
-        "MsUntilDisplayed", "CPUStartTimeInMs", "MsBetweenAppStart", "MsCPUBusy", "MsCPUWait",
-        "MsGPULatency", "MsGPUTime", "MsGPUBusy", "MsGPUWait", "MsAnimationError", "AnimationTime",
-        "MsFlipDelay", "MsAllInputToPhotonLatency", "MsClickToPhotonLatency",
-    ]
-
-    def _real_row(
-        self, *, process_id: object = TARGET_PID, swap_chain: str = "0xCCC",
-        time_in_ms: object, between_display_change: str = "16.6", until_displayed: str = "8.3",
-    ) -> dict[str, str]:
-        values = {name: "NA" for name in self._REAL_HEADER}
-        values.update({
-            "Application": "MLVApp.exe",
-            "ProcessID": str(process_id),
-            "SwapChainAddress": swap_chain,
-            "PresentRuntime": "DXGI",
-            "SyncInterval": "0",
-            "PresentFlags": "512",
-            "AllowsTearing": "0",
-            "PresentMode": "Composed: Flip",
-            "TimeInMs": str(time_in_ms),
-            "MsBetweenPresents": "16.6",
-            "MsBetweenDisplayChange": between_display_change,
-            "MsUntilDisplayed": until_displayed,
-        })
-        return values
-
-    def _write_real_csv(self, rows: list[dict[str, str]]) -> Path:
-        path = self.tmp / "presentmon.csv"
-        lines = [",".join(self._REAL_HEADER)]
-        for row in rows:
-            lines.append(",".join(row[name] for name in self._REAL_HEADER))
-        path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
-        return path
-
     def test_the_real_28_column_header_is_accepted_and_produces_a_report(self) -> None:
         rows = [
-            self._real_row(
+            _real_csv_row(
                 time_in_ms=5000 + i * 1000,
                 between_display_change=("NA" if i == 0 else "16.6"),
                 until_displayed=("8.3" if i == 0 else "16.6"),
@@ -377,11 +406,20 @@ class RealPresentMon251HeaderFixtureTests(_ReportCase):
         # change to diff against), the rest via MsBetweenDisplayChange.
         self.assertEqual(report["selectedChain"]["displayedCount"], 10)
         self.assertEqual(len(report["selectedChainRows"]), 10)
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol BLOCKER): row 0's interval is genuinely
+        # absent, never a zero one -- msBetweenDisplayChange and displayFpsEquivalent are both
+        # $null on the wire (Export-Csv later writes that as an empty cell, which
+        # refresh_period_histogram.py already skips). See IntervalStatsFilterFixtureTests below
+        # for the job-level Get-Stats consumer that must filter this out itself.
+        self.assertIsNone(report["selectedChainRows"][0]["msBetweenDisplayChange"])
+        self.assertIsNone(report["selectedChainRows"][0]["displayFpsEquivalent"])
+        for row in report["selectedChainRows"][1:]:
+            self.assertAlmostEqual(row["msBetweenDisplayChange"], 16.6)
 
     def test_a_row_with_na_display_metrics_is_presented_but_not_displayed(self) -> None:
         # PresentMon legitimately writes NA for metrics it cannot compute yet -- never mistaken
         # for a schema mismatch, and never counted as a display when both signals are absent.
-        row = self._real_row(time_in_ms=5000, between_display_change="NA", until_displayed="NA")
+        row = _real_csv_row(time_in_ms=5000, between_display_change="NA", until_displayed="NA")
         path = self._write_real_csv([row])
 
         report = self.call(path, _result_json())
@@ -389,6 +427,147 @@ class RealPresentMon251HeaderFixtureTests(_ReportCase):
         self.assertEqual(report["status"], "DISPLAY_ASLEEP")
         self.assertEqual(report["selectedChain"]["presentedCount"], 1)
         self.assertEqual(report["selectedChain"]["displayedCount"], 0)
+
+
+@requires_pwsh
+class BracketWindowingFixtureTests(_ReportCase):
+    """CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol+fable HARDENING): rows are now windowed under
+    BOTH endpoints of the caller's capture-start bracket, never just the earlier one -- the
+    earlier-only anchor's direction argument was inverted (see the corrected comment in the
+    module and playback-attr-3-cuda-job.ps1). WINDOW_START_UTC is +2s of CAPTURE_START_UTC; a
+    LatestCaptureStartUtc 500ms after EarliestCaptureStartUtc shifts windowStartMs 500ms earlier
+    (windowSeconds -- the real playback duration -- is unaffected, since both window bounds shift
+    together), so a row placed in that 500ms sliver is IN the window only under the later
+    endpoint -- exactly the front-edge-exclusion failure direction the corrected comment
+    describes."""
+
+    _EARLIEST = "2026-01-01T00:00:00.0000000Z"
+    _LATEST = "2026-01-01T00:00:00.5000000Z"
+
+    def test_a_front_edge_row_admitted_only_under_the_later_endpoint_heads_the_report(self) -> None:
+        rows = [
+            _csv_row(time_in_ms=1600),  # in-window only if anchored on the later endpoint
+            _csv_row(time_in_ms=10000),  # in-window under both endpoints
+        ]
+        path = self._write_csv(rows)
+
+        report = self.call(path, _result_json(), capture_start=self._EARLIEST, latest_capture_start=self._LATEST)
+
+        self.assertEqual(report["status"], "OK", report)
+        bracket = report["clockBracket"]
+        self.assertEqual(bracket["earliest"]["presentedCount"], 1)
+        self.assertEqual(bracket["latest"]["presentedCount"], 2)
+        # The later endpoint admits strictly more genuinely-in-window rows, so it heads the
+        # report -- selectedChainRows/selectedChain reflect it, not the earlier endpoint.
+        self.assertEqual(bracket["headline"], "latest")
+        self.assertEqual(report["selectedChain"]["presentedCount"], 2)
+        self.assertEqual(len(report["selectedChainRows"]), 2)
+        # Exactly the one front-edge row disagrees on window membership between the endpoints.
+        self.assertEqual(bracket["rowsDifferingInWindowMembership"], 1)
+
+    def test_a_degenerate_bracket_has_no_disagreement_and_heads_earliest(self) -> None:
+        rows = [_csv_row(time_in_ms=5000 + i * 1000) for i in range(3)]
+        path = self._write_csv(rows)
+
+        report = self.call(path, _result_json(), capture_start=self._EARLIEST)
+
+        self.assertEqual(report["status"], "OK", report)
+        bracket = report["clockBracket"]
+        self.assertEqual(bracket["earliest"], bracket["latest"])
+        self.assertEqual(bracket["rowsDifferingInWindowMembership"], 0)
+        # Tie-break: equal endpoints keep the earlier one, deterministically.
+        self.assertEqual(bracket["headline"], "earliest")
+
+    def test_display_asleep_still_reports_the_bracket(self) -> None:
+        rows = [_csv_row(between_display_change="0", until_displayed="0", time_in_ms=5000)]
+        path = self._write_csv(rows)
+
+        report = self.call(path, _result_json(), capture_start=self._EARLIEST, latest_capture_start=self._LATEST)
+
+        self.assertEqual(report["status"], "DISPLAY_ASLEEP")
+        self.assertIsNotNone(report["clockBracket"])
+        self.assertEqual(report["clockBracket"]["earliest"]["presentedCount"], 1)
+
+
+@requires_pwsh
+class IntervalStatsFilterFixtureTests(_ReportCase):
+    """CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol BLOCKER): a row displayed only via
+    MsUntilDisplayed (MsBetweenDisplayChange NA) carries msBetweenDisplayChange=$null in
+    .selectedChainRows. [double]$null coerces to 0.0 in PowerShell, so feeding that array
+    straight into the job's own Get-Stats turned a row with NO interval into a spuriously fast
+    (0ms) one, inflating fpsEquivalentMean and counting a non-interval row as a positive sample
+    (sol repro: [null,16.6] published meanMs=8.3/fpsEquivalentMean=120.48 instead of
+    meanMs=16.6/fpsEquivalentMean=60.24). This class EXECUTES the job template's own
+    Get-Mean/Get-SampleSd/Get-Percentile/Get-Stats source and its own $pmIntervalRows filter
+    expression -- extracted verbatim from playback-attr-3-cuda-job.ps1, never hand-reimplemented
+    -- against the module's real output for the exact real-28-column NA-first-row fixture, so a
+    regression in either file's actual text fails this test."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        stats_start = text.index("function Get-Mean(")
+        stats_end = text.index("function Start-PresentMonCapture(")
+        cls.stats_source = text[stats_start:stats_end]
+        filter_start = text.index("$pmIntervalRows = @(")
+        filter_end = text.index("\n", filter_start)
+        cls.filter_line = text[filter_start:filter_end]
+        assert "function Get-Stats(" in cls.stats_source, cls.stats_source
+        assert "$null -ne $_.msBetweenDisplayChange -and $_.msBetweenDisplayChange -gt 0" in cls.filter_line, cls.filter_line
+
+    def _run_stats(self, csv_path: Path, result_json: dict) -> dict:
+        out_path = self.tmp / "stats-out.json"
+        result_json_path = self.tmp / "result.json"
+        result_json_path.write_text(json.dumps(result_json), encoding="utf-8")
+        script = self.tmp / "probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"{self.stats_source}\n"
+            f"$captureStart = [datetime]::Parse('{CAPTURE_START_UTC}', $null, "
+            "[Globalization.DateTimeStyles]::RoundtripKind)\n"
+            f"$csvPath = '{csv_path}'\n"
+            f"$resultJson = (Get-Content -LiteralPath '{result_json_path}' -Raw | ConvertFrom-Json)\n"
+            "$report = Get-AttrCudaPresentMonDisplayReport -CsvPath $csvPath -ResultJson $resultJson "
+            "-EarliestCaptureStartUtc $captureStart -LatestCaptureStartUtc $captureStart\n"
+            "$pmRows = @($report.selectedChainRows)\n"
+            f"{self.filter_line}\n"
+            "$pmStats = Get-Stats @($pmIntervalRows | ForEach-Object { [double]$_.msBetweenDisplayChange })\n"
+            "[pscustomobject]@{ pmRowsCount = $pmRows.Count; pmIntervalRowsCount = $pmIntervalRows.Count; "
+            "pmStats = $pmStats } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath "
+            f"'{out_path}' -Encoding UTF8\n"
+            "Write-Output 'PROBE_DONE'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROBE_DONE", proc.stdout, proc.stdout + proc.stderr)
+        return json.loads(out_path.read_text(encoding="utf-8"))
+
+    def test_the_na_first_row_interval_is_excluded_before_get_stats(self) -> None:
+        # sol's exact repro shape: two in-window displayed rows, row 0 NA/MsUntilDisplayed=8.3,
+        # row 1 a real 16.6ms interval.
+        rows = [
+            _real_csv_row(time_in_ms=5000, between_display_change="NA", until_displayed="8.3"),
+            _real_csv_row(time_in_ms=5017, between_display_change="16.6", until_displayed="16.6"),
+        ]
+        path = self._write_real_csv(rows)
+
+        result = self._run_stats(path, _result_json())
+
+        self.assertEqual(result["pmRowsCount"], 2, result)
+        # The NA-first row is excluded from the interval population -- only the one real
+        # interval remains, never coerced to a spurious 0.0.
+        self.assertEqual(result["pmIntervalRowsCount"], 1, result)
+        stats = result["pmStats"]
+        self.assertEqual(stats["count"], 1)
+        self.assertAlmostEqual(stats["meanMs"], 16.6)
+        self.assertAlmostEqual(stats["fpsEquivalentMean"], 1000.0 / 16.6)
+        # Pre-fix behaviour (regression guard): [double]$null coercing to 0.0 would have produced
+        # meanMs=8.3 and fpsEquivalentMean~120.48 from count=2 -- assert those are NOT what a
+        # future regression could silently reproduce.
+        self.assertNotAlmostEqual(stats["meanMs"], 8.3)
+        self.assertNotAlmostEqual(stats["fpsEquivalentMean"], 1000.0 / 8.3)
 
 
 if __name__ == "__main__":

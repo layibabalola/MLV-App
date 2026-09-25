@@ -143,6 +143,78 @@ class TemplateOrderingTests(unittest.TestCase):
         # unchanged -- only this call site's handling of it changed.
         self.assertIn("PRESENTMON_TIMEOUT: did not exit within", self.template)
 
+    def test_presentmon_wait_failure_also_publishes_the_csv_and_capture_bracket(self) -> None:
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (fable HARDENING): a wait failure used to publish
+        # neither the partial presentmon.csv nor the capture-start bracket sidecar, leaving an
+        # operator diagnosing a PresentMon hang with strictly less evidence than a parse failure
+        # would have left. Both must now be published inside the wait-failure catch, before its
+        # typed PRESENTMON_UNAVAILABLE summary.json and exit 23 -- scoped to strictly between the
+        # typed-terminal check and its exit, so this passes only if the publish calls are actually
+        # inside THIS branch, not merely present somewhere earlier in the template.
+        wait_call = self.template.index("$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc")
+        typed_check = self.template.index("if ($null -ne $presentMonWaitError) {", wait_call)
+        typed_exit = self.template.index("exit 23", typed_check)
+        csv_publish = self.template.index(
+            "Publish-AttrCudaFileCopy -Source $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv')",
+            typed_check,
+        )
+        bracket_save = self.template.index("(Join-Path $Pub 'presentmon-capture.json')", typed_check)
+        self.assertLess(typed_check, csv_publish)
+        self.assertLess(csv_publish, typed_exit)
+        self.assertLess(typed_check, bracket_save)
+        self.assertLess(bracket_save, typed_exit)
+
+    def test_the_display_report_call_windows_under_both_bracket_endpoints(self) -> None:
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol+fable HARDENING): the call must pass BOTH
+        # endpoints of the capture-start bracket, never just the single earlier-only anchor the
+        # prior round used (whose comment argument was inverted -- see the corrected comment
+        # test below).
+        self.assertIn(
+            "Get-AttrCudaPresentMonDisplayReport -CsvPath $presentMonPath -ResultJson $resultJson "
+            "-EarliestCaptureStartUtc $presentMonCaptureStartUtc -LatestCaptureStartUtc $presentMonPostSpawnUtc",
+            self.template,
+        )
+        self.assertNotIn("-ResultJson $resultJson -CaptureStartUtc $presentMonCaptureStartUtc", self.template)
+
+    def test_the_anchor_comment_no_longer_claims_a_single_safe_direction(self) -> None:
+        # sol+fable (HARNESS-2 review): "windowing against it never excludes a row that truly
+        # falls inside the playback window" was the inverted claim -- an anchor at or before the
+        # true origin shifts the window LATER and CAN exclude a genuine front-edge row. The old
+        # claim text must be gone; the corrected reasoning must be present.
+        self.assertNotIn("so windowing against it never", self.template)
+        self.assertIn("That direction argument was inverted", self.template)
+
+    def test_interval_stats_are_filtered_before_get_stats(self) -> None:
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol BLOCKER): a row displayed only via
+        # MsUntilDisplayed carries msBetweenDisplayChange=$null; [double]$null coerces to 0.0,
+        # so feeding $pmRows straight into Get-Stats turned a no-interval row into a spuriously
+        # fast one. The filtered $pmIntervalRows array -- never $pmRows directly -- must feed
+        # Get-Stats. Executed end to end against the module's real fixture in the sibling
+        # tools/repo_hygiene/test_playback_attr_3_cuda_presentmon_display_report.py
+        # (IntervalStatsFilterFixtureTests); this is the static ordering/text tripwire.
+        filter_line = self.template.index(
+            "$pmIntervalRows = @($pmRows | Where-Object "
+            "{ $null -ne $_.msBetweenDisplayChange -and $_.msBetweenDisplayChange -gt 0 })"
+        )
+        pm_rows_built = self.template.index("$pmRows = @($displayReport.selectedChainRows)")
+        get_stats_call = self.template.index(
+            "$pmStats = Get-Stats @($pmIntervalRows | ForEach-Object { [double]$_.msBetweenDisplayChange })"
+        )
+        self.assertLess(pm_rows_built, filter_line)
+        self.assertLess(filter_line, get_stats_call)
+        # The raw (unfiltered) array must never be the one handed to Get-Stats.
+        self.assertNotIn(
+            "Get-Stats @($pmRows | ForEach-Object { [double]$_.msBetweenDisplayChange })", self.template
+        )
+
+    def test_positive_samples_reflects_the_interval_filtered_count(self) -> None:
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol BLOCKER): manifest.presentMon.positiveSamples
+        # must count the same population presentMonStats was computed on ($pmIntervalRows), not
+        # every displayed row ($pmRows), which previously over-counted by including the
+        # interval-less NA-first-present row.
+        self.assertIn("positiveSamples=$pmIntervalRows.Count", self.template)
+        self.assertNotIn("positiveSamples=$pmRows.Count", self.template)
+
     def test_presentmon_capture_anchor_bracket_and_uncertainty_are_persisted(self) -> None:
         # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 2 / fable HARDENING): a single
         # guessed captureStartUtc had no stated error bar. The pre-spawn/post-spawn wall-clock

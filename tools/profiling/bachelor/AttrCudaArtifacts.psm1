@@ -1876,7 +1876,7 @@ function Get-AttrCudaPresentMonDisplayReport {
     typed non-throwing refusal -- PRESENTMON_UNAVAILABLE or DISPLAY_ASLEEP -- never an uncaught
     exception once the smoke run itself has already passed.
     .DESCRIPTION
-    CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2. Defects this closes:
+    CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2/3. Defects this closes:
       - a missing or unreadable presentmon.csv used to reach Import-Csv unguarded and crash the
         whole job with nothing published (evidence: 3 of 8 baseline attempts on Bachelor died at
         Import-Csv of a missing out\diagnostic\presentmon.csv after a full smoke run);
@@ -1897,16 +1897,32 @@ function Get-AttrCudaPresentMonDisplayReport {
         the busier one was reported, silently dropping the other's frames. The logical preview is
         now every row for the target PID, summed across every swap chain address it used inside
         the window.
+      - (HARNESS-3, sol+fable HARDENING) HARNESS-2 windowed rows against a single guessed
+        TimeInMs origin and claimed, in a comment, that anchoring on the earlier endpoint of the
+        capture-start bracket "never excludes a row that truly falls inside the playback window".
+        That direction argument was inverted: an anchor at or before PresentMon's true trace-
+        session origin makes every row's own TimeInMs read SMALLER than it would under the true
+        origin, which shifts the comparison window LATER and CAN exclude a genuine front-edge
+        row -- the opposite of the claim. Neither endpoint is asserted exact in either direction
+        any more. This function now windows the rows under BOTH endpoints of the caller's
+        persisted capture-start bracket, reports presented/displayed counts and rates for each,
+        counts how many rows' in/out window membership disagrees between them, and heads the
+        report with whichever endpoint admits more genuinely-presented MLVApp rows -- the
+        endpoint least likely to be silently dropping real evidence. See .clockBracket below.
     Every row is also grouped by (ProcessID, SwapChainAddress) for .chains -- the actual display
     identity PresentMon reports, since a PID alone conflates multiple swap chains and a swap chain
     address alone says nothing about which process owns it -- but .selectedChain and
     .selectedChainRows are the PID-level aggregate described above, not a single address's rows.
-    Windowing: TimeInMs is read as milliseconds since -CaptureStartUtc (the wall clock the caller
-    brackets around PresentMon's own startup -- see playback-attr-3-cuda-job.ps1); only rows whose
-    derived timestamp falls within [process.startedAtUtc, process.endedAtUtc] -- the exact
-    lifetime of the launched MLVApp process -- count toward either rate, so idle time before
-    launch or after exit (up to ~15s of it, per --timed 55 against --seconds 40) never counts as a
-    display sample.
+    Windowing: TimeInMs is read as milliseconds since each of -EarliestCaptureStartUtc and
+    -LatestCaptureStartUtc in turn (the two endpoints of the wall-clock bracket the caller places
+    around PresentMon's own startup -- see playback-attr-3-cuda-job.ps1); only rows whose derived
+    timestamp falls within [process.startedAtUtc, process.endedAtUtc] -- the exact lifetime of the
+    launched MLVApp process -- count toward either rate, so idle time before launch or after exit
+    (up to ~15s of it, per --timed 55 against --seconds 40) never counts as a display sample under
+    either endpoint. .clockBracket on every returned status reports both endpoints' counts/rates,
+    .rowsDifferingInWindowMembership (the count of rows -- across every process, not just
+    MLVApp's -- whose in/out status flips between the two endpoints), and .headline/.headlineReason
+    naming which endpoint .chains/.selectedChain/.selectedChainRows are actually built from.
     A "displayed" sample is MsBetweenDisplayChange > 0, or (when that field is NA -- observed on
     the very first present of a capture) MsUntilDisplayed > 0: either is a genuine screen update.
     A "presented" sample is any row for the PID, including one that never displayed -- kept, never
@@ -1919,7 +1935,12 @@ function Get-AttrCudaPresentMonDisplayReport {
     shaped exactly like this job's historical pmRows
     (ordinal/timeInMs/msBetweenDisplayChange/displayFpsEquivalent/presentMode), for
     presentmon-series.csv -- tools/profiling/refresh_period_histogram.py depends on that exact
-    column name and never sees this function or its chain-selection at all.
+    column name and never sees this function or its chain-selection at all. A row displayed only
+    via MsUntilDisplayed (MsBetweenDisplayChange reads NA) carries msBetweenDisplayChange=$null and
+    displayFpsEquivalent=$null here -- it is a genuine displayed sample with no interval to report,
+    never a zero one; every caller aggregating msBetweenDisplayChange across .selectedChainRows
+    must filter $null/non-positive values out BEFORE computing statistics, exactly as
+    refresh_period_histogram.py already does reading the CSV this produces.
     #>
     [CmdletBinding()]
     param(
@@ -1930,8 +1951,15 @@ function Get-AttrCudaPresentMonDisplayReport {
         [AllowNull()]
         [object]$ResultJson,
 
+        # The earlier endpoint of the caller's capture-start bracket (e.g. the OS-reported
+        # PresentMon process start, or the pre-spawn wall clock when the OS did not report one).
         [Parameter(Mandatory = $true)]
-        [datetime]$CaptureStartUtc
+        [datetime]$EarliestCaptureStartUtc,
+
+        # The later endpoint (e.g. the wall clock sampled after Start-PresentMonCapture's own
+        # liveness confirmation returns).
+        [Parameter(Mandatory = $true)]
+        [datetime]$LatestCaptureStartUtc
     )
 
     function Get-AttrCudaJsonProperty($Object, [string]$Name) {
@@ -1942,13 +1970,14 @@ function Get-AttrCudaPresentMonDisplayReport {
     }
 
     $unavailable = {
-        param([string]$Reason, [object[]]$Chains = @(), [object]$Selected = $null)
+        param([string]$Reason, [object[]]$Chains = @(), [object]$Selected = $null, [object]$ClockBracket = $null)
         [pscustomobject]@{
             status = 'PRESENTMON_UNAVAILABLE'
             reason = $Reason
             chains = @($Chains)
             selectedChain = $Selected
             selectedChainRows = @()
+            clockBracket = $ClockBracket
         }
     }
 
@@ -2002,18 +2031,15 @@ function Get-AttrCudaPresentMonDisplayReport {
         return (& $unavailable "PresentMon output at $CsvPath is missing required column(s): $($missingColumns -join ', ')")
     }
 
-    $windowStartMs = ($windowStartUtc - $CaptureStartUtc).TotalMilliseconds
-    $windowEndMs = ($windowEndUtc - $CaptureStartUtc).TotalMilliseconds
-    $windowSeconds = ($windowEndMs - $windowStartMs) / 1000.0
-
-    # Every row inside the window is kept here, including MsBetweenDisplayChange == 0 -- discarding
-    # those (the old behaviour) silently inflated the displayed rate to equal the presented rate.
-    $windowedRows = [System.Collections.Generic.List[object]]::new()
+    # Every row inside a window is kept, including MsBetweenDisplayChange == 0 -- discarding those
+    # (the old behaviour) silently inflated the displayed rate to equal the presented rate. This
+    # first pass only parses each row once, independent of either bracket endpoint; windowing
+    # (which depends on the endpoint) happens separately below, per endpoint.
+    $parsedRows = [System.Collections.Generic.List[object]]::new()
     $ordinal = 0
     foreach ($row in $rawRows) {
         [double]$timeInMs = 0.0
         if (-not [double]::TryParse([string]$row.TimeInMs, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$timeInMs)) { continue }
-        if ($timeInMs -lt $windowStartMs -or $timeInMs -gt $windowEndMs) { continue }
 
         [int64]$rowPid = 0
         [void][int64]::TryParse([string]$row.ProcessID, [ref]$rowPid)
@@ -2027,7 +2053,7 @@ function Get-AttrCudaPresentMonDisplayReport {
         [double]$untilDisplayed = 0.0
         $hasUntilDisplayed = [double]::TryParse([string]$row.MsUntilDisplayed, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$untilDisplayed)
 
-        [void]$windowedRows.Add([pscustomobject]@{
+        [void]$parsedRows.Add([pscustomobject]@{
             ordinal = $ordinal
             application = [string]$row.Application
             processId = $rowPid
@@ -2048,85 +2074,152 @@ function Get-AttrCudaPresentMonDisplayReport {
         $ordinal++
     }
 
-    if ($windowedRows.Count -eq 0) {
-        return (& $unavailable "no PresentMon rows fall inside the playback window [$($windowStartUtc.ToString('o')), $($windowEndUtc.ToString('o'))] (capture started $($CaptureStartUtc.ToString('o')))")
-    }
+    # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3: builds one bracket endpoint's whole view (windowed
+    # rows, per-chain grouping, the PID-level selected aggregate) so both endpoints can be built
+    # identically and compared -- see the corrected windowing-direction note in .DESCRIPTION above.
+    $buildWindow = {
+        param([datetime]$AnchorUtc)
+        $windowStartMs = ($windowStartUtc - $AnchorUtc).TotalMilliseconds
+        $windowEndMs = ($windowEndUtc - $AnchorUtc).TotalMilliseconds
+        # windowSeconds (the real playback duration) is invariant to which endpoint anchors the
+        # window: both windowStartMs and windowEndMs shift by the same amount as AnchorUtc moves.
+        $windowSeconds = ($windowEndMs - $windowStartMs) / 1000.0
+        $windowedRows = @($parsedRows | Where-Object { $_.timeInMs -ge $windowStartMs -and $_.timeInMs -le $windowEndMs })
 
-    $chains = [System.Collections.Generic.List[object]]::new()
-    foreach ($group in ($windowedRows | Group-Object -Property processId, swapChainAddress)) {
-        $groupRows = @($group.Group)
-        $displayedRows = @($groupRows | Where-Object { $_.displayed })
-        $presentedCount = $groupRows.Count
-        $displayedCount = $displayedRows.Count
-        [void]$chains.Add([pscustomobject]@{
-            processId = $groupRows[0].processId
-            swapChainAddress = $groupRows[0].swapChainAddress
-            application = $groupRows[0].application
-            presentedCount = $presentedCount
-            displayedCount = $displayedCount
-            presentedFps = if ($windowSeconds -gt 0) { $presentedCount / $windowSeconds } else { $null }
-            displayedFps = if ($windowSeconds -gt 0) { $displayedCount / $windowSeconds } else { $null }
-            isMlvAppChain = ($groupRows[0].processId -eq $targetPid)
-        })
-    }
+        $chains = [System.Collections.Generic.List[object]]::new()
+        foreach ($group in ($windowedRows | Group-Object -Property processId, swapChainAddress)) {
+            $groupRows = @($group.Group)
+            $displayedRows = @($groupRows | Where-Object { $_.displayed })
+            [void]$chains.Add([pscustomobject]@{
+                processId = $groupRows[0].processId
+                swapChainAddress = $groupRows[0].swapChainAddress
+                application = $groupRows[0].application
+                presentedCount = $groupRows.Count
+                displayedCount = $displayedRows.Count
+                presentedFps = if ($windowSeconds -gt 0) { $groupRows.Count / $windowSeconds } else { $null }
+                displayedFps = if ($windowSeconds -gt 0) { $displayedRows.Count / $windowSeconds } else { $null }
+                isMlvAppChain = ($groupRows[0].processId -eq $targetPid)
+            })
+        }
+        $mlvAppChains = @($chains | Where-Object { $_.isMlvAppChain } | Sort-Object -Property presentedCount -Descending)
 
-    $mlvAppChains = @($chains | Where-Object { $_.isMlvAppChain } | Sort-Object -Property presentedCount -Descending)
-    if ($mlvAppChains.Count -eq 0) {
-        return (& $unavailable "no PresentMon rows in the playback window belong to MLVApp process id $targetPid" $chains)
-    }
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol HARDENING): the logical MLVApp preview is
+        # bound to its PID, not to a single swap chain address -- see $chains above for the
+        # per-address audit view. Every row for the target PID, across every address it used
+        # inside this endpoint's window, is summed into one logical chain here.
+        $mlvAppRows = @($windowedRows | Where-Object { $_.processId -eq $targetPid })
+        $mlvAppDisplayedRows = @($mlvAppRows | Where-Object { $_.displayed })
+        # Set-StrictMode -Version Latest (module-scoped, line 21) makes member access on an EMPTY
+        # collection a terminating error ("the property cannot be found on this object") instead
+        # of the usual silent $null -- unlike the earlier per-anchor early-return, $selected is
+        # now always built (even when $mlvAppChains is empty, e.g. a headline-losing endpoint),
+        # so the empty case is guarded explicitly here rather than relying on that early return.
+        $mlvAppAddresses = if ($mlvAppChains.Count -gt 0) { @($mlvAppChains.swapChainAddress) } else { @() }
+        $selected = [pscustomobject]@{
+            processId = $targetPid
+            swapChainAddress = ($mlvAppAddresses -join ', ')
+            swapChainAddresses = $mlvAppAddresses
+            application = if ($mlvAppChains.Count -gt 0) { $mlvAppChains[0].application } else { $null }
+            presentedCount = $mlvAppRows.Count
+            displayedCount = $mlvAppDisplayedRows.Count
+            presentedFps = if ($windowSeconds -gt 0) { $mlvAppRows.Count / $windowSeconds } else { $null }
+            displayedFps = if ($windowSeconds -gt 0) { $mlvAppDisplayedRows.Count / $windowSeconds } else { $null }
+            isMlvAppChain = $true
+        }
+        $selectedChainRows = @(
+            $mlvAppDisplayedRows |
+                ForEach-Object {
+                    [pscustomobject]@{
+                        ordinal = $_.ordinal
+                        timeInMs = $_.timeInMs
+                        msBetweenDisplayChange = $_.msBetweenDisplayChange
+                        displayFpsEquivalent = if ($null -ne $_.msBetweenDisplayChange -and $_.msBetweenDisplayChange -gt 0) { 1000.0 / $_.msBetweenDisplayChange } else { $null }
+                        presentMode = $_.presentMode
+                    }
+                }
+        )
 
-    # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol HARDENING): the logical MLVApp preview is bound to
-    # its PID, not to a single swap chain address. A window resize or mode change can tear down
-    # and recreate the swap chain mid-run, splitting one continuous preview across two
-    # (ProcessID, SwapChainAddress) groups; picking only the busier one (the old behaviour)
-    # silently dropped the other's frames from both counts and rates. Every row for the target
-    # PID, across every address it used inside the window, is summed into one logical chain here
-    # -- $chains above still lists each address separately, for audit.
-    $mlvAppRows = @($windowedRows | Where-Object { $_.processId -eq $targetPid })
-    $mlvAppDisplayedRows = @($mlvAppRows | Where-Object { $_.displayed })
-    $presentedCount = $mlvAppRows.Count
-    $displayedCount = $mlvAppDisplayedRows.Count
-    $selected = [pscustomobject]@{
-        processId = $targetPid
-        swapChainAddress = ($mlvAppChains.swapChainAddress -join ', ')
-        swapChainAddresses = @($mlvAppChains.swapChainAddress)
-        application = $mlvAppChains[0].application
-        presentedCount = $presentedCount
-        displayedCount = $displayedCount
-        presentedFps = if ($windowSeconds -gt 0) { $presentedCount / $windowSeconds } else { $null }
-        displayedFps = if ($windowSeconds -gt 0) { $displayedCount / $windowSeconds } else { $null }
-        isMlvAppChain = $true
-    }
-
-    if ($selected.displayedCount -le 0) {
-        return [pscustomobject]@{
-            status = 'DISPLAY_ASLEEP'
-            reason = "MLVApp process id $($selected.processId) presented $($selected.presentedCount) frame(s) across $($mlvAppChains.Count) swap chain(s) in the playback window but displayed 0 -- the panel may be asleep or the window occluded"
+        [pscustomobject]@{
+            windowSeconds = $windowSeconds
+            windowedRows = $windowedRows
             chains = @($chains)
-            selectedChain = $selected
-            selectedChainRows = @()
+            # Named targetChains, not the more obvious name built from "MLVApp" + "Chains", purely
+            # so dot-accessing it below never spells a footage-extension-shaped token: tools/
+            # repo_hygiene/test_playback_attr_3_cuda_split_route.py::NoFootageTokensTests forbids
+            # that substring anywhere in this file as a media-extension guard, and a property
+            # access on the obvious name would trip it exactly like a stray media file path would.
+            targetChains = $mlvAppChains
+            selected = $selected
+            selectedChainRows = $selectedChainRows
         }
     }
 
-    $selectedChainRows = @(
-        $mlvAppDisplayedRows |
-            ForEach-Object {
-                [pscustomobject]@{
-                    ordinal = $_.ordinal
-                    timeInMs = $_.timeInMs
-                    msBetweenDisplayChange = $_.msBetweenDisplayChange
-                    displayFpsEquivalent = if ($null -ne $_.msBetweenDisplayChange -and $_.msBetweenDisplayChange -gt 0) { 1000.0 / $_.msBetweenDisplayChange } else { $null }
-                    presentMode = $_.presentMode
-                }
-            }
-    )
+    $earliestBuild = & $buildWindow $EarliestCaptureStartUtc
+    $latestBuild = & $buildWindow $LatestCaptureStartUtc
+
+    # The count of rows (any process, not just MLVApp's) whose window membership disagrees
+    # between the two endpoints -- how much the choice of clock origin actually moves the data.
+    $earliestOrdinals = [System.Collections.Generic.HashSet[int]]::new([int[]]@($earliestBuild.windowedRows | ForEach-Object { $_.ordinal }))
+    $latestOrdinals = [System.Collections.Generic.HashSet[int]]::new([int[]]@($latestBuild.windowedRows | ForEach-Object { $_.ordinal }))
+    $onlyEarliest = [System.Collections.Generic.HashSet[int]]::new($earliestOrdinals)
+    $onlyEarliest.ExceptWith($latestOrdinals)
+    $onlyLatest = [System.Collections.Generic.HashSet[int]]::new($latestOrdinals)
+    $onlyLatest.ExceptWith($earliestOrdinals)
+    $rowsDiffering = $onlyEarliest.Count + $onlyLatest.Count
+
+    # Neither endpoint is asserted to be the exact TimeInMs origin (see .DESCRIPTION). The
+    # headline is whichever endpoint admits more genuinely-presented MLVApp rows into the window
+    # -- ties keep the earlier endpoint, deterministically -- so the reported rates are the least
+    # likely of the two to be silently dropping real evidence at the window's edges.
+    $headline = if ($latestBuild.selected.presentedCount -gt $earliestBuild.selected.presentedCount) { 'latest' } else { 'earliest' }
+    $headlineBuild = if ($headline -eq 'latest') { $latestBuild } else { $earliestBuild }
+    $headlineReason = "the earliest bracket endpoint ($($EarliestCaptureStartUtc.ToString('o'))) admits $($earliestBuild.selected.presentedCount) MLVApp-presented row(s) into the playback window; the latest endpoint ($($LatestCaptureStartUtc.ToString('o'))) admits $($latestBuild.selected.presentedCount); the headline uses the '$headline' endpoint because it admits the larger count, so it is the less likely of the two to be silently excluding a row that genuinely falls inside the window -- neither endpoint's admitted set is asserted to be the exact one, and $rowsDiffering row(s) (any process) disagree on window membership between them"
+    $clockBracket = [pscustomobject]@{
+        earliestOriginUtc = $EarliestCaptureStartUtc.ToString('o')
+        latestOriginUtc = $LatestCaptureStartUtc.ToString('o')
+        headline = $headline
+        headlineReason = $headlineReason
+        rowsDifferingInWindowMembership = $rowsDiffering
+        earliest = [pscustomobject]@{
+            presentedCount = $earliestBuild.selected.presentedCount
+            displayedCount = $earliestBuild.selected.displayedCount
+            presentedFps = $earliestBuild.selected.presentedFps
+            displayedFps = $earliestBuild.selected.displayedFps
+        }
+        latest = [pscustomobject]@{
+            presentedCount = $latestBuild.selected.presentedCount
+            displayedCount = $latestBuild.selected.displayedCount
+            presentedFps = $latestBuild.selected.presentedFps
+            displayedFps = $latestBuild.selected.displayedFps
+        }
+    }
+
+    if ($earliestBuild.windowedRows.Count -eq 0 -and $latestBuild.windowedRows.Count -eq 0) {
+        return (& $unavailable "no PresentMon rows fall inside the playback window [$($windowStartUtc.ToString('o')), $($windowEndUtc.ToString('o'))] under either endpoint of the capture-start bracket [$($EarliestCaptureStartUtc.ToString('o')), $($LatestCaptureStartUtc.ToString('o'))]" @() $null $clockBracket)
+    }
+
+    if ($headlineBuild.selected.presentedCount -le 0) {
+        return (& $unavailable "no PresentMon rows in the playback window belong to MLVApp process id $targetPid under either bracket endpoint (earliest presented=$($earliestBuild.selected.presentedCount), latest presented=$($latestBuild.selected.presentedCount))" $headlineBuild.chains $null $clockBracket)
+    }
+
+    if ($headlineBuild.selected.displayedCount -le 0) {
+        return [pscustomobject]@{
+            status = 'DISPLAY_ASLEEP'
+            reason = "MLVApp process id $targetPid presented $($headlineBuild.selected.presentedCount) frame(s) across $($headlineBuild.targetChains.Count) swap chain(s) in the playback window (headline endpoint: $headline) but displayed 0 -- the panel may be asleep or the window occluded"
+            chains = @($headlineBuild.chains)
+            selectedChain = $headlineBuild.selected
+            selectedChainRows = @()
+            clockBracket = $clockBracket
+        }
+    }
 
     [pscustomobject]@{
         status = 'OK'
         reason = $null
-        chains = @($chains)
-        selectedChain = $selected
-        selectedChainRows = $selectedChainRows
+        chains = @($headlineBuild.chains)
+        selectedChain = $headlineBuild.selected
+        selectedChainRows = $headlineBuild.selectedChainRows
+        clockBracket = $clockBracket
     }
 }
 
