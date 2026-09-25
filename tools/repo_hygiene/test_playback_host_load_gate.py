@@ -142,6 +142,11 @@ class HostLoadSnapshotTests(_ProbeCase):
             self.assertNotIn("/", name)
             self.assertNotIn(":", name)
 
+    @unittest.skipUnless(
+        os.name == "nt",
+        "asserts SYSTEM_TIMES_COLLECTED=True, which needs the Windows-only GetSystemTimes syscall; "
+        "on other hosts systemTimesCollected is correctly False.",
+    )
     def test_a_throwing_get_process_during_top_consumers_gathering_does_not_block_collection(self) -> None:
         # round 7: the per-process ENUMERATION that used to drive the load decision itself
         # (rounds 4-6's totalCpuSeconds/processCpuSecondsById summing loop) is retired entirely --
@@ -164,6 +169,11 @@ class HostLoadSnapshotTests(_ProbeCase):
         proc_count_line = next(l for l in proc.stdout.splitlines() if l.startswith("PROC_COUNT="))
         self.assertEqual(proc_count_line, "PROC_COUNT=")
 
+    @unittest.skipUnless(
+        os.name == "nt",
+        "asserts SYSTEM_TIMES_COLLECTED=True, which needs the Windows-only GetSystemTimes syscall; "
+        "on other hosts systemTimesCollected is correctly False.",
+    )
     def test_skip_evidence_collection_calls_neither_cim_nor_get_process(self) -> None:
         # round 8 (sol MAJOR item 2): -SkipEvidenceCollection must skip the ENTIRE evidence block
         # -- both CIM calls and Get-Process -- so a during-leg sample really is just the syscall
