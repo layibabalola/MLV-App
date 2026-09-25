@@ -336,6 +336,123 @@ class HostLoadSnapshotPrivacyTests(_ProbeCase):
 
 
 @requires_pwsh
+class WaitSystemCpuSettleSanitizationTests(_ProbeCase):
+    """round 9 (sol/fable minor, item 3): round 8 sanitized this catch (type name only, matching
+    every other sanitized catch in the file) but it was left with no executable regression test --
+    both reviewers named it, and the pattern already existed for Get-HostLoadSnapshot's own catch
+    at test_uncollectable_snapshot_error_is_sanitized_not_raw_exception_text above. Overrides
+    Get-SystemCpuPercent to throw with a message that embeds a path/host identifier and asserts
+    only the exception's bare type name reaches $result.failure."""
+
+    script = SMOKE_SCRIPT
+    functions = ["Get-SystemCpuPercent", "Wait-SystemCpuSettle"]
+
+    def test_a_throwing_cpu_sample_records_type_name_only_not_raw_message_text(self) -> None:
+        proc = self.run_snippet(
+            "function Get-SystemCpuPercent {\n"
+            "    throw [System.Management.Automation.RuntimeException]::new("
+            "'CIM connection to \\\\BACHELOR\\root\\cimv2 failed')\n"
+            "}\n"
+            "$r = Wait-SystemCpuSettle -ThresholdPercent 5 -StableMs 100 -MaxMs 1000\n"
+            "Write-Host \"FAILURE=$($r.failure)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        failure_line = next(l for l in proc.stdout.splitlines() if l.startswith("FAILURE="))
+        failure_text = failure_line[len("FAILURE="):]
+        self.assertRegex(failure_text, r"^[A-Za-z0-9_.]+$")
+        self.assertNotIn("BACHELOR", failure_text)
+        self.assertNotIn("\\", failure_text)
+        self.assertNotIn("cimv2", failure_text)
+
+
+@requires_pwsh
+class GuiSmokeScreenshotCatchSanitizationTests(unittest.TestCase):
+    """round 9 (sol/fable minor, item 3): the screenshot and window-screenshot validation catches
+    (both sanitized at round 8 to record the exception's type name only) live in the main script
+    body, not inside a named function, so _extract_functions cannot splice them -- extracted here by
+    literal text search instead (same technique as the P3/summarizer guard-execution tests), then
+    executed against a throwing Get-ScreenshotImageMetadata whose message embeds a path, proving
+    only the type name -- never the message -- reaches $captureBindingFailures."""
+
+    # round 9: NOT "if ($CaptureScreenshot) {" -- that literal string appears multiple times
+    # earlier in this same script (argument-building sections), so a naive .index() search would
+    # splice the wrong block entirely. These inner-if markers are unique.
+    SCREENSHOT_START_MARKER = "if (-not (Test-Path -LiteralPath $screenshotPath)) {"
+    SCREENSHOT_END_MARKER = 'GUI smoke screenshot validation failed: $($_.Exception.GetType().Name)"'
+    WINDOW_START_MARKER = "if (-not (Test-Path -LiteralPath $windowScreenshotPath)) {"
+    WINDOW_END_MARKER = 'GUI smoke window-screenshot validation failed: $($_.Exception.GetType().Name)"'
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="hostload-screenshot-catch-probe-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.source = SMOKE_SCRIPT.read_text(encoding="utf-8")
+
+    def _run(self, script_text: str) -> subprocess.CompletedProcess:
+        script = self.tmp / "run.ps1"
+        script.write_text(script_text, encoding="utf-8")
+        return subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(script)],
+            capture_output=True, text=True,
+        )
+
+    def test_a_throwing_screenshot_metadata_read_records_type_name_only(self) -> None:
+        guard_block = _extract_block(
+            self.source, self.SCREENSHOT_START_MARKER, self.SCREENSHOT_END_MARKER, trailing_lines=2)
+        screenshot_path = self.tmp / "shot.png"
+        screenshot_path.write_bytes(b"not a real png, just needs to exist")
+        proc = self._run(
+            "$ErrorActionPreference = 'Stop'\n"
+            "function Get-ScreenshotImageMetadata {\n"
+            "    param($Path)\n"
+            "    throw [System.InvalidOperationException]::new('failed reading C:\\Users\\secret\\footage.dat')\n"
+            "}\n"
+            "function Get-ScreenshotColorArtifactScan { param($Path) $null }\n"
+            "$CaptureScreenshot = $true\n"
+            f"$screenshotPath = '{screenshot_path}'\n"
+            "$ScreenshotDelayMs = 0; $ScreenshotWindowWaitMs = 0; $ScreenshotCaptureTimeoutMs = 0\n"
+            "$screenshotCapture = $null\n"
+            "$colorArtifactScan = $null\n"
+            "$captureBindingFailures = @()\n"
+            f"{guard_block}\n"
+            "Write-Host \"FAILURES=$($captureBindingFailures -join '|')\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        failures_line = next(l for l in proc.stdout.splitlines() if l.startswith("FAILURES="))
+        self.assertIn("InvalidOperationException", failures_line)
+        self.assertNotIn("secret", failures_line)
+        self.assertNotIn("\\", failures_line)
+        self.assertNotIn("footage.dat", failures_line)
+
+    def test_a_throwing_window_screenshot_metadata_read_records_type_name_only(self) -> None:
+        guard_block = _extract_block(
+            self.source, self.WINDOW_START_MARKER, self.WINDOW_END_MARKER, trailing_lines=2)
+        window_screenshot_path = self.tmp / "window-shot.png"
+        window_screenshot_path.write_bytes(b"not a real png, just needs to exist")
+        proc = self._run(
+            "$ErrorActionPreference = 'Stop'\n"
+            "function Get-ScreenshotImageMetadata {\n"
+            "    param($Path)\n"
+            "    throw [System.InvalidOperationException]::new('failed reading C:\\Users\\secret\\footage.dat')\n"
+            "}\n"
+            f"$windowScreenshotPath = '{window_screenshot_path}'\n"
+            "$fpsStatusCropPath = $null\n"
+            "$windowScreenshotCapture = $null\n"
+            "$fpsStatusCropCapture = $null\n"
+            "$captureBindingFailures = @()\n"
+            f"{guard_block}\n"
+            "Write-Host \"FAILURES=$($captureBindingFailures -join '|')\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        failures_line = next(l for l in proc.stdout.splitlines() if l.startswith("FAILURES="))
+        self.assertIn("InvalidOperationException", failures_line)
+        self.assertNotIn("secret", failures_line)
+        self.assertNotIn("\\", failures_line)
+        self.assertNotIn("footage.dat", failures_line)
+
+
+@requires_pwsh
 class HostLoadVerdictTests(_ProbeCase):
     """tools/profiling/run-release-gui-smoke.ps1's Get-HostLoadVerdict -- the bar and the three
     outcomes (quiet / exceeded / unknown), never two.
@@ -2178,6 +2295,110 @@ class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
         self.assertTrue(self.REAL_FPS_PATTERN.search(self._strip_comments(body)))
         self.assertIn("host_load_provisional", body)  # the OLD substring-presence check would pass
         self.assertFalse(self._is_bound(body))  # the round-6 detector must still refuse it
+
+
+class HostLoadReaderPredicateCensusTests(unittest.TestCase):
+    """round 9 (fable minor, item 3): sol/fable round 8 accepted six-way duplication of the
+    canonical quiet-AND-not-provisional predicate across compare-machine-perf.ps1,
+    compare-release-gui-smoke-ab.ps1, run-release-cuda-playback-ab.ps1,
+    run-ultramagnus-p3-validation.ps1 (twice), and summarize-local-cuda-proof.ps1 -- each site
+    individually protected by its own exceeded/false behavioural test, but nothing structural
+    pinned either the SET of sites or the SHAPE they must share. fable's own words: "nothing
+    structural catches a seventh reader added later without the predicate." This is the reader-side
+    analogue of CompareMachinePerfRowHostLoadCensusTests above (which does the same job for
+    PRODUCER rows): it scans every reader script for a predicate-DEFINING line -- one that combines
+    a provisional-named identifier with an -or plus an -eq/-ne comparison against the quiet/
+    unknown/exceeded state literals, in EITHER polarity, so a near-miss shape (wrong operator,
+    wrong comparand) cannot silently evade the locator the way it evaded the exact-shape regex
+    alone -- and asserts (a) there are exactly the six known sites today, re-derived from the live
+    files, and (b) every single one of them matches the canonical
+    `($xDeclared -or $yState -ne "quiet")` shape verbatim, not merely a related one.
+
+    run-local-gpu-capability.ps1 and run-ultra-magnus-profile.ps1 are excluded (not silently
+    ignored): fable's round-8 repo-wide enumeration confirmed both only ever WRITE
+    host_load_provisional = $true/$null and never derive cleanliness from state, so they are
+    producers, not readers, of this predicate."""
+
+    READER_SCRIPTS = {
+        "compare-machine-perf.ps1": COMPARE_MACHINE_PERF_SCRIPT,
+        "compare-release-gui-smoke-ab.ps1": COMPARE_SCRIPT,
+        "run-release-cuda-playback-ab.ps1": CUDA_AB_SCRIPT,
+        "run-ultramagnus-p3-validation.ps1": P3_VALIDATION_SCRIPT,
+        "summarize-local-cuda-proof.ps1": CUDA_PROOF_SUMMARIZER_SCRIPT,
+    }
+    EXPECTED_SITE_COUNT = 6
+
+    # A predicate-DEFINING line: mentions a provisional-named identifier, an "-or", and an
+    # "-eq"/"-ne" comparison against one of the three host-load state literals, all on the same
+    # (comment-stripped) line. Deliberately broader than the canonical shape itself (which only
+    # ever uses "-ne \"quiet\"") so a drifted near-miss -- e.g. the pre-round-7 `-eq "unknown"`
+    # shape, which misses an exceeded/false leg -- is still located as a site to check, not missed
+    # entirely because it doesn't look like the fix yet.
+    _LOOSE_LOCATOR_PATTERN = re.compile(
+        r'^(?=.*[Pp]rovisional)(?=.*-or)(?=.*(?:-eq|-ne)\s*"(?:quiet|unknown|exceeded)").+$',
+        re.MULTILINE,
+    )
+    # The canonical shape itself: <ident-containing-Provisional> -or <ident-containing-State> -ne
+    # "quiet", whatever variable-name prefix each site uses (legProvisionalDeclared,
+    # clipHostLoadProvisionalDeclared, ...).
+    CANONICAL_PREDICATE_PATTERN = re.compile(
+        r'\(\s*\$[A-Za-z0-9_]*[Pp]rovisional[A-Za-z0-9_]*\s*-or\s*'
+        r'\$[A-Za-z0-9_]*[Ss]tate[A-Za-z0-9_]*\s*-ne\s*"quiet"\s*\)'
+    )
+
+    @staticmethod
+    def _strip_comments(text: str) -> str:
+        return "\n".join(re.sub(r"#.*$", "", line) for line in text.splitlines())
+
+    def test_every_reader_predicate_line_is_the_canonical_shape_and_the_set_is_complete(self) -> None:
+        matches: list[tuple[str, str]] = []
+        for name, path in self.READER_SCRIPTS.items():
+            code_only = self._strip_comments(path.read_text(encoding="utf-8"))
+            for line in self._LOOSE_LOCATOR_PATTERN.findall(code_only):
+                matches.append((name, line.strip()))
+        self.assertEqual(
+            len(matches), self.EXPECTED_SITE_COUNT,
+            f"expected exactly {self.EXPECTED_SITE_COUNT} reader-predicate sites (the six-way "
+            f"duplication accepted at round 8), found {len(matches)}: {matches}. A different count "
+            "means either a new reader appeared (verify it uses the canonical shape below, then "
+            "update this pin deliberately) or an existing one was removed.",
+        )
+        non_canonical = [
+            (name, line) for name, line in matches
+            if not self.CANONICAL_PREDICATE_PATTERN.search(line)
+        ]
+        self.assertEqual(
+            non_canonical, [],
+            "reader predicate line(s) do not match the canonical quiet-AND-not-provisional "
+            f"expression verbatim: {non_canonical}",
+        )
+
+    def test_the_pre_round_7_eq_unknown_shape_would_be_located_and_rejected(self) -> None:
+        # fable's named historical defect (round 5/6, closed at round 7): checking
+        # state=="unknown" instead of state!="quiet" misses an exceeded/false leg entirely
+        # (state="exceeded", provisional=false slips through). Proves the LOOSE locator still
+        # FINDS this drifted shape (it doesn't require the canonical operator/literal to match) and
+        # that the CANONICAL pattern correctly refuses it -- the census does not merely accept
+        # anything that mentions provisional and state together.
+        drifted = '$provisional = ($provisionalDeclared -or $state -eq "unknown")'
+        self.assertRegex(drifted, self._LOOSE_LOCATOR_PATTERN)
+        self.assertIsNone(self.CANONICAL_PREDICATE_PATTERN.search(drifted))
+
+    def test_a_seventh_reader_with_a_fresh_variable_prefix_would_still_be_recognized_as_canonical(self) -> None:
+        # Sanity check on the patterns themselves: a synthetic seventh site using a variable-name
+        # prefix that appears nowhere in the real six sites still matches both patterns, proving
+        # this census is not accidentally keyed to the six existing identifier names.
+        synthetic = '$xProvisional = ($xProvisionalDeclared -or $xState -ne "quiet")'
+        self.assertRegex(synthetic, self._LOOSE_LOCATOR_PATTERN)
+        self.assertRegex(synthetic, self.CANONICAL_PREDICATE_PATTERN)
+
+    def test_a_comment_only_mention_is_not_located_as_a_site(self) -> None:
+        # Mirrors the row census's comment-stripping guard: a mention of provisional/state/quiet
+        # that exists only in a comment (this file's own round-8 rationale comments say exactly
+        # this phrase) must not be counted as a predicate-defining site.
+        commented = '# note): clean iff state=="quiet" AND provisional==false; every other combo\n'
+        code_only = self._strip_comments(commented)
+        self.assertEqual(self._LOOSE_LOCATOR_PATTERN.findall(code_only), [])
 
 
 @requires_pwsh
