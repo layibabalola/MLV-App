@@ -138,6 +138,22 @@ def _extract_balanced(source, open_index, open_char, close_char):
     return source[open_index + 1:i - 1]
 
 
+def _balanced_end_offset(source, open_index, open_char, close_char):
+    """Same walk as _extract_balanced, but returns the offset just past the
+    matching close_char instead of the substring between them -- needed to
+    check what comes AFTER a call, not just what is inside it."""
+    assert source[open_index] == open_char
+    depth = 1
+    i = open_index + 1
+    while depth > 0:
+        if source[i] == open_char:
+            depth += 1
+        elif source[i] == close_char:
+            depth -= 1
+        i += 1
+    return i
+
+
 def _split_top_level_args(text):
     args = []
     depth = 0
@@ -440,6 +456,26 @@ class MainWindowWiringTests(unittest.TestCase):
             "the accumulator must be fed DIRECTLY by offeredAdvance(...)'s "
             "return value with nothing else (e.g. a `0 * ` multiplier) "
             "between the `+=` and the call -- got %r" % between)
+
+    def test_drop_frame_advance_policy_call_has_no_suffix_before_the_terminating_semicolon(self):
+        # round 11 (fable MINOR, "suffix insertion survives the census"):
+        # the round-10 check above only pins the text BETWEEN `+=` and the
+        # call -- it says nothing about what follows the call's closing
+        # paren. `... ui->spinBoxCutOut->value() - 1 ) * 0.0;` still passes
+        # every prefix/args/whitespace-between check because all of those
+        # only look at the call's arguments and what precedes them, not
+        # what comes after. Require nothing but whitespace between the
+        # call's closing paren and the statement's terminating `;`.
+        marker_offset = self.source.index(DROP_FRAME_POLICY_MARKER)
+        open_paren = marker_offset + len(DROP_FRAME_POLICY_MARKER) - 1
+        call_end = _balanced_end_offset(self.source, open_paren, "(", ")")
+        semicolon_offset = self.source.index(";", call_end)
+        suffix = self.source[call_end:semicolon_offset]
+        self.assertRegex(
+            suffix, r"^\s*$",
+            "nothing but whitespace may sit between offeredAdvance(...)'s "
+            "closing paren and the statement's terminating ';' (e.g. a "
+            "`* 0.0` suffix multiplier must fail this) -- got %r" % suffix)
 
     def test_drop_frame_source_frames_advanced_is_computed_from_the_live_frame_rate_and_time_diff(self):
         # round 10 (fable MINOR): the upstream producer of
