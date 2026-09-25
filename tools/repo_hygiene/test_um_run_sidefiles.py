@@ -11,6 +11,7 @@ The placement code is exercised two ways:
 
 from __future__ import annotations
 
+import re
 import hashlib
 import json
 import os
@@ -20,6 +21,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+
+# hub: pwsh colours its error view with ANSI escapes whenever the parent environment advertises a colour
+# terminal (e.g. TERM=xterm-256color), and a wrapped error line then carries an escape mid-phrase. Strip them
+# so the phrase assertions below do not depend on the caller's terminal.
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
 
 ROOT = Path(__file__).resolve().parents[2]
 UM_RUN = ROOT / "tools" / "profiling" / "um-run.ps1"
@@ -679,7 +686,7 @@ class UmRunEndToEndTests(_Share):
         # message must disclose that rather than assert a stronger guarantee than this client can
         # actually prove.
         proc = self.submit("-JobId", "demo", max_queue_wait_sec="0")
-        combined = proc.stdout + proc.stderr
+        combined = " ".join(_ANSI_ESCAPE.sub("", proc.stdout + proc.stderr).replace("|", " ").split())
         self.assertIn("RETRACTED:", combined, combined)
         self.assertIn("per-poll inbox listing can be stale", combined, combined)
         self.assertIn("launch-failure receipt", combined, combined)
@@ -745,7 +752,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertEqual(proc.returncode, 0, combined)
         self.assertNotIn("Timed out", combined, combined)
 
@@ -800,7 +807,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertIn("UNRESOLVED:", combined, combined)
         self.assertIn("claimed by the agent", combined, combined)
         self.assertNotIn("RETRACTED", combined, combined)
@@ -848,7 +855,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotEqual(proc.returncode, 0, combined)
         self.assertIn("UNRESOLVED:", combined, combined)
         self.assertIn("claimed by the agent", combined, combined)
@@ -897,7 +904,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotEqual(proc.returncode, 0, combined)
         self.assertIn("UNRESOLVED:", combined, combined)
         self.assertIn("claimed by the agent", combined, combined)
@@ -950,7 +957,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertEqual(proc.returncode, 0, combined)
         self.assertNotIn("UNRESOLVED", combined, combined)
 
@@ -1022,7 +1029,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotIn("was never claimed", combined, combined)
         self.assertNotIn("THREW", combined, combined)
         self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
@@ -1097,7 +1104,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotIn("was never claimed", combined, combined)
         self.assertNotIn("THREW", combined, combined)
         self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
@@ -1158,7 +1165,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotIn("RETRACTED", combined, combined)
         self.assertNotIn("THREW", combined, combined)
         self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
@@ -1272,7 +1279,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotIn("THREW", combined, combined)
         self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
 
@@ -1331,7 +1338,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotIn("THREW", combined, combined)
         self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
 
@@ -1494,7 +1501,7 @@ class UmRunEndToEndTests(_Share):
         # continuation line with a literal "| " margin -- both would otherwise split a long
         # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
         # length rather than content. None of this file's own asserted text ever contains "|".
-        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        combined = " ".join(_ANSI_ESCAPE.sub("", (stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertEqual(proc.returncode, 0, combined)
         self.assertNotIn("Timed out", combined, combined)
 
