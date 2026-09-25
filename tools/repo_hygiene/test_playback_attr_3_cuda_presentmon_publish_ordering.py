@@ -242,6 +242,86 @@ class TemplateOrderingTests(unittest.TestCase):
             module_text,
         )
 
+    def test_start_presentmon_capture_is_wrapped_in_try_catch_not_left_uncaught(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: the call site used to sit bare inside the outer
+        # try/finally (which has no catch of its own) -- either of Start-PresentMonCapture's own
+        # throws would crash the whole job with a raw PowerShell error. Now caught, typed, and
+        # exits 23 like every other PresentMon failure.
+        spawn_call = self.template.index("$presentMonProc = Start-PresentMonCapture $presentMonPath")
+        try_start = self.template.rindex("try {", 0, spawn_call)
+        catch_start = self.template.index("} catch {", spawn_call)
+        error_capture = self.template.index("$presentMonSpawnError = $_.Exception.Message", catch_start)
+        typed_check = self.template.index("if ($null -ne $presentMonSpawnError) {", error_capture)
+        typed_result = self.template.index("result='PRESENTMON_UNAVAILABLE'", typed_check)
+        typed_exit = self.template.index("exit 23", typed_result)
+        self.assertLess(try_start, spawn_call)
+        self.assertLess(spawn_call, catch_start)
+        self.assertLess(catch_start, error_capture)
+        self.assertLess(error_capture, typed_check)
+        self.assertLess(typed_check, typed_result)
+        self.assertLess(typed_result, typed_exit)
+        # This typed check must run strictly before the smoke run is ever launched -- a spawn
+        # failure means no app-side measurement exists yet to preserve.
+        smoke_launch = self.template.index("$smokeLaunchException = $null")
+        self.assertLess(typed_exit, smoke_launch)
+
+    def test_the_display_and_wait_failure_branches_carry_a_present_mon_status_field(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: every typed PresentMon refusal (spawn, wait, parse/
+        # display) now tags presentMonStatus='unavailable' -- a coarse field simple downstream
+        # consumers can key on without re-deriving it from .status/exit code.
+        self.assertEqual(self.template.count("presentMonStatus='unavailable'"), 3)
+
+    def test_the_display_failure_branch_carries_the_already_computed_app_side_measurement(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: the backend-eligibility/GPU-frames gates and the
+        # region timing stats have ALL already run and succeeded by the time displayReport.status
+        # is checked -- discarding them here (the pre-fix behaviour) threw away a leg whose own
+        # app-side measurement was fine, just because PresentMon itself could not verify display.
+        report_check = self.template.index("if ($displayReport.status -ne 'OK') {")
+        typed_exit = self.template.index("exit $displayExitCode", report_check)
+        for field in ("diagnostics=$diagnostics", "gpuSummary=$gpuSummary", "gpuFramesTotal=$gpuFramesTotal",
+                      "frameRows=$rows.Count", "regions=$stats"):
+            with self.subTest(field=field):
+                pos = self.template.index(field, report_check)
+                self.assertLess(pos, typed_exit)
+
+    def test_the_wait_failure_branch_carries_the_frame_row_count(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: $rows is already parsed and published by the time a
+        # PresentMon WAIT failure can happen -- carried into that typed refusal too.
+        typed_check = self.template.index("if ($null -ne $presentMonWaitError) {")
+        typed_exit = self.template.index("exit 23", typed_check)
+        frame_rows = self.template.index("frameRows=$rows.Count", typed_check)
+        self.assertLess(typed_check, frame_rows)
+        self.assertLess(frame_rows, typed_exit)
+
+    def test_the_success_path_derives_ok_or_degraded_from_the_interval_filtered_count(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: 'degraded' -- never silently 'ok' -- when display was
+        # confirmed but no row carried a positive MsBetweenDisplayChange interval (the disclosed
+        # "very thin admitted-row count" full-screen gap). Must be derived from
+        # $pmIntervalRows.Count (the same population Get-Stats above already runs on), not
+        # $pmRows.Count (every displayed row, which over-counts exactly the population this
+        # status exists to distinguish).
+        self.assertIn(
+            "$presentMonStatus = if ($pmIntervalRows.Count -gt 0) { 'ok' } else { 'degraded' }",
+            self.template,
+        )
+        self.assertNotIn(
+            "$presentMonStatus = if ($pmRows.Count -gt 0) { 'ok' } else { 'degraded' }",
+            self.template,
+        )
+        pm_rows_built = self.template.index("$pmRows = @($displayReport.selectedChainRows)")
+        status_assigned = self.template.index("$presentMonStatus = if ($pmIntervalRows.Count -gt 0)")
+        self.assertLess(pm_rows_built, status_assigned)
+
+    def test_present_modes_are_a_field_of_get_attr_cuda_present_mon_display_report(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: the module's own chain/selectedChain objects, not a
+        # job-level re-derivation -- a full-screen leg's missing-samples diagnosis needs this on
+        # every chain the function already builds, never a second copy that could drift from it.
+        module_text = MODULE.read_text(encoding="utf-8")
+        start = module_text.index("function Get-AttrCudaPresentMonDisplayReport {")
+        end = module_text.index("\n}\n\nExport-ModuleMember", start)
+        function_text = module_text[start:end]
+        self.assertEqual(function_text.count("presentModes = @("), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

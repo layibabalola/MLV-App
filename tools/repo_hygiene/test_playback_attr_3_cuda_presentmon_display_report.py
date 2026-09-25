@@ -609,5 +609,167 @@ class IntervalStatsFilterFixtureTests(_ReportCase):
         self.assertNotAlmostEqual(stats["fpsEquivalentMean"], 1000.0 / 8.3)
 
 
+@requires_pwsh
+class PresentModeBreakdownFixtureTests(_ReportCase):
+    """PRESENTMON-HARNESS-ROBUSTNESS-1: every chain -- the audit list and the MLVApp PID-level
+    aggregate alike -- records every PresentMode it observed with its own row count. Counts
+    alone cannot explain WHY a leg lost most of its PresentMon samples (the "very thin
+    admitted-row count" gap disclosed on CUDA-PLAYBACK-FULLSCREEN-UI-1 r2b); a PresentMode drop
+    (e.g. Hardware: Independent Flip falling to Composed: Flip mid-capture) is a genuine signal
+    PresentMon itself already reports, so this makes it visible in the evidence a future
+    full-screen leg publishes instead of needing a live repro to diagnose."""
+
+    def test_the_mlvapp_chain_reports_every_present_mode_with_its_own_count(self) -> None:
+        rows = [
+            _csv_row(present_mode="Hardware: Independent Flip", time_in_ms=5000 + i * 1000)
+            for i in range(3)
+        ]
+        rows += [
+            _csv_row(present_mode="Composed: Flip", time_in_ms=9000 + i * 1000)
+            for i in range(2)
+        ]
+        path = self._write_csv(rows)
+
+        report = self.call(path, _result_json())
+
+        self.assertEqual(report["status"], "OK", report)
+        modes = {m["presentMode"]: m["count"] for m in report["selectedChain"]["presentModes"]}
+        self.assertEqual(modes, {"Hardware: Independent Flip": 3, "Composed: Flip": 2})
+        # The per-chain audit entry (report["chains"]) must agree with the aggregate -- there is
+        # only one chain here, so its breakdown is identical.
+        chain_modes = {m["presentMode"]: m["count"] for m in report["chains"][0]["presentModes"]}
+        self.assertEqual(chain_modes, modes)
+
+    def test_a_foreign_chain_carries_its_own_present_modes_independently(self) -> None:
+        rows = [_csv_row(time_in_ms=5000)]  # MLVApp's own default mode, 1 row
+        rows += [
+            _csv_row(
+                application="dwm.exe", process_id=999, swap_chain="0xBBB",
+                present_mode="Composed: Copy with GPU GDI", time_in_ms=6000 + i * 1000,
+            )
+            for i in range(4)
+        ]
+        path = self._write_csv(rows)
+
+        report = self.call(path, _result_json())
+
+        self.assertEqual(report["status"], "OK", report)
+        foreign = next(c for c in report["chains"] if not c["isMlvAppChain"])
+        self.assertEqual(
+            foreign["presentModes"], [{"presentMode": "Composed: Copy with GPU GDI", "count": 4}]
+        )
+        mlvapp_modes = {m["presentMode"]: m["count"] for m in report["selectedChain"]["presentModes"]}
+        self.assertEqual(mlvapp_modes, {"Hardware: Independent Flip": 1})
+
+    def test_a_thin_single_row_leg_still_reports_its_one_present_mode(self) -> None:
+        # The exact shape of the disclosed full-screen evidence gap: presentedCount=1,
+        # displayedCount=1 -- this is the one piece of context that could have explained it.
+        # (No comma in the mode string: this fixture's own writer is a plain unquoted CSV join,
+        # so a comma inside a field value would corrupt the column count -- unrelated to the
+        # function under test.)
+        path = self._write_csv([_csv_row(present_mode="Hardware: Legacy Flip Independent Flip", time_in_ms=5000)])
+
+        report = self.call(path, _result_json())
+
+        self.assertEqual(report["status"], "OK", report)
+        self.assertEqual(report["selectedChain"]["presentedCount"], 1)
+        self.assertEqual(
+            report["selectedChain"]["presentModes"],
+            [{"presentMode": "Hardware: Legacy Flip Independent Flip", "count": 1}],
+        )
+
+
+@requires_pwsh
+class PresentMonStatusFixtureTests(_ReportCase):
+    """PRESENTMON-HARNESS-ROBUSTNESS-1: the job's own presentMonStatus/-Reason assignment,
+    EXECUTED verbatim from playback-attr-3-cuda-job.ps1 (never hand-reimplemented) against the
+    module's real output. Must read 'degraded' -- never silently 'ok' -- when
+    $pmIntervalRows is empty despite a genuinely displayed row (the exact "very thin
+    admitted-row count" full-screen gap this round closes), and 'ok' once at least one positive
+    interval sample exists."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start = text.index("$presentMonStatus = if ($pmIntervalRows.Count -gt 0)")
+        end = text.index("\n\n$dllSha256Lower", start)
+        cls.status_source = text[start:end]
+        assert "'degraded'" in cls.status_source, cls.status_source
+        assert "'ok'" in cls.status_source, cls.status_source
+
+    def _run_status(self, csv_path: Path, result_json: dict) -> dict:
+        out_path = self.tmp / "status-out.json"
+        result_json_path = self.tmp / "result.json"
+        result_json_path.write_text(json.dumps(result_json), encoding="utf-8")
+        script = self.tmp / "probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"$captureStart = [datetime]::Parse('{CAPTURE_START_UTC}', $null, "
+            "[Globalization.DateTimeStyles]::RoundtripKind)\n"
+            f"$csvPath = '{csv_path}'\n"
+            f"$resultJson = (Get-Content -LiteralPath '{result_json_path}' -Raw | ConvertFrom-Json)\n"
+            "$report = Get-AttrCudaPresentMonDisplayReport -CsvPath $csvPath -ResultJson $resultJson "
+            "-EarliestCaptureStartUtc $captureStart -LatestCaptureStartUtc $captureStart\n"
+            "$pmRows = @($report.selectedChainRows)\n"
+            "$pmIntervalRows = @($pmRows | Where-Object "
+            "{ $null -ne $_.msBetweenDisplayChange -and $_.msBetweenDisplayChange -gt 0 })\n"
+            f"{self.status_source}\n"
+            "[pscustomobject]@{ presentMonStatus = $presentMonStatus; "
+            "presentMonStatusReason = $presentMonStatusReason } | ConvertTo-Json -Depth 10 | "
+            f"Set-Content -LiteralPath '{out_path}' -Encoding UTF8\n"
+            "Write-Output 'PROBE_DONE'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("PROBE_DONE", proc.stdout, proc.stdout + proc.stderr)
+        return json.loads(out_path.read_text(encoding="utf-8"))
+
+    def test_degraded_when_the_only_displayed_row_has_no_interval(self) -> None:
+        # sol's exact repro shape (see IntervalStatsFilterFixtureTests above), but this class
+        # asserts on the STATUS the job now derives from it, not just the stats.
+        row = _real_csv_row(time_in_ms=5000, between_display_change="NA", until_displayed="8.3")
+        path = self._write_real_csv([row])
+
+        result = self._run_status(path, _result_json())
+
+        self.assertEqual(result["presentMonStatus"], "degraded", result)
+        self.assertIsNotNone(result["presentMonStatusReason"])
+        self.assertIn("no interval to compute cadence", result["presentMonStatusReason"])
+        self.assertIn("display itself is still confirmed", result["presentMonStatusReason"])
+
+    def test_a_thin_full_screen_style_single_row_leg_is_degraded_not_ok(self) -> None:
+        # The disclosed CUDA-PLAYBACK-FULLSCREEN-UI-1 r2b evidence shape: presentedCount=1,
+        # displayedCount=1, first present of the capture (MsBetweenDisplayChange NA).
+        row = _real_csv_row(time_in_ms=5000, between_display_change="NA", until_displayed="16.6")
+        path = self._write_real_csv([row])
+
+        result = self._run_status(path, _result_json())
+
+        self.assertEqual(result["presentMonStatus"], "degraded", result)
+
+    def test_ok_once_at_least_one_positive_interval_sample_exists(self) -> None:
+        rows = [
+            _real_csv_row(time_in_ms=5000, between_display_change="NA", until_displayed="8.3"),
+            _real_csv_row(time_in_ms=5017, between_display_change="16.6", until_displayed="16.6"),
+        ]
+        path = self._write_real_csv(rows)
+
+        result = self._run_status(path, _result_json())
+
+        self.assertEqual(result["presentMonStatus"], "ok", result)
+        self.assertIsNone(result["presentMonStatusReason"])
+
+    def test_ok_when_every_displayed_row_carries_a_real_interval(self) -> None:
+        rows = [_csv_row(time_in_ms=5000 + i * 1000) for i in range(5)]
+        path = self._write_csv(rows)
+
+        result = self._run_status(path, _result_json())
+
+        self.assertEqual(result["presentMonStatus"], "ok", result)
+        self.assertIsNone(result["presentMonStatusReason"])
+
+
 if __name__ == "__main__":
     unittest.main()
