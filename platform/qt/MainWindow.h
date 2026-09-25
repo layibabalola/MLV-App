@@ -997,6 +997,14 @@ private:
     bool m_playbackSmokeFrameTelemetry = false;
     bool m_playbackSmokeTimelineTelemetry = false;
     uint64_t m_playbackSmokeSessionId = 0;
+    // Foreground-state telemetry (CUDA-PERF-PLAYBACK-FOREGROUND-1): gated on the same
+    // MLVAPP_PLAYBACK_SMOKE_TELEMETRY env var as the swap telemetry above, not a new flag
+    // -- see beginPlaybackSmokeTelemetry()/finishPlaybackSmokeTelemetry() and
+    // onPlaybackSmokeApplicationStateChanged(). m_playbackSmokeForegroundLostCount counts
+    // ApplicationInactive/Hidden transitions during the session (event-driven via
+    // QGuiApplication::applicationStateChanged, never polled per frame).
+    bool m_playbackSmokeForegroundAtBegin = false;
+    uint64_t m_playbackSmokeForegroundLostCount = 0;
     int m_playbackSmokeStartPosition = 0;
     int m_playbackSmokeStartCutIn = 0;
     int m_playbackSmokeStartCutOut = 0;
@@ -1382,6 +1390,12 @@ private:
                                           const RenderFrameThread::ReadyFrame &readyFrame,
                                           const PresentationRequestContext &requestContext );
     void finishPlaybackSmokeTelemetry( const char *reason );
+    // --gui-smoke-playback only (CUDA-PERF-PLAYBACK-FOREGROUND-1): forces the main window
+    // and the GPU display window to the OS foreground and verifies with
+    // GetForegroundWindow(); never called from normal (non-smoke) startup or from the
+    // generic Play toggle. See MainWindow::runGuiPlaybackSmoke().
+    void forcePlaybackSmokeWindowForeground( void );
+    void onPlaybackSmokeApplicationStateChanged( Qt::ApplicationState state );
     void enqueuePlaybackPrepTask( const PlaybackPrepTask &task );
     void invalidatePlaybackPrepForDisplayChange( const char *reason );
     void waitForRenderThreadIdleBeforeCoreMutation( const char *reason );
