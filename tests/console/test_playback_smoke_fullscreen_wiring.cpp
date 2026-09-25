@@ -331,7 +331,10 @@ TEST(PlaybackSmokeFullscreenWiring, FullscreenLossMidSessionFailsClosedAfterTheD
     const int playedMsAt = smokeBody.indexOf(
         QStringLiteral("const qint64 playedMs = playbackClock.elapsed();"), loopAt);
     ASSERT_TRUE(playedMsAt > loopAt);
-    const int gateAt = smokeBody.indexOf(QStringLiteral("if( !isFullScreen() )"), playedMsAt);
+    // CUDA-PLAYBACK-FULLSCREEN-UI-2: the gate now also fails on a nonzero lost count, not
+    // just the final-state isFullScreen() check -- see the dedicated latch tests below.
+    const int gateAt = smokeBody.indexOf(
+        QStringLiteral("if( !isFullScreen() || m_playbackSmokeFullscreenLostCount > 0 )"), playedMsAt);
     ASSERT_TRUE(gateAt > playedMsAt);
     const int gateFailCallAt = smokeBody.indexOf(
         QStringLiteral("logFullscreenSmokeFailure( \"fullscreen_lost_mid_session\" )"), gateAt);
@@ -355,4 +358,153 @@ TEST(PlaybackSmokeFullscreenWiring, DoneLineReportsPreambleAndPlayedMsNextToRequ
     ASSERT_TRUE(durationAt >= 0);
     ASSERT_TRUE(preambleAt > durationAt);
     ASSERT_TRUE(playedAt > preambleAt);
+}
+
+// --- CUDA-PLAYBACK-FULLSCREEN-UI-2: the end-of-loop isFullScreen() check alone is a point
+// sample and misses a lose-then-regain interval entirely within the measured window (e.g.
+// Escape to windowed, then F11/Ctrl+F back to full screen before the loop ends). These pin
+// the event-driven latch that fails closed on that case too, not just the final state.
+
+TEST(PlaybackSmokeFullscreenWiring, HeaderDeclaresTheLossLatchApiAndState)
+{
+    const QString header = readRepoFile(QStringLiteral("platform/qt/MainWindow.h"));
+    ASSERT_TRUE(header.contains(QStringLiteral("void changeEvent( QEvent *event );")));
+    ASSERT_TRUE(header.contains(QStringLiteral("bool m_playbackSmokeFullscreenLossLatchArmed = false;")));
+    ASSERT_TRUE(header.contains(QStringLiteral("uint64_t m_playbackSmokeFullscreenLostCount = 0;")));
+}
+
+TEST(PlaybackSmokeFullscreenWiring, ChangeEventOnlyCountsWindowStateChangesToNotFullscreenWhileArmed)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString body = functionBody(source,
+        QStringLiteral("void MainWindow::changeEvent( QEvent *event )"),
+        QStringLiteral("// Intercept FileOpen events"));
+    ASSERT_FALSE(body.isEmpty());
+
+    // Base class implementation must still run.
+    ASSERT_TRUE(body.contains(QStringLiteral("QMainWindow::changeEvent( event );")));
+
+    const int armedGateAt = body.indexOf(
+        QStringLiteral("if( m_playbackSmokeFullscreenLossLatchArmed"));
+    const int typeGateAt = body.indexOf(
+        QStringLiteral("&& event->type() == QEvent::WindowStateChange"), armedGateAt);
+    const int notFullscreenGateAt = body.indexOf(
+        QStringLiteral("&& !isFullScreen() )"), typeGateAt);
+    const int incrementAt = body.indexOf(
+        QStringLiteral("++m_playbackSmokeFullscreenLostCount;"), notFullscreenGateAt);
+    ASSERT_TRUE(armedGateAt >= 0);
+    ASSERT_TRUE(typeGateAt > armedGateAt);
+    ASSERT_TRUE(notFullscreenGateAt > typeGateAt);
+    ASSERT_TRUE(incrementAt > notFullscreenGateAt);
+}
+
+TEST(PlaybackSmokeFullscreenWiring, LatchIsArmedOnlyAfterVerificationAndImmediatelyBeforeThePlayTrigger)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = functionBody(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    // Every windowState transition before verification (entry into full screen and its
+    // settle-loop churn) must happen while the latch is still disarmed -- so the arm site
+    // must be textually after the fail-closed verification check, not before it.
+    const int failCheckAt = smokeBody.indexOf(QStringLiteral("if( !fullscreenVerified )"));
+    const int clockStartAt = smokeBody.indexOf(QStringLiteral("playbackClock.start();"), failCheckAt);
+    const int resetAt = smokeBody.indexOf(
+        QStringLiteral("m_playbackSmokeFullscreenLostCount = 0;"), clockStartAt);
+    const int armAt = smokeBody.indexOf(
+        QStringLiteral("m_playbackSmokeFullscreenLossLatchArmed = true;"), resetAt);
+    const int triggerAt = smokeBody.indexOf(QStringLiteral("ui->actionPlay->trigger();"), armAt);
+
+    ASSERT_TRUE(failCheckAt >= 0);
+    ASSERT_TRUE(clockStartAt > failCheckAt);
+    ASSERT_TRUE(resetAt > clockStartAt);
+    ASSERT_TRUE(armAt > resetAt);
+    ASSERT_TRUE(triggerAt > armAt);
+}
+
+TEST(PlaybackSmokeFullscreenWiring, LatchIsDisarmedAtLoopExitBeforeTheGateCheckAndTeardown)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = functionBody(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    const int loopAt = smokeBody.indexOf(
+        QStringLiteral("while( playbackClock.elapsed() < durationMs && ui->actionPlay->isChecked() )"));
+    const int playedMsAt = smokeBody.indexOf(
+        QStringLiteral("const qint64 playedMs = playbackClock.elapsed();"), loopAt);
+    const int disarmAt = smokeBody.indexOf(
+        QStringLiteral("m_playbackSmokeFullscreenLossLatchArmed = false;"), playedMsAt);
+    const int gateAt = smokeBody.indexOf(
+        QStringLiteral("if( !isFullScreen() || m_playbackSmokeFullscreenLostCount > 0 )"), disarmAt);
+
+    ASSERT_TRUE(loopAt >= 0);
+    ASSERT_TRUE(playedMsAt > loopAt);
+    ASSERT_TRUE(disarmAt > playedMsAt);
+    ASSERT_TRUE(gateAt > disarmAt);
+
+    // The guard's teardown (leavePlaybackSmokeFullscreen(), which itself toggles full
+    // screen off) runs strictly after this disarm, on every path -- so restoring chrome at
+    // session end is never itself counted.
+    const int guardDefAt = smokeBody.indexOf(QStringLiteral("PlaybackSmokeFullscreenGuard"));
+    ASSERT_TRUE(guardDefAt >= 0);
+    ASSERT_TRUE(disarmAt > guardDefAt);
+}
+
+TEST(PlaybackSmokeFullscreenWiring, GateFailsClosedOnLostCountEvenWhenFinalStateIsFullscreen)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = functionBody(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    // The point-sample isFullScreen() check alone is no longer sufficient: a genuinely
+    // full-screen final state with a nonzero lost count must still fail.
+    ASSERT_TRUE(smokeBody.contains(
+        QStringLiteral("if( !isFullScreen() || m_playbackSmokeFullscreenLostCount > 0 )")));
+    const int gateAt = smokeBody.indexOf(
+        QStringLiteral("if( !isFullScreen() || m_playbackSmokeFullscreenLostCount > 0 )"));
+    const int failCallAt = smokeBody.indexOf(
+        QStringLiteral("logFullscreenSmokeFailure( \"fullscreen_lost_mid_session\" )"), gateAt);
+    ASSERT_TRUE(failCallAt > gateAt);
+}
+
+TEST(PlaybackSmokeFullscreenWiring, FailureHelperReportsTheLostCount)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = functionBody(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+    ASSERT_TRUE(smokeBody.contains(
+        QStringLiteral("<< \" lost_count=\" << m_playbackSmokeFullscreenLostCount")));
+}
+
+TEST(PlaybackSmokeFullscreenWiring, ForegroundLineCarriesTheFullscreenLostCountField)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const int lineAt = source.indexOf(QStringLiteral("playback_smoke.foreground session=%1"));
+    ASSERT_TRUE(lineAt >= 0);
+    const QString tail = source.mid(lineAt, 1200);
+    ASSERT_TRUE(tail.contains(QStringLiteral("fullscreen_lost_count=%12")));
+    ASSERT_TRUE(tail.contains(
+        QStringLiteral(".arg( static_cast<qulonglong>( m_playbackSmokeFullscreenLostCount ) );")));
+}
+
+TEST(PlaybackSmokeFullscreenWiring, HeaderNoLongerCallsTheActionMenuHidden)
+{
+    // sol NOTE (#168 round 1): the header comment still described actionFullscreen as
+    // menu-hidden although CUDA-PLAYBACK-FULLSCREEN-UI-1 intentionally unhid it.
+    const QString header = readRepoFile(QStringLiteral("platform/qt/MainWindow.h"));
+    const int declAt = header.indexOf(QStringLiteral("bool enterPlaybackSmokeFullscreen( void );"));
+    ASSERT_TRUE(declAt >= 0);
+    const int commentAt = header.lastIndexOf(QStringLiteral("// --gui-smoke-playback only"), declAt);
+    ASSERT_TRUE(commentAt >= 0);
+    const QString comment = header.mid(commentAt, declAt - commentAt);
+    ASSERT_FALSE(comment.contains(QStringLiteral("menu-hidden")));
+    ASSERT_TRUE(comment.contains(QStringLiteral("unhidden for normal use")));
 }

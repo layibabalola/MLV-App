@@ -3213,6 +3213,25 @@ void MainWindow::resizeEvent(QResizeEvent *event)
     event->accept();
 }
 
+// --gui-smoke-playback only (CUDA-PLAYBACK-FULLSCREEN-UI-2): counts every loss of full
+// screen while m_playbackSmokeFullscreenLossLatchArmed is set (armed/disarmed by
+// runGuiPlaybackSmoke(), never elsewhere). QEvent::WindowStateChange fires for every
+// windowState transition, so this single event-driven choke point (never polled per frame,
+// like m_playbackSmokeForegroundLostCount above) catches both the in-app Escape/F11/Ctrl+F/
+// menu path -- on_actionFullscreen_triggered() calling showNormal() -- and any OS-driven
+// change that bypasses that action entirely. Outside the armed interval this is a no-op, so
+// normal (non-smoke) full-screen use is unaffected.
+void MainWindow::changeEvent( QEvent *event )
+{
+    QMainWindow::changeEvent( event );
+    if( m_playbackSmokeFullscreenLossLatchArmed
+     && event->type() == QEvent::WindowStateChange
+     && !isFullScreen() )
+    {
+        ++m_playbackSmokeFullscreenLostCount;
+    }
+}
+
 // Intercept FileOpen events
 bool MainWindow::event(QEvent *event)
 {
@@ -8912,6 +8931,7 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             << failScreenSize.width() << "x" << failScreenSize.height()
             << " window=" << size().width() << "x" << size().height()
             << " gpu_viewport=" << failGpuViewport.width() << "x" << failGpuViewport.height()
+            << " lost_count=" << m_playbackSmokeFullscreenLostCount
             << "\n";
         return 13;
     };
@@ -8923,6 +8943,14 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
     const qint64 preambleMs = preambleClock.elapsed();
     QElapsedTimer playbackClock;
     playbackClock.start();
+
+    // CUDA-PLAYBACK-FULLSCREEN-UI-2: arm the mid-session fullscreen-loss latch only now,
+    // after full screen is verified above and immediately before the play trigger -- every
+    // windowState transition changeEvent() sees before this point (entering full screen
+    // above, and its own settle-loop churn) happens while the latch is still disarmed, so it
+    // cannot count against the measured interval.
+    m_playbackSmokeFullscreenLostCount = 0;
+    m_playbackSmokeFullscreenLossLatchArmed = true;
 
     ui->actionPlay->trigger();
     qApp->processEvents( QEventLoop::AllEvents );
@@ -9239,11 +9267,18 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         QThread::msleep( 10 );
     }
     const qint64 playedMs = playbackClock.elapsed();
+    // Disarm right at loop exit -- before the guard's eventual leavePlaybackSmokeFullscreen()
+    // teardown runs, so restoring normal chrome at session end is never itself counted.
+    m_playbackSmokeFullscreenLossLatchArmed = false;
 
-    // CUDA-PLAYBACK-FULLSCREEN-UI-1 round 2: the normal-use Escape/menu toggle this round
-    // adds can leave full screen mid-measurement (e.g. the round-1 Escape shortcut) -- fail
-    // closed rather than report a duration/frame count measured partly or fully windowed.
-    if( !isFullScreen() )
+    // CUDA-PLAYBACK-FULLSCREEN-UI-1 round 2 / CUDA-PLAYBACK-FULLSCREEN-UI-2: the normal-use
+    // Escape/menu toggle can leave full screen mid-measurement (e.g. the round-1 Escape
+    // shortcut). The end-of-loop isFullScreen() check alone is a point sample and misses a
+    // lose-then-regain interval entirely within the measured window (e.g. Escape to
+    // windowed, then F11/Ctrl+F back to full screen before the loop ends) -- also fail
+    // closed on m_playbackSmokeFullscreenLostCount, latched event-driven throughout the
+    // measured interval above, rather than trusting only the final state.
+    if( !isFullScreen() || m_playbackSmokeFullscreenLostCount > 0 )
     {
         return logFullscreenSmokeFailure( "fullscreen_lost_mid_session" );
     }
@@ -26154,7 +26189,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    "playback_smoke.foreground session=%1 telemetry_enabled=%2 "
                    "foreground_at_begin=%3 foreground_at_gate=%4 foreground_lost_count=%5 "
                    "fullscreen_at_begin=%6 fullscreen_at_gate=%7 "
-                   "viewport_at_begin=%8x%9 viewport_at_gate=%10x%11" )
+                   "viewport_at_begin=%8x%9 viewport_at_gate=%10x%11 "
+                   "fullscreen_lost_count=%12" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( bool01( m_playbackSmokeFrameTelemetry ) )
                    .arg( bool01( m_playbackSmokeForegroundAtBegin ) )
@@ -26165,7 +26201,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    .arg( m_playbackSmokeViewportWidthAtBegin )
                    .arg( m_playbackSmokeViewportHeightAtBegin )
                    .arg( viewportAtGate.width() )
-                   .arg( viewportAtGate.height() );
+                   .arg( viewportAtGate.height() )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeFullscreenLostCount ) );
     }
 
     // Displayed cadence, distinct from frames_presented above (which counts frame
