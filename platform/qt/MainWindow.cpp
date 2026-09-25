@@ -6144,8 +6144,13 @@ void MainWindow::computeDisplaySceneGeometry( int sourceWidth,
         int actHeight = 0;
         if( ui->actionFullscreen->isChecked() )
         {
-            actWidth = QApplication::primaryScreen()->size().width();
-            actHeight = QApplication::primaryScreen()->size().height();
+            // showFullScreen() goes fullscreen on whichever screen the window already
+            // occupies, not necessarily the primary one -- size the scene from that same
+            // screen (falling back to primary if the window isn't associated with one yet).
+            QScreen *fullscreenScreen = this->screen();
+            if( !fullscreenScreen ) fullscreenScreen = QApplication::primaryScreen();
+            actWidth = fullscreenScreen->size().width();
+            actHeight = fullscreenScreen->size().height();
         }
         else
         {
@@ -10512,8 +10517,18 @@ void MainWindow::initGui( void )
     QPixmap pic = QPixmap::fromImage( m_pAudioWave->getMonoWave( NULL, 0, 100, devicePixelRatio() ) );
     pic.setDevicePixelRatio( devicePixelRatio() );
     ui->labelAudioTrack->setPixmap( pic );
-    //Fullscreen does not work well, so disable
-    ui->actionFullscreen->setVisible( false );
+#ifdef Q_OS_WIN
+    //F11 is the standard Windows fullscreen key; keep the existing Ctrl+F too
+    ui->actionFullscreen->setShortcuts( QList<QKeySequence>()
+                                         << ui->actionFullscreen->shortcut()
+                                         << QKeySequence( Qt::Key_F11 ) );
+#endif
+    //Esc exits fullscreen (no-op otherwise -- MainWindow has no other Escape handler)
+    QShortcut *pFullscreenEscape = new QShortcut( QKeySequence( Qt::Key_Escape ), this );
+    connect( pFullscreenEscape, &QShortcut::activated, this, [this]()
+    {
+        if( ui->actionFullscreen->isChecked() ) ui->actionFullscreen->trigger();
+    } );
     //Disable caching by default to avoid crashes
     //ui->actionCaching->setVisible( false );
     //Hide deflicker target - no one knows what it does...
@@ -22202,6 +22217,7 @@ void MainWindow::on_actionFullscreen_triggered( bool checked )
     static bool editWasActive;
     static bool sessionWasActive;
     static bool audioWasActive;
+    static bool windowWasMaximized;
 
     if( checked )
     {
@@ -22213,6 +22229,10 @@ void MainWindow::on_actionFullscreen_triggered( bool checked )
         editWasActive = ui->actionShowEditArea->isChecked();
         sessionWasActive = ui->actionShowSessionArea->isChecked();
         audioWasActive = ui->actionShowAudioTrack->isChecked();
+        //showFullScreen() clears the maximized bit and showNormal() only restores the
+        //pre-fullscreen normal geometry, so a maximized window would otherwise come back
+        //un-maximized on exit -- capture it here and restore explicitly below.
+        windowWasMaximized = isMaximized();
         ui->actionShowEditArea->setChecked( false );
         ui->actionShowSessionArea->setChecked( false );
         ui->actionShowAudioTrack->setChecked( false );
@@ -22223,7 +22243,8 @@ void MainWindow::on_actionFullscreen_triggered( bool checked )
     }
     else
     {
-        this->showNormal();
+        if( windowWasMaximized ) this->showMaximized();
+        else this->showNormal();
         ui->statusBar->show();
         ui->mainToolBar->show();
         ui->menuBar->show();
@@ -22585,14 +22606,11 @@ void MainWindow::forcePlaybackSmokeWindowForeground( void )
 // screen is how the owner watches, and it changes the present path (window size, pixels
 // presented, possibly the Windows present mode) versus windowed playback, so a windowed
 // measurement does not represent what is being measured. Triggers the existing
-// on_actionFullscreen_triggered() action -- its menu entry stays hidden (see initGui(),
-// "Fullscreen does not work well, so disable") -- so all of its chrome-hiding and the
-// zoom-fit scene sizing in computeDisplaySceneGeometry() (which already branches on
-// ui->actionFullscreen->isChecked() to size from the primary screen) apply exactly as they
-// would for a user-triggered Ctrl+F. That disable comment dates to 2018
-// (2f469e7632c23f9990f8586e87f808e8bad609ec, "reverting fullscreen for this release,
-// because no test results") -- it was never confirmed broken, only never covered by a test,
-// which is what this round adds for the one path (measured smoke playback) that needs it.
+// on_actionFullscreen_triggered() action -- reachable via the menu and its usual shortcuts
+// since CUDA-PLAYBACK-FULLSCREEN-UI-1 -- so all of its chrome-hiding and the zoom-fit scene
+// sizing in computeDisplaySceneGeometry() (which already branches on
+// ui->actionFullscreen->isChecked() to size from the window's own screen) apply exactly as
+// they would for a user-triggered toggle.
 void MainWindow::enterPlaybackSmokeFullscreen( void )
 {
     if( !ui->actionFullscreen->isChecked() )
@@ -22600,8 +22618,11 @@ void MainWindow::enterPlaybackSmokeFullscreen( void )
         ui->actionFullscreen->trigger();
     }
 
-    const QSize screenSize = QApplication::primaryScreen()
-        ? QApplication::primaryScreen()->size() : QSize();
+    // Matches computeDisplaySceneGeometry()'s screen choice: the window's own screen, not
+    // always primary -- showFullScreen() goes fullscreen wherever the window already is.
+    QScreen *fullscreenScreen = this->screen();
+    if( !fullscreenScreen ) fullscreenScreen = QApplication::primaryScreen();
+    const QSize screenSize = fullscreenScreen ? fullscreenScreen->size() : QSize();
 
     // Bounded, event-driven wait: showFullScreen() is asynchronous under the window
     // manager, and when the experimental GL viewport path is active the GPU display

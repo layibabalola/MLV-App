@@ -3,9 +3,11 @@
 // MainWindow::runGuiPlaybackSmoke(), never from normal (non-smoke) startup, (2) runs in
 // the order foreground -> fullscreen -> foreground re-verify -> play trigger, (3) verifies
 // full-screen geometry and logs the outcome, (4) is restored at session end via a scope
-// guard that fires on every early-return path (not only the success path), (5) never
-// unhides the actionFullscreen menu entry, and (6) that the fullscreen/viewport telemetry
-// reuses the existing MLVAPP_PLAYBACK_SMOKE_TELEMETRY gate rather than a new ad hoc flag.
+// guard that fires on every early-return path (not only the success path), (5) the
+// actionFullscreen menu entry is not force-hidden (see CUDA-PLAYBACK-FULLSCREEN-UI-1's
+// test_playback_fullscreen_ui_wiring.cpp for the normal-use coverage that replaced the old
+// "stays hidden" pin), and (6) that the fullscreen/viewport telemetry reuses the existing
+// MLVAPP_PLAYBACK_SMOKE_TELEMETRY gate rather than a new ad hoc flag.
 // MainWindow.cpp/main.cpp need a full GUI build (not linked into console_tests), so this
 // test reads the sources as text -- the call sites are pinned by markers, not by exercising
 // a live window (mirrors test_playback_smoke_foreground_wiring.cpp's approach).
@@ -60,13 +62,15 @@ TEST(PlaybackSmokeFullscreenWiring, HeaderDeclaresTheFullscreenApi)
     ASSERT_TRUE(header.contains(QStringLiteral("QSize playbackSmokeViewportSize( void ) const;")));
 }
 
-TEST(PlaybackSmokeFullscreenWiring, MenuActionStaysHiddenThisRoundNeverUnhidesIt)
+TEST(PlaybackSmokeFullscreenWiring, MenuActionIsNoLongerForceHidden)
 {
-    // Explicit round-scope guardrail: the menu entry must stay hidden -- only the smoke
-    // path may drive actionFullscreen, via trigger(), never by making it user-visible.
+    // CUDA-PLAYBACK-FULLSCREEN-UI-1 unhid full screen for normal use: the 2018
+    // setVisible( false ) (and its "does not work well" comment) must be gone, and no
+    // later setVisible( false ) may have been reintroduced on this action. See
+    // test_playback_fullscreen_ui_wiring.cpp for the full visibility/shortcut/Esc/restore
+    // coverage this round adds.
     const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
-    ASSERT_TRUE(source.contains(QStringLiteral("ui->actionFullscreen->setVisible( false );")));
-    ASSERT_FALSE(source.contains(QStringLiteral("ui->actionFullscreen->setVisible( true )")));
+    ASSERT_FALSE(source.contains(QStringLiteral("ui->actionFullscreen->setVisible( false )")));
 }
 
 TEST(PlaybackSmokeFullscreenWiring, EntryAndExitAreCalledExactlyOnceAndOnlyFromGuiPlaybackSmoke)
