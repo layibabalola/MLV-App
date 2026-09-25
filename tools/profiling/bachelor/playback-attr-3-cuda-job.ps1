@@ -1116,7 +1116,7 @@ $cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted
 # $presentMonCaptureStartUtc (process creation, or the pre-spawn wall clock below when the OS
 # reported none) and $presentMonPostSpawnUtc (Start-PresentMonCapture returning) -- and reports
 # counts/rates for both plus how many rows disagree on window membership between them, heading the
-# report with whichever endpoint admits more genuinely-presented rows (see .clockBracket on
+# report with whichever endpoint admits more DISPLAYED rows, then presented rows (see .clockBracket on
 # $displayReport below). The full bracket (pre-spawn wall clock, the OS-reported process start,
 # post-spawn wall clock) and the residual uncertainty it implies are all persisted below, before
 # parsing, so a consumer needing a tighter join than this one can see exactly how much slack to

@@ -1907,8 +1907,9 @@ function Get-AttrCudaPresentMonDisplayReport {
         any more. This function now windows the rows under BOTH endpoints of the caller's
         persisted capture-start bracket, reports presented/displayed counts and rates for each,
         counts how many rows' in/out window membership disagrees between them, and heads the
-        report with whichever endpoint admits more genuinely-presented MLVApp rows -- the
-        endpoint least likely to be silently dropping real evidence. See .clockBracket below.
+        report with whichever endpoint admits more DISPLAYED MLVApp rows (then more presented
+        rows; ties to the earlier endpoint), so no display verdict rests on the endpoint that
+        happened to miss the displayed rows. See .clockBracket below.
     Every row is also grouped by (ProcessID, SwapChainAddress) for .chains -- the actual display
     identity PresentMon reports, since a PID alone conflates multiple swap chains and a swap chain
     address alone says nothing about which process owns it -- but .selectedChain and
@@ -2167,10 +2168,7 @@ function Get-AttrCudaPresentMonDisplayReport {
     $onlyLatest.ExceptWith($earliestOrdinals)
     $rowsDiffering = $onlyEarliest.Count + $onlyLatest.Count
 
-    # Neither endpoint is asserted to be the exact TimeInMs origin (see .DESCRIPTION). The
-    # headline is whichever endpoint admits more genuinely-presented MLVApp rows into the window
-    # -- ties keep the earlier endpoint, deterministically -- so the reported rates are the least
-    # likely of the two to be silently dropping real evidence at the window's edges.
+    # Neither endpoint is asserted to be the exact TimeInMs origin (see .DESCRIPTION).
     # HARNESS-4 (sol BLOCKER / fable HARDENING on #163, agreed fix): rank endpoints by DISPLAYED MLVApp rows first, then
     # presented rows, ties to earliest. Ranking by presented alone could head the report with an endpoint that admits only
     # an undisplayed tail row while the other endpoint admits a genuinely displayed front-edge row -> a false DISPLAY_ASLEEP.

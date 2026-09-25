@@ -236,9 +236,10 @@ carry the result as `clockBracket`: `earliest`/`latest` (each with `presentedCou
 `displayedCount`, `presentedFps`, `displayedFps`), `rowsDifferingInWindowMembership` (how many
 rows, any process, disagree on window membership between the two endpoints), and
 `headline`/`headlineReason` naming which endpoint the reported `chains`/`selectedChain`/
-`selectedChainRows` actually come from -- the endpoint admitting more genuinely-presented MLVApp
-rows, since neither endpoint is exact and admitting fewer rows is the direction that would
-silently under-report a real display rate.
+`selectedChainRows` actually come from -- the endpoint admitting more DISPLAYED MLVApp rows,
+then more presented rows, ties to the earlier endpoint. Neither endpoint is exact; ranking by
+displayed rows first means `DISPLAY_ASLEEP` is reported only when neither endpoint admits a
+displayed MLVApp row.
 
 **Interval statistics exclude interval-less rows.** A row displayed only via `MsUntilDisplayed`
 (observed on the very first present of a capture, when `MsBetweenDisplayChange` reads `NA`) has
