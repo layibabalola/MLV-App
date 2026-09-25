@@ -1108,6 +1108,26 @@ class HostLoadSnapshotProducerAlignmentTests(_ProbeCase):
             "it is running before the slow evidence collection, diluting the first interval",
         )
 
+    def test_before_bracket_evidence_failure_does_not_lose_the_timing_capture(self) -> None:
+        # hub (hosted ubuntu red on 36d4804e + fable HARDENING): with evidence first on the before path, a
+        # throwing Get-CimInstance (always the case on non-Windows pwsh, where the cmdlet does not exist)
+        # must not skip the syscall/subject capture that follows it. subjectCpuSeconds stays the
+        # definitional 0 on every platform, and on Windows the system times are still collected, exactly
+        # as at b1a4ab55 where the syscall ran first. collected stays False: evidence did fail.
+        proc = self.run_snippet(
+            "function Get-CimInstance { param($ClassName, $Filter, $ErrorAction, $OperationTimeoutSec) "
+            "throw [System.InvalidOperationException]::new('synthetic CIM failure') }\n"
+            "$s = Get-HostLoadSnapshot -TopProcessCount 1 -SubjectNotYetStarted\n"
+            "Write-Host \"SUBJECT=$($s.subjectCpuSeconds)\"\n"
+            "Write-Host \"SYSTEM_TIMES_COLLECTED=$($s.systemTimesCollected)\"\n"
+            "Write-Host \"COLLECTED=$($s.collected)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("SUBJECT=0", proc.stdout)
+        self.assertIn("COLLECTED=False", proc.stdout)
+        if os.name == "nt":
+            self.assertIn("SYSTEM_TIMES_COLLECTED=True", proc.stdout)
+
     def test_the_before_bracket_call_site_uses_the_evidence_first_shape(self) -> None:
         # The ordering above is keyed on -SubjectNotYetStarted; pin that the one production before-bracket
         # call passes it and keeps evidence enabled, so dropping either silently restores the dilution.

@@ -581,8 +581,13 @@ function Get-HostLoadSnapshot {
                 }
         }
         if ($SubjectNotYetStarted -and -not $SkipEvidenceCollection) {
-            . $collectEvidence
+            # An evidence failure (always, on non-Windows pwsh, where Get-CimInstance does not exist)
+            # must not skip the timing capture: hold it, capture, then rethrow so the outer catch
+            # records it exactly as it did when the syscall ran first.
+            $evidenceFailure = $null
+            try { . $collectEvidence } catch { $evidenceFailure = $_ }
             . $captureSystemTimes
+            if ($null -ne $evidenceFailure) { throw $evidenceFailure }
         }
         else {
             . $captureSystemTimes
