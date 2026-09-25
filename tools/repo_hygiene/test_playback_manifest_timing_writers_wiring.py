@@ -39,6 +39,7 @@ MAIN_WINDOW_CPP = REPO_ROOT / "platform" / "qt" / "MainWindow.cpp"
 GPU_DISPLAY_VIEWPORT_CPP = REPO_ROOT / "platform" / "qt" / "GpuDisplayViewport.cpp"
 GPU_DISPLAY_WINDOW_CPP = REPO_ROOT / "platform" / "qt" / "GpuDisplayWindow.cpp"
 RENDER_FRAME_THREAD_CPP = REPO_ROOT / "platform" / "qt" / "RenderFrameThread.cpp"
+RENDER_FRAME_THREAD_H = REPO_ROOT / "platform" / "qt" / "RenderFrameThread.h"
 
 
 # --------------------------------------------------------------------- helpers
@@ -122,6 +123,7 @@ class ManifestTimingWritersWiringTest(unittest.TestCase):
         cls.gpu_viewport = _strip_comments(GPU_DISPLAY_VIEWPORT_CPP.read_text(encoding="utf-8"))
         cls.gpu_window = _strip_comments(GPU_DISPLAY_WINDOW_CPP.read_text(encoding="utf-8"))
         cls.render_thread = _strip_comments(RENDER_FRAME_THREAD_CPP.read_text(encoding="utf-8"))
+        cls.render_thread_h = _strip_comments(RENDER_FRAME_THREAD_H.read_text(encoding="utf-8"))
 
     # -- 1. clock-probe resolution sample (sol round-11: "the disclosed clock
     # probe has no disabling-mutation test") --------------------------------
@@ -326,6 +328,185 @@ class ManifestTimingWritersWiringTest(unittest.TestCase):
             "runSerial no longer replaces the slot's reset phase3Mode with the per-frame "
             "activePhase3Mode result.",
         )
+
+    # -- 7. round-12 named gaps (sol MAJOR: "the census still omits load-
+    # bearing capture/reset/writer statements") --------------------------
+
+    def test_pre_clamp_requested_scale_capture_predicate(self):
+        # This is the statement render_manifest's requested_scale field
+        # reads back (test 2 above pins the READ; this pins the WRITE). A
+        # hardcoded predicate (e.g. always false) would make requested_scale
+        # collapse to effective_scale on every clamped frame, and no
+        # existing test would notice.
+        _assert_statement_in_function(
+            self,
+            self.main_window,
+            "void MainWindow::drawFrame( bool updateTimecodeLabel )",
+            "requestContext.playbackScaleFactorRequestedBeforeGpuTextureRouteClamp =\n"
+            "        m_playbackScaleClampedForGpuTextureRouteActive\n"
+            "            ? m_playbackScaleClampedForGpuTextureRouteRequestedScale\n"
+            "            : requestContext.playbackScaleFactor;",
+            "The pre-clamp requested-scale capture predicate in drawFrame no longer "
+            "distinguishes a clamped request from an unclamped one -- repro: force the "
+            "predicate to a constant so requested_scale always equals effective_scale.",
+        )
+
+    def test_scale_clamped_for_gpu_texture_route_is_emitted_from_the_two_captured_scales(self):
+        _assert_statement_in_function(
+            self,
+            self.main_window,
+            "void MainWindow::notePlaybackSmokePresentedFrame(",
+            '<< QStringLiteral("scale_clamped_for_gpu_texture_route=%1").arg(\n'
+            "                   bool01( requestContext.playbackScaleFactorRequestedBeforeGpuTextureRouteClamp\n"
+            "                           != requestContext.playbackScaleFactor ) )",
+            "render_manifest's scale_clamped_for_gpu_texture_route field no longer "
+            "compares the pre-clamp and post-clamp captured scales -- repro: hardcode "
+            "its argument to 0.",
+        )
+
+    def test_frame_slot_reset_metadata_clears_stale_phase3_mode(self):
+        _assert_statement_in_function(
+            self,
+            self.render_thread_h,
+            "void resetMetadata( void )",
+            "phase3Mode = Phase3Mode::Disabled;",
+            "FrameSlot::resetMetadata no longer clears phase3Mode -- a reused slot could "
+            "then carry a stale phase3_mode from a previous frame into "
+            "renderDecodedSlot/runSerial's replace-only-if-guarded logic.",
+        )
+
+    def test_gpu_display_viewport_writes_combined_availability_from_both_components(self):
+        _assert_statement_in_function(
+            self,
+            self.gpu_viewport,
+            "GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(",
+            "timing->available = reconTiming.available || amazeTiming.available;",
+            "GpuDisplayViewport's combined availability writer no longer ORs the two "
+            "component flags -- repro: hardcode it to false so texture_present_available "
+            "reads 0 even when a component measured.",
+        )
+
+    def test_gpu_display_window_writes_combined_availability_from_both_components(self):
+        _assert_statement_in_function(
+            self,
+            self.gpu_window,
+            "GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(",
+            "timing->available = reconTiming.available || amazeTiming.available;",
+            "GpuDisplayWindow's combined availability writer no longer ORs the two "
+            "component flags -- repro: hardcode it to false so texture_present_available "
+            "reads 0 even when a component measured.",
+        )
+
+    def test_prep_region_clock_monotonic_is_written_and_re_emitted(self):
+        _assert_statement_in_function(
+            self,
+            self.main_window,
+            "void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result )",
+            'readyFrame.stageTimingTelemetry.insert(\n'
+            '        QStringLiteral("playback_prep_region_clock_monotonic"),\n'
+            '        prepRegionClock.isMonotonic() );',
+            "The clock-monotonic sample write is missing or was moved out of "
+            "presentPlaybackPreparedFrame -- repro: replace the RHS with a constant "
+            "(e.g. `= true;`).",
+        )
+        _assert_statement_in_function(
+            self,
+            self.main_window,
+            "void MainWindow::notePlaybackSmokePresentedFrame(",
+            '<< QStringLiteral("prep_region_clock_monotonic=%1").arg(\n'
+            '                   bool01( telemetryBoolValue(\n'
+            '                       timing, "playback_prep_region_clock_monotonic" ) ) )',
+            "playback_smoke.timing_validity no longer re-emits prep_region_clock_monotonic "
+            "read back from the same key the probe wrote.",
+        )
+
+    def test_derived_subtraction_basis_and_inputs_literals_are_emitted(self):
+        span = _function_body_span(
+            self.main_window, "void MainWindow::notePlaybackSmokePresentedFrame("
+        )
+        body = self.main_window[span[0]:span[1]]
+        for statement, label in (
+            (
+                '<< QStringLiteral("processed16_threading_overhead_basis=derived_subtraction")',
+                "processed16_threading_overhead_basis",
+            ),
+            (
+                '<< QStringLiteral("processed16_threading_overhead_inputs=render_work_ms,llrawproc_ms,processed16_ms")',
+                "processed16_threading_overhead_inputs",
+            ),
+            (
+                '<< QStringLiteral("processed8_threading_overhead_basis=derived_subtraction")',
+                "processed8_threading_overhead_basis",
+            ),
+            (
+                '<< QStringLiteral("processed8_threading_overhead_inputs=render_work_ms,llrawproc_ms,processed8_ms")',
+                "processed8_threading_overhead_inputs",
+            ),
+            (
+                '<< QStringLiteral("texture_present_host_gap_ms_basis=derived_subtraction")',
+                "texture_present_host_gap_ms_basis",
+            ),
+            (
+                '<< QStringLiteral("texture_present_host_gap_ms_inputs=texture_present_wall_ms,texture_present_total_ms")',
+                "texture_present_host_gap_ms_inputs",
+            ),
+        ):
+            with self.subTest(field=label):
+                self.assertIn(
+                    statement,
+                    body,
+                    f"timing_validity's {label} literal is missing or its text changed -- "
+                    "this literal is what tells a downstream reader (and the analyzer's "
+                    "DERIVED_BASIS_FIELDS join) that the paired *_ms field is a subtraction "
+                    "residual, not an independent measurement.",
+                )
+
+    def test_remaining_timing_validity_writers_are_emitted(self):
+        span = _function_body_span(
+            self.main_window, "void MainWindow::notePlaybackSmokePresentedFrame("
+        )
+        body = self.main_window[span[0]:span[1]]
+        for statement, label in (
+            (
+                '<< QStringLiteral("texture_present_available=%1").arg(\n'
+                '                   bool01( texturePresentAvailable ) )',
+                "texture_present_available",
+            ),
+            (
+                '<< QStringLiteral("texture_present_recon_component_available=%1").arg(\n'
+                '                   bool01( texturePresentReconAvailable ) )',
+                "texture_present_recon_component_available",
+            ),
+            (
+                '<< QStringLiteral("texture_present_amaze_component_available=%1").arg(\n'
+                '                   bool01( texturePresentAmazeAvailable ) )',
+                "texture_present_amaze_component_available",
+            ),
+            (
+                '<< QStringLiteral("texture_present_upload_ms_basis=%1").arg(\n'
+                '                   texturePresentUploadMsBasis )',
+                "texture_present_upload_ms_basis",
+            ),
+            (
+                '<< QStringLiteral("cpu_amaze_debayer_skipped_for_gpu_tex_nr=%1").arg(\n'
+                '                   bool01( telemetryBoolValue(\n'
+                '                       timing, "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" ) ) )',
+                "cpu_amaze_debayer_skipped_for_gpu_tex_nr",
+            ),
+            (
+                '<< QStringLiteral("gpu_pipeline_status=%1").arg(\n'
+                '                   QString::fromLatin1(\n'
+                '                       mainWindowGpuPlaybackPipelineStatusToken( gpuPlaybackPipelineStatus ) ) )',
+                "gpu_pipeline_status",
+            ),
+        ):
+            with self.subTest(field=label):
+                self.assertIn(
+                    statement,
+                    body,
+                    f"timing_validity's {label} field no longer sources the live value it "
+                    "is documented to.",
+                )
 
 
 if __name__ == "__main__":
