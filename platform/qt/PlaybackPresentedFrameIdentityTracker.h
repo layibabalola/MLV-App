@@ -141,6 +141,17 @@ public:
         }
     }
 
+    /*! True once noteOfferedFrame() has been called this session -- i.e.
+     *  false exactly until the session's first offered occurrence.
+     *  MainWindow::drawFrame() reads it to recognise that first occurrence
+     *  (CUDA-ATTRIBUTION-BASELINE-1 hub fix, sol r12 BLOCKER; see
+     *  PlaybackFramePopulationPolicy::computeSourceFramePopulation()'s
+     *  startOccurrenceOffered note). */
+    bool hasOfferedCeiling() const
+    {
+        return m_hasOfferedCeiling;
+    }
+
     /*! \param loopEpoch which lap displayFrame belongs to -- see
      *         PresentationContext::playbackSmokeLoopEpoch.
      *  \param displayFrame the source-frame index a genuinely new request

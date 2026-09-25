@@ -1045,6 +1045,14 @@ private:
      * finishPlaybackSmokeTelemetry(). Reset at playback start alongside the
      * other smoke counters. */
     double m_playbackSmokeStartTimelineSourceFramesOffered = 0.0;
+    /* CUDA-ATTRIBUTION-BASELINE-1 hub fix (sol r12 BLOCKER): true iff this
+     * session's first offered occurrence was reached with < 1 frame of
+     * offered-accumulator advance (drop-frame mode's start frame), so that
+     * occurrence is credited as offered. Reset in
+     * beginPlaybackSmokeTelemetry(), set in drawFrame() before the first
+     * noteOfferedFrame(); see PlaybackFramePopulationPolicy::
+     * computeSourceFramePopulation()'s startOccurrenceOffered note. */
+    bool m_playbackSmokeStartOccurrenceOffered = false;
     /* CUDA-ATTRIBUTION-BASELINE-1 round 5 (sol BLOCKER): the per-session
      * presented-frame split by request origin used to be a plain event
      * count (++ on every presentation), which is identity-blind -- the same

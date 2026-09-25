@@ -774,6 +774,76 @@ TEST(PlaybackFramePopulationPolicy, FrameTelemetryMeasuredDefaultsToTrue)
     ASSERT_EQ(uint64_t(20), population.presentedFrames);
 }
 
+// CUDA-ATTRIBUTION-BASELINE-1 hub fix (sol r12 BLOCKER, drop-frame
+// fencepost). offeredSourceFrames counts DISPLACEMENT (elapsed source-frame
+// distance), the identity sets count every occurrence TOUCHED. Drop-frame
+// mode's first tick advances < 1 frame, so the start frame p is requested
+// and presented: occurrences p..p+k (k+1 of them) against a raw displacement
+// of k+fraction, which rounds to k -- one short of the requested union. The
+// start occurrence is credited only when MainWindow saw it (credit 1);
+// normal mode advances +1.0 before its first drawFrame(), never requests p,
+// and gets no credit.
+static PlaybackSourceFramePopulation fencepostPopulation( uint64_t firstFrame,
+                                                          uint64_t lastFrame,
+                                                          double rawOffered,
+                                                          uint64_t startOccurrenceOffered )
+{
+    PlaybackPresentedFrameIdentityTracker identity;
+    for (uint64_t f = firstFrame; f <= lastFrame; ++f)
+    {
+        identity.noteOfferedFrame(/*loopEpoch=*/0, f);
+        identity.noteRequestedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+        identity.notePresentedFrame(/*loopEpoch=*/0, f, /*viaLookahead=*/false);
+    }
+    return PlaybackFramePopulationPolicy::computeSourceFramePopulation(
+        /*timelineSourceFramesOfferedNow=*/rawOffered,
+        /*timelineSourceFramesOfferedStart=*/0.0,
+        identity.requestedOccurrenceUnionCount(),
+        identity.distinctTargetPresentedCount(),
+        identity.distinctLookaheadPresentedCount(),
+        identity.presentedOccurrenceUnionCount(),
+        identity.requestedThenSkippedTargetCount(),
+        identity.requestedThenDiscardedLookaheadCount(),
+        /*frameTelemetryMeasured=*/true,
+        startOccurrenceOffered );
+}
+
+// (i) drop-frame: (0, 10..34) requested+presented, raw offered 24.3, start
+// occurrence credited -> 25 offered, sound, nothing never-requested.
+TEST(PlaybackFramePopulationPolicy, SolR12_DropFrameStartOccurrenceCreditedIsSound)
+{
+    const PlaybackSourceFramePopulation population =
+        fencepostPopulation( 10, 34, 24.3, /*startOccurrenceOffered=*/1 );
+    ASSERT_EQ(uint64_t(25), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(25), population.presentedFrames);
+    ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+}
+
+// (ii) negative control: the SAME healthy drop-frame run without the credit
+// is exactly sol's r12 BLOCKER -- 24 offered < 25 requested, unsound.
+TEST(PlaybackFramePopulationPolicy, SolR12_DropFrameStartOccurrenceUncreditedIsUnsound)
+{
+    const PlaybackSourceFramePopulation population =
+        fencepostPopulation( 10, 34, 24.3, /*startOccurrenceOffered=*/0 );
+    ASSERT_EQ(uint64_t(24), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(25), population.presentedFrames);
+    ASSERT_TRUE(!population.partitionSound);
+}
+
+// (iii) normal mode: (0, 11..34) requested+presented, offered exactly 24,
+// no credit -> sound, nothing never-requested (a blanket +1 would fabricate
+// one never-requested frame here).
+TEST(PlaybackFramePopulationPolicy, SolR12_NormalModeNoStartCreditIsSound)
+{
+    const PlaybackSourceFramePopulation population =
+        fencepostPopulation( 11, 34, 24.0, /*startOccurrenceOffered=*/0 );
+    ASSERT_EQ(uint64_t(24), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(24), population.presentedFrames);
+    ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+}
+
 // Same successful-reuse scenario, but with offered=20 instead of 60 --
 // must resolve consistently regardless of how much of the clip's total
 // span the reused identities represent.

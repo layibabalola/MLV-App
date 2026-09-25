@@ -6581,6 +6581,18 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
      * PlaybackPresentedFrameIdentityTracker.h's round-7 note. */
     if( m_playbackSmokeActive && m_playbackSmokeFrameTelemetry )
     {
+        /* CUDA-ATTRIBUTION-BASELINE-1 hub fix (sol r12 BLOCKER): the
+         * session's first offered occurrence, reached with < 1 frame of
+         * accumulated advance, is drop-frame mode's start frame -- requested
+         * and presented, but invisible to the displacement accumulator.
+         * Normal mode reaches its first drawFrame() already +1.0 advanced,
+         * so it gets no credit. */
+        if( !m_playbackSmokePresentedFrameIdentity.hasOfferedCeiling() )
+        {
+            m_playbackSmokeStartOccurrenceOffered =
+                ( m_playbackTimelineSourceFramesOffered
+                  - m_playbackSmokeStartTimelineSourceFramesOffered ) < 1.0;
+        }
         m_playbackSmokePresentedFrameIdentity.noteOfferedFrame(
             requestContext.playbackSmokeLoopEpoch,
             static_cast<uint64_t>( requestedFrame ) );
@@ -22630,6 +22642,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeStartTargetRequestSerial = m_nextTargetRenderRequestSerial;
     m_playbackSmokeStartTimelineSourceFramesOffered = m_playbackTimelineSourceFramesOffered;
     m_playbackSmokePresentedFrameIdentity.reset();
+    m_playbackSmokeStartOccurrenceOffered = false;
     m_playbackSmokeStartDecodeRequestsIssued =
         m_pRenderThread ? m_pRenderThread->decodeRequestsIssuedCount() : 0;
     m_playbackSmokeStartPrepStaleDrops =
@@ -25411,7 +25424,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
             m_playbackSmokePresentedFrameIdentity.presentedOccurrenceUnionCount(),
             m_playbackSmokePresentedFrameIdentity.requestedThenSkippedTargetCount(),
             m_playbackSmokePresentedFrameIdentity.requestedThenDiscardedLookaheadCount(),
-            m_playbackSmokeFrameTelemetry );
+            m_playbackSmokeFrameTelemetry,
+            m_playbackSmokeStartOccurrenceOffered );
     const double sourceFrameLossRatioValue =
         sourceFramePopulation.offeredSourceFrames > 0
             ? static_cast<double>(

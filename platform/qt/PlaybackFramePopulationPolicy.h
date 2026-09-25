@@ -215,6 +215,25 @@ public:
      *         actively-measuring session) is unaffected; only
      *         MainWindow::finishPlaybackSmokeTelemetry() need pass the real
      *         value.
+     *  \param startOccurrenceOffered CUDA-ATTRIBUTION-BASELINE-1 hub fix (sol
+     *         r12 BLOCKER, drop-frame fencepost): 1 iff the session's FIRST
+     *         offered occurrence was reached with less than one whole frame
+     *         of offered-accumulator advance, else 0 (any nonzero value is
+     *         treated as 1). The accumulator counts DISPLACEMENT (elapsed
+     *         source-frame distance), but the identity sets count every
+     *         occurrence TOUCHED, including the start position itself. In
+     *         normal mode playbackHandling() advances a whole frame (+1.0)
+     *         before the first drawFrame(), so the start frame is never
+     *         requested and no credit is due (0). In drop-frame mode the
+     *         first tick advances by < 1 frame, the start frame P IS
+     *         requested, and displacement alone reports round(E) while the
+     *         requested union is floor(E)+1 -- a healthy run then fails
+     *         offeredSourceFrames >= requestedOccurrenceUnionCount about
+     *         half the time. MainWindow::drawFrame() decides this per
+     *         session (m_playbackSmokeStartOccurrenceOffered); it is never
+     *         a blanket +1, which would fabricate a never-requested frame
+     *         in every normal-mode run. Ignored when telemetry was not
+     *         measured.
      */
     static PlaybackSourceFramePopulation computeSourceFramePopulation(
         double timelineSourceFramesOfferedNow,
@@ -225,7 +244,8 @@ public:
         uint64_t presentedOccurrenceUnionCount,
         uint64_t requestedThenSkippedTargetOccurrenceCount,
         uint64_t requestedThenDiscardedLookaheadOccurrenceCount,
-        bool frameTelemetryMeasured = true )
+        bool frameTelemetryMeasured = true,
+        uint64_t startOccurrenceOffered = 0 )
     {
         PlaybackSourceFramePopulation result;
         const double rawOffered =
@@ -246,6 +266,11 @@ public:
             result.partitionSound = false;
             return result;
         }
+
+        /* Hub fix (sol r12 BLOCKER): credit the drop-frame start occurrence
+         * AFTER the displacement rounding above -- see the
+         * startOccurrenceOffered parameter note. */
+        result.offeredSourceFrames += startOccurrenceOffered != 0 ? 1u : 0u;
 
         result.presentedViaTargetFrames = presentedViaTargetFramesThisSession;
         result.presentedViaLookaheadFrames = presentedViaLookaheadFramesThisSession;

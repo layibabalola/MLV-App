@@ -120,6 +120,24 @@ DROP_FRAME_SOURCE_FRAMES_ADVANCED_EXPECTED_RHS = (
 
 NUMERIC_LITERAL_RE = re.compile(r"^-?\d+(\.\d+)?[fFuUlL]*$")
 
+# CUDA-ATTRIBUTION-BASELINE-1 hub fix (sol r12 BLOCKER, drop-frame
+# fencepost): the per-session start-occurrence credit fed to
+# computeSourceFramePopulation()'s tenth argument. Reset per session, set
+# exactly once per session in drawFrame() (guarded to the first offered
+# occurrence) BEFORE noteOfferedFrame() raises the ceiling, and computed
+# live from the offered accumulator's session delta.
+START_OCCURRENCE_MEMBER = "m_playbackSmokeStartOccurrenceOffered"
+START_OCCURRENCE_RESET_STATEMENT = START_OCCURRENCE_MEMBER + " = false;"
+START_OCCURRENCE_ASSIGN_RE = re.compile(
+    re.escape(START_OCCURRENCE_MEMBER) + r"\s*=(?!=)")
+START_OCCURRENCE_FIRST_OFFER_GUARD = (
+    "if( !" + TRACKER_MEMBER + ".hasOfferedCeiling() )"
+)
+START_OCCURRENCE_EXPECTED_RHS = (
+    "( m_playbackTimelineSourceFramesOffered "
+    "- m_playbackSmokeStartTimelineSourceFramesOffered ) < 1.0"
+)
+
 
 # --------------------------------------------------------------------- helpers
 # Same shape as tools/repo_hygiene/test_playback_gate_wiring.py's helpers
@@ -520,7 +538,7 @@ class MainWindowWiringTests(unittest.TestCase):
         calls = find_calls(self.source, COMPUTE_SOURCE_POPULATION_MARKER)
         self.assertEqual(len(calls), 1)
         args = calls[0][1]
-        self.assertEqual(len(args), 9)
+        self.assertEqual(len(args), 10)
         # round 10 (fable MINOR): args 0-1 (the offered-accumulator pair)
         # were the only call arguments left unpinned -- a constant
         # substitute for either survives every other check in this test.
@@ -543,6 +561,56 @@ class MainWindowWiringTests(unittest.TestCase):
                           "the telemetry-measured flag must be the live session "
                           "flag, not a hardcoded true -- see round 7's unmeasured "
                           "third-state fix")
+        self.assertEqual(args[9], START_OCCURRENCE_MEMBER,
+                          "the start-occurrence credit must be the live "
+                          "per-session member drawFrame() sets, not a "
+                          "constant (a blanket 1 fabricates a never-requested "
+                          "frame in every normal-mode run; a 0 re-opens sol's "
+                          "r12 drop-frame fencepost BLOCKER)")
+
+    # ---- hub fix (sol r12 BLOCKER): the start-occurrence credit -----------
+    def test_start_occurrence_flag_is_reset_inside_begin_playback_smoke_telemetry(self):
+        self.assertEqual(
+            self.source.count(START_OCCURRENCE_RESET_STATEMENT), 1,
+            "expected exactly 1 occurrence of %r -- without it one "
+            "session's credit leaks into the next" % START_OCCURRENCE_RESET_STATEMENT)
+        span = _function_body_span(self.source, BEGIN_TELEMETRY_SIGNATURE)
+        offset = self.source.index(START_OCCURRENCE_RESET_STATEMENT)
+        self.assertTrue(call_within(span, offset),
+                         "the start-occurrence reset must be inside "
+                         "beginPlaybackSmokeTelemetry()")
+
+    def test_start_occurrence_flag_is_set_live_in_draw_frame_before_note_offered_frame(self):
+        assignments = [m.start() for m in START_OCCURRENCE_ASSIGN_RE.finditer(self.source)]
+        self.assertEqual(
+            len(assignments), 2,
+            "expected exactly 2 assignments to %s (the per-session reset "
+            "and the drawFrame() first-offer set)" % START_OCCURRENCE_MEMBER)
+        span = _function_body_span(self.source, DRAW_FRAME_SIGNATURE)
+        inside = [a for a in assignments if call_within(span, a)]
+        self.assertEqual(len(inside), 1,
+                          "expected exactly 1 assignment to %s inside drawFrame()"
+                          % START_OCCURRENCE_MEMBER)
+        assign_offset = inside[0]
+        statement = self.source[assign_offset:self.source.index(";", assign_offset)]
+        rhs = re.sub(r"\s+", " ", statement.split("=", 1)[1]).strip()
+        self.assertEqual(
+            rhs, START_OCCURRENCE_EXPECTED_RHS,
+            "the credit must be computed live from the offered accumulator's "
+            "session delta -- got %r" % rhs)
+        guard_offset = self.source.rindex(
+            START_OCCURRENCE_FIRST_OFFER_GUARD, span[0], assign_offset)
+        between = self.source[guard_offset + len(START_OCCURRENCE_FIRST_OFFER_GUARD):assign_offset]
+        self.assertRegex(
+            between, r"^\s*\{\s*$",
+            "the assignment must be the first statement guarded by the "
+            "first-offered-occurrence check -- got %r" % between)
+        offered_calls = find_calls(self.source, NOTE_OFFERED_MARKER)
+        self.assertEqual(len(offered_calls), 1)
+        self.assertLess(
+            assign_offset, offered_calls[0][0],
+            "the credit must be decided BEFORE noteOfferedFrame(...) sets "
+            "the ceiling -- afterwards hasOfferedCeiling() is always true")
 
     # ---- round 9: value sources feeding the epoch, not just its plumbing ---
     # sol + astra MAJOR: the round-8 census proved every call site receives
