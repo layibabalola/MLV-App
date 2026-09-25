@@ -1932,7 +1932,12 @@ function Get-AttrCudaPresentMonDisplayReport {
     Returns .status one of 'OK' | 'PRESENTMON_UNAVAILABLE' | 'DISPLAY_ASLEEP'; .reason is $null
     only for 'OK'. On 'OK', .chains lists every (ProcessID, SwapChainAddress) group observed in
     the window, for audit; .selectedChain is the PID-level aggregate (its swapChainAddresses lists
-    every address summed into it); .selectedChainRows carries only its positive-display rows,
+    every address summed into it). Both carry .presentModes -- every distinct PresentMode string
+    observed in that chain's rows, with its own row count (PRESENTMON-HARNESS-ROBUSTNESS-1) -- so
+    a leg admitting only a handful of rows (e.g. a full-screen leg that lost most of its samples)
+    can be diagnosed from evidence alone: an exclusive/hardware mode dropping to a composed one
+    mid-capture is a real signal PresentMon itself reports, not something counts alone can show.
+    .selectedChainRows carries only its positive-display rows,
     shaped exactly like this job's historical pmRows
     (ordinal/timeInMs/msBetweenDisplayChange/displayFpsEquivalent/presentMode), for
     presentmon-series.csv -- tools/profiling/refresh_period_histogram.py depends on that exact
@@ -2100,6 +2105,18 @@ function Get-AttrCudaPresentMonDisplayReport {
                 presentedFps = if ($windowSeconds -gt 0) { $groupRows.Count / $windowSeconds } else { $null }
                 displayedFps = if ($windowSeconds -gt 0) { $displayedRows.Count / $windowSeconds } else { $null }
                 isMlvAppChain = ($groupRows[0].processId -eq $targetPid)
+                # PRESENTMON-HARNESS-ROBUSTNESS-1: a thin/full-screen-style sample loss (e.g. a
+                # leg admitting only 1 presented/displayed row) cannot be diagnosed from counts
+                # alone -- PresentMode ("Hardware: Independent Flip" vs "Composed: Flip" vs a
+                # borderless/exclusive-fullscreen variant) is the field that actually explains
+                # WHY PresentMon lost samples on a given chain. Recorded per chain, every mode
+                # actually observed, so a future full-screen leg's evidence answers the question
+                # on its own instead of needing a live repro to diagnose.
+                presentModes = @(
+                    $groupRows | Group-Object -Property presentMode | ForEach-Object {
+                        [pscustomobject]@{ presentMode = $_.Name; count = $_.Count }
+                    }
+                )
             })
         }
         $mlvAppChains = @($chains | Where-Object { $_.isMlvAppChain } | Sort-Object -Property presentedCount -Descending)
@@ -2126,6 +2143,14 @@ function Get-AttrCudaPresentMonDisplayReport {
             presentedFps = if ($windowSeconds -gt 0) { $mlvAppRows.Count / $windowSeconds } else { $null }
             displayedFps = if ($windowSeconds -gt 0) { $mlvAppDisplayedRows.Count / $windowSeconds } else { $null }
             isMlvAppChain = $true
+            # PRESENTMON-HARNESS-ROBUSTNESS-1: summed across every swap chain address this PID
+            # used in the window, mirroring $chains' per-chain presentModes above -- see that
+            # comment for why this field exists.
+            presentModes = @(
+                $mlvAppRows | Group-Object -Property presentMode | ForEach-Object {
+                    [pscustomobject]@{ presentMode = $_.Name; count = $_.Count }
+                }
+            )
         }
         $selectedChainRows = @(
             $mlvAppDisplayedRows |

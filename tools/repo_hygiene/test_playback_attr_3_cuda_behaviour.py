@@ -1450,7 +1450,7 @@ class OwnerFootagePrivateDirectoryLeakAndRefusalTests(_PwshCase):
     def _extract_cmd_build(self) -> str:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
         start = text.index("$envList = \"'\" + ($envs -join")
-        end = text.index("\n$presentMonProc = Start-PresentMonCapture", start)
+        end = text.index("\n$presentMonSpawnError = $null", start)
         self.assertGreater(end, start, "cmd-build markers moved in the generator")
         return text[start:end]
 
@@ -3472,7 +3472,14 @@ class SmokeRunFailedPresentMonCleanupTests(_PwshCase):
 
     def _failure_block(self) -> str:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
-        start_marker = "$presentMonProc = Start-PresentMonCapture $presentMonPath"
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: starts at the spawn-guard's own flush-left assignment,
+        # not at the (now indented, inside its own try) Start-PresentMonCapture call itself --
+        # extracting from mid-try would leave this span's leading "} catch {" with no opening
+        # "try {" of its own, an unbalanced-brace syntax error in the synthetic script below.
+        # This boundary is a self-contained superset instead: the whole spawn-guard try/catch/if
+        # is included (a no-op here, since the stub below always succeeds), then everything the
+        # predecessor boundary already covered.
+        start_marker = "$presentMonSpawnError = $null"
         # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 1): the span now ends right after the
         # SMOKE_RUN_FAILED if-block's own closing brace -- everything hoisted above the
         # PresentMon wait (reading result.json, resolving the run log, publishing smoke evidence,

@@ -1122,7 +1122,31 @@ $cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted
 # parsing, so a consumer needing a tighter join than this one can see exactly how much slack to
 # allow rather than trusting a single unbracketed stamp.
 $presentMonPreSpawnUtc = (Get-Date).ToUniversalTime()
-$presentMonProc = Start-PresentMonCapture $presentMonPath
+# PRESENTMON-HARNESS-ROBUSTNESS-1: Start-PresentMonCapture throws -- a pre-existing output file,
+# or a PresentMon process that exited nonzero within its own 3s startup check (rc=6 is ETW access
+# denied) -- and this call site sat inside the outer try/finally with NO catch of its own, so
+# either throw would terminate the whole job with a raw PowerShell error and publish nothing, one
+# step before the smoke run (and therefore any app-side measurement) had even started. Typed the
+# same way every other PresentMon failure already is: PRESENTMON_UNAVAILABLE, exit 23.
+$presentMonSpawnError = $null
+try {
+    $presentMonProc = Start-PresentMonCapture $presentMonPath
+} catch {
+    $presentMonSpawnError = $_.Exception.Message
+}
+if ($null -ne $presentMonSpawnError) {
+    $displayFailure = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='PRESENTMON_UNAVAILABLE'
+        fixtureRehearsal=$FixtureRehearsal
+        reason="PresentMon failed to start: $presentMonSpawnError"
+        presentMonStatus='unavailable'
+        chains=@()
+        sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $displayFailure (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=PRESENTMON_UNAVAILABLE REASON=`"PresentMon failed to start: $presentMonSpawnError`" ARTIFACTS=$Pub"
+    exit 23
+}
 $presentMonPostSpawnUtc = (Get-Date).ToUniversalTime()
 $presentMonProcessStartUtc = $null
 try { $presentMonProcessStartUtc = $presentMonProc.StartTime.ToUniversalTime() } catch { $presentMonProcessStartUtc = $null }
@@ -1305,12 +1329,18 @@ if ($null -ne $presentMonWaitError) {
         schema='playback-attr-3-cuda-venue.v1'; result='PRESENTMON_UNAVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
         reason=$presentMonWaitError
+        presentMonStatus='unavailable'
         chains=@()
         presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: the smoke run's own frame rows are already parsed and
+        # published (above, before PresentMon was ever waited on) by the time a wait failure can
+        # happen here -- carried into this typed refusal too, so a reader is not left guessing
+        # whether the app-side run produced any frame telemetry at all.
+        frameRows=$rows.Count
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $displayFailure (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=PRESENTMON_UNAVAILABLE REASON=`"$presentMonWaitError`" ARTIFACTS=$Pub"
+    Write-Output "RESULT=PRESENTMON_UNAVAILABLE REASON=`"$presentMonWaitError`" FRAME_ROWS=$($rows.Count) ARTIFACTS=$Pub"
     exit 23
 }
 
@@ -1408,17 +1438,30 @@ Save-Json ([ordered]@{
 # take the headline number's clock origin on faith.
 $displayReport = Get-AttrCudaPresentMonDisplayReport -CsvPath $presentMonPath -ResultJson $resultJson -EarliestCaptureStartUtc $presentMonCaptureStartUtc -LatestCaptureStartUtc $presentMonPostSpawnUtc
 if ($displayReport.status -ne 'OK') {
+    # PRESENTMON-HARNESS-ROBUSTNESS-1: the backend-eligibility gate, the GPU-frames gate and the
+    # region timing stats above have ALL already run and already succeeded by this point in the
+    # script -- $diagnostics/$gpuSummary/$gpuFramesTotal/$stats/$rows are real, computed evidence
+    # that this leg's own app-side measurement worked, not placeholders. Discarding them here,
+    # only because PresentMon itself could not verify the display side, used to throw away a leg
+    # whose measurement was fine; they are published alongside the typed refusal now, tagged with
+    # presentMonStatus so nothing downstream mistakes this for a display-verified result.
     $displayFailure = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result=$displayReport.status
         fixtureRehearsal=$FixtureRehearsal
         reason=$displayReport.reason
+        presentMonStatus='unavailable'
         chains=$displayReport.chains
         presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')
         clockBracket=$displayReport.clockBracket
+        diagnostics=$diagnostics
+        gpuSummary=$gpuSummary
+        gpuFramesTotal=$gpuFramesTotal
+        frameRows=$rows.Count
+        regions=$stats
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $displayFailure (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=$($displayReport.status) REASON=`"$($displayReport.reason)`" ARTIFACTS=$Pub"
+    Write-Output "RESULT=$($displayReport.status) REASON=`"$($displayReport.reason)`" FRAME_ROWS=$($rows.Count) GPU_FRAMES=$gpuFramesTotal ARTIFACTS=$Pub"
     $displayExitCode = if ($displayReport.status -eq 'DISPLAY_ASLEEP') { 24 } else { 23 }
     exit $displayExitCode
 }
@@ -1438,6 +1481,20 @@ $pmRows | Export-Csv -LiteralPath (Join-Path $legOut 'presentmon-series.csv') -N
 # and non-positive msBetweenDisplayChange cells reading the csv this exports).
 $pmIntervalRows = @($pmRows | Where-Object { $null -ne $_.msBetweenDisplayChange -and $_.msBetweenDisplayChange -gt 0 })
 $pmStats = Get-Stats @($pmIntervalRows | ForEach-Object { [double]$_.msBetweenDisplayChange })
+# PRESENTMON-HARNESS-ROBUSTNESS-1: $displayReport.status is 'OK' here (the typed refusal above
+# already returned on anything else), meaning PresentMon confirmed at least one genuine display
+# change for MLVApp -- but that alone does not mean presentMonStats above is a real cadence
+# measurement. A leg admitting only NA-first-present row(s) (displayed via MsUntilDisplayed, no
+# prior display change to diff against) has $pmIntervalRows.Count -eq 0: pmStats.count reads 0
+# and every stat reads $null, silently, while the rest of this leg still reports
+# RESULT=MEASUREMENT_CAPTURED as if PresentMon had fully corroborated it -- exactly the "very
+# thin admitted-row count" gap disclosed on CUDA-PLAYBACK-FULLSCREEN-UI-1 r2b (a real full-screen
+# leg with presentedCount=1 displayedCount=1). Typed here as 'degraded': display is genuinely
+# confirmed, but cadence cannot be, and the reason says why -- never silent.
+$presentMonStatus = if ($pmIntervalRows.Count -gt 0) { 'ok' } else { 'degraded' }
+$presentMonStatusReason = if ($pmIntervalRows.Count -gt 0) { $null } else {
+    "PresentMon confirmed $($pmRows.Count) displayed MLVApp row(s) in the playback window, but none carried a positive MsBetweenDisplayChange interval -- every displayed sample came from MsUntilDisplayed on what PresentMon reports as an NA-first-present row, so presentMonStats has no interval to compute cadence from; display itself is still confirmed, cadence is not"
+}
 
 $dllSha256Lower = (Get-Sha $reconDll).ToLowerInvariant()
 # $pendingSymbolPresence came from the build manifest above, whose dll.sha256 was verified
@@ -1486,6 +1543,12 @@ $manifest = [ordered]@{
         # inflated this above the sample size the statistics below were actually computed on.
         positiveSamples=$pmIntervalRows.Count
         clockBracket=$displayReport.clockBracket
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: 'ok' when positiveSamples above is > 0, 'degraded'
+        # when display was confirmed but no positive-interval sample was -- see the assignment
+        # comment above for why that distinction matters and cannot be read off positiveSamples
+        # alone by every consumer.
+        status=$presentMonStatus
+        statusReason=$presentMonStatusReason
     }
     environmentBoundary = [ordered]@{ jobTempDir=$Scratch; allChildrenInheritJobTemp=$true }
     cpuQuiescence = [ordered]@{ samples=$loads; meanPercent=$avgLoad; thresholdPercent=20.0; pass=($avgLoad -le 20.0) }
@@ -1514,6 +1577,8 @@ Save-Json ([ordered]@{
     cpuFrames = $gpuSummary.cpuFrames
     presentMonSamples = $pmRows.Count
     presentMonSelectedChain = $displayReport.selectedChain
+    presentMonStatus = $presentMonStatus
+    presentMonStatusReason = $presentMonStatusReason
     clockBracket = $displayReport.clockBracket
     diagnostics = $diagnostics
     artifactRoot = $Pub
@@ -1524,7 +1589,7 @@ Save-Json ([ordered]@{ schema='playback-attr-3-cuda-artifact-index.v1'; artifact
 # outbox result.json carries stdout and nothing else, so a reader who never opens an artifact
 # still cannot mistake a rehearsal for a measurement.
 $resultVerb = if ($FixtureRehearsal) { 'FIXTURE_REHEARSAL_CAPTURED' } else { 'MEASUREMENT_CAPTURED' }
-Write-Output "RESULT=$resultVerb FIXTURE_REHEARSAL=$FixtureRehearsal SOURCE=$SourceCommit CLIP=$ClipId ROWS=$($rows.Count) GPU_FRAMES=$gpuFramesTotal CPU_FRAMES=$($gpuSummary.cpuFrames) PRESENTMON_SAMPLES=$($pmRows.Count) ARTIFACTS=$Pub"
+Write-Output "RESULT=$resultVerb FIXTURE_REHEARSAL=$FixtureRehearsal SOURCE=$SourceCommit CLIP=$ClipId ROWS=$($rows.Count) GPU_FRAMES=$gpuFramesTotal CPU_FRAMES=$($gpuSummary.cpuFrames) PRESENTMON_SAMPLES=$($pmRows.Count) PRESENTMON_STATUS=$presentMonStatus ARTIFACTS=$Pub"
 exit 0
 } finally {
     if ($OwnerClipDir) {
