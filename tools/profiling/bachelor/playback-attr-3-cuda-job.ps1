@@ -452,7 +452,12 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     # spliced verbatim into both, never two copies that can drift apart.
     'Read-AttrCudaBase64Payload',
     'Test-AttrCudaFootagePart',
-    'ConvertTo-AttrCudaUtf8String'
+    'ConvertTo-AttrCudaUtf8String',
+    # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1: the PresentMon post-step's own safety boundary --
+    # parses, clips to the playback window, groups by (ProcessID, SwapChainAddress), and returns a
+    # typed PRESENTMON_UNAVAILABLE/DISPLAY_ASLEEP refusal instead of an uncaught throw. See its own
+    # header in AttrCudaArtifacts.psm1.
+    'Get-AttrCudaPresentMonDisplayReport'
 )
 # ATTR3-FOOTAGE-BIND-1 PR-B round 4b: the private verified-part directory (one hard link per
 # verified part, under a neutral name derived from its index, so nothing downstream -- the smoke
@@ -1093,6 +1098,10 @@ $envs = @(
 $envList = "'" + ($envs -join "','") + "'"
 function ConvertTo-PsSingleQuoted([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
 $cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted $exePath) -Input $(ConvertTo-PsSingleQuoted $clipPath) -Output $(ConvertTo-PsSingleQuoted $resultPath) -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor 4 -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1: recorded immediately before PresentMon starts so
+# Get-AttrCudaPresentMonDisplayReport can turn PresentMon's own TimeInMs (ms since this capture
+# began) back into a wall-clock timestamp and clip to the playback window below.
+$presentMonCaptureStartUtc = (Get-Date).ToUniversalTime()
 $presentMonProc = Start-PresentMonCapture $presentMonPath
 # ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3): the smoke-failure ordering fix only covered a
 # NORMAL child return -- a terminating exception while starting or running the nested pwsh (the
@@ -1211,6 +1220,20 @@ $rawLog = [IO.File]::ReadAllText($logPath)
 $rows = Get-FrameRows $rawLog
 $rows | Export-Csv -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -NoTypeInformation
 
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1: publish the smoke artifacts BEFORE any PresentMon
+# parsing. They are already known-good the moment the run log and frame rows are resolved -- a
+# PresentMon post-step failure (missing csv, zero displayed samples in the playback window) must
+# never destroy evidence that a smoke run already passed. Previously these were only published at
+# the very end of a fully successful run, interleaved with the PresentMon parse itself, so an
+# uncaught failure in that parse (Import-Csv on a missing file, or the old unguarded "no positive
+# samples" throw) left nothing published at all -- exactly the 3-of-8 baseline failure this closes.
+[void](Publish-AttrCudaFileCopy -Source $resultPath -Destination (Join-Path $Pub 'result.json'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'smoke-stdout.txt') -Destination (Join-Path $Pub 'smoke-stdout.txt'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'smoke-stderr.txt') -Destination (Join-Path $Pub 'smoke-stderr.txt'))
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'probe-timeline.csv') -Destination (Join-Path $Pub 'probe-timeline.csv'))
+[void](New-AttrCudaDirectory -Path (Join-Path $Pub 'logs'))
+[void](Publish-AttrCudaFileCopy -Source $logPath -Destination (Join-Path $Pub 'logs\smoke-run.log'))
+
 # Backend-availability gate (swarm ruling, 2026-09-16): parse the run's own diagnostic
 # fields BEFORE any verdict. A run where the CUDA backend never loaded, or where the R16
 # texture path was not admitted, cannot produce a CUDA attribution -- the frame counters
@@ -1273,21 +1296,31 @@ foreach ($name in @('prep_region_setup','prep_region_gpu','prep_region_image','p
     $stats[$name] = Get-Stats $values
 }
 
-$pmRows = @()
-foreach ($row in @(Import-Csv -LiteralPath $presentMonPath)) {
-    $value = 0.0
-    if ([double]::TryParse([string]$row.MsBetweenDisplayChange, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value) -and $value -gt 0) {
-        $pmRows += [pscustomobject]@{
-            ordinal = $pmRows.Count
-            timeInMs = [double]$row.TimeInMs
-            msBetweenDisplayChange = $value
-            displayFpsEquivalent = 1000.0 / $value
-            presentMode = [string]$row.PresentMode
-        }
-    }
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1: the raw capture is published (if it exists) BEFORE it is
+# ever parsed, so a typed refusal below still leaves it behind for diagnosis -- the previous
+# unguarded Import-Csv threw straight past this file's own existence check when it was missing,
+# and "no positive MsBetweenDisplayChange samples" threw AFTER the smoke run had already passed,
+# both destroying every artifact already produced instead of reporting a typed outcome.
+if (Test-Path -LiteralPath $presentMonPath -PathType Leaf) {
+    [void](Publish-AttrCudaFileCopy -Source $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv'))
 }
-if ($pmRows.Count -eq 0) { throw 'PresentMon sidecar had no positive MsBetweenDisplayChange samples' }
+$displayReport = Get-AttrCudaPresentMonDisplayReport -CsvPath $presentMonPath -ResultJson $resultJson -CaptureStartUtc $presentMonCaptureStartUtc
+if ($displayReport.status -ne 'OK') {
+    $displayFailure = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result=$displayReport.status
+        fixtureRehearsal=$FixtureRehearsal
+        reason=$displayReport.reason
+        chains=$displayReport.chains
+        sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $displayFailure (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=$($displayReport.status) REASON=`"$($displayReport.reason)`" ARTIFACTS=$Pub"
+    $displayExitCode = if ($displayReport.status -eq 'DISPLAY_ASLEEP') { 24 } else { 23 }
+    exit $displayExitCode
+}
+$pmRows = @($displayReport.selectedChainRows)
 $pmRows | Export-Csv -LiteralPath (Join-Path $legOut 'presentmon-series.csv') -NoTypeInformation
+[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'presentmon-series.csv') -Destination (Join-Path $Pub 'presentmon-series.csv'))
 $pmStats = Get-Stats @($pmRows | ForEach-Object { [double]$_.msBetweenDisplayChange })
 
 $dllSha256Lower = (Get-Sha $reconDll).ToLowerInvariant()
@@ -1304,17 +1337,9 @@ $provenance = [ordered]@{
 }
 Save-Json $provenance (Join-Path $Pub 'provenance.json')
 
-[void](Publish-AttrCudaFileCopy -Source $resultPath -Destination (Join-Path $Pub 'result.json'))
-[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'smoke-stdout.txt') -Destination (Join-Path $Pub 'smoke-stdout.txt'))
-[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'smoke-stderr.txt') -Destination (Join-Path $Pub 'smoke-stderr.txt'))
-[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'probe-timeline.csv') -Destination (Join-Path $Pub 'probe-timeline.csv'))
-[void](Publish-AttrCudaFileCopy -Source $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv'))
-[void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'presentmon-series.csv') -Destination (Join-Path $Pub 'presentmon-series.csv'))
-[void](New-AttrCudaDirectory -Path (Join-Path $Pub 'logs'))
-# The per-run snapshot, under the name that says what it is. The aggregate rotating app log is
-# NOT published: the smoke runner is explicit that it may grow after the run and carries no
-# comparison authority.
-[void](Publish-AttrCudaFileCopy -Source $logPath -Destination (Join-Path $Pub 'logs\smoke-run.log'))
+# result.json, smoke-stdout.txt, smoke-stderr.txt, probe-timeline.csv and logs\smoke-run.log were
+# already published above, before PresentMon was ever parsed; presentmon.csv and
+# presentmon-series.csv were published above too, alongside/after the PresentMon parse itself.
 
 $manifest = [ordered]@{
     schema = 'playback-attr-3-cuda-evidence-manifest.v1'
@@ -1330,7 +1355,15 @@ $manifest = [ordered]@{
     buildManifest = [ordered]@{ name=$buildManifestName; sha256=$BuildManifestSha256; dllPairManifestSha256=$dllPairManifestSha256 }
     executable = [ordered]@{ name=$ExeName; sha256=$cacheExeSha }
     reconDll = [ordered]@{ name=$ReconName; sha256=(Get-Sha $reconDll) }
-    presentMon = [ordered]@{ name=$PresentMonName; sha256=$PresentMonSha; launch='direct-child-inherits-job-temp'; positiveSamples=$pmRows.Count }
+    presentMon = [ordered]@{
+        name=$PresentMonName; sha256=$PresentMonSha; launch='direct-child-inherits-job-temp'
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1: display rates are reported for the MLVApp preview
+        # chain only -- selectedChain names which (ProcessID, SwapChainAddress) that is; chains
+        # lists every group PresentMon reported inside the playback window, for audit.
+        chains=$displayReport.chains
+        selectedChain=$displayReport.selectedChain
+        positiveSamples=$pmRows.Count
+    }
     environmentBoundary = [ordered]@{ jobTempDir=$Scratch; allChildrenInheritJobTemp=$true }
     cpuQuiescence = [ordered]@{ samples=$loads; meanPercent=$avgLoad; thresholdPercent=20.0; pass=($avgLoad -le 20.0) }
     frameRows = $rows.Count
@@ -1357,6 +1390,7 @@ Save-Json ([ordered]@{
     gpuFramesTotal = $gpuFramesTotal
     cpuFrames = $gpuSummary.cpuFrames
     presentMonSamples = $pmRows.Count
+    presentMonSelectedChain = $displayReport.selectedChain
     diagnostics = $diagnostics
     artifactRoot = $Pub
 }) (Join-Path $Pub 'summary.json')
