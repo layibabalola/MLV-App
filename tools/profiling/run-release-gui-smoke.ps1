@@ -309,12 +309,30 @@ function Get-HostLoadSystemTimes {
     # Get-HostLoadNonSubjectCpuLoadPercent below for the subtraction that turns this into a
     # non-subject figure.
     #
+    # round 9 (sol BLOCKER item 1): -SubjectProcess/-SubjectNotYetStarted read the subject's own
+    # TotalProcessorTime HERE, immediately after the GetSystemTimes syscall, with nothing but a
+    # null-check assignment between the two reads -- not by a separate caller-side read one or more
+    # statements later (as Get-HostLoadSnapshot did through round 8). Both numbers now describe the
+    # SAME instant by construction: there is no window left in which the subject can keep burning
+    # CPU that then gets attributed, via subtraction, to a system-wide interval it was never
+    # inside. sol's round-8 repro depended on exactly that gap (a delayed subject read pulling in
+    # 0.88 CPU-seconds accrued after the system endpoint, turning a true 96% into a reported 74%
+    # quiet); folding the read in here removes the gap rather than bounding it.
+    #
     # Self-contained (the Add-Type guard lives inside this function, not at file scope) so the test
     # harness's verbatim-splice extraction (_extract_functions) can pull this function alone and it
     # still works standalone -- same precedent as capture-window-screenshot.ps1's NativeMethods
     # guard. Returns $null (never throws) on any failure: non-Windows platform, Add-Type failure,
     # or GetSystemTimes itself returning FALSE -- callers must treat $null as "could not collect",
     # the same fail-toward-unknown contract every other collection point in this file already uses.
+    param(
+        [AllowNull()][System.Diagnostics.Process]$SubjectProcess = $null,
+        # round 7: the BEFORE snapshot is captured before the subject process is even started --
+        # its cumulative CPU time is not "unreadable", it is DEFINITIONALLY zero. See
+        # Get-HostLoadSnapshot's own parameter comment for the full rationale; carried here
+        # verbatim now that the read itself lives in this function.
+        [switch]$SubjectNotYetStarted
+    )
     if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
         return $null
     }
@@ -360,11 +378,39 @@ namespace HostLoadNative {
     if (-not $ok) {
         return $null
     }
+    # round 9 (sol BLOCKER item 1): read immediately -- the only statements between the syscall
+    # above and this read are the two null checks above it, none of which can block or sleep.
+    $subjectCpuSeconds = $null
+    if ($SubjectNotYetStarted) {
+        $subjectCpuSeconds = 0.0
+    }
+    elseif ($null -ne $SubjectProcess) {
+        try {
+            # Read straight off the caller's own held handle -- no process lookup, so PID reuse
+            # and "the process already exited" cannot make this read the WRONG process's CPU
+            # time. See Get-HostLoadSnapshot's former copy of this comment (round 4/7) for the
+            # full rationale; unchanged, only relocated.
+            $SubjectProcess.Refresh()
+            $subjectTotalProcessorTime = $SubjectProcess.TotalProcessorTime
+            # round 7: a disposed/invalid Process handle's TotalProcessorTime getter does NOT
+            # always throw -- PowerShell's member-access can suppress the .NET property getter's
+            # exception and simply yield $null instead. An explicit null check -- not exception
+            # handling alone -- is what closes it; casting $null straight to [double] would
+            # silently produce 0.0.
+            if ($null -ne $subjectTotalProcessorTime) {
+                $subjectCpuSeconds = [double]$subjectTotalProcessorTime.TotalSeconds
+            }
+        } catch {
+            # A genuinely thrown exception is handled identically: subjectCpuSeconds stays at its
+            # $null default (unreadable, the third state -- never guess zero).
+        }
+    }
     [pscustomobject]@{
         idleSeconds = $idleTicks / 1e7
         kernelSeconds = $kernelTicks / 1e7
         userSeconds = $userTicks / 1e7
         capturedAtUtc = $syscallAtUtc
+        subjectCpuSeconds = $subjectCpuSeconds
     }
 }
 
@@ -394,18 +440,27 @@ function Get-HostLoadSnapshot {
     # round 7 (both keys BLOCKER): cpuLoadPercent (Win32_Processor.LoadPercentage via CIM) and
     # topCpuConsumers (Get-Process, sorted) are kept for the receipt's own sake -- they are useful
     # evidence for a human reading a receipt -- but NEITHER feeds the quiet/exceeded decision
-    # anymore; that decision is systemIdleSeconds/systemKernelSeconds/systemUserSeconds
-    # (Get-HostLoadSystemTimes, one syscall) and subjectCpuSeconds (read from the subject's OWN
-    # process handle, -SubjectProcess, below) only. -SubjectProcess takes the actual
-    # [System.Diagnostics.Process] object the caller already holds from ::Start(), not a PID to
-    # re-look-up: a fresh Get-Process -Id lookup would FAIL once the subject has exited (it drops
-    # out of the live process table almost immediately after being killed), which is exactly the
-    # "after" snapshot's own common case -- the ORIGINAL Process object's handle stays valid for
-    # reading TotalProcessorTime past exit (until the caller Close()s/Dispose()s it, which this
-    # file never does), so this is the one reading in this whole function that does NOT go through
-    # any form of process lookup at all. topCpuConsumers' own Get-Process call is wrapped in its
-    # OWN try/catch: a failure gathering that purely-evidentiary list must not block collection of
-    # the data the gate actually depends on.
+    # anymore; that decision is systemIdleSeconds/systemKernelSeconds/systemUserSeconds and
+    # subjectCpuSeconds, both now read together by Get-HostLoadSystemTimes (one syscall plus one
+    # subject-handle read, back to back) only. -SubjectProcess/-SubjectNotYetStarted are passed
+    # straight through to that function -- see its own comment for the full rationale (why the
+    # caller's held handle, never a fresh Get-Process -Id lookup; why "not yet started" is a
+    # legitimate zero, distinct from "unreadable"). topCpuConsumers' own Get-Process call is
+    # wrapped in its OWN try/catch: a failure gathering that purely-evidentiary list must not block
+    # collection of the data the gate actually depends on.
+    #
+    # round 9 (sol BLOCKER item 1 + fable minor -- evidence stretches the final interval): the
+    # syscall + subject-CPU reading (via Get-HostLoadSystemTimes) now happens FIRST, before any
+    # CIM/Get-Process evidence collection, for EVERY snapshot -- not just during-leg ones. Through
+    # round 8, the evidence block ran first and the syscall ran after it, so up to
+    # ~2*OperationTimeoutSec of CIM latency plus an unbounded Get-Process could land between the
+    # leg boundary and the syscall that is supposed to mark it: the BEFORE snapshot's syscall
+    # landed late (shrinking the first interval) and the AFTER snapshot's syscall landed late
+    # (stretching the final interval past leg end, diluting a leg-tail burst -- fable's round-8
+    # residual). capturedAtUtc -- the general timestamp the main body's spacing guard
+    # (hostLoadObservedMaxSampleGapMs) measures gaps from -- is now the syscall's own instant when
+    # the syscall succeeds, not a separate top-of-function stamp taken before that evidence work,
+    # so the guard can no longer be blind to the stretch either.
     param(
         [int]$TopProcessCount = 8,
         [int]$OperationTimeoutSec = 2,
@@ -430,9 +485,13 @@ function Get-HostLoadSnapshot {
         [switch]$SkipEvidenceCollection
     )
 
-    $capturedAtUtc = [datetime]::UtcNow
+    # round 9: this is now only a FALLBACK top-of-function stamp -- overwritten below with the
+    # syscall's own instant whenever Get-HostLoadSystemTimes succeeds (the common Windows case).
+    # It stays as the default so a host where the syscall is unavailable (non-Windows, or the
+    # Add-Type/syscall failure path) still records a timestamp, matching the pre-round-9 contract.
+    $fallbackCapturedAtUtc = [datetime]::UtcNow
     $snapshot = [ordered]@{
-        capturedAtUtc = $capturedAtUtc.ToString("o")
+        capturedAtUtc = $fallbackCapturedAtUtc.ToString("o")
         collected = $false
         error = $null
         cpuLoadPercent = $null
@@ -448,6 +507,42 @@ function Get-HostLoadSnapshot {
         systemUserSeconds = $null
     }
     try {
+        # round 9: syscall + subject-CPU reading FIRST, before any evidence collection -- see the
+        # function-level comment above for why the ordering itself is the fix.
+        $systemTimes = Get-HostLoadSystemTimes -SubjectProcess $SubjectProcess -SubjectNotYetStarted:$SubjectNotYetStarted
+        if ($null -ne $systemTimes) {
+            $snapshot.capturedAtUtc = $systemTimes.capturedAtUtc.ToString("o")
+            $snapshot.systemIdleSeconds = [double]$systemTimes.idleSeconds
+            $snapshot.systemKernelSeconds = [double]$systemTimes.kernelSeconds
+            $snapshot.systemUserSeconds = [double]$systemTimes.userSeconds
+            $snapshot.systemTimesCapturedAtUtc = $systemTimes.capturedAtUtc.ToString("o")
+            $snapshot.systemTimesCollected = $true
+            $snapshot.subjectCpuSeconds = $systemTimes.subjectCpuSeconds
+        }
+        else {
+            # round 9: GetSystemTimes itself was unavailable here (non-Windows, or the native
+            # syscall/Add-Type failed) -- the window-alignment fix this round exists for is moot on
+            # this path (the interval is unknown regardless; see
+            # Get-HostLoadNonSubjectCpuLoadPercent's systemTimesCollected gate), but the subject-CPU
+            # field's own contract (SubjectNotYetStarted -> a genuine 0.0, an unreadable handle ->
+            # $null, never guessed) must still hold independent of platform. This duplicates
+            # Get-HostLoadSystemTimes' own subject-read block exactly, for this fallback path only.
+            if ($SubjectNotYetStarted) {
+                $snapshot.subjectCpuSeconds = 0.0
+            }
+            elseif ($null -ne $SubjectProcess) {
+                try {
+                    $SubjectProcess.Refresh()
+                    $subjectTotalProcessorTime = $SubjectProcess.TotalProcessorTime
+                    if ($null -ne $subjectTotalProcessorTime) {
+                        $snapshot.subjectCpuSeconds = [double]$subjectTotalProcessorTime.TotalSeconds
+                    }
+                } catch {
+                    # stays $null -- unreadable, never guessed zero.
+                }
+            }
+        }
+
         if (-not $SkipEvidenceCollection) {
             $cpuLoad = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop `
                 -OperationTimeoutSec $OperationTimeoutSec |
@@ -473,44 +568,6 @@ function Get-HostLoadSnapshot {
             } catch {
                 # topCpuConsumers/processCount stay at their evidence-only defaults (empty/$null) --
                 # this must never block collection of the load-relevant data below.
-            }
-        }
-
-        $systemTimes = Get-HostLoadSystemTimes
-        if ($null -ne $systemTimes) {
-            $snapshot.systemIdleSeconds = [double]$systemTimes.idleSeconds
-            $snapshot.systemKernelSeconds = [double]$systemTimes.kernelSeconds
-            $snapshot.systemUserSeconds = [double]$systemTimes.userSeconds
-            $snapshot.systemTimesCapturedAtUtc = $systemTimes.capturedAtUtc.ToString("o")
-            $snapshot.systemTimesCollected = $true
-        }
-
-        if ($SubjectNotYetStarted) {
-            $snapshot.subjectCpuSeconds = 0.0
-        }
-        elseif ($null -ne $SubjectProcess) {
-            try {
-                # Read straight off the caller's own held handle -- no process lookup, so PID reuse
-                # and "the process already exited" cannot make this read the WRONG process's CPU
-                # time (there is no re-resolution step that could land on a different process that
-                # happens to have reused the same PID).
-                $SubjectProcess.Refresh()
-                $subjectTotalProcessorTime = $SubjectProcess.TotalProcessorTime
-                # round 7: a disposed/invalid Process handle's TotalProcessorTime getter does NOT
-                # always throw here -- PowerShell's member-access can suppress the .NET property
-                # getter's exception and simply yield $null instead (the exact same defect class
-                # astra's round-6 finding described for the retired per-process loop: "PowerShell
-                # suppresses the property-get exception; casting the resulting null to double
-                # records zero without entering the catch"). Reproduced live against a genuinely
-                # disposed handle while building this fix: no exception, $null returned. An
-                # explicit null check here -- not exception handling alone -- is what actually
-                # closes it; casting $null straight to [double] would silently produce 0.0.
-                if ($null -ne $subjectTotalProcessorTime) {
-                    $snapshot.subjectCpuSeconds = [double]$subjectTotalProcessorTime.TotalSeconds
-                }
-            } catch {
-                # A genuinely thrown exception is handled identically: subjectCpuSeconds stays at
-                # its $null default.
             }
         }
 

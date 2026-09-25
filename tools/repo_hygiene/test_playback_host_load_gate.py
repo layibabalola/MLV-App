@@ -823,6 +823,163 @@ class HostLoadWindowAlignmentTests(_ProbeCase):
 
 
 @requires_pwsh
+class HostLoadSnapshotProducerAlignmentTests(_ProbeCase):
+    """round 9 (sol BLOCKER item 1 + fable major): HostLoadWindowAlignmentTests above proves the
+    CONSUMER side (Get-HostLoadNonSubjectCpuLoadPercent) reads the right fields correctly, but --
+    exactly as fable's round-8 review found -- every one of its fixtures is a synthetic
+    [pscustomobject] literal; none of them ever calls the real Get-HostLoadSnapshot or
+    Get-HostLoadSystemTimes, so a producer-side regression (e.g. reverting
+    Get-HostLoadSnapshot to independently re-stamp capturedAtUtc, or to read the subject's CPU
+    itself instead of taking it from Get-HostLoadSystemTimes) would pass every existing test. These
+    tests EXECUTE the real producer chain instead."""
+
+    script = SMOKE_SCRIPT
+    functions = ["Get-HostLoadSystemTimes", "Get-HostLoadSnapshot"]
+
+    def test_snapshot_wires_system_times_and_subject_cpu_from_get_host_load_system_times_verbatim(self) -> None:
+        # Overrides Get-HostLoadSystemTimes (the SAME redefine-after-dot-source technique the
+        # existing Get-CimInstance/Get-Process mocks already use) to return a sentinel object whose
+        # capturedAtUtc, idle/kernel/user seconds, AND subjectCpuSeconds are all far from anything
+        # the real Get-HostLoadSnapshot would independently compute. Runs the REAL, unmodified
+        # Get-HostLoadSnapshot and asserts every one of those fields on the resulting snapshot is
+        # the sentinel value verbatim -- proving they are WIRED from the one call to
+        # Get-HostLoadSystemTimes, not independently re-derived. Reverting Get-HostLoadSnapshot to
+        # take its own `[datetime]::UtcNow` for capturedAtUtc (fable's exact round-8 mutant at the
+        # old :484), or to read $SubjectProcess.TotalProcessorTime itself instead of taking
+        # subjectCpuSeconds off $systemTimes (sol's round-8 blocker, reintroduced), each make a
+        # DIFFERENT one of these assertions fail.
+        proc = self.run_snippet(
+            "function Get-HostLoadSystemTimes {\n"
+            "    param($SubjectProcess, [switch]$SubjectNotYetStarted)\n"
+            "    $script:receivedSubjectNotYetStarted = $SubjectNotYetStarted.IsPresent\n"
+            "    [pscustomobject]@{\n"
+            "        idleSeconds = 111.0; kernelSeconds = 222.0; userSeconds = 333.0\n"
+            "        capturedAtUtc = [datetime]::new(2026, 6, 1, 0, 0, 0, [DateTimeKind]::Utc)\n"
+            "        subjectCpuSeconds = 77.5\n"
+            "    }\n"
+            "}\n"
+            "$s = Get-HostLoadSnapshot -TopProcessCount 1 -SkipEvidenceCollection -SubjectNotYetStarted\n"
+            "Write-Host \"CAPTURED=$($s.capturedAtUtc)\"\n"
+            "Write-Host \"SYSTEM_TIMES_CAPTURED=$($s.systemTimesCapturedAtUtc)\"\n"
+            "Write-Host \"IDLE=$($s.systemIdleSeconds)\"\n"
+            "Write-Host \"KERNEL=$($s.systemKernelSeconds)\"\n"
+            "Write-Host \"USER=$($s.systemUserSeconds)\"\n"
+            "Write-Host \"SUBJECT=$($s.subjectCpuSeconds)\"\n"
+            "Write-Host \"PASSED_SUBJECT_NOT_YET_STARTED=$script:receivedSubjectNotYetStarted\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        captured_line = next(l for l in proc.stdout.splitlines() if l.startswith("CAPTURED="))
+        system_times_captured_line = next(l for l in proc.stdout.splitlines() if l.startswith("SYSTEM_TIMES_CAPTURED="))
+        self.assertIn("2026-06-01", captured_line)
+        self.assertIn("2026-06-01", system_times_captured_line)
+        self.assertIn("IDLE=111", proc.stdout)
+        self.assertIn("KERNEL=222", proc.stdout)
+        self.assertIn("USER=333", proc.stdout)
+        self.assertIn("SUBJECT=77.5", proc.stdout)
+        self.assertIn("PASSED_SUBJECT_NOT_YET_STARTED=True", proc.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "exercises the real GetSystemTimes syscall")
+    def test_slow_evidence_collection_does_not_delay_the_syscall_timestamp(self) -> None:
+        # Overrides Get-CimInstance to sleep for 900ms before returning (simulating sol/fable's
+        # "slow evidence collection" repro), then calls the REAL, unmodified Get-HostLoadSnapshot
+        # (evidence collection enabled, i.e. the before/after BRACKET shape, not the interior-sample
+        # -SkipEvidenceCollection shape). Asserts the returned systemTimesCapturedAtUtc lands close
+        # to when the call STARTED, not close to when it RETURNED -- proving the syscall (and, by
+        # construction, the subject-CPU read that immediately follows it inside
+        # Get-HostLoadSystemTimes) is not waiting on the slow evidence work. Also asserts the call
+        # really did take >= 900ms end to end, so a mock that silently never ran cannot make this
+        # test pass vacuously.
+        proc = self.run_snippet(
+            "function Get-CimInstance {\n"
+            "    param($ClassName, $Filter, $ErrorAction, $OperationTimeoutSec)\n"
+            "    Start-Sleep -Milliseconds 900\n"
+            "    if ($ClassName -eq 'Win32_Processor') { [pscustomobject]@{ LoadPercentage = 5 } }\n"
+            "    else { [pscustomobject]@{ FreePhysicalMemory = 1024; TotalVisibleMemorySize = 2048 } }\n"
+            "}\n"
+            "function Get-Process { param($ErrorAction, $Id) @() }\n"
+            "$callStartUtc = [datetime]::UtcNow\n"
+            "$s = Get-HostLoadSnapshot -TopProcessCount 1 -SubjectNotYetStarted\n"
+            "$callEndUtc = [datetime]::UtcNow\n"
+            # round 9 test-harness note: a plain [datetime]<iso-string> cast in PowerShell does not
+            # reliably preserve the "Z"/UTC kind the "o"-format string encodes -- production code
+            # never notices because it only ever subtracts two such casts from EACH OTHER (any
+            # kind-handling quirk cancels out identically on both sides), but comparing against a
+            # native [datetime]::UtcNow here needs an explicit RoundtripKind parse to avoid a bogus
+            # multi-hour "offset" masking the real millisecond-scale lag this test measures.
+            "$syscallCapturedAtUtc = [datetime]::Parse($s.systemTimesCapturedAtUtc, "
+            "[System.Globalization.CultureInfo]::InvariantCulture, "
+            "[System.Globalization.DateTimeStyles]::RoundtripKind)\n"
+            "$syscallLagMs = ($syscallCapturedAtUtc - $callStartUtc).TotalMilliseconds\n"
+            "$totalCallMs = ($callEndUtc - $callStartUtc).TotalMilliseconds\n"
+            "Write-Host \"SYSTEM_TIMES_COLLECTED=$($s.systemTimesCollected)\"\n"
+            "Write-Host \"SYSCALL_LAG_MS=$syscallLagMs\"\n"
+            "Write-Host \"TOTAL_CALL_MS=$totalCallMs\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("SYSTEM_TIMES_COLLECTED=True", proc.stdout)
+        lag_ms = float(next(l for l in proc.stdout.splitlines() if l.startswith("SYSCALL_LAG_MS="))[len("SYSCALL_LAG_MS="):])
+        total_ms = float(next(l for l in proc.stdout.splitlines() if l.startswith("TOTAL_CALL_MS="))[len("TOTAL_CALL_MS="):])
+        self.assertGreaterEqual(total_ms, 850.0, "the mocked CIM sleep must actually have run")
+        # round 9: the threshold is deliberately loose (1200ms) rather than tight -- the very first
+        # call in this fresh pwsh process also pays Get-HostLoadSystemTimes' one-time Add-Type JIT
+        # compilation cost, which lands BEFORE the syscall too and can itself run into the hundreds
+        # of milliseconds on a loaded machine, unrelated to evidence-collection ordering. The two
+        # mocked Get-CimInstance calls sleep 900ms each (>= 1800ms total), so a genuine round-8-style
+        # reversion (evidence before the syscall) lags by close to the FULL call duration (observed
+        # 2300-2500ms when deliberately reverted while writing this test) -- comfortably clear of
+        # this threshold in either direction.
+        self.assertLess(
+            lag_ms, 1200.0,
+            f"systemTimesCapturedAtUtc lagged the call start by {lag_ms}ms out of a {total_ms}ms "
+            "call -- the syscall is waiting on slow evidence collection again (round-8 ordering)",
+        )
+
+    @unittest.skipUnless(os.name == "nt", "spawns a real Windows child process and needs the real syscall")
+    def test_slow_evidence_collection_does_not_inflate_a_real_subjects_recorded_cpu(self) -> None:
+        # sol's exact round-8 blocker, reproduced end to end against the real producer instead of a
+        # synthetic fixture: a real, continuously CPU-spinning child process stands in for the
+        # subject; Get-CimInstance is mocked to sleep 900ms (simulating slow evidence collection).
+        # If the subject read happened AFTER evidence collection (the round-8 ordering sol's repro
+        # depended on), Get-HostLoadSnapshot's recorded subjectCpuSeconds would include most of the
+        # CPU the spinner burns DURING that 900ms sleep. Post-round-9, the subject is read
+        # immediately after the syscall, before evidence collection even starts, so the recorded
+        # value must be far below what a SEPARATE reading taken right after the call returns (which
+        # necessarily includes the full 900ms of spin) would show.
+        proc = self.run_snippet(
+            "function Get-CimInstance {\n"
+            "    param($ClassName, $Filter, $ErrorAction, $OperationTimeoutSec)\n"
+            "    Start-Sleep -Milliseconds 900\n"
+            "    if ($ClassName -eq 'Win32_Processor') { [pscustomobject]@{ LoadPercentage = 5 } }\n"
+            "    else { [pscustomobject]@{ FreePhysicalMemory = 1024; TotalVisibleMemorySize = 2048 } }\n"
+            "}\n"
+            "function Get-Process { param($ErrorAction, $Id) @() }\n"
+            "$spinner = Start-Process -FilePath 'powershell.exe' -ArgumentList "
+            "'-NoProfile','-NonInteractive','-Command','while ($true) { [Math]::Sqrt(12345) | Out-Null }' "
+            "-PassThru\n"
+            "try {\n"
+            "    Start-Sleep -Milliseconds 250\n"
+            "    $before = Get-HostLoadSnapshot -TopProcessCount 1 -SubjectProcess $spinner\n"
+            "    $spinner.Refresh()\n"
+            "    $actualAfterCallSeconds = $spinner.TotalProcessorTime.TotalSeconds\n"
+            "    Write-Host \"RECORDED=$($before.subjectCpuSeconds)\"\n"
+            "    Write-Host \"ACTUAL_AFTER_CALL=$actualAfterCallSeconds\"\n"
+            "} finally {\n"
+            "    $spinner | Stop-Process -Force -ErrorAction SilentlyContinue\n"
+            "}\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        recorded = float(next(l for l in proc.stdout.splitlines() if l.startswith("RECORDED="))[len("RECORDED="):])
+        actual_after_call = float(
+            next(l for l in proc.stdout.splitlines() if l.startswith("ACTUAL_AFTER_CALL="))[len("ACTUAL_AFTER_CALL="):])
+        self.assertGreater(
+            actual_after_call, recorded + 0.3,
+            f"recorded subjectCpuSeconds ({recorded}) is too close to a post-call reading "
+            f"({actual_after_call}) -- the subject read is not happening before the slow evidence "
+            "collection, so it is picking up CPU the spinner burned during the mocked delay",
+        )
+
+
+@requires_pwsh
 class HostLoadPartialCollectionEndToEndVerdictTests(_ProbeCase):
     """round 7 (both keys BLOCKER): rerun of both keys' round-6 repros -- adapted to the new
     mechanism -- chained through the real Get-HostLoadNonSubjectCpuLoadPercent -> Get-HostLoadVerdict
