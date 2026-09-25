@@ -117,8 +117,22 @@ public:
      * explicit swapBuffers() in grabPresentedFramebufferIfActive -- so displayed cadence
      * can be joined against PresentMon and against frames_presented (which counts
      * submissions, not swaps). Call resetSwapTelemetry() at playback-smoke-session start
-     * and swapTelemetrySnapshot() at session end. GUI-thread only, like the swaps
-     * themselves. Zero cost and zero output when the env var is unset. */
+     * and swapTelemetrySnapshot() at session end; the latter also CLOSES the session (see
+     * below), so it must be called exactly once per session, at the end. GUI-thread only,
+     * like the swaps themselves.
+     *
+     * Zero cost and zero output when the env var is unset: the constructor never connects
+     * frameSwapped() to the recorder in that case (the env var is cached and cannot change
+     * mid-run, so this is decided once, not re-checked per swap), and swapTelemetrySnapshot()
+     * never emits a summary.
+     *
+     * The session id and its active/closed state live at file scope in GpuDisplayWindow.cpp,
+     * not on this instance: they must survive the window being inactive when a session
+     * begins, or being destroyed and recreated mid-session, so the summary swapTelemetrySnapshot()
+     * returns never reports a different session than the playback_smoke.gate line it is
+     * paired with. Once a session is closed, noteRealSwap() is a no-op for any further swap
+     * (queued or screenshot-capture swaps included) until the next resetSwapTelemetry() --
+     * so the summary and every already-emitted per-swap gpu_window.swap line always agree. */
     static void resetSwapTelemetry(quint64 sessionId);
     static GpuWindowSwapTelemetrySnapshot swapTelemetrySnapshot(void);
 
@@ -233,7 +247,8 @@ private:
     QString m_rendererDescription;
 
     // Swap telemetry (see resetSwapTelemetry()/swapTelemetrySnapshot()/noteRealSwap()).
-    quint64 m_swapTelemetrySessionId;
+    // The session id/active-state live at file scope in the .cpp, not here -- see the
+    // resetSwapTelemetry() doc comment above.
     std::array<SwapTelemetryRecord, kSwapTelemetryRingCapacity> m_swapTelemetryRing;
     GpuWindowSwapTelemetryCounters m_swapTelemetryCounters;
 };

@@ -90,3 +90,88 @@ TEST(GpuWindowSwapWiring, PlaybackSmokeSessionResetsAndReadsSwapTelemetry)
         QStringLiteral("GpuDisplayWindow::swapTelemetrySnapshot()")));
     ASSERT_TRUE(source.contains(QStringLiteral("playback_smoke.gpu_window_swaps")));
 }
+
+// Round 2, fix 1 (sol BLOCKER 2): disabled telemetry must be zero-cost and zero-output --
+// no frameSwapped connection, no noteRealSwap work, no summary line.
+
+TEST(GpuWindowSwapWiring, AutomaticSwapConnectionIsGatedOnTelemetryEnabledAtConstruction)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/GpuDisplayWindow.cpp"));
+    // The env var is cached and cannot change mid-run (see swapTelemetryEnabled()), so the
+    // decision not to connect at all when disabled is made once, in the constructor --
+    // not re-checked per swap via an early return in the slot alone.
+    ASSERT_TRUE(source.contains(QStringLiteral(
+        "if ( swapTelemetryEnabled() )\n"
+        "    {\n"
+        "        connect(this, &QOpenGLWindow::frameSwapped, this, &GpuDisplayWindow::noteRealSwap);\n"
+        "    }")));
+}
+
+TEST(GpuWindowSwapWiring, NoteRealSwapStillEarlyReturnsOnTheExistingGate)
+{
+    // Pinned separately from the construction-time gate above: even if a future change
+    // made the connection unconditional again, noteRealSwap() must still refuse to do any
+    // per-swap work when telemetry is disabled.
+    const QString source = readRepoFile(QStringLiteral("platform/qt/GpuDisplayWindow.cpp"));
+    ASSERT_TRUE(source.contains(QStringLiteral("if ( !swapTelemetryEnabled() ) return;")));
+}
+
+TEST(GpuWindowSwapWiring, GpuWindowSwapSummaryLineIsGatedOnTelemetryEnabled)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const int gateAt = source.indexOf(QStringLiteral("if ( swapSnapshot.telemetryEnabled )"));
+    const int lineAt = source.indexOf(QStringLiteral("playback_smoke.gpu_window_swaps"));
+    ASSERT_TRUE(gateAt >= 0);
+    ASSERT_TRUE(lineAt > gateAt);
+    // ...and the emission must be the ONLY thing gated -- swapTelemetrySnapshot() (which
+    // closes the session) still has to run unconditionally, every time, so a disabled-at-
+    // begin/enabled-at-end (or vice versa) run cannot leave the session open forever.
+    const int snapshotAt = source.indexOf(QStringLiteral("GpuDisplayWindow::swapTelemetrySnapshot()"));
+    ASSERT_TRUE(snapshotAt >= 0 && snapshotAt < gateAt);
+}
+
+// Round 2, fix 2 (sol BLOCKER 1): swapTelemetrySnapshot() closes the session so swaps
+// after the gate (queued or screenshot-capture swaps included) are not recorded under it.
+
+TEST(GpuWindowSwapWiring, SwapTelemetrySnapshotClosesTheSessionBeforeReturning)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/GpuDisplayWindow.cpp"));
+    // Two occurrences expected: the file-scope declaration ("... = false;") and the
+    // deactivation inside swapTelemetrySnapshot(); counting occurrences (rather than a
+    // plain contains()) so a mutation that deletes the deactivation but leaves the
+    // declaration intact still fails this test.
+    ASSERT_EQ(2, countOccurrences(source, QStringLiteral("g_swapTelemetrySessionActive = false;")));
+
+    const int functionAt = source.indexOf(QStringLiteral("GpuWindowSwapTelemetrySnapshot GpuDisplayWindow::swapTelemetrySnapshot()"));
+    ASSERT_TRUE(functionAt >= 0);
+    const int deactivateAt = source.indexOf(QStringLiteral("g_swapTelemetrySessionActive = false;"), functionAt);
+    ASSERT_TRUE(deactivateAt > functionAt);
+}
+
+TEST(GpuWindowSwapWiring, NoteRealSwapRefusesToRecordOnceTheSessionIsClosed)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/GpuDisplayWindow.cpp"));
+    const int enabledGateAt = source.indexOf(QStringLiteral("if ( !swapTelemetryEnabled() ) return;"));
+    const int activeGateAt = source.indexOf(QStringLiteral("if ( !g_swapTelemetrySessionActive ) return;"));
+    ASSERT_TRUE(enabledGateAt >= 0);
+    ASSERT_TRUE(activeGateAt > enabledGateAt);
+}
+
+// Round 2, fix 4 (sol+fable hardening): the session id must be set regardless of whether
+// a window is active yet, so it survives the window being inactive at begin or recreated
+// mid-session.
+
+TEST(GpuWindowSwapWiring, ResetSwapTelemetrySetsSessionIdBeforeAnyWindowLookup)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/GpuDisplayWindow.cpp"));
+    const int functionAt = source.indexOf(QStringLiteral("void GpuDisplayWindow::resetSwapTelemetry(quint64 sessionId)"));
+    ASSERT_TRUE(functionAt >= 0);
+    const int nextFunctionAt = source.indexOf(QStringLiteral("GpuWindowSwapTelemetrySnapshot GpuDisplayWindow::swapTelemetrySnapshot()"), functionAt);
+    ASSERT_TRUE(nextFunctionAt > functionAt);
+    const QString body = source.mid(functionAt, nextFunctionAt - functionAt);
+
+    const int sessionIdAt = body.indexOf(QStringLiteral("g_swapTelemetrySessionId = sessionId;"));
+    const int windowLookupAt = body.indexOf(QStringLiteral("g_activeWindow.load(std::memory_order_acquire)"));
+    ASSERT_TRUE(sessionIdAt >= 0);
+    ASSERT_TRUE(windowLookupAt > sessionIdAt);
+}
