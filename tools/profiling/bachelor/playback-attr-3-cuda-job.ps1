@@ -458,14 +458,19 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     # typed PRESENTMON_UNAVAILABLE/DISPLAY_ASLEEP refusal instead of an uncaught throw. See its own
     # header in AttrCudaArtifacts.psm1.
     'Get-AttrCudaPresentMonDisplayReport',
-    # CUDA-PERF-DISPLAY-WAKE-1: wakes the display from the interactive session before this leg
-    # launches MLVApp and holds it awake for the leg -- see their own header in
-    # AttrCudaArtifacts.psm1. Start-/Stop-AttrCudaDisplayWake call Register-.../
-    # Get-AttrCudaScreensaverRunning internally, so all four must be embedded together.
+    # CUDA-PERF-DISPLAY-WAKE-1/2: wakes the display from the interactive session before this leg
+    # launches MLVApp, holds it awake for the leg, and keeps nudging periodically for the whole
+    # leg (SetThreadExecutionState alone does not stop the screen saver) -- see their own header in
+    # AttrCudaArtifacts.psm1. All six call Register-.../Get-AttrCudaScreensaver* internally, so all
+    # six must be embedded together.
     'Register-AttrCudaDisplayWakeNativeMethods',
     'Get-AttrCudaScreensaverRunning',
+    'Get-AttrCudaScreensaverTimeoutSeconds',
+    'Get-AttrCudaScreensaverActive',
     'Start-AttrCudaDisplayWake',
-    'Stop-AttrCudaDisplayWake'
+    'Stop-AttrCudaDisplayWake',
+    'Start-AttrCudaDisplayWakeKeepAlive',
+    'Stop-AttrCudaDisplayWakeKeepAlive'
 )
 # ATTR3-FOOTAGE-BIND-1 PR-B round 4b: the private verified-part directory (one hard link per
 # verified part, under a neutral name derived from its index, so nothing downstream -- the smoke
@@ -1029,6 +1034,22 @@ Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip) -DestinationPath 
 # AttrCudaArtifacts.psm1): a Win32 failure is recorded in $displayWake, never allowed to block this
 # leg. Released in the `finally` below, on every exit path.
 $displayWake = Start-AttrCudaDisplayWake
+# CUDA-PERF-DISPLAY-WAKE-2 (sol BLOCKER on #167): SetThreadExecutionState alone does not stop the
+# screen saver, and the single nudge above only resets its idle interval once -- a short
+# screensaver timeout can still re-engage during the CPU-quiescence sleeps below or during
+# playback itself. Started here (before MLVApp is even deployed) and stopped in the `finally`
+# below (after the measured smoke launch has returned), so the periodic nudge runs continuously
+# for the leg's full duration, not just around the launch.
+$displayWakeKeepAlive = Start-AttrCudaDisplayWakeKeepAlive
+# Folded into $displayWake itself (by reference for .keepAliveNudgeState -- the SAME live
+# Hashtable instance the background loop mutates) rather than added as a separate field at each of
+# the 10 existing evidence write sites below: every one of those already carries whatever is in
+# $displayWake at the moment it serializes, so this is the only edit needed for every recorded
+# outcome (VENUE_NOT_QUIESCENT, DISPLAY_ASLEEP, the final success summary, etc.) to also carry
+# live keep-alive evidence, right up to the count at that write's own moment.
+$displayWake['keepAliveIntervalSeconds'] = $displayWakeKeepAlive.intervalSeconds
+$displayWake['keepAliveStartedUtc'] = $displayWakeKeepAlive.startedUtc
+$displayWake['keepAliveNudgeState'] = $displayWakeKeepAlive.nudgeState
 $baseExe = Get-ChildItem -LiteralPath (Join-Path $Work 'pkg') -Recurse -Filter $BasePackageExeName | Select-Object -First 1
 if (-not $baseExe) { throw "base package executable not found: $BasePackageExeName" }
 $pkgDir = $baseExe.Directory.FullName
@@ -1559,6 +1580,11 @@ exit 0
     if ($OwnerClipDir) {
         Close-AttrCudaOwnerFootageWorkspace -Handles $ownerLinkHandles -Directory $OwnerClipDir
     }
+    # CUDA-PERF-DISPLAY-WAKE-2: stop the periodic keep-alive first -- releases its background
+    # Runspace -- before releasing the execution-state request itself, on every exit path from
+    # the try above, including an early `exit N`. Stop-AttrCudaDisplayWakeKeepAlive tolerates a
+    # $null handle, so this is safe even if the try above threw before Start- was reached.
+    [void](Stop-AttrCudaDisplayWakeKeepAlive -Handle $displayWakeKeepAlive)
     # CUDA-PERF-DISPLAY-WAKE-1: released on every exit path from the try above, including an
     # early `exit N` -- never left held past this leg regardless of how it ended.
     [void](Stop-AttrCudaDisplayWake)

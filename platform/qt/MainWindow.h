@@ -187,6 +187,16 @@ protected:
     void dropEvent( QDropEvent *event );
     void closeEvent( QCloseEvent *event );
     bool eventFilter(QObject *watched, QEvent *event);
+#ifdef Q_OS_WIN
+    // Refuses the screen-saver/monitor-off WM_SYSCOMMAND while playback holds the display
+    // required (CUDA-PERF-DISPLAY-WAKE-2) -- see MainWindow.cpp for why
+    // SetThreadExecutionState(ES_DISPLAY_REQUIRED) alone is not enough.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    bool nativeEvent( const QByteArray &eventType, void *message, qintptr *result );
+#else
+    bool nativeEvent( const QByteArray &eventType, void *message, long *result );
+#endif
+#endif
 
 signals:
     void frameReady( void );
@@ -997,6 +1007,17 @@ private:
     bool m_playbackSmokeFrameTelemetry = false;
     bool m_playbackSmokeTimelineTelemetry = false;
     uint64_t m_playbackSmokeSessionId = 0;
+    // Display-wake state (CUDA-PERF-DISPLAY-WAKE-1/2): m_playbackDisplayRequiredActive is true
+    // for exactly the window between setPlaybackDisplayRequiredExecutionState(true) on play-start
+    // and its (false) release on play-stop/close -- independent of any telemetry flag, and it is
+    // what gates nativeEvent()'s WM_SYSCOMMAND screen-saver refusal below.
+    // m_playbackDisplayRequiredAcquired is the Win32 acquisition OUTCOME (SetThreadExecutionState's
+    // return value), not just the request, reported by playback_smoke.display_required.
+    // m_playbackScreensaverBlockedCount counts WM_SYSCOMMAND SC_SCREENSAVE/SC_MONITORPOWER
+    // refusals during the current session, reset at play-start, reported at session end.
+    bool m_playbackDisplayRequiredActive = false;
+    bool m_playbackDisplayRequiredAcquired = false;
+    uint64_t m_playbackScreensaverBlockedCount = 0;
     // Foreground-state telemetry (CUDA-PERF-PLAYBACK-FOREGROUND-1): gated on the same
     // MLVAPP_PLAYBACK_SMOKE_TELEMETRY env var as the swap telemetry above, not a new flag
     // -- see beginPlaybackSmokeTelemetry()/finishPlaybackSmokeTelemetry() and

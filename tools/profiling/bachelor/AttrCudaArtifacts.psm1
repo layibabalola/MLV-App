@@ -2291,6 +2291,12 @@ function Register-AttrCudaDisplayWakeNativeMethods {
             [DllImport("user32.dll", SetLastError = true)]
             public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref bool pvParam, uint fWinIni);
 
+            // Same native function as above (SystemParametersInfoW), a second managed overload
+            // for the SPI_* actions whose pvParam is an int (e.g. SPI_GETSCREENSAVETIMEOUT) rather
+            // than a bool -- EntryPoint pins both to the one Win32 export.
+            [DllImport("user32.dll", EntryPoint = "SystemParametersInfo", SetLastError = true)]
+            public static extern bool SystemParametersInfoInt(uint uiAction, uint uiParam, ref int pvParam, uint fWinIni);
+
             [DllImport("kernel32.dll")]
             public static extern uint SetThreadExecutionState(uint esFlags);
         }
@@ -2322,6 +2328,50 @@ function Get-AttrCudaScreensaverRunning {
     }
 }
 
+function Get-AttrCudaScreensaverTimeoutSeconds {
+    <#
+    .SYNOPSIS
+    SPI_GETSCREENSAVETIMEOUT via SystemParametersInfo: the configured screen-saver timeout in
+    seconds, or $null if the native type could not load or the call itself failed -- never throws.
+    Read-only, like Get-AttrCudaScreensaverRunning: this module never calls SPI_SET* and never
+    changes a screen-saver or power setting (CUDA-PERF-DISPLAY-WAKE-2).
+    #>
+    [CmdletBinding()]
+    param()
+    if (-not (Register-AttrCudaDisplayWakeNativeMethods)) { return $null }
+    try {
+        $timeoutSeconds = 0
+        # SPI_GETSCREENSAVETIMEOUT = 0x000E.
+        $ok = [MLVAppAttrCudaDisplayWake.NativeMethods]::SystemParametersInfoInt(0x000E, 0, [ref]$timeoutSeconds, 0)
+        if (-not $ok) { return $null }
+        return [int]$timeoutSeconds
+    } catch {
+        return $null
+    }
+}
+
+function Get-AttrCudaScreensaverActive {
+    <#
+    .SYNOPSIS
+    SPI_GETSCREENSAVEACTIVE via SystemParametersInfo: whether the screen saver is enabled at all --
+    distinct from Get-AttrCudaScreensaverRunning, which reports whether it is CURRENTLY running.
+    $null if the native type could not load or the call itself failed -- never throws. Read-only,
+    like its siblings above.
+    #>
+    [CmdletBinding()]
+    param()
+    if (-not (Register-AttrCudaDisplayWakeNativeMethods)) { return $null }
+    try {
+        $active = $false
+        # SPI_GETSCREENSAVEACTIVE = 0x0010.
+        $ok = [MLVAppAttrCudaDisplayWake.NativeMethods]::SystemParametersInfo(0x0010, 0, [ref]$active, 0)
+        if (-not $ok) { return $null }
+        return [bool]$active
+    } catch {
+        return $null
+    }
+}
+
 function Start-AttrCudaDisplayWake {
     <#
     .SYNOPSIS
@@ -2336,11 +2386,16 @@ function Start-AttrCudaDisplayWake {
         until the caller releases it via Stop-AttrCudaDisplayWake.
     Returns .attempted (always $true -- this function ran), .method, .screensaverRunningBefore /
     .screensaverRunningAfter (each $true/$false/$null -- $null only when that probe itself
-    failed), .sendInputError/.executionStateError (each $null on success), .utc.
+    failed), .sendInputError/.executionStateError (each $null on success),
+    .screensaverTimeoutSeconds (SPI_GETSCREENSAVETIMEOUT, read-only) and .screensaverActive
+    (SPI_GETSCREENSAVEACTIVE, read-only) -- CUDA-PERF-DISPLAY-WAKE-2, so a run that still ends
+    DISPLAY_ASLEEP shows what timeout it was racing -- and .utc.
     #>
     [CmdletBinding()]
     param()
 
+    $screensaverTimeoutSeconds = Get-AttrCudaScreensaverTimeoutSeconds
+    $screensaverActive = Get-AttrCudaScreensaverActive
     $screensaverBefore = Get-AttrCudaScreensaverRunning
     $sendInputError = $null
     $executionStateError = $null
@@ -2384,6 +2439,8 @@ function Start-AttrCudaDisplayWake {
         screensaverRunningAfter = $screensaverAfter
         sendInputError = $sendInputError
         executionStateError = $executionStateError
+        screensaverTimeoutSeconds = $screensaverTimeoutSeconds
+        screensaverActive = $screensaverActive
         utc = (Get-Date).ToUniversalTime().ToString('o')
     }
 }
@@ -2412,6 +2469,125 @@ function Stop-AttrCudaDisplayWake {
     [ordered]@{
         released = ($null -eq $releaseError)
         error = $releaseError
+        utc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+}
+
+function Start-AttrCudaDisplayWakeKeepAlive {
+    <#
+    .SYNOPSIS
+    Starts a bounded background keep-alive that repeats the SendInput pointer nudge on an
+    interval, independent of Start-AttrCudaDisplayWake's own one-time nudge.
+    .DESCRIPTION
+    SetThreadExecutionState alone does not stop the screen saver (see Start-AttrCudaDisplayWake's
+    own header); a leg or playback session longer than the configured screen-saver timeout needs
+    periodic input, not just a continuous execution-state request. This starts a dedicated
+    background Runspace inside THIS process (never a new process, never SPI_SET*, never a power
+    setting) that loops a net-zero 1-pixel SendInput nudge on -IntervalSeconds until the caller
+    calls Stop-AttrCudaDisplayWakeKeepAlive with the returned handle -- so it keeps nudging while
+    the caller's own thread is blocked on something else (e.g. a nested smoke launch that runs
+    MLVApp.exe synchronously). Non-throwing by construction: every nudge attempt inside the loop
+    is wrapped in try/catch, and a nudge failure never stops the loop or reaches the caller. The
+    caller MUST call Stop-AttrCudaDisplayWakeKeepAlive from a `finally` block -- an unstopped
+    keep-alive keeps injecting input and keeps its Runspace open for the life of the process.
+    .PARAMETER IntervalSeconds
+    Nudge period; contract is "periodically (<= every 20 s)", default 15.
+    .OUTPUTS
+    A handle for Stop-AttrCudaDisplayWakeKeepAlive; .nudgeState.count is a live, thread-safe
+    counter of nudge attempts (incremented whether or not that attempt's SendInput itself
+    succeeded), readable at any time -- including before Stop -- for evidence/diagnostics.
+    #>
+    [CmdletBinding()]
+    param(
+        [ValidateRange(1, 20)]
+        [int]$IntervalSeconds = 15
+    )
+
+    [void](Register-AttrCudaDisplayWakeNativeMethods)
+    $stopEvent = [System.Threading.ManualResetEventSlim]::new($false)
+    # Synchronized wrapper: the loop thread below and this (the caller's) thread both touch the
+    # same underlying Hashtable instance -- a plain Hashtable is not safe for that, .Synchronized
+    # is.
+    $nudgeState = [System.Collections.Hashtable]::Synchronized(@{ count = 0 })
+    $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $runspace.Open()
+    $shell = [System.Management.Automation.PowerShell]::Create()
+    $shell.Runspace = $runspace
+    $loopScript = {
+        param($StopEvent, $IntervalSeconds, $NudgeState)
+        while (-not $StopEvent.Wait([int]($IntervalSeconds * 1000))) {
+            try {
+                if ("MLVAppAttrCudaDisplayWake.NativeMethods" -as [type]) {
+                    $INPUT_MOUSE = 0
+                    $MOUSEEVENTF_MOVE = [uint32]0x0001
+                    $nudge = [MLVAppAttrCudaDisplayWake.INPUT[]]@(
+                        [MLVAppAttrCudaDisplayWake.INPUT]@{ type = $INPUT_MOUSE; mi = [MLVAppAttrCudaDisplayWake.MOUSEINPUT]@{ dx = 1; dy = 0; mouseData = 0; dwFlags = $MOUSEEVENTF_MOVE; time = 0; dwExtraInfo = [IntPtr]::Zero } },
+                        [MLVAppAttrCudaDisplayWake.INPUT]@{ type = $INPUT_MOUSE; mi = [MLVAppAttrCudaDisplayWake.MOUSEINPUT]@{ dx = -1; dy = 0; mouseData = 0; dwFlags = $MOUSEEVENTF_MOVE; time = 0; dwExtraInfo = [IntPtr]::Zero } }
+                    )
+                    $structSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][MLVAppAttrCudaDisplayWake.INPUT])
+                    [void][MLVAppAttrCudaDisplayWake.NativeMethods]::SendInput([uint32]$nudge.Count, $nudge, $structSize)
+                    $NudgeState.count = [int]$NudgeState.count + 1
+                }
+            } catch {
+                # Non-throwing by construction: a single nudge failure must never stop the loop or
+                # escape to the caller -- the next tick simply tries again.
+            }
+        }
+    }
+    [void]$shell.AddScript($loopScript).AddArgument($stopEvent).AddArgument($IntervalSeconds).AddArgument($nudgeState)
+    $asyncResult = $shell.BeginInvoke()
+
+    [ordered]@{
+        stopEvent = $stopEvent
+        runspace = $runspace
+        powershell = $shell
+        asyncResult = $asyncResult
+        nudgeState = $nudgeState
+        intervalSeconds = $IntervalSeconds
+        startedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+}
+
+function Stop-AttrCudaDisplayWakeKeepAlive {
+    <#
+    .SYNOPSIS
+    Stops a keep-alive started by Start-AttrCudaDisplayWakeKeepAlive and releases its Runspace.
+    Non-throwing, and safe to call with $null or an already-stopped handle -- a job's `finally`
+    block may reach here even when Start-AttrCudaDisplayWakeKeepAlive was never reached.
+    #>
+    [CmdletBinding()]
+    param(
+        $Handle
+    )
+
+    $stopError = $null
+    $nudgeCount = $null
+    if ($Handle) {
+        if ($Handle.nudgeState) { $nudgeCount = [int]$Handle.nudgeState.count }
+        try {
+            if ($Handle.stopEvent) { $Handle.stopEvent.Set() }
+            if ($Handle.powershell -and $Handle.asyncResult) {
+                [void]$Handle.powershell.EndInvoke($Handle.asyncResult)
+            }
+        } catch {
+            $stopError = $_.Exception.Message
+        }
+        try { if ($Handle.powershell) { $Handle.powershell.Dispose() } } catch {
+        }
+        try { if ($Handle.stopEvent) { $Handle.stopEvent.Dispose() } } catch {
+        }
+        try {
+            if ($Handle.runspace) {
+                $Handle.runspace.Close()
+                $Handle.runspace.Dispose()
+            }
+        } catch {
+        }
+    }
+    [ordered]@{
+        stopped = ($null -eq $stopError)
+        error = $stopError
+        nudgeCount = $nudgeCount
         utc = (Get-Date).ToUniversalTime().ToString('o')
     }
 }
@@ -2458,5 +2634,9 @@ Export-ModuleMember -Function `
     Get-AttrCudaPresentMonDisplayReport, `
     Register-AttrCudaDisplayWakeNativeMethods, `
     Get-AttrCudaScreensaverRunning, `
+    Get-AttrCudaScreensaverTimeoutSeconds, `
+    Get-AttrCudaScreensaverActive, `
     Start-AttrCudaDisplayWake, `
-    Stop-AttrCudaDisplayWake
+    Stop-AttrCudaDisplayWake, `
+    Start-AttrCudaDisplayWakeKeepAlive, `
+    Stop-AttrCudaDisplayWakeKeepAlive

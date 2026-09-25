@@ -4136,8 +4136,12 @@ class EmbeddedFunctionContractTests(_PwshCase):
             "Remove-AttrCudaTree",
             "Register-AttrCudaDisplayWakeNativeMethods",
             "Get-AttrCudaScreensaverRunning",
+            "Get-AttrCudaScreensaverTimeoutSeconds",
+            "Get-AttrCudaScreensaverActive",
             "Start-AttrCudaDisplayWake",
             "Stop-AttrCudaDisplayWake",
+            "Start-AttrCudaDisplayWakeKeepAlive",
+            "Stop-AttrCudaDisplayWakeKeepAlive",
         ),
     }
 
@@ -4194,6 +4198,23 @@ class DisplayWakeFunctionTests(_PwshCase):
         # thrown), which the never-throws test below exercises by forcing the native type absent.
         self.assertIsNone(result["sendInputError"])
         self.assertIsNone(result["executionStateError"])
+        # CUDA-PERF-DISPLAY-WAKE-2: SPI_GETSCREENSAVETIMEOUT/SPI_GETSCREENSAVEACTIVE, read-only.
+        self.assertTrue(
+            result["screensaverTimeoutSeconds"] is None
+            or isinstance(result["screensaverTimeoutSeconds"], int)
+        )
+        self.assertIn(result["screensaverActive"], (True, False, None))
+
+    def test_screensaver_timeout_and_active_getters_never_throw(self) -> None:
+        proc = self.run_with_module(
+            "$t = Get-AttrCudaScreensaverTimeoutSeconds\n"
+            "$a = Get-AttrCudaScreensaverActive\n"
+            "Write-Output \"TIMEOUT=$($null -eq $t ? 'NULL' : $t)\"\n"
+            "Write-Output \"ACTIVE=$($null -eq $a ? 'NULL' : $a)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertRegex(proc.stdout, r"TIMEOUT=(\d+|NULL)")
+        self.assertRegex(proc.stdout, r"ACTIVE=(True|False|NULL)")
 
     def test_stop_display_wake_never_throws_and_releases(self) -> None:
         proc = self.run_with_module(
@@ -4230,6 +4251,7 @@ class DisplayWakeFunctionTests(_PwshCase):
             "Import-Module '" + str(MODULE) + "' -Force\n"
             "$src = Get-AttrCudaEmbeddedFunctionSource -Name @("
             "'Register-AttrCudaDisplayWakeNativeMethods','Get-AttrCudaScreensaverRunning',"
+            "'Get-AttrCudaScreensaverTimeoutSeconds','Get-AttrCudaScreensaverActive',"
             "'Start-AttrCudaDisplayWake','Stop-AttrCudaDisplayWake')\n"
             f"Set-Content -LiteralPath '{(self.tmp / 'extracted.ps1')}' -Value $src -Encoding utf8\n",
             encoding="utf-8",
@@ -4304,6 +4326,127 @@ class DisplayWakeJobOrderingTests(unittest.TestCase):
             "$displayExitCode = if ($displayReport.status -eq 'DISPLAY_ASLEEP') { 24 } else { 23 }")
         block = self.text[status_at:display_asleep_exit_at]
         self.assertIn("displayWake=$displayWake", block)
+
+
+# --------------------------------------------------------------------------------------------
+# CUDA-PERF-DISPLAY-WAKE-2: the periodic keep-alive, on top of WAKE-1's one-time nudge (sol's
+# BLOCKER on PR #167 -- SetThreadExecutionState alone does not stop the screen saver, and a short
+# timeout can re-engage during the leg's long sleeps/playback after the single initial nudge).
+# --------------------------------------------------------------------------------------------
+
+
+@requires_pwsh
+class DisplayWakeKeepAliveFunctionTests(_PwshCase):
+    """Start-/Stop-AttrCudaDisplayWakeKeepAlive: shape, never-throws, and it actually nudges."""
+
+    def test_keep_alive_starts_nudges_and_stops_without_throwing(self) -> None:
+        # A 1-second interval so the test doesn't wait 15-20s; the contract
+        # (ValidateRange(1,20)) permits it, and the deployed job's own default (15s) is a
+        # separate, unexercised-here parameter choice.
+        proc = self.run_with_module(
+            "$h = Start-AttrCudaDisplayWakeKeepAlive -IntervalSeconds 1\n"
+            "Start-Sleep -Milliseconds 2500\n"
+            "$midCount = [int]$h.nudgeState.count\n"
+            "$r = Stop-AttrCudaDisplayWakeKeepAlive -Handle $h\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'mid.txt')}', \"$midCount\")\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'r.json')}', ($r | ConvertTo-Json -Depth 5))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        mid_count = int((self.tmp / "mid.txt").read_text(encoding="utf-8"))
+        result = json.loads((self.tmp / "r.json").read_text(encoding="utf-8"))
+        # >=2 ticks are expected in 2.5s at a 1s interval; >=1 tolerates a slow CI host without
+        # letting a keep-alive that never nudges at all pass silently.
+        self.assertGreaterEqual(mid_count, 1, "the keep-alive should have nudged at least once")
+        self.assertIs(result["stopped"], True)
+        self.assertIsNone(result["error"])
+        self.assertGreaterEqual(result["nudgeCount"], mid_count)
+
+    def test_stop_keep_alive_tolerates_a_null_handle(self) -> None:
+        # A job's `finally` calls Stop-AttrCudaDisplayWakeKeepAlive even when the try above threw
+        # before Start- was ever reached -- must not throw on an uninitialized/$null handle.
+        proc = self.run_with_module(
+            "$r = Stop-AttrCudaDisplayWakeKeepAlive -Handle $null\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'r.json')}', ($r | ConvertTo-Json -Depth 5))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "r.json").read_text(encoding="utf-8"))
+        self.assertIs(result["stopped"], True)
+        self.assertIsNone(result["error"])
+
+    def test_keep_alive_does_not_throw_when_native_type_is_unavailable(self) -> None:
+        # Same simulated-failure shape as DisplayWakeFunctionTests.
+        # test_a_native_load_failure_is_recorded_not_thrown: the loop's own try/catch, not
+        # Add-Type's, is what must keep this non-throwing.
+        extract_script = self.tmp / "extract.ps1"
+        extract_script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            "Import-Module '" + str(MODULE) + "' -Force\n"
+            "$src = Get-AttrCudaEmbeddedFunctionSource -Name @("
+            "'Register-AttrCudaDisplayWakeNativeMethods',"
+            "'Start-AttrCudaDisplayWakeKeepAlive','Stop-AttrCudaDisplayWakeKeepAlive')\n"
+            f"Set-Content -LiteralPath '{(self.tmp / 'extracted.ps1')}' -Value $src -Encoding utf8\n",
+            encoding="utf-8",
+        )
+        extract_proc = _run_pwsh_file(extract_script)
+        self.assertEqual(extract_proc.returncode, 0, extract_proc.stdout + extract_proc.stderr)
+
+        probe_script = self.tmp / "extracted.ps1"
+        with probe_script.open("a", encoding="utf-8") as f:
+            f.write(
+                "\n$ErrorActionPreference = 'Stop'\n"
+                "function Register-AttrCudaDisplayWakeNativeMethods { $false }\n"
+                "$h = Start-AttrCudaDisplayWakeKeepAlive -IntervalSeconds 1\n"
+                "Start-Sleep -Milliseconds 1500\n"
+                "$r = Stop-AttrCudaDisplayWakeKeepAlive -Handle $h\n"
+                f"[IO.File]::WriteAllText('{(self.tmp / 'r.json')}', ($r | ConvertTo-Json -Depth 5))\n"
+            )
+        proc = _run_pwsh_file(probe_script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "r.json").read_text(encoding="utf-8"))
+        self.assertIs(result["stopped"], True)
+        self.assertIsNone(result["error"])
+        # The native type never loaded, so the loop's own "if type exists" guard must have kept
+        # every tick a no-op rather than throwing -- zero nudges, not a crash.
+        self.assertEqual(0, result["nudgeCount"])
+
+
+class DisplayWakeKeepAliveJobOrderingTests(unittest.TestCase):
+    """Static ordering/shape checks on the generator's own template text (no pwsh required)."""
+
+    def setUp(self) -> None:
+        self.text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+
+    def test_keep_alive_starts_right_after_the_one_time_wake_before_the_smoke_launch(self) -> None:
+        wake_at = self.text.index("$displayWake = Start-AttrCudaDisplayWake")
+        keep_alive_at = self.text.index(
+            "$displayWakeKeepAlive = Start-AttrCudaDisplayWakeKeepAlive", wake_at)
+        launch_at = self.text.index(
+            '& "$env:ProgramFiles\\PowerShell\\7\\pwsh.exe" -NoLogo -NoProfile -NonInteractive '
+            '-ExecutionPolicy Bypass -Command $cmd', keep_alive_at)
+        self.assertGreater(keep_alive_at, wake_at)
+        self.assertGreater(launch_at, keep_alive_at,
+                            "the leg must launch MLVApp only after the keep-alive has started")
+
+    def test_keep_alive_stop_runs_in_finally_before_the_one_time_release(self) -> None:
+        finally_at = self.text.index("} finally {")
+        keep_alive_stop_at = self.text.index(
+            "[void](Stop-AttrCudaDisplayWakeKeepAlive -Handle $displayWakeKeepAlive)", finally_at)
+        release_at = self.text.index("[void](Stop-AttrCudaDisplayWake)", keep_alive_stop_at)
+        self.assertGreater(keep_alive_stop_at, finally_at)
+        self.assertGreater(release_at, keep_alive_stop_at,
+                            "the keep-alive must stop before the execution-state release")
+
+    def test_keep_alive_nudge_state_is_folded_into_display_wake_by_reference(self) -> None:
+        # $displayWake['keepAliveNudgeState'] = $displayWakeKeepAlive.nudgeState (a reference, not
+        # a copy) is what makes every one of the 9+1 existing displayWake=$displayWake write sites
+        # automatically carry live keep-alive evidence without editing each site -- see
+        # test_display_wake_evidence_is_recorded_on_every_outcome_after_the_wake, whose count is
+        # unchanged by this card for exactly that reason.
+        keep_alive_at = self.text.index(
+            "$displayWakeKeepAlive = Start-AttrCudaDisplayWakeKeepAlive")
+        fold_at = self.text.index(
+            "$displayWake['keepAliveNudgeState'] = $displayWakeKeepAlive.nudgeState", keep_alive_at)
+        self.assertGreater(fold_at, keep_alive_at)
 
 
 if __name__ == "__main__":
