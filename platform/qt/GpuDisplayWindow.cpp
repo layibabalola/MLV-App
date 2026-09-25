@@ -7,6 +7,7 @@
 
 #include "GpuDisplayWindow.h"
 #include "GpuDebayer.h"
+#include "debug/StageTiming.h"
 
 #include <QGraphicsView>
 #include <QWidget>
@@ -14,6 +15,7 @@
 #include <QLayout>
 #include <QThread>
 #include <QByteArray>
+#include <QDateTime>
 #include <QSurfaceFormat>
 #include <QOpenGLContext>
 #include <QElapsedTimer>
@@ -39,6 +41,17 @@ bool windowEnvFlagEnabled(const QByteArray &value)
     if ( value.isEmpty() ) return false;
     const QByteArray normalized = value.trimmed().toLower();
     return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
+// Same env var and the same "set and not literally 0" semantics as MainWindow's
+// playbackSmokeFrameTelemetryEnabled() -- deliberately reused rather than a new flag, so
+// one env var opts into both the frame-submission and the real-swap telemetry together.
+bool swapTelemetryEnabled()
+{
+    static const bool enabled =
+        qEnvironmentVariableIsSet( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" )
+        && qEnvironmentVariable( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" ) != QStringLiteral("0");
+    return enabled;
 }
 
 /* GLSL 1.20 passthrough -- works in the NVIDIA compatibility context a QOpenGLWindow
@@ -97,6 +110,68 @@ QSize GpuDisplayWindow::displaySize()
 {
     GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
     return win ? win->size() : QSize();
+}
+
+void GpuDisplayWindow::resetSwapTelemetry(quint64 sessionId)
+{
+    GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
+    if ( !win ) return;
+    win->m_swapTelemetrySessionId = sessionId;
+    win->m_swapTelemetryCounters = GpuWindowSwapTelemetryCounters();
+}
+
+GpuWindowSwapTelemetrySnapshot GpuDisplayWindow::swapTelemetrySnapshot()
+{
+    GpuWindowSwapTelemetrySnapshot snapshot;
+    snapshot.telemetryEnabled = swapTelemetryEnabled();
+    GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
+    if ( !win ) return snapshot;
+    snapshot.windowActive = true;
+    snapshot.sessionId = win->m_swapTelemetrySessionId;
+    snapshot.summary = GpuWindowSwapTelemetryPolicy::summarize(win->m_swapTelemetryCounters);
+    return snapshot;
+}
+
+void GpuDisplayWindow::noteRealSwap()
+{
+    if ( !swapTelemetryEnabled() ) return;
+
+    const double qpcMs = mlv_stage_timing_now() * 1000.0;
+    const quint64 swapSerial = ++m_swapTelemetryCounters.swapCount;
+
+    SwapTelemetryRecord record;
+    record.swapSerial = swapSerial;
+    record.qpcMs = qpcMs;
+    record.presentedSerial = m_presentedSerial;
+    record.presentedSerialValid = m_presentedSerialValid;
+    m_swapTelemetryRing[ static_cast<std::size_t>( ( swapSerial - 1 ) % kSwapTelemetryRingCapacity ) ] = record;
+
+    if ( swapSerial == 1 )
+    {
+        m_swapTelemetryCounters.firstSwapQpcMs = qpcMs;
+    }
+    else
+    {
+        const double gapMs = qpcMs - m_swapTelemetryCounters.lastSwapQpcMs;
+        if ( gapMs > m_swapTelemetryCounters.maxGapMs )
+        {
+            m_swapTelemetryCounters.maxGapMs = gapMs;
+            m_swapTelemetryCounters.maxGapBeforeSerial = swapSerial - 1;
+            m_swapTelemetryCounters.maxGapAfterSerial = swapSerial;
+        }
+    }
+    m_swapTelemetryCounters.lastSwapQpcMs = qpcMs;
+
+    qInfo().noquote()
+        << QStringLiteral(
+               "gpu_window.swap session=%1 serial=%2 qpc_ms=%3 utc=%4 "
+               "presented_serial=%5 presented_serial_valid=%6" )
+               .arg( static_cast<qulonglong>( m_swapTelemetrySessionId ) )
+               .arg( static_cast<qulonglong>( record.swapSerial ) )
+               .arg( record.qpcMs, 0, 'f', 3 )
+               .arg( QDateTime::currentDateTimeUtc().toString( Qt::ISODateWithMs ) )
+               .arg( static_cast<qulonglong>( record.presentedSerial ) )
+               .arg( record.presentedSerialValid ? 1 : 0 );
 }
 
 bool GpuDisplayWindow::installInPreview(QGraphicsView *view)
@@ -288,10 +363,16 @@ GpuDisplayWindow::GpuDisplayWindow(QWindow *parent)
     , m_loggedPresented(false)
     , m_loggedSetImage(false)
     , m_loggedSetGpuTexture(false)
+    , m_swapTelemetrySessionId(0)
 {
     QSurfaceFormat fmt = format();
     fmt.setSwapInterval(0);
     setFormat(fmt);
+
+    // Real swap path 1 of 2: Qt's own automatic swap after paintGL() returns, in its
+    // normal paint-event cycle (frameSwapped() fires only for THIS swap, not for the
+    // explicit manual one in grabPresentedFramebufferIfActive -- see path 2 there).
+    connect(this, &QOpenGLWindow::frameSwapped, this, &GpuDisplayWindow::noteRealSwap);
 }
 
 GpuDisplayWindow::~GpuDisplayWindow()
@@ -911,6 +992,10 @@ bool GpuDisplayWindow::grabPresentedFramebufferIfActive(QImage *outImage,
     // swap now so the window's own swapchain reflects exactly what was just captured,
     // making this a real present rather than a side-channel readback.
     glContext->swapBuffers(win);
+    // Real swap path 2 of 2: this manual swap runs outside Qt's own paint-event cycle, so
+    // QOpenGLWindow's frameSwapped() signal (path 1, connected in the constructor) does
+    // NOT fire for it -- record it explicitly so swap telemetry covers every real swap.
+    win->noteRealSwap();
     if ( madeCurrent ) win->doneCurrent();
 
     if ( outImage ) *outImage = win->m_captureReadbackImage;

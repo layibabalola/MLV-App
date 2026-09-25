@@ -22466,6 +22466,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
 
     m_playbackSmokeActive = true;
     m_playbackSmokeFrameTelemetry = playbackSmokeFrameTelemetryEnabled();
+    GpuDisplayWindow::resetSwapTelemetry( m_playbackSmokeSessionId );
     m_playbackSmokeTimelineTelemetry =
         m_playbackSmokeFrameTelemetry
         && playbackSmokeTimelineTelemetryEnabled();
@@ -25834,6 +25835,28 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( static_cast<qulonglong>( decodeRequestsIssuedDelta ) )
                .arg( m_playbackSmokeParityMatchCount )
                .arg( m_playbackSmokeTargetPresentedFrames );
+
+    // Displayed cadence, distinct from frames_presented above (which counts frame
+    // SUBMISSIONS -- see notePlaybackSmokePresentedFrame -- not confirmed on-screen
+    // swaps). See GpuDisplayWindow::resetSwapTelemetry/swapTelemetrySnapshot.
+    const GpuWindowSwapTelemetrySnapshot swapSnapshot = GpuDisplayWindow::swapTelemetrySnapshot();
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.gpu_window_swaps session=%1 window_active=%2 "
+               "telemetry_enabled=%3 swaps=%4 swap_fps=%5 max_gap_ms=%6 "
+               "max_gap_before_serial=%7 max_gap_after_serial=%8 frames_presented=%9 "
+               "swaps_minus_frames_presented=%10" )
+               .arg( static_cast<qulonglong>( swapSnapshot.sessionId ) )
+               .arg( bool01( swapSnapshot.windowActive ) )
+               .arg( bool01( swapSnapshot.telemetryEnabled ) )
+               .arg( static_cast<qulonglong>( swapSnapshot.summary.swapCount ) )
+               .arg( swapSnapshot.summary.swapFps, 0, 'f', 3 )
+               .arg( swapSnapshot.summary.maxGapMs, 0, 'f', 3 )
+               .arg( static_cast<qulonglong>( swapSnapshot.summary.maxGapBeforeSerial ) )
+               .arg( static_cast<qulonglong>( swapSnapshot.summary.maxGapAfterSerial ) )
+               .arg( m_playbackSmokePresentedFrames )
+               .arg( static_cast<qlonglong>( swapSnapshot.summary.swapCount )
+                     - static_cast<qlonglong>( m_playbackSmokePresentedFrames ) );
 }
 
 bool MainWindow::primePlaybackCacheOnPlayStart( void )
