@@ -1869,6 +1869,219 @@ function Get-AttrCudaEligibilityVerdict {
     }
 }
 
+function Get-AttrCudaPresentMonDisplayReport {
+    <#
+    .SYNOPSIS
+    Parse a raw PresentMon CSV into presented/displayed rates for the MLVApp preview chain, or a
+    typed non-throwing refusal -- PRESENTMON_UNAVAILABLE or DISPLAY_ASLEEP -- never an uncaught
+    exception once the smoke run itself has already passed.
+    .DESCRIPTION
+    CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1. Three defects this closes:
+      - a missing or unreadable presentmon.csv used to reach Import-Csv unguarded and crash the
+        whole job with nothing published (evidence: 3 of 8 baseline attempts on Bachelor died at
+        Import-Csv of a missing out\diagnostic\presentmon.csv after a full smoke run);
+      - "no positive MsBetweenDisplayChange samples" was an uncaught throw AFTER a passed smoke
+        run, destroying every artifact already produced instead of reporting a typed outcome;
+      - PresentMon runs --timed 55 against a --seconds 40 playback, so its raw CSV always
+        contains idle desktop/startup presents outside the measured window; without restricting
+        to that window, those contaminate the rate for whichever swap chain looks busiest.
+    Every row is grouped by (ProcessID, SwapChainAddress) -- the actual display identity
+    PresentMon reports, since a PID alone conflates multiple swap chains (e.g. a window resize
+    tearing down and recreating one) and a swap chain address alone says nothing about which
+    process owns it. The MLVApp preview chain is the group whose ProcessID matches the exact PID
+    run-release-gui-smoke.ps1 launched and waited on (result.json `process.id`), preferring the
+    chain with the most presented rows among ties.
+    Windowing: TimeInMs is read as milliseconds since -CaptureStartUtc (the wall clock recorded by
+    the caller immediately before PresentMon was started); only rows whose derived timestamp
+    falls within [process.startedAtUtc, process.endedAtUtc] -- the exact lifetime of the launched
+    MLVApp process -- count toward either rate, so idle time before launch or after exit (up to
+    ~15s of it, per --timed 55 against --seconds 40) never counts as a display sample.
+    A "displayed" sample is MsBetweenDisplayChange > 0 (a genuine screen update); a "presented"
+    sample is any row for the chain, including MsBetweenDisplayChange == 0 (a frame PresentMon
+    saw the app hand to the swap chain that never actually changed the screen) -- kept, never
+    discarded, so the presented rate is not silently inflated by discarding it and not silently
+    deflated by treating it as a display.
+    Returns .status one of 'OK' | 'PRESENTMON_UNAVAILABLE' | 'DISPLAY_ASLEEP'; .reason is $null
+    only for 'OK'. On 'OK', .chains lists every (ProcessID, SwapChainAddress) group observed in
+    the window and .selectedChain is the MLVApp one; .selectedChainRows carries only its
+    positive-MsBetweenDisplayChange rows, shaped exactly like this job's historical pmRows
+    (ordinal/timeInMs/msBetweenDisplayChange/displayFpsEquivalent/presentMode), for
+    presentmon-series.csv -- tools/profiling/refresh_period_histogram.py depends on that exact
+    column name and never sees this function or its chain-selection at all.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CsvPath,
+
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [object]$ResultJson,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$CaptureStartUtc
+    )
+
+    function Get-AttrCudaJsonProperty($Object, [string]$Name) {
+        if ($null -eq $Object) { return $null }
+        $prop = $Object.PSObject.Properties[$Name]
+        if ($null -eq $prop) { return $null }
+        $prop.Value
+    }
+
+    $unavailable = {
+        param([string]$Reason, [object[]]$Chains = @(), [object]$Selected = $null)
+        [pscustomobject]@{
+            status = 'PRESENTMON_UNAVAILABLE'
+            reason = $Reason
+            chains = @($Chains)
+            selectedChain = $Selected
+            selectedChainRows = @()
+        }
+    }
+
+    $processNode = Get-AttrCudaJsonProperty $ResultJson 'process'
+    $rawPid = Get-AttrCudaJsonProperty $processNode 'id'
+    $rawStart = Get-AttrCudaJsonProperty $processNode 'startedAtUtc'
+    $rawEnd = Get-AttrCudaJsonProperty $processNode 'endedAtUtc'
+
+    [int64]$targetPid = 0
+    $windowStartUtc = [datetime]::MinValue
+    $windowEndUtc = [datetime]::MinValue
+    $identityOk = $true
+    if ($null -eq $rawPid -or -not [int64]::TryParse([string]$rawPid, [ref]$targetPid) -or $targetPid -le 0) { $identityOk = $false }
+    if ($identityOk) {
+        try {
+            $windowStartUtc = [datetime]::Parse([string]$rawStart, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        } catch { $identityOk = $false }
+    }
+    if ($identityOk) {
+        try {
+            $windowEndUtc = [datetime]::Parse([string]$rawEnd, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        } catch { $identityOk = $false }
+    }
+    if ($identityOk -and $windowEndUtc -le $windowStartUtc) { $identityOk = $false }
+    if (-not $identityOk) {
+        return (& $unavailable "result.json process.id/startedAtUtc/endedAtUtc is missing or malformed -- cannot identify the MLVApp process or its playback window")
+    }
+
+    if (-not (Test-Path -LiteralPath $CsvPath -PathType Leaf)) {
+        return (& $unavailable "PresentMon output does not exist: $CsvPath")
+    }
+    try {
+        $rawRows = @(Import-Csv -LiteralPath $CsvPath)
+    } catch {
+        return (& $unavailable "PresentMon output at $CsvPath could not be parsed: $($_.Exception.Message)")
+    }
+    if ($rawRows.Count -eq 0) {
+        return (& $unavailable "PresentMon output at $CsvPath has no rows")
+    }
+
+    $requiredColumns = @('Application', 'ProcessID', 'SwapChainAddress', 'PresentMode', 'MsBetweenPresents', 'MsBetweenDisplayChange', 'DisplayedTime', 'TimeInMs')
+    $columns = @($rawRows[0].PSObject.Properties.Name)
+    $missingColumns = @($requiredColumns | Where-Object { $columns -notcontains $_ })
+    if ($missingColumns.Count -gt 0) {
+        return (& $unavailable "PresentMon output at $CsvPath is missing required column(s): $($missingColumns -join ', ')")
+    }
+
+    $windowStartMs = ($windowStartUtc - $CaptureStartUtc).TotalMilliseconds
+    $windowEndMs = ($windowEndUtc - $CaptureStartUtc).TotalMilliseconds
+    $windowSeconds = ($windowEndMs - $windowStartMs) / 1000.0
+
+    # Every row inside the window is kept here, including MsBetweenDisplayChange == 0 -- discarding
+    # those (the old behaviour) silently inflated the displayed rate to equal the presented rate.
+    $windowedRows = [System.Collections.Generic.List[object]]::new()
+    $ordinal = 0
+    foreach ($row in $rawRows) {
+        [double]$timeInMs = 0.0
+        if (-not [double]::TryParse([string]$row.TimeInMs, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$timeInMs)) { continue }
+        if ($timeInMs -lt $windowStartMs -or $timeInMs -gt $windowEndMs) { continue }
+
+        [int64]$rowPid = 0
+        [void][int64]::TryParse([string]$row.ProcessID, [ref]$rowPid)
+
+        [double]$displayChange = 0.0
+        $hasDisplayChange = [double]::TryParse([string]$row.MsBetweenDisplayChange, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$displayChange)
+
+        [double]$betweenPresents = 0.0
+        $hasBetweenPresents = [double]::TryParse([string]$row.MsBetweenPresents, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$betweenPresents)
+
+        [void]$windowedRows.Add([pscustomobject]@{
+            ordinal = $ordinal
+            application = [string]$row.Application
+            processId = $rowPid
+            swapChainAddress = [string]$row.SwapChainAddress
+            presentMode = [string]$row.PresentMode
+            timeInMs = $timeInMs
+            msBetweenPresents = if ($hasBetweenPresents) { $betweenPresents } else { $null }
+            msBetweenDisplayChange = if ($hasDisplayChange) { $displayChange } else { $null }
+            displayedTime = [string]$row.DisplayedTime
+            displayed = ($hasDisplayChange -and $displayChange -gt 0)
+        })
+        $ordinal++
+    }
+
+    if ($windowedRows.Count -eq 0) {
+        return (& $unavailable "no PresentMon rows fall inside the playback window [$($windowStartUtc.ToString('o')), $($windowEndUtc.ToString('o'))] (capture started $($CaptureStartUtc.ToString('o')))")
+    }
+
+    $chains = [System.Collections.Generic.List[object]]::new()
+    foreach ($group in ($windowedRows | Group-Object -Property processId, swapChainAddress)) {
+        $groupRows = @($group.Group)
+        $displayedRows = @($groupRows | Where-Object { $_.displayed })
+        $presentedCount = $groupRows.Count
+        $displayedCount = $displayedRows.Count
+        [void]$chains.Add([pscustomobject]@{
+            processId = $groupRows[0].processId
+            swapChainAddress = $groupRows[0].swapChainAddress
+            application = $groupRows[0].application
+            presentedCount = $presentedCount
+            displayedCount = $displayedCount
+            presentedFps = if ($windowSeconds -gt 0) { $presentedCount / $windowSeconds } else { $null }
+            displayedFps = if ($windowSeconds -gt 0) { $displayedCount / $windowSeconds } else { $null }
+            isMlvAppChain = ($groupRows[0].processId -eq $targetPid)
+        })
+    }
+
+    $mlvAppChains = @($chains | Where-Object { $_.isMlvAppChain } | Sort-Object -Property presentedCount -Descending)
+    if ($mlvAppChains.Count -eq 0) {
+        return (& $unavailable "no PresentMon rows in the playback window belong to MLVApp process id $targetPid" $chains)
+    }
+    $selected = $mlvAppChains[0]
+
+    if ($selected.displayedCount -le 0) {
+        return [pscustomobject]@{
+            status = 'DISPLAY_ASLEEP'
+            reason = "MLVApp chain (processId=$($selected.processId) swapChainAddress=$($selected.swapChainAddress)) presented $($selected.presentedCount) frame(s) in the playback window but displayed 0 -- the panel may be asleep or the window occluded"
+            chains = @($chains)
+            selectedChain = $selected
+            selectedChainRows = @()
+        }
+    }
+
+    $selectedChainRows = @(
+        $windowedRows |
+            Where-Object { $_.processId -eq $selected.processId -and $_.swapChainAddress -eq $selected.swapChainAddress -and $_.displayed } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    ordinal = $_.ordinal
+                    timeInMs = $_.timeInMs
+                    msBetweenDisplayChange = $_.msBetweenDisplayChange
+                    displayFpsEquivalent = 1000.0 / $_.msBetweenDisplayChange
+                    presentMode = $_.presentMode
+                }
+            }
+    )
+
+    [pscustomobject]@{
+        status = 'OK'
+        reason = $null
+        chains = @($chains)
+        selectedChain = $selected
+        selectedChainRows = $selectedChainRows
+    }
+}
+
 Export-ModuleMember -Function `
     Get-AttrCudaArtifactNames, `
     New-AttrCudaBuildInfoHeader, `
@@ -1907,4 +2120,5 @@ Export-ModuleMember -Function `
     Remove-AttrCudaTree, `
     Resolve-AttrCudaSmokeRunLog, `
     Get-AttrCudaLastEligibilityLine, `
-    Get-AttrCudaEligibilityVerdict
+    Get-AttrCudaEligibilityVerdict, `
+    Get-AttrCudaPresentMonDisplayReport
