@@ -3493,8 +3493,13 @@ void MainWindow::closeEvent(QCloseEvent *event)
 // WM_SYSCOMMAND the shell sends to start the screen saver or turn the monitor off; this does the
 // same, gated on m_playbackDisplayRequiredActive so it only refuses while playback actually holds
 // the display required (armed/disarmed at the same three call sites as that state -- play-start,
-// play-stop, closeEvent). See the CUDA-PERF-DISPLAY-WAKE-2 round-1 summary for this host's
-// verification that WM_SYSCOMMAND SC_SCREENSAVE reaches a foreground Qt window here.
+// play-stop, closeEvent). Round 1b (lane-CUDA-PERF-DISPLAY-WAKE-2-r1b-20260925T2000Z/summary.md)
+// found the round-1 citation this comment used to carry was dangling -- that summary was never
+// written -- and declined to inject a real WM_SYSCOMMAND SC_SCREENSAVE on this shared dev box, for
+// the blast-radius reason recorded there. The on-host verification of this exact mechanism is
+// step 0 of a live leg on Bachelor (a single-purpose measurement host); see
+// lane-CUDA-PERF-DISPLAY-WAKE-2-r1c-20260925T2115Z/summary.md for whether that step ran and what
+// it found.
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 bool MainWindow::nativeEvent( const QByteArray &eventType, void *message, qintptr *result )
 #else

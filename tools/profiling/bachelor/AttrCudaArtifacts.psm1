@@ -2299,6 +2299,85 @@ function Register-AttrCudaDisplayWakeNativeMethods {
 
             [DllImport("kernel32.dll")]
             public static extern uint SetThreadExecutionState(uint esFlags);
+
+            // CUDA-PERF-DISPLAY-WAKE-2 round 1c: OpenInputDesktop resolves whichever desktop is
+            // CURRENTLY receiving input (round 1b evidence: a plain SendInput failed with
+            // ERROR_ACCESS_DENIED once a non-secure screen saver had already engaged), and
+            // SetThreadDesktop reassigns a caller-supplied thread to it -- see
+            // Invoke-AttrCudaInputDesktopNudge's own header for the "why a dedicated thread"
+            // constraint Microsoft documents for SetThreadDesktop.
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern IntPtr OpenInputDesktop(uint dwFlags, bool fInherit, uint dwDesiredAccess);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern bool SetThreadDesktop(IntPtr hDesktop);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern bool CloseDesktop(IntPtr hDesktop);
+        }
+
+        // CUDA-PERF-DISPLAY-WAKE-2 round 1c. Invoking a PowerShell scriptblock on a raw
+        // System.Threading.Thread throws PSInvalidOperationException ("There is no Runspace
+        // available to run scripts in this thread") the instant the delegate is invoked -- a new
+        // .NET thread does not inherit [Runspace]::DefaultRunspace, which the PowerShell engine
+        // needs before it can execute even the scriptblock's first statement, so there is no way
+        // to set it from PowerShell code running ON that thread (chicken-and-egg). The dedicated
+        // thread this needs is therefore built entirely in C#, which has no such requirement --
+        // it is plain P/Invoke and CLR threading, nothing PowerShell-specific runs on it at all.
+        public class InputDesktopNudgeResult
+        {
+            public string OpenInputDesktopError;
+            public string SetThreadDesktopError;
+            public string SendInputError;
+            public bool ThreadJoined;
+        }
+
+        public static class InputDesktopNudge
+        {
+            public static InputDesktopNudgeResult Run(int joinTimeoutMilliseconds)
+            {
+                InputDesktopNudgeResult result = new InputDesktopNudgeResult();
+                System.Threading.Thread thread = new System.Threading.Thread(delegate ()
+                {
+                    // GENERIC_ALL: this thread lives only long enough for one SendInput call, so
+                    // the simplest sufficient access right is used rather than assembling
+                    // individual DESKTOP_* bits.
+                    uint GENERIC_ALL = 0x10000000;
+                    IntPtr hDesktop = NativeMethods.OpenInputDesktop(0, false, GENERIC_ALL);
+                    if (hDesktop == IntPtr.Zero)
+                    {
+                        result.OpenInputDesktopError = "OpenInputDesktop failed (lastError=" + Marshal.GetLastWin32Error() + ")";
+                        return;
+                    }
+                    try
+                    {
+                        if (!NativeMethods.SetThreadDesktop(hDesktop))
+                        {
+                            result.SetThreadDesktopError = "SetThreadDesktop failed (lastError=" + Marshal.GetLastWin32Error() + ")";
+                            return;
+                        }
+                        uint INPUT_MOUSE = 0;
+                        uint MOUSEEVENTF_MOVE = 0x0001;
+                        INPUT[] nudge = new INPUT[] {
+                            new INPUT { type = (int)INPUT_MOUSE, mi = new MOUSEINPUT { dx = 1, dy = 0, mouseData = 0, dwFlags = MOUSEEVENTF_MOVE, time = 0, dwExtraInfo = IntPtr.Zero } },
+                            new INPUT { type = (int)INPUT_MOUSE, mi = new MOUSEINPUT { dx = -1, dy = 0, mouseData = 0, dwFlags = MOUSEEVENTF_MOVE, time = 0, dwExtraInfo = IntPtr.Zero } }
+                        };
+                        uint sent = NativeMethods.SendInput((uint)nudge.Length, nudge, Marshal.SizeOf(typeof(INPUT)));
+                        if (sent != nudge.Length)
+                        {
+                            result.SendInputError = "SendInput sent " + sent + " of " + nudge.Length + " events (lastError=" + Marshal.GetLastWin32Error() + ")";
+                        }
+                    }
+                    finally
+                    {
+                        NativeMethods.CloseDesktop(hDesktop);
+                    }
+                });
+                thread.IsBackground = true;
+                thread.Start();
+                result.ThreadJoined = thread.Join(joinTimeoutMilliseconds);
+                return result;
+            }
         }
     }
 '@ -ErrorAction Stop
@@ -2372,6 +2451,102 @@ function Get-AttrCudaScreensaverActive {
     }
 }
 
+function Get-AttrCudaScreensaverSecure {
+    <#
+    .SYNOPSIS
+    SPI_GETSCREENSAVESECURE via SystemParametersInfo: whether resuming from the screen saver
+    requires the logon password. $null if the native type could not load or the call itself
+    failed -- never throws. Read-only, like its siblings above.
+    .DESCRIPTION
+    CUDA-PERF-DISPLAY-WAKE-2 round 1c. This is the ONE check that gates every screen-saver-dismiss
+    attempt in Start-AttrCudaDisplayWake below: a secure screen saver's password prompt is a
+    security boundary this job never attempts to cross -- ending it is an owner action, never an
+    automated one.
+    #>
+    [CmdletBinding()]
+    param()
+    if (-not (Register-AttrCudaDisplayWakeNativeMethods)) { return $null }
+    try {
+        $secure = $false
+        # SPI_GETSCREENSAVESECURE = 0x0076.
+        $ok = [MLVAppAttrCudaDisplayWake.NativeMethods]::SystemParametersInfo(0x0076, 0, [ref]$secure, 0)
+        if (-not $ok) { return $null }
+        return [bool]$secure
+    } catch {
+        return $null
+    }
+}
+
+function Invoke-AttrCudaInputDesktopNudge {
+    <#
+    .SYNOPSIS
+    Sends the same net-zero 1-pixel SendInput nudge as Start-AttrCudaDisplayWake's plain path, but
+    from a brand-new dedicated thread that first calls OpenInputDesktop + SetThreadDesktop -- the
+    supported way to inject input into whichever desktop is CURRENTLY receiving input, when that is
+    not the desktop this job's own thread was created on.
+    .DESCRIPTION
+    CUDA-PERF-DISPLAY-WAKE-2 round 1c. A live leg on Bachelor (round 1b) recorded
+    screensaverRunningBefore=true and a plain SendInput failing with lastError=5
+    (ERROR_ACCESS_DENIED): Microsoft documents SendInput as injecting only into the CALLING
+    THREAD's own desktop, and a non-secure screen saver that has already engaged switches the
+    input desktop out from under this job's thread. OpenInputDesktop resolves the desktop that is
+    actually receiving input right now, and SetThreadDesktop reassigns a thread to it -- but
+    Microsoft also documents that "you cannot set the desktop for a thread if the thread has any
+    windows or hooks on the current desktop", so this MUST run on a freshly created
+    System.Threading.Thread that has never created a window or hook, never this job's own thread
+    (which already touched user32 via Register-AttrCudaDisplayWakeNativeMethods/SendInput above).
+    Never called when the screen saver is SECURE (SPI_GETSCREENSAVESECURE) -- that gate lives in
+    Start-AttrCudaDisplayWake, one level up, not here: ending a password-protected screen saver is
+    an owner action, never something this job attempts.
+    Non-throwing by construction, like every other function in this file: every failure is
+    recorded in the returned evidence, never allowed to propagate to the caller. The dedicated
+    thread itself is built entirely in C# (Register-AttrCudaDisplayWakeNativeMethods's
+    InputDesktopNudge helper), never as a PowerShell scriptblock run on a raw thread: a new
+    System.Threading.Thread does not inherit [Runspace]::DefaultRunspace, so invoking PowerShell
+    code on it throws PSInvalidOperationException before a single statement runs -- there is no
+    way to set that from PowerShell code running ON the new thread, since setting it is itself
+    PowerShell code needing the very runspace that is missing. Plain P/Invoke and CLR threading
+    have no such requirement, so the thread body is C# instead.
+    .OUTPUTS
+    An ordered hashtable: .attempted, .openInputDesktopError/.setThreadDesktopError/
+    .sendInputError (each $null on success), and .threadJoined (whether the dedicated thread
+    finished within its join timeout -- $false is itself evidence, not a throw).
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$JoinTimeoutMilliseconds = 5000
+    )
+
+    if (-not (Register-AttrCudaDisplayWakeNativeMethods)) {
+        return [ordered]@{
+            attempted = $false
+            openInputDesktopError = 'ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE native P/Invoke type could not be loaded'
+            setThreadDesktopError = $null
+            sendInputError = $null
+            threadJoined = $false
+        }
+    }
+
+    try {
+        $result = [MLVAppAttrCudaDisplayWake.InputDesktopNudge]::Run($JoinTimeoutMilliseconds)
+        [ordered]@{
+            attempted = $true
+            openInputDesktopError = $result.OpenInputDesktopError
+            setThreadDesktopError = $result.SetThreadDesktopError
+            sendInputError = $result.SendInputError
+            threadJoined = [bool]$result.ThreadJoined
+        }
+    } catch {
+        [ordered]@{
+            attempted = $true
+            openInputDesktopError = $_.Exception.Message
+            setThreadDesktopError = $null
+            sendInputError = $null
+            threadJoined = $false
+        }
+    }
+}
+
 function Start-AttrCudaDisplayWake {
     <#
     .SYNOPSIS
@@ -2380,16 +2555,31 @@ function Start-AttrCudaDisplayWake {
     recorded in the returned evidence, never allowed to block or fail the leg.
     .DESCRIPTION
     Two independent mechanisms, both attempted regardless of whether the other succeeds:
-      - a 1-pixel SendInput relative pointer move and back (net zero displacement) -- the same
-        kind of input a real user's mouse produces, which ends an active screensaver;
+      - a net-zero 1-pixel pointer nudge -- the same kind of input a real user's mouse produces,
+        which ends an active screensaver. CUDA-PERF-DISPLAY-WAKE-2 round 1c: if the screen saver
+        is ALREADY RUNNING (SPI_GETSCREENSAVERRUNNING) when this is called, a plain SendInput from
+        this thread is expected to fail with ERROR_ACCESS_DENIED (round 1b's live evidence on
+        Bachelor) because the screen saver has taken over the input desktop -- so this dispatches
+        to Invoke-AttrCudaInputDesktopNudge instead, which sends the SAME nudge from a dedicated
+        thread attached to whichever desktop is currently receiving input. Neither is ever
+        attempted when the screen saver is SECURE (SPI_GETSCREENSAVESECURE) -- see
+        .screensaverSecureOwnerOnly below;
       - SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED), held
-        until the caller releases it via Stop-AttrCudaDisplayWake.
+        until the caller releases it via Stop-AttrCudaDisplayWake -- attempted regardless of the
+        screen-saver branch above, since it never touches the screen saver's own desktop.
     Returns .attempted (always $true -- this function ran), .method, .screensaverRunningBefore /
     .screensaverRunningAfter (each $true/$false/$null -- $null only when that probe itself
-    failed), .sendInputError/.executionStateError (each $null on success),
-    .screensaverTimeoutSeconds (SPI_GETSCREENSAVETIMEOUT, read-only) and .screensaverActive
-    (SPI_GETSCREENSAVEACTIVE, read-only) -- CUDA-PERF-DISPLAY-WAKE-2, so a run that still ends
-    DISPLAY_ASLEEP shows what timeout it was racing -- and .utc.
+    failed), .screensaverSecure (SPI_GETSCREENSAVESECURE, read-only, CUDA-PERF-DISPLAY-WAKE-2
+    round 1c), .screensaverSecureOwnerOnly ($true only when the screen saver is BOTH already
+    running AND secure -- the caller's signal to stop the leg with a typed
+    SCREENSAVER_SECURE_OWNER_ONLY result rather than attempting anything: ending a
+    password-protected screen saver is an owner action), .inputDesktopNudge (the nested evidence
+    from Invoke-AttrCudaInputDesktopNudge, or $null when that path was not taken),
+    .sendInputError/.executionStateError (each $null on success -- .sendInputError reflects
+    whichever nudge path actually ran), .screensaverTimeoutSeconds (SPI_GETSCREENSAVETIMEOUT,
+    read-only) and .screensaverActive (SPI_GETSCREENSAVEACTIVE, read-only) -- CUDA-PERF-
+    DISPLAY-WAKE-2, so a run that still ends DISPLAY_ASLEEP shows what timeout it was racing --
+    and .utc. Never calls an SPI_SET* action and never changes a screen-saver or power setting.
     #>
     [CmdletBinding()]
     param()
@@ -2397,9 +2587,23 @@ function Start-AttrCudaDisplayWake {
     $screensaverTimeoutSeconds = Get-AttrCudaScreensaverTimeoutSeconds
     $screensaverActive = Get-AttrCudaScreensaverActive
     $screensaverBefore = Get-AttrCudaScreensaverRunning
+    $screensaverSecure = Get-AttrCudaScreensaverSecure
+    $screensaverSecureOwnerOnly = ($screensaverBefore -eq $true) -and ($screensaverSecure -eq $true)
     $sendInputError = $null
     $executionStateError = $null
-    if (Register-AttrCudaDisplayWakeNativeMethods) {
+    $inputDesktopNudge = $null
+    $nativeAvailable = Register-AttrCudaDisplayWakeNativeMethods
+
+    if ($screensaverSecureOwnerOnly) {
+        # A password-protected screen saver is a security boundary: no dismiss attempt of any
+        # kind is made, on either path below. The caller (the attribution job) is expected to
+        # stop the leg on this flag before touching footage or the smoke run.
+        $sendInputError = 'ATTRCUDA_SCREENSAVER_SECURE_OWNER_ONLY screen saver is running and secure (password on resume); no dismiss attempted -- ending it is an owner action'
+    } elseif ($nativeAvailable -and $screensaverBefore -eq $true) {
+        $inputDesktopNudge = Invoke-AttrCudaInputDesktopNudge
+        $sendInputError = @($inputDesktopNudge.openInputDesktopError, $inputDesktopNudge.setThreadDesktopError, $inputDesktopNudge.sendInputError) |
+            Where-Object { $_ } | Select-Object -First 1
+    } elseif ($nativeAvailable) {
         try {
             $INPUT_MOUSE = 0
             $MOUSEEVENTF_MOVE = [uint32]0x0001
@@ -2415,6 +2619,11 @@ function Start-AttrCudaDisplayWake {
         } catch {
             $sendInputError = $_.Exception.Message
         }
+    } else {
+        $sendInputError = 'ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE native P/Invoke type could not be loaded'
+    }
+
+    if ($nativeAvailable) {
         try {
             # ES_CONTINUOUS = 0x80000000 (a bare hex literal this large parses as a negative
             # Int32 in PowerShell, not an auto-widened UInt32, so it is spelled decimal instead).
@@ -2427,16 +2636,26 @@ function Start-AttrCudaDisplayWake {
             $executionStateError = $_.Exception.Message
         }
     } else {
-        $sendInputError = 'ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE native P/Invoke type could not be loaded'
-        $executionStateError = $sendInputError
+        $executionStateError = 'ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE native P/Invoke type could not be loaded'
     }
     $screensaverAfter = Get-AttrCudaScreensaverRunning
 
+    $method = if ($screensaverSecureOwnerOnly) {
+        'SecureScreensaverNoDismissAttempted+SetThreadExecutionState(ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED)'
+    } elseif ($screensaverBefore -eq $true) {
+        'OpenInputDesktop+SetThreadDesktop+SendInputPointerNudge(dedicated thread)+SetThreadExecutionState(ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED)'
+    } else {
+        'SendInputPointerNudge+SetThreadExecutionState(ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED)'
+    }
+
     [ordered]@{
         attempted = $true
-        method = 'SendInputPointerNudge+SetThreadExecutionState(ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED)'
+        method = $method
         screensaverRunningBefore = $screensaverBefore
         screensaverRunningAfter = $screensaverAfter
+        screensaverSecure = $screensaverSecure
+        screensaverSecureOwnerOnly = $screensaverSecureOwnerOnly
+        inputDesktopNudge = $inputDesktopNudge
         sendInputError = $sendInputError
         executionStateError = $executionStateError
         screensaverTimeoutSeconds = $screensaverTimeoutSeconds
@@ -2636,6 +2855,8 @@ Export-ModuleMember -Function `
     Get-AttrCudaScreensaverRunning, `
     Get-AttrCudaScreensaverTimeoutSeconds, `
     Get-AttrCudaScreensaverActive, `
+    Get-AttrCudaScreensaverSecure, `
+    Invoke-AttrCudaInputDesktopNudge, `
     Start-AttrCudaDisplayWake, `
     Stop-AttrCudaDisplayWake, `
     Start-AttrCudaDisplayWakeKeepAlive, `

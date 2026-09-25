@@ -461,12 +461,17 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     # CUDA-PERF-DISPLAY-WAKE-1/2: wakes the display from the interactive session before this leg
     # launches MLVApp, holds it awake for the leg, and keeps nudging periodically for the whole
     # leg (SetThreadExecutionState alone does not stop the screen saver) -- see their own header in
-    # AttrCudaArtifacts.psm1. All six call Register-.../Get-AttrCudaScreensaver* internally, so all
-    # six must be embedded together.
+    # AttrCudaArtifacts.psm1. All eight call Register-.../Get-AttrCudaScreensaver*/
+    # Invoke-AttrCudaInputDesktopNudge internally, so all eight must be embedded together.
     'Register-AttrCudaDisplayWakeNativeMethods',
     'Get-AttrCudaScreensaverRunning',
     'Get-AttrCudaScreensaverTimeoutSeconds',
     'Get-AttrCudaScreensaverActive',
+    # CUDA-PERF-DISPLAY-WAKE-2 round 1c: SPI_GETSCREENSAVESECURE (gates every dismiss attempt) and
+    # the OpenInputDesktop/SetThreadDesktop dedicated-thread nudge Start-AttrCudaDisplayWake
+    # dispatches to when the screen saver is already running and not secure.
+    'Get-AttrCudaScreensaverSecure',
+    'Invoke-AttrCudaInputDesktopNudge',
     'Start-AttrCudaDisplayWake',
     'Stop-AttrCudaDisplayWake',
     'Start-AttrCudaDisplayWakeKeepAlive',
@@ -595,6 +600,28 @@ $ownerLinkHandles = [System.Collections.Generic.List[object]]::new()
 # called above its definition, so every emitted job died with command-not-found).
 __EMBEDDED_FUNCTIONS__
 # --- end embedded verifiers -------------------------------------------------------------------
+
+# CUDA-PERF-DISPLAY-WAKE-2 round 1c: THE VERY FIRST ACTION this job takes after claim, before the
+# TEMP boundary, before $Work/$Pub are even created, before footage resolution, before package/
+# build-manifest verification, and before the CPU-quiescence sleeps far below. Round 1b's live
+# leg on Bachelor recorded a 4.5-minute gap between job claim and the keep-alive's first nudge
+# (footage resolution and package verification ran first) -- long enough for a 300s screen-saver
+# timeout to elapse before this job ever touched the desktop, after which SendInput could no
+# longer recover it (screensaverRunningBefore=true, SendInput lastError=5 ERROR_ACCESS_DENIED).
+# Moving the synchronous nudge here, and starting the periodic keep-alive in the same breath (not
+# after staging), closes that gap: nothing from here to the leg's own release in `finally` ever
+# runs without the keep-alive already ticking. Bounded and non-throwing -- see
+# Start-AttrCudaDisplayWake's own header in AttrCudaArtifacts.psm1.
+$displayWake = Start-AttrCudaDisplayWake
+$displayWakeKeepAlive = Start-AttrCudaDisplayWakeKeepAlive
+# Folded into $displayWake itself (by reference for .keepAliveNudgeState -- the SAME live
+# Hashtable instance the background loop mutates) rather than added as a separate field at each
+# evidence write site below: every one of those already carries whatever is in $displayWake at
+# the moment it serializes, so this is the only edit needed for every recorded outcome to also
+# carry live keep-alive evidence, right up to the count at that write's own moment.
+$displayWake['keepAliveIntervalSeconds'] = $displayWakeKeepAlive.intervalSeconds
+$displayWake['keepAliveStartedUtc'] = $displayWakeKeepAlive.startedUtc
+$displayWake['keepAliveNudgeState'] = $displayWakeKeepAlive.nudgeState
 
 # TEMP boundary (BLOCKER fix): job-owned scratch dir under this job's own C:\mlvtmp
 # work dir, set as TEMP/TMP at the very start -- before any child process (reg.exe,
@@ -804,6 +831,27 @@ function Get-LastGpuSummary([string]$RawLog) {
     }
 }
 
+# CUDA-PERF-DISPLAY-WAKE-2 round 1c: checked as early as Save-Json's own definition allows --
+# before package/build-manifest verification, before footage resolution, before the
+# CPU-quiescence check -- so a leg claimed onto an already-secure (password-on-resume) screen
+# saver never touches footage or spends any of its own budget on work that would only be thrown
+# away. Ending a password-protected screen saver is an owner action; this job stops here instead
+# of attempting anything (see Start-AttrCudaDisplayWake's own header in AttrCudaArtifacts.psm1 for
+# how screensaverSecureOwnerOnly is derived).
+if ($displayWake.screensaverSecureOwnerOnly) {
+    [void](New-AttrCudaDirectory -Path (Join-Path $Root 'outbox'))
+    [void](New-AttrCudaDirectory -Path $Pub)
+    $secureRefusal = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='SCREENSAVER_SECURE_OWNER_ONLY'
+        fixtureRehearsal=$FixtureRehearsal
+        displayWake=$displayWake
+        sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $secureRefusal (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=SCREENSAVER_SECURE_OWNER_ONLY ARTIFACTS=$Pub"
+    exit 25
+}
+
 foreach ($item in @(
     @{ path=(Join-Path $Cache $PresentMonName); sha=$PresentMonSha }
 )) {
@@ -892,6 +940,7 @@ if ($FixtureRehearsal) {
         $mismatch = [ordered]@{
             schema='playback-attr-3-cuda-venue.v1'; result='FIXTURE_CONTENT_MISMATCH'
             fixtureRehearsal=$FixtureRehearsal
+            displayWake=$displayWake
             clipPath=$clipPath; expectedSha256=$FixtureSha256; actualSha256=$actualClipSha256
             sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
         }
@@ -924,6 +973,7 @@ if ($FixtureRehearsal) {
         $notVerified = [ordered]@{
             schema='playback-attr-3-cuda-venue.v1'; result='OWNER_FOOTAGE_NOT_VERIFIED'
             fixtureRehearsal=$FixtureRehearsal
+            displayWake=$displayWake
             parts=@($ownerPartResults)
             sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
         }
@@ -946,6 +996,7 @@ if ($FixtureRehearsal) {
         $notContiguous = [ordered]@{
             schema='playback-attr-3-cuda-venue.v1'; result='OWNER_PARTS_NOT_CONTIGUOUS'
             fixtureRehearsal=$FixtureRehearsal
+            displayWake=$displayWake
             partCount=$ownerDecodedParts.Count
             sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
         }
@@ -993,6 +1044,7 @@ if ($FixtureRehearsal) {
             $relinkRefusal = [ordered]@{
                 schema='playback-attr-3-cuda-venue.v1'; result='OWNER_FOOTAGE_NOT_VERIFIED'
                 fixtureRehearsal=$FixtureRehearsal
+                displayWake=$displayWake
                 parts=@(@{ index = $part.index; status = $Matches[1] })
                 sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
             }
@@ -1009,6 +1061,7 @@ if ($FixtureRehearsal) {
         $linkRefusal = [ordered]@{
             schema='playback-attr-3-cuda-venue.v1'; result=$linkToken
             fixtureRehearsal=$FixtureRehearsal
+            displayWake=$displayWake
             partIndex=$part.index
             sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
         }
@@ -1026,30 +1079,11 @@ if ($FixtureRehearsal) {
 # fixture run, so the `finally` is a no-op there.
 try {
 Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip) -DestinationPath (Join-Path $Work 'pkg') -Force
-# CUDA-PERF-DISPLAY-WAKE-1. OWNER (2026-09-25): "if display is asleep just wake it. its just the
-# blank screensaver". Woken and held for the whole rest of the leg -- from before MLVApp is even
-# deployed, through PresentMon's own capture -- never just around the smoke launch itself, so a
-# screensaver that was already engaged before this job started never gets a window to still be up
-# when PresentMon starts sampling. Bounded and non-throwing (see its own header in
-# AttrCudaArtifacts.psm1): a Win32 failure is recorded in $displayWake, never allowed to block this
-# leg. Released in the `finally` below, on every exit path.
-$displayWake = Start-AttrCudaDisplayWake
-# CUDA-PERF-DISPLAY-WAKE-2 (sol BLOCKER on #167): SetThreadExecutionState alone does not stop the
-# screen saver, and the single nudge above only resets its idle interval once -- a short
-# screensaver timeout can still re-engage during the CPU-quiescence sleeps below or during
-# playback itself. Started here (before MLVApp is even deployed) and stopped in the `finally`
-# below (after the measured smoke launch has returned), so the periodic nudge runs continuously
-# for the leg's full duration, not just around the launch.
-$displayWakeKeepAlive = Start-AttrCudaDisplayWakeKeepAlive
-# Folded into $displayWake itself (by reference for .keepAliveNudgeState -- the SAME live
-# Hashtable instance the background loop mutates) rather than added as a separate field at each of
-# the 10 existing evidence write sites below: every one of those already carries whatever is in
-# $displayWake at the moment it serializes, so this is the only edit needed for every recorded
-# outcome (VENUE_NOT_QUIESCENT, DISPLAY_ASLEEP, the final success summary, etc.) to also carry
-# live keep-alive evidence, right up to the count at that write's own moment.
-$displayWake['keepAliveIntervalSeconds'] = $displayWakeKeepAlive.intervalSeconds
-$displayWake['keepAliveStartedUtc'] = $displayWakeKeepAlive.startedUtc
-$displayWake['keepAliveNudgeState'] = $displayWakeKeepAlive.nudgeState
+# CUDA-PERF-DISPLAY-WAKE-1/2. OWNER (2026-09-25): "if display is asleep just wake it. its just the
+# blank screensaver". $displayWake/$displayWakeKeepAlive were already started at the very top of
+# this job (round 1c -- see that block's own comment for why: closing the gap between job claim
+# and the keep-alive's first nudge), so nothing further is needed here; both are released in the
+# `finally` below, on every exit path.
 $baseExe = Get-ChildItem -LiteralPath (Join-Path $Work 'pkg') -Recurse -Filter $BasePackageExeName | Select-Object -First 1
 if (-not $baseExe) { throw "base package executable not found: $BasePackageExeName" }
 $pkgDir = $baseExe.Directory.FullName
