@@ -4134,6 +4134,10 @@ class EmbeddedFunctionContractTests(_PwshCase):
             "Publish-AttrCudaFileMove",
             "New-AttrCudaDirectory",
             "Remove-AttrCudaTree",
+            "Register-AttrCudaDisplayWakeNativeMethods",
+            "Get-AttrCudaScreensaverRunning",
+            "Start-AttrCudaDisplayWake",
+            "Stop-AttrCudaDisplayWake",
         ),
     }
 
@@ -4161,6 +4165,145 @@ class EmbeddedFunctionContractTests(_PwshCase):
                 self.assertIn("__EMBEDDED_FUNCTIONS__", text)
                 for name in names:
                     self.assertIn(f"'{name}'", text)
+
+
+# --------------------------------------------------------------------------------------------
+# CUDA-PERF-DISPLAY-WAKE-1: the display-wake functions themselves, and their wiring into the
+# attribution job template (wake before the smoke launch, release in `finally`, evidence recorded
+# on every outcome).
+# --------------------------------------------------------------------------------------------
+
+
+@requires_pwsh
+class DisplayWakeFunctionTests(_PwshCase):
+    """Start-/Stop-AttrCudaDisplayWake and their helpers: shape and never-throws, on a real host."""
+
+    def test_start_display_wake_never_throws_and_has_the_documented_shape(self) -> None:
+        proc = self.run_with_module(
+            "$w = Start-AttrCudaDisplayWake\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'w.json')}', ($w | ConvertTo-Json -Depth 5))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "w.json").read_text(encoding="utf-8"))
+        self.assertIs(result["attempted"], True)
+        self.assertIn("SetThreadExecutionState", result["method"])
+        self.assertIn(result["screensaverRunningBefore"], (True, False, None))
+        self.assertIn(result["screensaverRunningAfter"], (True, False, None))
+        self.assertIn("utc", result)
+        # On a real Windows CI host both native calls succeed; a failure is recorded (never
+        # thrown), which the never-throws test below exercises by forcing the native type absent.
+        self.assertIsNone(result["sendInputError"])
+        self.assertIsNone(result["executionStateError"])
+
+    def test_stop_display_wake_never_throws_and_releases(self) -> None:
+        proc = self.run_with_module(
+            "[void](Start-AttrCudaDisplayWake)\n"
+            "$r = Stop-AttrCudaDisplayWake\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'r.json')}', ($r | ConvertTo-Json -Depth 5))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "r.json").read_text(encoding="utf-8"))
+        self.assertIs(result["released"], True)
+        self.assertIsNone(result["error"])
+        self.assertIn("utc", result)
+
+    def test_get_screensaver_running_never_throws(self) -> None:
+        proc = self.run_with_module(
+            "$s = Get-AttrCudaScreensaverRunning\n"
+            "Write-Output \"RESULT=$($null -eq $s ? 'NULL' : $s)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertRegex(proc.stdout, r"RESULT=(True|False|NULL)")
+
+    def test_a_native_load_failure_is_recorded_not_thrown(self) -> None:
+        # Simulates Register-AttrCudaDisplayWakeNativeMethods failing (a Win32 P/Invoke surface
+        # that could not load): the real job never Import-Modules this file -- it embeds the
+        # verbatim function text into ONE flat script (see Get-AttrCudaEmbeddedFunctionSource's
+        # own header), so a later definition in that same scope wins. Extracted the same way here,
+        # with a redefinition appended, so this proves Start-/Stop-AttrCudaDisplayWake's own error
+        # handling -- not Add-Type's -- is what keeps this path from throwing, in the same flat-
+        # scope shape the deployed job actually runs in (Import-Module's module-scope boundary
+        # would not let a caller-side redefinition intercept the module's own internal call).
+        extract_script = self.tmp / "extract.ps1"
+        extract_script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            "Import-Module '" + str(MODULE) + "' -Force\n"
+            "$src = Get-AttrCudaEmbeddedFunctionSource -Name @("
+            "'Register-AttrCudaDisplayWakeNativeMethods','Get-AttrCudaScreensaverRunning',"
+            "'Start-AttrCudaDisplayWake','Stop-AttrCudaDisplayWake')\n"
+            f"Set-Content -LiteralPath '{(self.tmp / 'extracted.ps1')}' -Value $src -Encoding utf8\n",
+            encoding="utf-8",
+        )
+        extract_proc = _run_pwsh_file(extract_script)
+        self.assertEqual(extract_proc.returncode, 0, extract_proc.stdout + extract_proc.stderr)
+
+        probe_script = self.tmp / "extracted.ps1"
+        with probe_script.open("a", encoding="utf-8") as f:
+            f.write(
+                "\n$ErrorActionPreference = 'Stop'\n"
+                "function Register-AttrCudaDisplayWakeNativeMethods { $false }\n"
+                "$w = Start-AttrCudaDisplayWake\n"
+                "$r = Stop-AttrCudaDisplayWake\n"
+                f"[IO.File]::WriteAllText('{(self.tmp / 'w.json')}', ($w | ConvertTo-Json -Depth 5))\n"
+                f"[IO.File]::WriteAllText('{(self.tmp / 'r.json')}', ($r | ConvertTo-Json -Depth 5))\n"
+            )
+        proc = _run_pwsh_file(probe_script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        wake = json.loads((self.tmp / "w.json").read_text(encoding="utf-8"))
+        release = json.loads((self.tmp / "r.json").read_text(encoding="utf-8"))
+        self.assertIs(wake["attempted"], True)
+        self.assertIn("ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE", wake["sendInputError"])
+        self.assertIn("ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE", wake["executionStateError"])
+        self.assertIs(release["released"], False)
+        self.assertIn("ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE", release["error"])
+
+
+class DisplayWakeJobOrderingTests(unittest.TestCase):
+    """Static ordering/shape checks on the generator's own template text (no pwsh required)."""
+
+    def setUp(self) -> None:
+        self.text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+
+    def test_wake_runs_before_the_smoke_launch_and_release_runs_in_finally(self) -> None:
+        wake_at = self.text.index("$displayWake = Start-AttrCudaDisplayWake")
+        # The smoke launch: the nested pwsh.exe invocation that actually runs MLVApp.exe via
+        # run-release-gui-smoke.ps1 (see the generator's own $cmd construction above it).
+        launch_at = self.text.index(
+            '& "$env:ProgramFiles\\PowerShell\\7\\pwsh.exe" -NoLogo -NoProfile -NonInteractive '
+            '-ExecutionPolicy Bypass -Command $cmd', wake_at)
+        release_at = self.text.index("[void](Stop-AttrCudaDisplayWake)", launch_at)
+        finally_at = self.text.rindex("} finally {", wake_at, release_at)
+        self.assertGreater(launch_at, wake_at, "the leg must launch MLVApp only after the wake")
+        self.assertGreater(release_at, finally_at, "the release must run in the `finally` block")
+
+    def test_release_is_the_last_statement_in_finally_so_it_always_runs(self) -> None:
+        finally_at = self.text.index("} finally {")
+        close_workspace_at = self.text.index("Close-AttrCudaOwnerFootageWorkspace", finally_at)
+        release_at = self.text.index("[void](Stop-AttrCudaDisplayWake)", close_workspace_at)
+        end_template_at = self.text.index("'@", release_at)
+        self.assertLess(release_at, end_template_at)
+
+    def test_display_wake_evidence_is_recorded_on_every_outcome_after_the_wake(self) -> None:
+        wake_at = self.text.index("$displayWake = Start-AttrCudaDisplayWake")
+        end_template_at = self.text.index("'@", wake_at)
+        body = self.text[wake_at:end_template_at]
+        # Every Save-Json ... 'summary.json' call in this leg's body, after the wake, carries
+        # displayWake -- the failure paths (VENUE_NOT_QUIESCENT, SMOKE_RUN_FAILED,
+        # SMOKE_LOG_UNAVAILABLE, PRESENTMON_UNAVAILABLE, BACKEND_NOT_AVAILABLE,
+        # GPU_RECON_FRAMES_ZERO, CPU_FALLBACK_DETECTED, the displayReport failure including
+        # DISPLAY_ASLEEP itself) and the success evidence-manifest.json/summary.json.
+        summary_writes = body.count("(Join-Path $Pub 'summary.json')")
+        display_wake_fields = body.count("displayWake=$displayWake") + body.count("displayWake = $displayWake")
+        self.assertEqual(9, summary_writes, "a summary.json write site was added/removed after the wake")
+        # +1: the success path also stamps displayWake into evidence-manifest.json, a second file.
+        self.assertEqual(summary_writes + 1, display_wake_fields)
+
+    def test_display_asleep_outcome_specifically_carries_the_wake_evidence(self) -> None:
+        status_at = self.text.index("schema='playback-attr-3-cuda-venue.v1'; result=$displayReport.status")
+        display_asleep_exit_at = self.text.index(
+            "$displayExitCode = if ($displayReport.status -eq 'DISPLAY_ASLEEP') { 24 } else { 23 }")
+        block = self.text[status_at:display_asleep_exit_at]
+        self.assertIn("displayWake=$displayWake", block)
 
 
 if __name__ == "__main__":

@@ -2111,6 +2111,19 @@ static bool nativeWindowIsForeground( QWidget *window )
 #endif
 }
 
+/* Keeps the display awake while media plays -- ordinary media-player behaviour,
+ * independent of any playback-smoke telemetry flag (CUDA-PERF-DISPLAY-WAKE-1). Called once
+ * on play start and once on stop/window-close, never per frame: SetThreadExecutionState only
+ * needs to be told the current intent, not refreshed continuously. */
+static void setPlaybackDisplayRequiredExecutionState( bool required )
+{
+#ifdef Q_OS_WIN
+    SetThreadExecutionState( required ? ( ES_CONTINUOUS | ES_DISPLAY_REQUIRED ) : ES_CONTINUOUS );
+#else
+    Q_UNUSED( required );
+#endif
+}
+
 /* spaceTag argument options: ffmpeg color space tag number compliant */
 #define SPACETAG_REC709   1   /* rec709 color space */
 #define SPACETAG_UNKNOWN  2   /* No color space tag set */
@@ -3429,6 +3442,10 @@ void MainWindow::openMlvSet( QStringList list )
 //App shall close -> hammer method, we shot on the main class... for making the app close and killing everything in background
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    // CUDA-PERF-DISPLAY-WAKE-1: explicit release on window close, never relied on solely via
+    // setChecked(false)'s toggled() signal below -- that only fires when actionPlay was
+    // actually checked, and the request must never outlive the window regardless.
+    setPlaybackDisplayRequiredExecutionState( false );
     ui->actionPlay->setChecked( false );
     on_actionPlay_triggered( false );
 
@@ -22877,6 +22894,15 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                .arg( QString::fromLatin1(
                    playbackQualityAutoDecisionReasonName(
                        m_playbackQualityAutoDecisionReason ) ) );
+
+    // CUDA-PERF-DISPLAY-WAKE-1: once per playback session, reporting the display-required
+    // request this same play-start already made above (setPlaybackDisplayRequiredExecutionState
+    // is unconditional and not gated on telemetry; this line is just its record).
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.display_required session=%1 display_required=%2" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+               .arg( bool01( true ) );
 }
 
 void MainWindow::notePlaybackSmokePresentedFrame(
@@ -26051,6 +26077,10 @@ void MainWindow::on_actionPlay_toggled(bool checked)
     //When stopping, debayer selection has to come in right order from render thread (extra-invitation)
     if( !checked )
     {
+        // CUDA-PERF-DISPLAY-WAKE-1: release the display-required request unconditionally, not
+        // gated on m_playbackSmokeActive -- finishPlaybackSmokeTelemetry() below no-ops when a
+        // session was never begun, and this call must never depend on that.
+        setPlaybackDisplayRequiredExecutionState( false );
         finishPlaybackSmokeTelemetry( "play-stop" );
         m_playbackStopped = true;
         m_playToFirstFramePending = false;
@@ -26066,6 +26096,9 @@ void MainWindow::on_actionPlay_toggled(bool checked)
     applyEffectiveDualIsoPlaybackSettings();
     if( checked )
     {
+        // CUDA-PERF-DISPLAY-WAKE-1: acquired before beginPlaybackSmokeTelemetry() so the
+        // playback_smoke.display_required line it emits reports the state already in effect.
+        setPlaybackDisplayRequiredExecutionState( true );
         resetPlaybackQualityAutoRunState();
         beginPlaybackSmokeTelemetry();
         beginPlayToFirstFrameMeasurement();

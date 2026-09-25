@@ -2229,6 +2229,193 @@ function Get-AttrCudaPresentMonDisplayReport {
     }
 }
 
+# CUDA-PERF-DISPLAY-WAKE-1. OWNER (2026-09-25): "if display is asleep just wake it. its just the
+# blank screensaver". Measured legs on Bachelor kept ending DISPLAY_ASLEEP (presented but
+# displayed 0) while the interactive session's blank screensaver was up. These three functions
+# wake the display from that session before a leg launches MLVApp and hold it awake for the leg's
+# duration, exactly the way a real user's mouse would -- never gated on whether the leg turns out
+# to need it, and never allowed to fail the leg: every Win32 call is wrapped so a failure is
+# RECORDED in the returned evidence object, never thrown.
+
+function Register-AttrCudaDisplayWakeNativeMethods {
+    <#
+    .SYNOPSIS
+    Loads the small P/Invoke surface (SendInput, SystemParametersInfo, SetThreadExecutionState)
+    the display-wake functions below need, or returns $false -- never throws. Idempotent: a type
+    already loaded (e.g. a second call within the same job) is detected and Add-Type is skipped,
+    since redefining the same type in one process throws.
+    #>
+    [CmdletBinding()]
+    param()
+    if ("MLVAppAttrCudaDisplayWake.NativeMethods" -as [type]) { return $true }
+    try {
+        # Indented so NO line of this embedded C# starts with an unindented '}' -- that column-0
+        # shape is exactly what Get-AttrCudaEmbeddedFunctionSource's own extraction regex (see
+        # its header above) uses to find THIS function's closing brace, and a namespace/class
+        # brace sitting at column 0 would end the extraction early, silently truncating this
+        # function wherever it is embedded.
+        Add-Type -TypeDefinition @'
+    using System;
+    using System.Runtime.InteropServices;
+
+    namespace MLVAppAttrCudaDisplayWake
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MOUSEINPUT
+        {
+            public int dx;
+            public int dy;
+            public uint mouseData;
+            public uint dwFlags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        // INPUT is really a union (mouse/keyboard/hardware); only the mouse arm is ever
+        // populated here, so it is flattened with explicit offsets rather than modelled as a
+        // full union -- the well-known layout for a mouse-only SendInput caller (dwType at 0,
+        // the union member at 8 for the x64 8-byte alignment MOUSEINPUT's trailing IntPtr
+        // requires; total size 40 bytes, matching the real Windows INPUT struct on x64).
+        [StructLayout(LayoutKind.Explicit)]
+        public struct INPUT
+        {
+            [FieldOffset(0)] public int type;
+            [FieldOffset(8)] public MOUSEINPUT mi;
+        }
+
+        public static class NativeMethods
+        {
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref bool pvParam, uint fWinIni);
+
+            [DllImport("kernel32.dll")]
+            public static extern uint SetThreadExecutionState(uint esFlags);
+        }
+    }
+'@ -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-AttrCudaScreensaverRunning {
+    <#
+    .SYNOPSIS
+    SPI_GETSCREENSAVERRUNNING via SystemParametersInfo: $true/$false, or $null if the native type
+    could not load or the call itself failed -- never throws.
+    #>
+    [CmdletBinding()]
+    param()
+    if (-not (Register-AttrCudaDisplayWakeNativeMethods)) { return $null }
+    try {
+        $running = $false
+        # SPI_GETSCREENSAVERRUNNING = 0x0072.
+        $ok = [MLVAppAttrCudaDisplayWake.NativeMethods]::SystemParametersInfo(0x0072, 0, [ref]$running, 0)
+        if (-not $ok) { return $null }
+        return [bool]$running
+    } catch {
+        return $null
+    }
+}
+
+function Start-AttrCudaDisplayWake {
+    <#
+    .SYNOPSIS
+    Ends a blank screensaver and holds the display awake for the caller's leg, from the
+    interactive session this job runs in. Bounded and non-throwing: a Win32 call failure is
+    recorded in the returned evidence, never allowed to block or fail the leg.
+    .DESCRIPTION
+    Two independent mechanisms, both attempted regardless of whether the other succeeds:
+      - a 1-pixel SendInput relative pointer move and back (net zero displacement) -- the same
+        kind of input a real user's mouse produces, which ends an active screensaver;
+      - SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED), held
+        until the caller releases it via Stop-AttrCudaDisplayWake.
+    Returns .attempted (always $true -- this function ran), .method, .screensaverRunningBefore /
+    .screensaverRunningAfter (each $true/$false/$null -- $null only when that probe itself
+    failed), .sendInputError/.executionStateError (each $null on success), .utc.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $screensaverBefore = Get-AttrCudaScreensaverRunning
+    $sendInputError = $null
+    $executionStateError = $null
+    if (Register-AttrCudaDisplayWakeNativeMethods) {
+        try {
+            $INPUT_MOUSE = 0
+            $MOUSEEVENTF_MOVE = [uint32]0x0001
+            $nudge = [MLVAppAttrCudaDisplayWake.INPUT[]]@(
+                [MLVAppAttrCudaDisplayWake.INPUT]@{ type = $INPUT_MOUSE; mi = [MLVAppAttrCudaDisplayWake.MOUSEINPUT]@{ dx = 1; dy = 0; mouseData = 0; dwFlags = $MOUSEEVENTF_MOVE; time = 0; dwExtraInfo = [IntPtr]::Zero } },
+                [MLVAppAttrCudaDisplayWake.INPUT]@{ type = $INPUT_MOUSE; mi = [MLVAppAttrCudaDisplayWake.MOUSEINPUT]@{ dx = -1; dy = 0; mouseData = 0; dwFlags = $MOUSEEVENTF_MOVE; time = 0; dwExtraInfo = [IntPtr]::Zero } }
+            )
+            $structSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][MLVAppAttrCudaDisplayWake.INPUT])
+            $sent = [MLVAppAttrCudaDisplayWake.NativeMethods]::SendInput([uint32]$nudge.Count, $nudge, $structSize)
+            if ($sent -ne $nudge.Count) {
+                $sendInputError = "SendInput sent $sent of $($nudge.Count) events (lastError=$([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+            }
+        } catch {
+            $sendInputError = $_.Exception.Message
+        }
+        try {
+            # ES_CONTINUOUS = 0x80000000 (a bare hex literal this large parses as a negative
+            # Int32 in PowerShell, not an auto-widened UInt32, so it is spelled decimal instead).
+            $ES_CONTINUOUS = [uint32]2147483648
+            $ES_SYSTEM_REQUIRED = [uint32]0x00000001
+            $ES_DISPLAY_REQUIRED = [uint32]0x00000002
+            $result = [MLVAppAttrCudaDisplayWake.NativeMethods]::SetThreadExecutionState($ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED -bor $ES_DISPLAY_REQUIRED)
+            if ($result -eq 0) { $executionStateError = 'SetThreadExecutionState returned 0 (failed)' }
+        } catch {
+            $executionStateError = $_.Exception.Message
+        }
+    } else {
+        $sendInputError = 'ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE native P/Invoke type could not be loaded'
+        $executionStateError = $sendInputError
+    }
+    $screensaverAfter = Get-AttrCudaScreensaverRunning
+
+    [ordered]@{
+        attempted = $true
+        method = 'SendInputPointerNudge+SetThreadExecutionState(ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED)'
+        screensaverRunningBefore = $screensaverBefore
+        screensaverRunningAfter = $screensaverAfter
+        sendInputError = $sendInputError
+        executionStateError = $executionStateError
+        utc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+}
+
+function Stop-AttrCudaDisplayWake {
+    <#
+    .SYNOPSIS
+    Releases the display-required request Start-AttrCudaDisplayWake made (SetThreadExecutionState
+    back to plain ES_CONTINUOUS). Non-throwing, like its counterpart: a failure is recorded in the
+    returned evidence, never allowed to block the leg's own exit.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $releaseError = $null
+    if (Register-AttrCudaDisplayWakeNativeMethods) {
+        try {
+            $ES_CONTINUOUS = [uint32]2147483648
+            [void][MLVAppAttrCudaDisplayWake.NativeMethods]::SetThreadExecutionState($ES_CONTINUOUS)
+        } catch {
+            $releaseError = $_.Exception.Message
+        }
+    } else {
+        $releaseError = 'ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE native P/Invoke type could not be loaded'
+    }
+    [ordered]@{
+        released = ($null -eq $releaseError)
+        error = $releaseError
+        utc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+}
+
 Export-ModuleMember -Function `
     Get-AttrCudaArtifactNames, `
     New-AttrCudaBuildInfoHeader, `
@@ -2268,4 +2455,8 @@ Export-ModuleMember -Function `
     Resolve-AttrCudaSmokeRunLog, `
     Get-AttrCudaLastEligibilityLine, `
     Get-AttrCudaEligibilityVerdict, `
-    Get-AttrCudaPresentMonDisplayReport
+    Get-AttrCudaPresentMonDisplayReport, `
+    Register-AttrCudaDisplayWakeNativeMethods, `
+    Get-AttrCudaScreensaverRunning, `
+    Start-AttrCudaDisplayWake, `
+    Stop-AttrCudaDisplayWake

@@ -457,7 +457,15 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     # parses, clips to the playback window, groups by (ProcessID, SwapChainAddress), and returns a
     # typed PRESENTMON_UNAVAILABLE/DISPLAY_ASLEEP refusal instead of an uncaught throw. See its own
     # header in AttrCudaArtifacts.psm1.
-    'Get-AttrCudaPresentMonDisplayReport'
+    'Get-AttrCudaPresentMonDisplayReport',
+    # CUDA-PERF-DISPLAY-WAKE-1: wakes the display from the interactive session before this leg
+    # launches MLVApp and holds it awake for the leg -- see their own header in
+    # AttrCudaArtifacts.psm1. Start-/Stop-AttrCudaDisplayWake call Register-.../
+    # Get-AttrCudaScreensaverRunning internally, so all four must be embedded together.
+    'Register-AttrCudaDisplayWakeNativeMethods',
+    'Get-AttrCudaScreensaverRunning',
+    'Start-AttrCudaDisplayWake',
+    'Stop-AttrCudaDisplayWake'
 )
 # ATTR3-FOOTAGE-BIND-1 PR-B round 4b: the private verified-part directory (one hard link per
 # verified part, under a neutral name derived from its index, so nothing downstream -- the smoke
@@ -1013,6 +1021,14 @@ if ($FixtureRehearsal) {
 # fixture run, so the `finally` is a no-op there.
 try {
 Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip) -DestinationPath (Join-Path $Work 'pkg') -Force
+# CUDA-PERF-DISPLAY-WAKE-1. OWNER (2026-09-25): "if display is asleep just wake it. its just the
+# blank screensaver". Woken and held for the whole rest of the leg -- from before MLVApp is even
+# deployed, through PresentMon's own capture -- never just around the smoke launch itself, so a
+# screensaver that was already engaged before this job started never gets a window to still be up
+# when PresentMon starts sampling. Bounded and non-throwing (see its own header in
+# AttrCudaArtifacts.psm1): a Win32 failure is recorded in $displayWake, never allowed to block this
+# leg. Released in the `finally` below, on every exit path.
+$displayWake = Start-AttrCudaDisplayWake
 $baseExe = Get-ChildItem -LiteralPath (Join-Path $Work 'pkg') -Recurse -Filter $BasePackageExeName | Select-Object -First 1
 if (-not $baseExe) { throw "base package executable not found: $BasePackageExeName" }
 $pkgDir = $baseExe.Directory.FullName
@@ -1046,6 +1062,7 @@ if ($avgLoad -gt 20.0) {
         schema='playback-attr-3-cuda-venue.v1'
         result='VENUE_NOT_QUIESCENT'
         fixtureRehearsal=$FixtureRehearsal
+        displayWake=$displayWake
         cpuSamples=$loads
         cpuMean=$avgLoad
         cpuThresholdPercent=20.0
@@ -1186,6 +1203,7 @@ if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not (Test-Path -Lite
     $smokeFailure = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='SMOKE_RUN_FAILED'
         fixtureRehearsal=$FixtureRehearsal
+        displayWake=$displayWake
         smokeExitCode=$smokeRc; smokeResultPresent=(Test-Path -LiteralPath $resultPath)
         smokeStderrTail=$smokeStderrTail
         smokeLaunchExceptionType=$smokeLaunchExceptionType
@@ -1237,6 +1255,7 @@ try {
     $unavailable = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='SMOKE_LOG_UNAVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
+        displayWake=$displayWake
         message=$_.Exception.Message; smokeExitCode=$smokeRc; resultJson=$resultPath
         presentMonConfirmedExited=$presentMonStop.confirmedExited
         presentMonKillError=$presentMonStop.killError
@@ -1304,6 +1323,7 @@ if ($null -ne $presentMonWaitError) {
     $displayFailure = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='PRESENTMON_UNAVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
+        displayWake=$displayWake
         reason=$presentMonWaitError
         chains=@()
         presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')
@@ -1337,6 +1357,7 @@ if (-not $verdict.admitted) {
     $refusal = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='BACKEND_NOT_AVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
+        displayWake=$displayWake
         diagnostics=$diagnostics; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $refusal (Join-Path $Pub 'summary.json')
@@ -1353,6 +1374,7 @@ if ($gpuFramesTotal -le 0) {
     $fallback = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='GPU_RECON_FRAMES_ZERO'
         fixtureRehearsal=$FixtureRehearsal
+        displayWake=$displayWake
         gpuSummary=$gpuSummary; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $fallback (Join-Path $Pub 'summary.json')
@@ -1363,6 +1385,7 @@ if ($gpuSummary.cpuFrames -gt 0) {
     $fallback = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='CPU_FALLBACK_DETECTED'
         fixtureRehearsal=$FixtureRehearsal
+        displayWake=$displayWake
         gpuSummary=$gpuSummary; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $fallback (Join-Path $Pub 'summary.json')
@@ -1411,6 +1434,9 @@ if ($displayReport.status -ne 'OK') {
     $displayFailure = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result=$displayReport.status
         fixtureRehearsal=$FixtureRehearsal
+        # CUDA-PERF-DISPLAY-WAKE-1: if this leg still ends DISPLAY_ASLEEP, the wake attempt that
+        # ran before MLVApp ever launched is right here -- never omitted on this path.
+        displayWake=$displayWake
         reason=$displayReport.reason
         chains=$displayReport.chains
         presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')
@@ -1463,6 +1489,8 @@ $manifest = [ordered]@{
     sourceCommit = $SourceCommit
     clipId = $ClipId
     fixtureRehearsal = $FixtureRehearsal
+    # CUDA-PERF-DISPLAY-WAKE-1: the wake attempt made before MLVApp launched for this leg.
+    displayWake = $displayWake
     # A rehearsal cites no consent receipt: the fixtures are repository bytes, and recording the
     # owner-footage receipt here would be misleading provenance (sol, PR #137 r2 minor).
     consentReceipt = $(if ($FixtureRehearsal) { $null } else { $ConsentReceiptFileName })
@@ -1507,6 +1535,7 @@ Save-Json $manifest (Join-Path $Pub 'evidence-manifest.json')
 Save-Json ([ordered]@{
     result = $(if ($FixtureRehearsal) { 'FIXTURE_REHEARSAL_CAPTURED' } else { 'MEASUREMENT_CAPTURED' })
     fixtureRehearsal = $FixtureRehearsal
+    displayWake = $displayWake
     sourceCommit = $SourceCommit
     clipId = $ClipId
     rows = $rows.Count
@@ -1530,6 +1559,9 @@ exit 0
     if ($OwnerClipDir) {
         Close-AttrCudaOwnerFootageWorkspace -Handles $ownerLinkHandles -Directory $OwnerClipDir
     }
+    # CUDA-PERF-DISPLAY-WAKE-1: released on every exit path from the try above, including an
+    # early `exit N` -- never left held past this leg regardless of how it ended.
+    [void](Stop-AttrCudaDisplayWake)
 }
 '@
 
