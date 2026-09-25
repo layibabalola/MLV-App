@@ -1304,6 +1304,9 @@ foreach ($name in @('prep_region_setup','prep_region_gpu','prep_region_image','p
 if (Test-Path -LiteralPath $presentMonPath -PathType Leaf) {
     [void](Publish-AttrCudaFileCopy -Source $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv'))
 }
+# hub (sol step-0 key): persist the PresentMon clock anchor BEFORE parsing, so a later join of app swap timestamps
+# (gpu_window.swap utc=) against PresentMon TimeInMs never has to re-derive the origin -- step 0 got it wrong.
+Save-Json ([ordered]@{ schema='playback-attr-3-cuda-presentmon-capture.v1'; captureStartUtc=$presentMonCaptureStartUtc.ToString('o') }) (Join-Path $Pub 'presentmon-capture.json')
 $displayReport = Get-AttrCudaPresentMonDisplayReport -CsvPath $presentMonPath -ResultJson $resultJson -CaptureStartUtc $presentMonCaptureStartUtc
 if ($displayReport.status -ne 'OK') {
     $displayFailure = [ordered]@{
@@ -1311,6 +1314,7 @@ if ($displayReport.status -ne 'OK') {
         fixtureRehearsal=$FixtureRehearsal
         reason=$displayReport.reason
         chains=$displayReport.chains
+        presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $displayFailure (Join-Path $Pub 'summary.json')
@@ -1343,6 +1347,7 @@ Save-Json $provenance (Join-Path $Pub 'provenance.json')
 
 $manifest = [ordered]@{
     schema = 'playback-attr-3-cuda-evidence-manifest.v1'
+    presentMonCaptureStartUtc = $presentMonCaptureStartUtc.ToString('o')
     sourceCommit = $SourceCommit
     clipId = $ClipId
     fixtureRehearsal = $FixtureRehearsal

@@ -85,6 +85,15 @@ class TemplateOrderingTests(unittest.TestCase):
         embed_call_end = text.index("\n)", embed_call_start)
         self.assertIn("Get-AttrCudaPresentMonDisplayReport", text[embed_call_start:embed_call_end])
 
+    def test_presentmon_capture_anchor_is_persisted_before_the_report_is_built(self) -> None:
+        # hub (sol step-0 key): the join of app swap UTC timestamps against PresentMon TimeInMs needs the capture
+        # origin on disk; step 0 mis-derived it. It must be saved before parsing and carried by both outcomes.
+        save_anchor = self.template.index("'presentmon-capture.json')")
+        report_call = self.template.index("$displayReport = Get-AttrCudaPresentMonDisplayReport")
+        self.assertLess(save_anchor, report_call)
+        self.assertIn("presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')", self.template)
+        self.assertIn("presentMonCaptureStartUtc = $presentMonCaptureStartUtc.ToString('o')", self.template)
+
 
 if __name__ == "__main__":
     unittest.main()
