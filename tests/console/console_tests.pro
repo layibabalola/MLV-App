@@ -46,6 +46,8 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_download_manager.cpp \
     $$REPO_ROOT/tests/console/test_playback_gate_policy.cpp \
     $$REPO_ROOT/tests/console/test_async_h2d_counter_contract.cpp \
+    $$REPO_ROOT/tests/console/test_gpu_window_swap_telemetry.cpp \
+    $$REPO_ROOT/tests/console/test_gpu_window_swap_wiring.cpp \
     $$REPO_ROOT/tests/console/test_playback_achieved_scale_policy.cpp \
     $$REPO_ROOT/tests/console/test_gpu_texture_present_availability_policy.cpp \
     $$REPO_ROOT/tests/console/test_playback_frame_population_policy.cpp \
@@ -76,6 +78,7 @@ HEADERS += \
     $$REPO_ROOT/platform/qt/PlaybackPrepPresentationPolicy.h \
     $$REPO_ROOT/platform/qt/PlaybackGatePolicy.h \
     $$REPO_ROOT/platform/qt/AsyncH2dCounterContract.h \
+    $$REPO_ROOT/platform/qt/GpuWindowSwapTelemetry.h \
     $$REPO_ROOT/platform/qt/PlaybackFramePopulationPolicy.h \
     $$REPO_ROOT/platform/qt/PlaybackPresentedFrameIdentityTracker.h \
     $$REPO_ROOT/platform/qt/PlaybackDropFrameAdvancePolicy.h \
