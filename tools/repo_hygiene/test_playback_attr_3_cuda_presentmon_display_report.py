@@ -478,6 +478,45 @@ class BracketWindowingFixtureTests(_ReportCase):
         # Tie-break: equal endpoints keep the earlier one, deterministically.
         self.assertEqual(bracket["headline"], "earliest")
 
+    def test_sol_repro_displayed_front_edge_row_beats_an_undisplayed_tail_row(self) -> None:
+        # HARNESS-4 (sol BLOCKER on #163): earliest admits only the undisplayed tail row (41550 ms), latest admits only the
+        # displayed front-edge row (1600 ms). Ranking by presented count alone headed the report with earliest -> a false
+        # DISPLAY_ASLEEP. Displayed-first ranking heads it with latest -> OK.
+        rows = [
+            _csv_row(time_in_ms=1600),
+            _csv_row(time_in_ms=41550, between_display_change="NA", until_displayed="NA"),
+        ]
+        path = self._write_csv(rows)
+
+        report = self.call(path, _result_json(), capture_start=self._EARLIEST, latest_capture_start=self._LATEST)
+
+        self.assertEqual(report["status"], "OK", report)
+        bracket = report["clockBracket"]
+        self.assertEqual(bracket["earliest"]["displayedCount"], 0)
+        self.assertEqual(bracket["latest"]["displayedCount"], 1)
+        self.assertEqual(bracket["headline"], "latest")
+
+    def test_fable_repro_more_presented_but_undisplayed_endpoint_does_not_head(self) -> None:
+        # HARNESS-4 (fable HARDENING on #163): earliest admits more PRESENTED rows (all undisplayed), latest admits fewer but
+        # displayed ones -> not DISPLAY_ASLEEP; latest heads.
+        rows = [
+            # 41600/41700/41800 ms: inside the earliest window [2000, 42000] only (latest is [1500, 41500]).
+            _csv_row(time_in_ms=41600, between_display_change="NA", until_displayed="NA"),
+            _csv_row(time_in_ms=41700, between_display_change="NA", until_displayed="NA"),
+            _csv_row(time_in_ms=41800, between_display_change="NA", until_displayed="NA"),
+            _csv_row(time_in_ms=1600),
+            _csv_row(time_in_ms=1800),
+        ]
+        path = self._write_csv(rows)
+
+        report = self.call(path, _result_json(), capture_start=self._EARLIEST, latest_capture_start=self._LATEST)
+
+        self.assertEqual(report["status"], "OK", report)
+        bracket = report["clockBracket"]
+        self.assertGreater(bracket["earliest"]["presentedCount"], bracket["latest"]["presentedCount"])
+        self.assertEqual(bracket["earliest"]["displayedCount"], 0)
+        self.assertEqual(bracket["headline"], "latest")
+
     def test_display_asleep_still_reports_the_bracket(self) -> None:
         rows = [_csv_row(between_display_change="0", until_displayed="0", time_in_ms=5000)]
         path = self._write_csv(rows)

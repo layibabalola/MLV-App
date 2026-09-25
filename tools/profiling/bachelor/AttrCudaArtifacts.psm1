@@ -2171,9 +2171,17 @@ function Get-AttrCudaPresentMonDisplayReport {
     # headline is whichever endpoint admits more genuinely-presented MLVApp rows into the window
     # -- ties keep the earlier endpoint, deterministically -- so the reported rates are the least
     # likely of the two to be silently dropping real evidence at the window's edges.
-    $headline = if ($latestBuild.selected.presentedCount -gt $earliestBuild.selected.presentedCount) { 'latest' } else { 'earliest' }
+    # HARNESS-4 (sol BLOCKER / fable HARDENING on #163, agreed fix): rank endpoints by DISPLAYED MLVApp rows first, then
+    # presented rows, ties to earliest. Ranking by presented alone could head the report with an endpoint that admits only
+    # an undisplayed tail row while the other endpoint admits a genuinely displayed front-edge row -> a false DISPLAY_ASLEEP.
+    # With displayed ranked first, the headline's displayedCount is the maximum over both endpoints, so DISPLAY_ASLEEP below
+    # fires only when NEITHER endpoint admits a displayed MLVApp row.
+    $latestWins = ($latestBuild.selected.displayedCount -gt $earliestBuild.selected.displayedCount) -or
+        (($latestBuild.selected.displayedCount -eq $earliestBuild.selected.displayedCount) -and
+         ($latestBuild.selected.presentedCount -gt $earliestBuild.selected.presentedCount))
+    $headline = if ($latestWins) { 'latest' } else { 'earliest' }
     $headlineBuild = if ($headline -eq 'latest') { $latestBuild } else { $earliestBuild }
-    $headlineReason = "the earliest bracket endpoint ($($EarliestCaptureStartUtc.ToString('o'))) admits $($earliestBuild.selected.presentedCount) MLVApp-presented row(s) into the playback window; the latest endpoint ($($LatestCaptureStartUtc.ToString('o'))) admits $($latestBuild.selected.presentedCount); the headline uses the '$headline' endpoint because it admits the larger count, so it is the less likely of the two to be silently excluding a row that genuinely falls inside the window -- neither endpoint's admitted set is asserted to be the exact one, and $rowsDiffering row(s) (any process) disagree on window membership between them"
+    $headlineReason = "the earliest bracket endpoint ($($EarliestCaptureStartUtc.ToString('o'))) admits $($earliestBuild.selected.presentedCount) MLVApp-presented row(s) into the playback window; the latest endpoint ($($LatestCaptureStartUtc.ToString('o'))) admits $($latestBuild.selected.presentedCount); displayed counts are earliest=$($earliestBuild.selected.displayedCount) latest=$($latestBuild.selected.displayedCount); the headline uses the '$headline' endpoint because it admits more DISPLAYED rows (then more presented rows; ties to earliest), so a display verdict never rests on the endpoint that happened to miss the displayed rows -- neither endpoint's admitted set is asserted to be the exact one, and $rowsDiffering row(s) (any process) disagree on window membership between them"
     $clockBracket = [pscustomobject]@{
         earliestOriginUtc = $EarliestCaptureStartUtc.ToString('o')
         latestOriginUtc = $LatestCaptureStartUtc.ToString('o')
