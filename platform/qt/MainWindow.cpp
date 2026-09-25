@@ -37,6 +37,7 @@ extern "C" {
 #include <QThread>
 #include <QTime>
 #include <QByteArray>
+#include <QGuiApplication>
 #include <QSignalBlocker>
 #include <QSettings>
 #include <QCryptographicHash>
@@ -2096,6 +2097,20 @@ static double normalizedProcessCpuPercent( double cpuSecondsDelta,
         * ( 100.0 / static_cast<double>( cores ) );
 }
 
+/* Single source of truth for "is this window the OS foreground window", used both by
+ * forcePlaybackSmokeWindowForeground()'s verification step and by the playback-smoke
+ * foreground telemetry (session begin / gate) -- CUDA-PERF-PLAYBACK-FOREGROUND-1. */
+static bool nativeWindowIsForeground( QWidget *window )
+{
+#ifdef Q_OS_WIN
+    if( !window ) return false;
+    const HWND hwnd = reinterpret_cast<HWND>( window->window()->winId() );
+    return hwnd != nullptr && GetForegroundWindow() == hwnd;
+#else
+    return window && window->isActiveWindow();
+#endif
+}
+
 /* spaceTag argument options: ffmpeg color space tag number compliant */
 #define SPACETAG_REC709   1   /* rec709 color space */
 #define SPACETAG_UNKNOWN  2   /* No color space tag set */
@@ -2657,6 +2672,17 @@ MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
              Qt::QueuedConnection );
     m_playbackPrepStop.store( false, std::memory_order_release );
     m_playbackPrepThread = std::thread( &MainWindow::playbackPrepThreadLoop, this );
+
+    // Playback-smoke foreground-loss telemetry (CUDA-PERF-PLAYBACK-FOREGROUND-1):
+    // event-driven, not per-frame polling. Reuses the existing MLVAPP_PLAYBACK_SMOKE_TELEMETRY
+    // gate exactly like GpuDisplayWindow's swap telemetry -- decided once, here, so when the
+    // env var is off this connection is never made at all (zero cost, not just an early
+    // return in the slot).
+    if( playbackSmokeFrameTelemetryEnabled() )
+    {
+        connect( qApp, &QGuiApplication::applicationStateChanged,
+                 this, &MainWindow::onPlaybackSmokeApplicationStateChanged );
+    }
 
     //Init scripting engine
     m_pScripting = new Scripting( this );
@@ -8839,6 +8865,11 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
     // clip plays once, the engine unchecks Play at clip-end, and the wait loop below exits early ("MLV
     // playback stopping too early"). Frame-matched A/B callers omit --loop so both legs stop on the same frame.
     if( options.loopPlayback && !ui->actionLoop->isChecked() ) ui->actionLoop->trigger();
+    // CUDA-PERF-PLAYBACK-FOREGROUND-1: force the window to the OS foreground right before
+    // the measured play trigger below -- a process launched by a background measurement job
+    // otherwise plays occluded/background, which a compositor can present at far fewer
+    // frames than the app submits.
+    forcePlaybackSmokeWindowForeground();
     ui->actionPlay->trigger();
     qApp->processEvents( QEventLoop::AllEvents );
     if( !ui->actionPlay->isChecked() )
@@ -22456,6 +22487,82 @@ void MainWindow::notePlayToFirstFramePresentation( int presentedFrame )
     m_playToFirstFrameTargetFrame = -1;
 }
 
+// --gui-smoke-playback only (CUDA-PERF-PLAYBACK-FOREGROUND-1). Never called from normal
+// (non-smoke) startup or from the generic on_actionPlay_toggled() handler -- see
+// MainWindow::runGuiPlaybackSmoke(), the only call site. A process launched by a
+// background measurement job is normally refused SetForegroundWindow by Windows'
+// foreground lock, so without this the measured window plays occluded/background and
+// PresentMon sees far fewer displayed frames than the app actually submits.
+void MainWindow::forcePlaybackSmokeWindowForeground( void )
+{
+    showNormal();
+    raise();
+    activateWindow();
+    if( QWindow *gpuWindow = GpuDisplayWindow::activeWindow() )
+    {
+        // The GPU display window is embedded via createWindowContainer, so it has no
+        // independent OS-level foreground state (that belongs to the top-level MainWindow
+        // HWND below) -- requestActivate() only needs to stop Qt itself from treating it
+        // as backgrounded.
+        gpuWindow->requestActivate();
+    }
+
+#ifdef Q_OS_WIN
+    const HWND target = reinterpret_cast<HWND>( this->window()->winId() );
+    const HWND previousForeground = GetForegroundWindow();
+    if( target && previousForeground != target )
+    {
+        // Workaround for the Windows foreground lock, which normally refuses
+        // SetForegroundWindow from a process that was not launched by the user's own
+        // foreground action (exactly the case here -- launched by a background
+        // measurement job): allow this process to set the foreground, then briefly
+        // attach input to whichever thread currently owns the foreground so
+        // SetForegroundWindow is granted rather than silently ignored.
+        AllowSetForegroundWindow( ASFW_ANY );
+        const DWORD myThreadId = GetCurrentThreadId();
+        DWORD foregroundThreadId = 0;
+        bool attached = false;
+        if( previousForeground )
+        {
+            foregroundThreadId = GetWindowThreadProcessId( previousForeground, nullptr );
+            if( foregroundThreadId != 0 && foregroundThreadId != myThreadId )
+            {
+                attached = AttachThreadInput( myThreadId, foregroundThreadId, TRUE ) != 0;
+            }
+        }
+        ShowWindow( target, SW_SHOWNORMAL );
+        // Brief HWND_TOPMOST -> HWND_NOTOPMOST: forces the z-order swap SetForegroundWindow
+        // alone can be refused for, then immediately releases it -- the window must not
+        // stay permanently topmost after this call returns.
+        SetWindowPos( target, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE );
+        SetForegroundWindow( target );
+        BringWindowToTop( target );
+        SetWindowPos( target, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE );
+        if( attached )
+        {
+            AttachThreadInput( myThreadId, foregroundThreadId, FALSE );
+        }
+    }
+    const bool verified = target && GetForegroundWindow() == target;
+#else
+    const bool verified = isActiveWindow();
+#endif
+
+    qInfo().noquote()
+        << QStringLiteral( "gui_smoke.foreground_request requested=1 verified=%1" )
+               .arg( bool01( verified ) );
+}
+
+void MainWindow::onPlaybackSmokeApplicationStateChanged( Qt::ApplicationState state )
+{
+    // Only counts while a playback-smoke session is open -- see beginPlaybackSmokeTelemetry()/
+    // finishPlaybackSmokeTelemetry(). Event-driven (this slot only fires on a real OS-level
+    // application activation/deactivation), never polled per frame.
+    if( !m_playbackSmokeActive ) return;
+    if( state == Qt::ApplicationActive ) return;
+    ++m_playbackSmokeForegroundLostCount;
+}
+
 void MainWindow::beginPlaybackSmokeTelemetry( void )
 {
     if( m_playbackSmokeActive )
@@ -22467,6 +22574,9 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeActive = true;
     m_playbackSmokeFrameTelemetry = playbackSmokeFrameTelemetryEnabled();
     GpuDisplayWindow::resetSwapTelemetry( m_playbackSmokeSessionId );
+    m_playbackSmokeForegroundLostCount = 0;
+    m_playbackSmokeForegroundAtBegin =
+        m_playbackSmokeFrameTelemetry && nativeWindowIsForeground( this );
     m_playbackSmokeTimelineTelemetry =
         m_playbackSmokeFrameTelemetry
         && playbackSmokeTimelineTelemetryEnabled();
@@ -25835,6 +25945,26 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( static_cast<qulonglong>( decodeRequestsIssuedDelta ) )
                .arg( m_playbackSmokeParityMatchCount )
                .arg( m_playbackSmokeTargetPresentedFrames );
+
+    // Window foreground state at session begin and at this gate, plus how many times the
+    // whole application lost the OS foreground during the session (event-driven via
+    // onPlaybackSmokeApplicationStateChanged(), not polled) -- so the joined analysis can
+    // filter a run where the measured window was occluded/backgrounded
+    // (CUDA-PERF-PLAYBACK-FOREGROUND-1). Sibling line to playback_smoke.gate above, gated
+    // on the same MLVAPP_PLAYBACK_SMOKE_TELEMETRY flag as the swap telemetry below.
+    if ( m_playbackSmokeFrameTelemetry )
+    {
+        const bool foregroundAtGate = nativeWindowIsForeground( this );
+        qInfo().noquote()
+            << QStringLiteral(
+                   "playback_smoke.foreground session=%1 telemetry_enabled=%2 "
+                   "foreground_at_begin=%3 foreground_at_gate=%4 foreground_lost_count=%5" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( bool01( m_playbackSmokeFrameTelemetry ) )
+                   .arg( bool01( m_playbackSmokeForegroundAtBegin ) )
+                   .arg( bool01( foregroundAtGate ) )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeForegroundLostCount ) );
+    }
 
     // Displayed cadence, distinct from frames_presented above (which counts frame
     // SUBMISSIONS -- see notePlaybackSmokePresentedFrame -- not confirmed on-screen

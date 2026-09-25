@@ -47,6 +47,13 @@ public:
     static const char *environmentVariableName(void);
     static bool isRequestedByEnvironment(void);
     static bool isActive(void);
+    /* The active window's own QWindow, or nullptr when none is active. Used by
+     * --gui-smoke-playback's foreground-forcing (CUDA-PERF-PLAYBACK-FOREGROUND-1) to
+     * activate the GPU display window alongside the main window -- it is embedded via
+     * createWindowContainer, so it has no OS-level foreground state of its own (that
+     * belongs to the top-level MainWindow), but still needs QWindow::requestActivate()
+     * so Qt does not consider it backgrounded. */
+    static QWindow *activeWindow(void);
 
     /* Replace the QGraphicsView with a QOpenGLWindow container in the same layout
      * slot and register it as the active preview window. Returns true on success. */
