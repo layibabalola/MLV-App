@@ -173,6 +173,77 @@ class UltraMagnusAgentMetadataFallbackTests(unittest.TestCase):
             time.sleep(0.1)
         self.assertFalse(started_marker.exists(), "the claim marker must be removed once the job's result is published")
 
+    def test_a_stale_agent_enumeration_can_still_publish_a_late_launch_failure_receipt_for_a_retracted_job(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 12 (item 1; sol BLOCKER / fable MINOR): the
+        # tracked agent lists its inbox once per poll (Get-ChildItem, this file's own agent script
+        # at its own top-level while loop) and processes every job in that ONE snapshot
+        # sequentially -- so a job queued behind another can still be in the agent's own in-memory
+        # list minutes after the client has already renamed it out of the inbox and reported
+        # RETRACTED. No execution of the withdrawn job's own script BODY is possible (the agent's
+        # launch step opens the file BY PATH, and the path is already gone), but the agent still
+        # writes a claim marker for it and can publish an honest launch-failure receipt afterward.
+        #
+        # This test stops setUp's own default agent and starts a fresh one only once BOTH jobs are
+        # already sitting in the inbox together, so the agent's very first Get-ChildItem
+        # deterministically captures both in one snapshot -- no wall-clock race with the agent's own
+        # poll timing is needed to reproduce the interleaving.
+        self._stop_agent()
+        inbox = self.share / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        # Sorts before "demo" (Sort-Object Name) so the agent's single snapshot processes it FIRST,
+        # giving the client time to retract "demo" while the agent is still busy with this one.
+        blocker = inbox / "aaa-blocker.job.ps1"
+        blocker.write_text("Start-Sleep -Seconds 5\n", encoding="utf-8")
+
+        demo_content_job = self.local / "demo-content.job.ps1"
+        demo_content_job.write_text("Write-Output 'hi'\n", encoding="utf-8")
+        submit_proc = subprocess.Popen(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
+             "-ScriptPath", str(demo_content_job), "-AgentShare", str(self.share),
+             "-JobId", "demo", "-TimeoutSec", "5", "-PollSeconds", "1", "-MaxQueueWaitSec", "2"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            demo_job_path = inbox / "demo.job.ps1"
+            deadline = time.time() + 15
+            while time.time() < deadline and not demo_job_path.exists():
+                time.sleep(0.1)
+            self.assertTrue(demo_job_path.exists(), "um-run.ps1 never published demo.job.ps1 to the inbox")
+
+            # Both jobs are now sitting in the inbox together -- start a fresh agent so its very
+            # first Get-ChildItem enumerates both in the SAME snapshot.
+            self.agent_proc = subprocess.Popen(
+                [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(AGENT_SCRIPT),
+                 "-Root", str(self.share), "-PollSeconds", "1", "-JobTimeoutSec", "2"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+            submit_stdout, submit_stderr = submit_proc.communicate(timeout=30)
+        finally:
+            if submit_proc.poll() is None:
+                submit_proc.kill()
+                submit_proc.communicate()
+        submit_combined = (submit_stdout or "") + (submit_stderr or "")
+        self.assertIn("RETRACTED:", submit_combined, submit_combined)
+        self.assertFalse(demo_job_path.exists(), "a genuinely retracted job's own file must be gone")
+        self.assertFalse((inbox / "demo.meta.json").exists(), "retraction must clean up this submission's own metadata")
+
+        # The agent is still busy with "aaa-blocker" (up to ~5s) -- once it finishes, it proceeds to
+        # "demo" from its OWN earlier snapshot and tries to launch a script that is no longer there.
+        result_path = self.share / "outbox" / "demo.result.json"
+        deadline = time.time() + 25
+        while time.time() < deadline and not result_path.exists():
+            time.sleep(0.2)
+        self.assertTrue(
+            result_path.exists(),
+            "the agent's own stale enumeration must still publish a receipt for the withdrawn id",
+        )
+        result = json.loads(result_path.read_text(encoding="ascii"))
+        self.assertNotEqual(result.get("exitCode"), 0, result)
+        # The sharpest assertion: the withdrawn job's own script body ("Write-Output 'hi'") never
+        # actually ran -- only a launch attempt against its now-missing path did.
+        self.assertNotIn("hi", result.get("stdout") or "", result)
+
 
 if __name__ == "__main__":
     unittest.main()

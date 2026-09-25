@@ -31,7 +31,9 @@
 # stopped waiting on the placement submission without proof the agent is either done with it or
 # dead (ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11) -- NOT a failure and NOT safely retryable on
 # this evidence alone: the agent may still be running the job and may still publish a receipt for
-# it after this process has already exited. Idempotent: a clip already fully present on Bachelor at
+# it after this process has already exited. This attempt's own already-staged share-side parts are
+# LEFT IN PLACE on UNRESOLVED (RESIDUE=RETAINED, round 12) -- never deleted while the agent may
+# still be reading them. Idempotent: a clip already fully present on Bachelor at
 # its spec path transfers nothing new and still reports FOOTAGE_STAGED (every part lands
 # ALREADY_PRESENT).
 
@@ -528,8 +530,17 @@ try {
             # may still own this job and may still publish a receipt for it later -- it is neither
             # a success nor a safely-retryable failure (unlike FOOTAGE_STAGE_REFUSED, which a caller
             # may treat as clear to resubmit), so it gets its own RESULT= line and exit code.
-            Remove-Attr3FootageStageAttemptResidue
-            Write-Output "RESULT=FOOTAGE_STAGE_UNRESOLVED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId)"
+            #
+            # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 12 (sol BLOCKER + fable MINOR, item 2): this
+            # used to call Remove-Attr3FootageStageAttemptResidue here regardless -- deleting this
+            # attempt's own already-staged share-side parts out from under a job the very same
+            # message says the agent may still be reading, converting a possible late SUCCESS into a
+            # near-certain late FAILURE. The staged parts are left in place; RESIDUE=RETAINED names
+            # that (a fixed token, never a path, per this script's own contract) so an operator, or a
+            # later invocation of this same ClipId once the earlier attempt is known dead, knows
+            # there is something at this JobId's own share staging directory to reclaim once a
+            # receipt lands or the attempt is abandoned.
+            Write-Output "RESULT=FOOTAGE_STAGE_UNRESOLVED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId) RESIDUE=RETAINED"
             exit 2
         }
         throw "ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED job could not be submitted or its result could not be retrieved CLASS=$submitFailClass"

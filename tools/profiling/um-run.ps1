@@ -38,6 +38,16 @@
 # This script never synthesizes a FAILED verdict from its own timeout: the only way this function
 # ever reports a failure is a receipt that itself says so (an ordinary exitCode != 0), which is
 # already the caller's business, not this wait loop's.
+#
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 12 (sol BLOCKER, item 3): the four outcomes above are
+# meant to be EXHAUSTIVE, but an unexpected share I/O failure after the job was made visible (a
+# heartbeat vanishing between Test-Path and Get-Item, a torn share-clock probe, ...) used to
+# propagate raw, past every outcome this file's own header promises, for a caller to misclassify
+# CLASS=UNKNOWN and treat as an ordinary, safely-retryable failure -- while the agent might still
+# own the job. The entire wait loop below is now wrapped in ONE structural try/catch: anything that
+# is not already this script's own well-formed RETRACTED:/UNRESOLVED: throw is remapped to
+# UNRESOLVED (after one last recheck for a receipt that may have landed despite the error), never
+# left to escape raw. This is the boundary, not a per-call patch on each individual share read.
 
 [CmdletBinding(DefaultParameterSetName = 'Script')]
 param(
@@ -80,13 +90,25 @@ param(
     # the same way -TestHookAtQueueDeadline already does for the marker-appears-first race.
     # Production never passes this.
     [scriptblock]$TestHookAfterRetractionRename = $null,
+    # Test-only: invoked with the retracted job's own renamed-out temporary path, immediately after
+    # that rename SUCCEEDS and BEFORE this client attempts to remove it (round 12, item 5) -- lets a
+    # test lock that exact, GUID-named path (unknowable in advance to an external caller) so the
+    # removal that follows can be made to fail deterministically, proving the failure is surfaced
+    # rather than silently swallowed. Production never passes this.
+    [scriptblock]$TestHookAfterRetractionJobRenamed = $null,
     # Test-only: invoked with no arguments immediately BEFORE the receipt recheck that guards the
     # absolute-outer-ceiling throw -- lets a test plant a receipt in that exact window to prove the
     # recheck is load-bearing (round 11, fable minor). Production never passes this.
     [scriptblock]$TestHookBeforeOuterCeilingReceiptRecheck = $null,
     # Test-only: same, for the receipt recheck that guards the liveness-lost throw. Production
     # never passes this.
-    [scriptblock]$TestHookBeforeLivenessLostReceiptRecheck = $null
+    [scriptblock]$TestHookBeforeLivenessLostReceiptRecheck = $null,
+    # Test-only: invoked with no arguments at the very top of every wait-loop iteration, before
+    # even the ordinary receipt check -- lets a test inject an arbitrary, unanticipated exception
+    # (round 12, item 3) to prove the structural catch around the whole loop converts it to
+    # UNRESOLVED rather than letting it propagate raw or be misclassified CLASS=UNKNOWN by a
+    # caller. Production never passes this.
+    [scriptblock]$TestHookAtLoopTop = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -169,7 +191,9 @@ function Get-UmRunResultIfPresent {
     return $null
 }
 
+try {
 while ($true) {
+    if ($TestHookAtLoopTop) { & $TestHookAtLoopTop }
     $r = Get-UmRunResultIfPresent -Path $resultFile
     if ($null -ne $r) { return $r }
 
@@ -250,30 +274,72 @@ while ($true) {
             # never asserts one, and falls through to the claimed wait instead.
             $retractedTmp = Join-Path $inbox "$jobId.$([guid]::NewGuid().ToString('N')).retracted.tmp"
             $renamed = $false
+            $jobTempCleanupNote = ''
             try {
                 Move-Item -LiteralPath $jobFile -Destination $retractedTmp -ErrorAction Stop   # no -Force
                 $renamed = $true
             } catch {
                 $renamed = $false
             }
-            if ($renamed) { Remove-Item -LiteralPath $retractedTmp -Force -ErrorAction SilentlyContinue }
+            if ($renamed) {
+                # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 12 (sol MAJOR, item 5): a failure to
+                # remove this client's OWN renamed-out temporary copy used to be silently swallowed
+                # (SilentlyContinue) -- surfaced below the same way the module's own rollback
+                # already surfaces an equivalent cleanup failure ("may outlive this refused
+                # submission"). -TestHookAfterRetractionJobRenamed hands a test the exact,
+                # GUID-named path (unknowable to an external caller in advance) so it can be locked
+                # deterministically to prove this.
+                if ($TestHookAfterRetractionJobRenamed) { & $TestHookAfterRetractionJobRenamed $retractedTmp }
+                try {
+                    Remove-Item -LiteralPath $retractedTmp -Force -ErrorAction Stop
+                } catch {
+                    $jobTempCleanupNote = " -- additionally, the withdrawn job's own renamed-out temporary copy could not be removed and may outlive this refused submission"
+                }
+            }
             if ($TestHookAfterRetractionRename) { & $TestHookAfterRetractionRename }
             $stillClaimed = Test-Path -LiteralPath $startedMarker
             if ($renamed -and -not $stillClaimed) {
-                # Genuinely never claimed: clean up this submission's own claim metadata, by
-                # nonce -- never a blind delete (the same invariant UmRunDrop.psm1's own rollback
-                # now enforces on its post-claim failure path).
+                # Genuinely never claimed (as of this recheck): clean up this submission's own claim
+                # metadata, by nonce -- never a blind delete (the same invariant UmRunDrop.psm1's own
+                # rollback now enforces on its post-claim failure path). round 12 (sol MAJOR + fable
+                # MINOR, item 5): a failed nonce read or a failed delete used to be silently
+                # swallowed (an empty catch, then SilentlyContinue) -- both are now surfaced, exactly
+                # mirroring the module rollback's own read-then-delete shape and its own comment on
+                # the narrow window a failed read still leaves open.
+                $metaCleanupNote = ''
                 $metaFinal = Join-Path $inbox "$jobId.meta.json"
                 if (Test-Path -LiteralPath $metaFinal) {
+                    $ownsClaim = $true
+                    $readSucceeded = $false
                     try {
                         $currentMeta = (Get-Content -LiteralPath $metaFinal -Raw -Encoding ascii) | ConvertFrom-Json
-                        if ($null -ne $currentMeta -and $currentMeta.nonce -eq $nonce) {
-                            Remove-Item -LiteralPath $metaFinal -Force -ErrorAction SilentlyContinue
+                        $readSucceeded = $true
+                        $ownsClaim = ($null -ne $currentMeta) -and ($currentMeta.nonce -eq $nonce)
+                    } catch {
+                        $readSucceeded = $false
+                    }
+                    if ($readSucceeded -and -not $ownsClaim) {
+                        # Not this submission's own claim (an operator manually cleared it and
+                        # resubmitted the same JobId) -- left untouched, never a blind delete.
+                    } else {
+                        try {
+                            Remove-Item -LiteralPath $metaFinal -Force -ErrorAction Stop
+                        } catch {
+                            $metaCleanupNote = " -- additionally, inbox\$jobId.meta.json could not be removed during retraction and may outlive this refused submission"
                         }
-                    } catch { }
+                    }
                 }
                 $queuedElapsedSec = [int]([DateTimeOffset]::Now - $submittedAt).TotalSeconds
-                throw "RETRACTED: $jobId reached its queue wait ceiling (-MaxQueueWaitSec ${MaxQueueWaitSec}s, ${queuedElapsedSec}s elapsed) with no $startedMarker marker ever appearing, so this client withdrew it from the inbox before the agent could ever claim it -- nothing was submitted from the agent's point of view; not a failure, retry with a new -JobId if desired"
+                # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 12 (sol BLOCKER / fable MINOR, item 1):
+                # this client's own rename proves the job's CONTENT can never execute now (its
+                # bytes are gone from the path any agent would open by name), but it does NOT prove
+                # the agent never saw this JobId at all -- a compatible agent lists its inbox once
+                # per poll and processes that snapshot sequentially (verified directly against both
+                # the tracked and deployed agents), so a claim marker for this id, landing from a
+                # snapshot taken before this rename, can still appear afterward, and the agent can
+                # still publish an honest launch-failure receipt for it. Disclosed here rather than
+                # asserting a stronger "nothing was submitted" than this client can actually prove.
+                throw "RETRACTED: $jobId reached its queue wait ceiling (-MaxQueueWaitSec ${MaxQueueWaitSec}s, ${queuedElapsedSec}s elapsed) with no $startedMarker marker ever appearing as of this client's own recheck, so this client withdrew it from the inbox before it could prove a claim -- the job's own script content can never execute now (its bytes are already withdrawn), but the agent's own per-poll inbox listing can be stale: a late claim marker and an honest launch-failure receipt for $jobId can still appear afterward, which does not contradict this message; not a failure, retry with a new -JobId if desired${jobTempCleanupNote}${metaCleanupNote}"
             }
             # Either the rename failed (something else already has this path -- almost certainly
             # the agent, mid-claim), or it succeeded but the marker appeared anyway (the agent
@@ -287,4 +353,24 @@ while ($true) {
         }
     }
     Start-Sleep -Seconds $PollSeconds
+}
+} catch {
+    $loopErrorMessage = [string]$_.Exception.Message
+    if ($loopErrorMessage -match '^(RETRACTED|UNRESOLVED):') {
+        # Already one of this script's own well-formed, exhaustive outcomes -- pass through
+        # unchanged, never re-wrapped.
+        throw
+    }
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 12 (sol BLOCKER, item 3): an unanticipated share I/O
+    # failure after the job was made visible (see this file's own header) -- one last look for a
+    # receipt that may have landed despite it (itself guarded: a torn read while checking must not
+    # crash this fallback), then UNRESOLVED, never left to escape raw or be misclassified
+    # CLASS=UNKNOWN by a caller while the agent may still own the job.
+    try {
+        $r = Get-UmRunResultIfPresent -Path $resultFile
+    } catch {
+        $r = $null
+    }
+    if ($null -ne $r) { return $r }
+    throw "UNRESOLVED: $jobId -- this client hit an unexpected error while waiting for its outcome ($($_.Exception.GetType().Name)) and is stopping, not failing: the agent may still own $jobId and its receipt may still land at $resultFile after this; not retryable on this evidence alone"
 }

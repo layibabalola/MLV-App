@@ -1384,6 +1384,127 @@ class NoPathInAnyBranchTests(unittest.TestCase):
         self.assertIn("ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED", combined)
         self.assertNotIn(str(dead_share), combined)
 
+    # ---- round 12 (fable MAJOR, item 4): the wrapper's own UNRESOLVED outcome is untested; -------
+    # ---- round 12 (sol BLOCKER, item 2): UNRESOLVED must never delete staged residue --------------
+
+    def test_get_attr3_footage_umrun_failure_class_classifies_known_prefixes_and_unknown(self) -> None:
+        # Get-Attr3FootageUmRunFailureClass, extracted via AST from the tracked generator -- never
+        # a hand-copied duplicate -- exactly like ConvertTo-Attr3FootageStageSafeOutput's own test
+        # above. Before round 12 this classifier had no test at all: reverting its RETRACTED or
+        # UNRESOLVED branch, or the whole function, failed no test in either suite.
+        script = (
+            f"$genText = [IO.File]::ReadAllText('{GENERATOR}'); "
+            "$t=$null; $e=$null; "
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput($genText, [ref]$t, [ref]$e); "
+            "$fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+            "$n.Name -eq 'Get-Attr3FootageUmRunFailureClass' }, $true) | Select-Object -First 1; "
+            "if (-not $fn) { throw 'FUNCTION_NOT_FOUND' }; "
+            "Invoke-Expression $fn.Extent.Text; "
+            "Get-Attr3FootageUmRunFailureClass -Message 'RETRACTED: demo reached its queue ceiling'; "
+            "Get-Attr3FootageUmRunFailureClass -Message 'UNRESOLVED: demo was claimed by the agent'; "
+            "Get-Attr3FootageUmRunFailureClass -Message 'some unrelated .NET exception text'"
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        lines = [line for line in proc.stdout.splitlines() if line.strip()]
+        self.assertEqual(lines, ["RETRACTED", "UNRESOLVED", "UNKNOWN"], proc.stdout + proc.stderr)
+
+    def _run_submit_catch_harness(self, throw_statement: str, *, clip_id: str = "FIX-UNRESOLVED-0001",
+                                   parts_count: int = 2, job_id: str = "job-abc",
+                                   extra_setup: str = "") -> subprocess.CompletedProcess:
+        # Drives the REAL submit try/catch (attr3-footage-stage.ps1's own step 6, around um-run.ps1
+        # -- the one that classifies um-run's failure and decides RESULT=FOOTAGE_STAGE_UNRESOLVED /
+        # exit 2 versus an ordinary ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED), extracted via AST -- never a
+        # hand-copied duplicate -- the same technique this file already uses for the outer catch
+        # (_run_generator_outer_catch) and for ConvertTo-Attr3FootageStageSafeOutput. There are
+        # THREE try statements in the real script (the whole-body outer one, the transfer+submit
+        # block, and this one); selected by the ONLY one whose own text mentions $submitFailClass.
+        harness = self.tmp / f"submit-catch-harness-{id(throw_statement)}-{id(extra_setup)}.ps1"
+        harness.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$genText = [IO.File]::ReadAllText('{GENERATOR}')\n"
+            "$t=$null; $e=$null\n"
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput($genText, [ref]$t, [ref]$e)\n"
+            "$classifyFn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+            "$n.Name -eq 'Get-Attr3FootageUmRunFailureClass' }, $true) | Select-Object -First 1\n"
+            "if (-not $classifyFn) { throw 'CLASSIFY_FN_NOT_FOUND' }\n"
+            "Invoke-Expression $classifyFn.Extent.Text\n"
+            "$tryStatements = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] }, $true))\n"
+            # Every TryStatementAst that CONTAINS the submit try (the whole-body outer one, and the
+            # transfer+submit block) also matches a plain substring search on its own Extent.Text,
+            # since it is a superset -- Select-Object -First 1 over THAT would pick the outermost,
+            # not the innermost. Matched on the CATCH CLAUSE's own text instead: only the submit
+            # try's own catch clause assigns $submitFailClass at all.
+            "$submitTry = $tryStatements | Where-Object { $_.CatchClauses[0].Body.Extent.Text -match 'submitFailClass = Get-Attr3FootageUmRunFailureClass' } | Select-Object -First 1\n"
+            "if (-not $submitTry) { throw 'SUBMIT_TRY_NOT_FOUND' }\n"
+            "$catchBodyText = $submitTry.CatchClauses[0].Body.Extent.Text\n"
+            "$catchBody = $catchBodyText.Substring(1, $catchBodyText.Length - 2)\n"
+            f"$ClipId = '{clip_id}'\n"
+            f"$parts = New-Object 'object[]' {parts_count}\n"
+            f"$job = [pscustomobject]@{{ jobId = '{job_id}' }}\n"
+            + extra_setup +
+            "try {\n"
+            f"    {throw_statement}\n"
+            "} catch {\n"
+            "    . ([scriptblock]::Create($catchBody))\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        return subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+                              capture_output=True, text=True)
+
+    def test_the_submit_catch_reports_unresolved_with_exit_2_and_never_deletes_staged_residue(self) -> None:
+        # fable MAJOR (item 4): before round 12 nothing in either suite drove the wrapper through
+        # RESULT=FOOTAGE_STAGE_UNRESOLVED at all -- deleting the classifier's UNRESOLVED branch, the
+        # whole exit-2 block, or flipping exit 2 to exit 1 all left every existing test green.
+        # sol BLOCKER (item 2): UNRESOLVED used to unconditionally call
+        # Remove-Attr3FootageStageAttemptResidue -- deleting this attempt's own already-staged
+        # share-side parts while the very message it emits says the agent may still be reading
+        # them. Remove-Attr3FootageStageAttemptResidue is extracted here too (real function, real
+        # $createdSharePaths naming a REAL staged file) so that if a future edit reintroduces that
+        # call on this branch, the staged file is actually deleted and this test actually fails --
+        # not merely a text assertion that the call is absent.
+        share_stage_root = self.tmp / "unresolved-share-stage-root"
+        share_stage_dir = share_stage_root / "job-abc"
+        share_stage_dir.mkdir(parents=True)
+        staged_part = share_stage_dir / "part-0"
+        staged_part.write_bytes(b"synthetic staged bytes that must survive UNRESOLVED")
+
+        extra_setup = (
+            f"Import-Module '{ARTIFACTS_MODULE}' -Force\n"
+            "$residueFnAst = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+            "$n.Name -eq 'Remove-Attr3FootageStageAttemptResidue' }, $true) | Select-Object -First 1\n"
+            "if (-not $residueFnAst) { throw 'RESIDUE_FN_NOT_FOUND' }\n"
+            "Invoke-Expression $residueFnAst.Extent.Text\n"
+            f"$shareStageRoot = '{share_stage_root}'\n"
+            f"$shareStageDir = '{share_stage_dir}'\n"
+            f"$createdSharePaths = @('{staged_part}')\n"
+        )
+        proc = self._run_submit_catch_harness(
+            "throw 'UNRESOLVED: demo was claimed by the agent and has kept proving liveness'",
+            extra_setup=extra_setup,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 2, combined)
+        self.assertIn(
+            "RESULT=FOOTAGE_STAGE_UNRESOLVED CLIP=FIX-UNRESOLVED-0001 PARTS=2 JOB=job-abc RESIDUE=RETAINED",
+            combined,
+        )
+        self.assertTrue(staged_part.exists(), "UNRESOLVED must never delete this attempt's staged inputs")
+
+    def test_the_submit_catch_reports_ordinary_submit_failed_with_class_unknown_for_an_unrecognized_message(self) -> None:
+        # The other branch of the same classifier call: a message that is neither RETRACTED: nor
+        # UNRESOLVED: must still be an ordinary, safely-retryable ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED
+        # failure (CLASS=UNKNOWN), never exit 2, never RESULT=FOOTAGE_STAGE_UNRESOLVED.
+        proc = self._run_submit_catch_harness("throw 'some unrelated .NET exception naming a real path'")
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0, combined)
+        self.assertNotEqual(proc.returncode, 2, combined)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED", combined)
+        self.assertIn("CLASS=UNKNOWN", combined)
+        self.assertNotIn("RESULT=FOOTAGE_STAGE_UNRESOLVED", combined)
+
     def test_cleanup_warning_is_suppressed_and_never_reaches_output(self) -> None:
         # Remove-AttrCudaPartialFile (AttrCudaArtifacts.psm1) writes a path-bearing Write-Warning
         # diagnostic on a refused cleanup; the emitted stage job's Record-PartResult (round 3)

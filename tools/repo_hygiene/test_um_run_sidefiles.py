@@ -667,6 +667,24 @@ class UmRunEndToEndTests(_Share):
             proc.kill()
             proc.communicate()
 
+    def test_retracted_message_discloses_the_agents_own_stale_enumeration_window(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 12 (sol BLOCKER / fable MINOR, item 1): RETRACTED
+        # used to assert "nothing was submitted from the agent's point of view" -- true for
+        # EXECUTION (both the tracked and deployed agents write their own claim marker strictly
+        # before a child ever opens the job file by path, so a successful rename means the job's
+        # own content can never run), but not for what the agent can still RECORD: it lists its
+        # inbox once per poll and processes that whole snapshot sequentially (verified directly
+        # against both agents), so a claim marker -- and an honest launch-failure receipt -- for
+        # this id can still land minutes later, from a snapshot taken before this rename. The
+        # message must disclose that rather than assert a stronger guarantee than this client can
+        # actually prove.
+        proc = self.submit("-JobId", "demo", max_queue_wait_sec="0")
+        combined = proc.stdout + proc.stderr
+        self.assertIn("RETRACTED:", combined, combined)
+        self.assertIn("per-poll inbox listing can be stale", combined, combined)
+        self.assertIn("launch-failure receipt", combined, combined)
+        self.assertIn("can never execute now", combined, combined)
+
     def test_an_unclaimed_job_is_retracted_never_a_down_diagnosis(self) -> None:
         # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol major 3): the OLD message
         # ("the job never ran or the agent is down") is an affirmative diagnosis the client has not
@@ -1317,6 +1335,135 @@ class UmRunEndToEndTests(_Share):
         self.assertNotIn("THREW", combined, combined)
         self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
 
+    # ---- round 12 (sol BLOCKER, item 3): a structural catch converts ANY unexpected error after ---
+    # ---- the job was made visible into UNRESOLVED, never a raw escape or CLASS=UNKNOWN ------------
+
+    def test_an_unexpected_error_during_the_wait_loop_resolves_to_unresolved_never_raw(self) -> None:
+        # An unanticipated share I/O failure after the job was made visible (a heartbeat vanishing
+        # between Test-Path and Get-Item, a torn share-clock probe, ...) used to propagate raw past
+        # every outcome this file's own header promises -- a caller then misclassified it
+        # CLASS=UNKNOWN and treated it as an ordinary, safely-retryable failure while the agent
+        # might still own the job. -TestHookAtLoopTop injects a synthetic, unrelated exception on
+        # the very first iteration, standing in for any such failure -- the structural catch around
+        # the whole loop must convert it to UNRESOLVED and must never forward the wrapped message.
+        hook = "{ throw [System.IO.IOException]::new('synthetic share hiccup') }"
+        wrapper = self.tmp / "run-with-loop-top-throw-hook.ps1"
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  $r = & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 30 -PollSeconds 1 -MaxQueueWaitSec 30 -JobId 'demo' "
+            "-TestHookAtLoopTop $hook\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode)\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                               capture_output=True, text=True, timeout=30)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("THREW UNRESOLVED:", combined, combined)
+        self.assertIn("IOException", combined, combined)
+        self.assertNotIn("synthetic share hiccup", combined, combined)
+        self.assertNotIn("RETRACTED", combined, combined)
+
+    def test_a_receipt_already_present_survives_an_unexpected_error_via_the_structural_catch(self) -> None:
+        # The other half of the same mechanism: a receipt that already landed on disk at the exact
+        # instant the unexpected error fires must still be found by the structural catch's own
+        # recheck -- an unrelated I/O hiccup elsewhere in the loop must never cost a receipt that
+        # already exists.
+        hook = (
+            "{ "
+            "$result = @{ jobId = 'demo'; exitCode = 0; stdout = 'late but real'; stderr = ''; "
+            "timeoutSec = 30; timedOut = $false } | ConvertTo-Json -Compress; "
+            f"$tmp = {_q(self.outbox / 'demo.result.tmp')}; "
+            f"$fin = {_q(self.outbox / 'demo.result.json')}; "
+            "Set-Content -LiteralPath $tmp -Value $result -Encoding ascii -NoNewline; "
+            "Move-Item -Force -LiteralPath $tmp -Destination $fin; "
+            "throw [System.IO.IOException]::new('synthetic share hiccup after the receipt landed') "
+            "}"
+        )
+        wrapper = self.tmp / "run-with-loop-top-receipt-then-throw-hook.ps1"
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  $r = & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 30 -PollSeconds 1 -MaxQueueWaitSec 30 -JobId 'demo' "
+            "-TestHookAtLoopTop $hook\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode)\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                               capture_output=True, text=True, timeout=30)
+        combined = proc.stdout + proc.stderr
+        self.assertNotIn("THREW", combined, combined)
+        self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
+
+    # ---- round 12 (sol MAJOR + fable MINOR, item 5): RETRACTED cleanup failures are surfaced -------
+
+    def test_a_retraction_metadata_cleanup_failure_is_surfaced_not_silently_swallowed(self) -> None:
+        # A failed nonce-checked delete of this submission's own claim metadata during RETRACTED
+        # used to be silently swallowed (SilentlyContinue) -- surfaced now, matching the module
+        # rollback's own "may outlive this refused submission" standard. Locks demo.meta.json
+        # exclusively right after the retraction rename (and its own temp-copy cleanup) complete,
+        # forcing the nonce-checked delete that follows to fail.
+        hook = (
+            "{ $script:umrunTestLock = [IO.File]::Open(" + _q(self.inbox / 'demo.meta.json') +
+            ", 'Open', 'Read', 'None') }"
+        )
+        wrapper = self.tmp / "run-with-retraction-metadata-lock-hook.ps1"
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  $r = & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 1 -PollSeconds 1 -MaxQueueWaitSec 0 -JobId 'demo' "
+            "-TestHookAfterRetractionRename $hook\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode)\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                               capture_output=True, text=True, timeout=30)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("THREW RETRACTED:", combined, combined)
+        self.assertIn("meta.json could not be removed during retraction", combined, combined)
+        self.assertIn("may outlive this refused submission", combined, combined)
+        self.assertTrue((self.inbox / "demo.meta.json").exists(),
+                         "a surfaced retraction cleanup failure must mean the metadata really was left behind")
+
+    def test_a_retraction_job_temp_cleanup_failure_is_surfaced_not_silently_swallowed(self) -> None:
+        # The other half: a failed removal of this client's OWN renamed-out job temporary (the
+        # withdrawn job's bytes, moved aside during retraction) used to be silently swallowed too.
+        # -TestHookAfterRetractionJobRenamed hands the test the exact, GUID-named path -- unknowable
+        # to an external caller in advance -- so it can be locked deterministically right after the
+        # rename succeeds, before this client's own removal attempt.
+        hook = "{ param($p) $script:umrunTestLock2 = [IO.File]::Open($p, 'Open', 'Read', 'None') }"
+        wrapper = self.tmp / "run-with-retraction-job-temp-lock-hook.ps1"
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  $r = & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 1 -PollSeconds 1 -MaxQueueWaitSec 0 -JobId 'demo' "
+            "-TestHookAfterRetractionJobRenamed $hook\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode)\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                               capture_output=True, text=True, timeout=30)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("THREW RETRACTED:", combined, combined)
+        self.assertIn("renamed-out temporary copy could not be removed", combined, combined)
+        self.assertIn("may outlive this refused submission", combined, combined)
+        # The locked temp file must still be sitting in the inbox -- a real, surfaced failure, not
+        # a lucky-looking string.
+        leftover = [p for p in self.inbox.iterdir() if p.name.endswith(".retracted.tmp")]
+        self.assertEqual(len(leftover), 1, self.names())
+
     def test_a_receipt_written_during_the_final_sleep_is_still_read(self) -> None:
         # fable/sol major 3 (second half): the old loop tested its deadline BEFORE sleeping, so a
         # receipt published during the final poll sleep was skipped -- the deadline had already
@@ -1376,6 +1523,57 @@ class UmRunEndToEndTests(_Share):
         combined = proc.stdout + proc.stderr
         self.assertIn("RETRACTED:", combined, combined)
         self.assertEqual(self.names(), ["demo-build.json", "demo-source.zip"], combined)
+
+
+class UmRunDeadlineTypeTests(unittest.TestCase):
+    """ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 12 (sol MINOR, item 6): every wait-loop deadline is
+    built from [DateTimeOffset]::Now specifically so a comparison against another DateTimeOffset is
+    defined on the absolute instant represented, regardless of Kind/offset -- reverting any ONE of
+    these root assignments back to [DateTime]/Get-Date reintroduces the exact Kind-ambiguity a prior
+    round had to remove (round 10/11's own header comment), but no test failed if that reversion
+    happened on a host whose local UTC offset is zero. This asserts on the TYPE the real source
+    actually constructs at each root assignment -- extracted via AST from um-run.ps1 itself, never a
+    hand-copied duplicate -- so it fails on EVERY host, independent of timezone, the instant any one
+    of these assignments stops constructing a DateTimeOffset. $queueDeadline/$budgetDeadline/
+    $outerCeiling are not checked directly: each is built via .AddSeconds() on an already-verified
+    DateTimeOffset root, and .AddSeconds() on a DateTimeOffset cannot itself return anything else --
+    the four ROOT `[DateTimeOffset]::Now` assignments are the only sites this class of regression
+    can actually enter at."""
+
+    @unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+    def test_every_now_anchored_deadline_variable_constructs_a_datetimeoffset(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="umrundeadlinetype-") as tmp_dir:
+            script = Path(tmp_dir) / "deadline-type-probe.ps1"
+            script.write_text(
+                "$ErrorActionPreference = 'Stop'\n"
+                f"$text = [IO.File]::ReadAllText({_q(UM_RUN)})\n"
+                "$t = $null; $e = $null\n"
+                "$ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$t, [ref]$e)\n"
+                "$assignments = @($ast.FindAll({ param($n) $n -is "
+                "[System.Management.Automation.Language.AssignmentStatementAst] -and "
+                "$n.Left.Extent.Text -in @('$submittedAt', '$claimedAt') -and "
+                "$n.Right.Extent.Text -eq '[DateTimeOffset]::Now' }, $true))\n"
+                "if ($assignments.Count -eq 0) { throw 'NO_ROOT_ASSIGNMENTS_FOUND' }\n"
+                "$types = @($assignments | ForEach-Object { (Invoke-Expression $_.Right.Extent.Text).GetType().Name })\n"
+                "@{ count = $assignments.Count; types = $types } | ConvertTo-Json -Compress\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                                  capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            result = json.loads(proc.stdout)
+        # $submittedAt (1 site) plus $claimedAt (3 separate assignment sites -- the QUEUED-to-
+        # CLAIMED transition, the marker-appears-at-the-queue-deadline transition, and the
+        # retraction-race fallback). A future edit that adds or removes a root assignment must
+        # update this count deliberately, not silently pass with fewer sites checked.
+        self.assertEqual(result["count"], 4, result)
+        types = result["types"] if isinstance(result["types"], list) else [result["types"]]
+        for type_name in types:
+            self.assertEqual(
+                type_name, "DateTimeOffset",
+                f"a wait-loop deadline root assignment constructs {type_name}, not DateTimeOffset "
+                f"-- reintroducing the Kind-ambiguity a prior round had to remove: {result}",
+            )
 
 
 if __name__ == "__main__":
