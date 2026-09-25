@@ -99,6 +99,11 @@ bool GpuDisplayWindow::isActive()
     return g_activeWindow.load(std::memory_order_acquire) != nullptr;
 }
 
+QWindow *GpuDisplayWindow::activeWindow()
+{
+    return g_activeWindow.load(std::memory_order_acquire);
+}
+
 QString GpuDisplayWindow::rendererDescription()
 {
     GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
