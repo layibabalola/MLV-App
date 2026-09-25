@@ -213,9 +213,19 @@ Before any verdict the job takes the run's own `gpu_playback_recon.eligibility` 
 snapshot and exits **15 `BACKEND_NOT_AVAILABLE`** unless `cuda_backend_available=1` **and**
 `r16_available=1`, recording both plus `r16_reason`. A log with no eligibility line at all is
 refused the same way: absence of the diagnostic is not evidence of eligibility. Other outcomes:
-12 `VENUE_NOT_QUIESCENT`, 13 `GPU_RECON_FRAMES_ZERO`, 14 `CPU_FALLBACK_DETECTED`, 0
-`MEASUREMENT_CAPTURED`. It publishes `presentmon-series.csv`, `logs\smoke-run.log`,
-`evidence-manifest.json`, `provenance.json` and `artifact-index.json`.
+12 `VENUE_NOT_QUIESCENT`, 13 `GPU_RECON_FRAMES_ZERO`, 14 `CPU_FALLBACK_DETECTED`, 18
+`SMOKE_RUN_FAILED` (the smoke run itself never produced a passing `result.json`), 23
+`PRESENTMON_UNAVAILABLE` (PresentMon never produced a usable capture for the MLVApp process --
+covers a missing/unreadable/columnless csv, a wait timeout, and a nonzero PresentMon exit code
+alike, all typed and never destroying the smoke evidence already published), 24
+`DISPLAY_ASLEEP` (the MLVApp chain presented frames but displayed none), 0
+`MEASUREMENT_CAPTURED`. Display rates (`presentedFps`/`displayedFps`) are for the MLVApp process
+id, summed across every swap chain address it used inside the playback window -- a mid-run swap
+chain recreation (e.g. a resize) is one logical preview, not two. It publishes
+`presentmon-series.csv`, `presentmon-capture.json` (the PresentMon clock anchor, bracketed by a
+pre-spawn/post-spawn wall-clock pair and the OS-reported process start, with the residual
+uncertainty in ms), `logs\smoke-run.log`, `evidence-manifest.json`, `provenance.json` and
+`artifact-index.json`.
 
 The owner's consent for the clip on this card is recorded at
 `.claude-state/coordination/dual-lane/receipts/owner-footage-consent-20260916.json`, with its

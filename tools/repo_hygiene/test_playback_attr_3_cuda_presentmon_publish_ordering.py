@@ -1,10 +1,22 @@
-"""CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1 (item 5): static assertions on the attribution
-generator's own $template text -- never executed, since no real MLVApp/GPU/display is available
-here -- proving the ordering and typed-terminal shape this round requires: smoke artifacts
-(result.json, stdout/stderr, probe-timeline.csv, the log snapshot) are published BEFORE the
-PresentMon report is ever built, presentmon.csv is never read without a Test-Path guard ahead of
-it, and the old unguarded "no positive MsBetweenDisplayChange samples" throw -- which used to fire
-AFTER a passed smoke run and destroy every artifact already produced -- is gone.
+"""CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2: static assertions on the attribution generator's own
+$template text -- never executed, since no real MLVApp/GPU/display is available here -- proving
+the ordering and typed-terminal shape this round requires: smoke artifacts (result.json,
+stdout/stderr, probe-timeline.csv, the log snapshot) are published BEFORE PresentMon is even
+waited on (HARNESS-2: not just before its report is built -- see sol BLOCKER 1 below),
+presentmon.csv is never read without a Test-Path guard ahead of it, and the old unguarded "no
+positive MsBetweenDisplayChange samples" throw -- which used to fire AFTER a passed smoke run and
+destroy every artifact already produced -- is gone.
+
+HARNESS-2 closed a gap this file's own predecessor left open (sol BLOCKER 1): the previous
+ordering test only pinned publish-before-REPORT, not publish-before-WAIT, so a PresentMon that
+hung past its wait timeout or exited nonzero after a passed smoke run still threw before anything
+was published, and this suite stayed green. Wait-PresentMonCapture's call site is now wrapped in
+try/catch and routes to the same typed PRESENTMON_UNAVAILABLE terminal a parse failure already
+used; see test_smoke_artifacts_are_published_before_presentmon_is_waited_on and
+test_presentmon_wait_failure_is_a_typed_terminal_not_an_uncaught_throw below. HARNESS-2 also
+closed sol BLOCKER 2 (the clock anchor is now a bracketed pre-spawn/post-spawn/OS-reported-start
+triple with a stated uncertainty, not one guessed instant) and sol BLOCKER 3 (the required
+PresentMon columns match the real pinned 2.5.1 header -- see the sibling display-report suite).
 
 These are regression tripwires against reintroducing that ordering bug, not a soundness proof:
 tools/repo_hygiene/test_playback_attr_3_cuda_presentmon_display_report.py is what actually EXECUTES
@@ -93,6 +105,70 @@ class TemplateOrderingTests(unittest.TestCase):
         self.assertLess(save_anchor, report_call)
         self.assertIn("presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')", self.template)
         self.assertIn("presentMonCaptureStartUtc = $presentMonCaptureStartUtc.ToString('o')", self.template)
+
+    def test_smoke_artifacts_are_published_before_presentmon_is_waited_on(self) -> None:
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 1 / fable HARDENING): a PresentMon
+        # wait failure (a hang past TimeoutSeconds, a nonzero exit code) used to throw BEFORE any
+        # smoke evidence was published, destroying a passed smoke run's evidence -- the
+        # predecessor test above only pinned publish-before-REPORT, which a Wait failure never
+        # reaches. The wait call must now come strictly after every smoke-evidence publish.
+        wait_call = self.template.index("$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc")
+        publish_result_json = self.template.index("Publish-AttrCudaFileCopy -Source $resultPath")
+        publish_stdout = self.template.index("'smoke-stdout.txt') -Destination")
+        publish_probe_timeline = self.template.index("'probe-timeline.csv') -Destination")
+        publish_log = self.template.index("logs\\smoke-run.log'")
+        self.assertLess(publish_result_json, wait_call)
+        self.assertLess(publish_stdout, wait_call)
+        self.assertLess(publish_probe_timeline, wait_call)
+        self.assertLess(publish_log, wait_call)
+
+    def test_presentmon_wait_failure_is_a_typed_terminal_not_an_uncaught_throw(self) -> None:
+        # The wait call is wrapped in try/catch; a caught failure routes to a typed
+        # PRESENTMON_UNAVAILABLE summary and exit 23 -- the same terminal a parsing failure
+        # already used -- never an uncaught throw that would propagate past the publish above.
+        wait_call = self.template.index("$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc")
+        try_start = self.template.rindex("try {", 0, wait_call)
+        catch_start = self.template.index("} catch {", wait_call)
+        error_capture = self.template.index("$presentMonWaitError = $_.Exception.Message", catch_start)
+        typed_check = self.template.index("if ($null -ne $presentMonWaitError) {", error_capture)
+        typed_result = self.template.index("result='PRESENTMON_UNAVAILABLE'", typed_check)
+        typed_exit = self.template.index("exit 23", typed_result)
+        self.assertLess(try_start, wait_call)
+        self.assertLess(wait_call, catch_start)
+        self.assertLess(catch_start, error_capture)
+        self.assertLess(error_capture, typed_check)
+        self.assertLess(typed_check, typed_result)
+        self.assertLess(typed_result, typed_exit)
+        # PRESENTMON_TIMEOUT's own throw message (inside Wait-PresentMonCapture's body) is
+        # unchanged -- only this call site's handling of it changed.
+        self.assertIn("PRESENTMON_TIMEOUT: did not exit within", self.template)
+
+    def test_presentmon_capture_anchor_bracket_and_uncertainty_are_persisted(self) -> None:
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 2 / fable HARDENING): a single
+        # guessed captureStartUtc had no stated error bar. The pre-spawn/post-spawn wall-clock
+        # bracket, the OS-reported process start, and the uncertainty in ms must all be
+        # persisted alongside it, before parsing.
+        save_anchor = self.template.index("'presentmon-capture.json')")
+        report_call = self.template.index("$displayReport = Get-AttrCudaPresentMonDisplayReport")
+        self.assertLess(save_anchor, report_call)
+        self.assertIn("preSpawnUtc=$presentMonPreSpawnUtc.ToString('o')", self.template)
+        self.assertIn("postSpawnUtc=$presentMonPostSpawnUtc.ToString('o')", self.template)
+        self.assertIn("captureStartUncertaintyMs=$presentMonCaptureStartUncertaintyMs", self.template)
+        self.assertIn("$presentMonProc.StartTime.ToUniversalTime()", self.template)
+
+    def test_the_required_columns_match_the_real_presentmon_2_5_1_legacy_header(self) -> None:
+        # sol BLOCKER 3: DisplayedTime does not exist in the pinned tool's real legacy CSV schema
+        # -- requiring it made every real capture PRESENTMON_UNAVAILABLE. Confirmed against real
+        # Bachelor captures (presentmon.csv header), never a synthetic fixture's own columns.
+        module_text = MODULE.read_text(encoding="utf-8")
+        # Quoted, not a bare substring check: the module's own comments legitimately mention
+        # DisplayedTime by name to explain why it was removed from the requirement.
+        self.assertNotIn("'DisplayedTime'", module_text)
+        self.assertIn(
+            "$requiredColumns = @('Application', 'ProcessID', 'SwapChainAddress', 'PresentMode', "
+            "'MsBetweenPresents', 'MsBetweenDisplayChange', 'MsUntilDisplayed', 'TimeInMs')",
+            module_text,
+        )
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
-"""CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1: Get-AttrCudaPresentMonDisplayReport, EXECUTED against
+"""CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2: Get-AttrCudaPresentMonDisplayReport, EXECUTED against
 real presentmon.csv fixtures -- the shared runtime function tools/profiling/bachelor/
 AttrCudaArtifacts.psm1 exports and playback-attr-3-cuda-job.ps1 embeds verbatim, so a pass here is
 a statement about the exact characters that run unattended on Bachelor.
 
-WHY THIS FILE EXISTS. Three baseline defects, reproduced against the provisional bachelor
-harness before this round: (1) 3 of 8 attempts ran a full smoke then died at an unguarded
-Import-Csv of a missing out\\diagnostic\\presentmon.csv, publishing nothing; (2) "no positive
+WHY THIS FILE EXISTS. Baseline defects, reproduced against the provisional bachelor harness
+before HARNESS-1: (1) 3 of 8 attempts ran a full smoke then died at an unguarded Import-Csv of a
+missing out\\diagnostic\\presentmon.csv, publishing nothing; (2) "no positive
 MsBetweenDisplayChange samples" was an uncaught throw AFTER the smoke run had already passed,
 destroying every artifact already produced; (3) PresentMon runs --timed 55 against a --seconds 40
 playback, so idle desktop/startup presents outside the measured window could inflate or deflate
@@ -15,9 +15,19 @@ MLVApp chain, is a typed 'PRESENTMON_UNAVAILABLE' / 'DISPLAY_ASLEEP' return -- n
 every row is grouped by (ProcessID, SwapChainAddress) and restricted to
 [process.startedAtUtc, process.endedAtUtc] before any rate is computed.
 
+HARNESS-2 (sol BLOCKER 3) found that these fixtures were themselves a defect: they carried a
+`DisplayedTime` column the pinned PresentMon 2.5.1 legacy launch never emits, which made the
+required-column check pass here while failing on every real capture. Every fixture in this file
+now uses only real columns (MsUntilDisplayed replaces DisplayedTime), and
+RealPresentMon251HeaderFixtureTests below pins the exact 28-column real header, read directly
+from a Bachelor capture, so a future column-set drift is caught here instead of on Bachelor.
+HARNESS-2 (sol HARDENING) also changed chain selection: the MLVApp preview is now the sum of
+every swap chain address the target PID used in the window, not just the busiest one -- see
+TwoSwapChainFixtureTests.test_a_second_mlvapp_swap_chain_is_summed_into_the_logical_preview.
+
 The sibling test_playback_attr_3_cuda_presentmon_publish_ordering.py asserts, on the generator's
 own template text, that the job-level ORDERING this round requires is also still there: smoke
-artifacts published before the PresentMon report is ever built, and the old unguarded parse gone.
+artifacts published before PresentMon is even waited on, and the old unguarded throws are gone.
 
 SKIPS. Everything is skipped cleanly when pwsh is absent, and on non-Windows platforms (the
 module's own callers validate drive-letter paths); Windows CI runs it all.
@@ -73,8 +83,11 @@ def _result_json(pid: object = TARGET_PID, start: object = WINDOW_START_UTC, end
 def _csv_row(
     *, application: str = "MLVApp.exe", process_id: object = TARGET_PID, swap_chain: str = "0xCCC",
     present_mode: str = "Hardware: Independent Flip", between_presents: str = "16.6",
-    between_display_change: str = "16.6", displayed_time: str = "16.6", time_in_ms: object = 5000,
+    between_display_change: str = "16.6", until_displayed: str = "16.6", time_in_ms: object = 5000,
 ) -> dict[str, str]:
+    # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 3): these are the columns the PINNED
+    # PresentMon 2.5.1 legacy launch actually emits -- confirmed against real Bachelor captures.
+    # There is no DisplayedTime column in that schema; MsUntilDisplayed is a real one instead.
     return {
         "Application": application,
         "ProcessID": str(process_id),
@@ -82,7 +95,7 @@ def _csv_row(
         "PresentMode": present_mode,
         "MsBetweenPresents": between_presents,
         "MsBetweenDisplayChange": between_display_change,
-        "DisplayedTime": displayed_time,
+        "MsUntilDisplayed": until_displayed,
         "TimeInMs": str(time_in_ms),
     }
 
@@ -164,7 +177,7 @@ class MissingCsvFixtureTests(_ReportCase):
         # reason, never crash on an absent property.
         path.write_text(
             "Application,ProcessID,SwapChainAddress,PresentMode,MsBetweenPresents,"
-            "MsBetweenDisplayChange,DisplayedTime\r\n"
+            "MsBetweenDisplayChange,MsUntilDisplayed\r\n"
             "MLVApp.exe,4242,0xCCC,Hardware: Independent Flip,16.6,16.6,16.6\r\n",
             encoding="utf-8",
         )
@@ -192,7 +205,7 @@ class ZeroDisplayedFixtureTests(_ReportCase):
 
     def test_all_zero_display_change_rows_in_window_is_display_asleep(self) -> None:
         rows = [
-            _csv_row(between_display_change="0", displayed_time="0", time_in_ms=5000 + i * 1000)
+            _csv_row(between_display_change="0", until_displayed="0", time_in_ms=5000 + i * 1000)
             for i in range(5)
         ]
         path = self._write_csv(rows)
@@ -238,7 +251,7 @@ class TwoSwapChainFixtureTests(_ReportCase):
         rows.append(_csv_row(time_in_ms=500))  # before the window opens
         for i in range(10):
             disp = "0" if i < 2 else "16.6"
-            rows.append(_csv_row(between_display_change=disp, displayed_time=disp, time_in_ms=5000 + i * 1000))
+            rows.append(_csv_row(between_display_change=disp, until_displayed=disp, time_in_ms=5000 + i * 1000))
         rows.append(_csv_row(time_in_ms=50000))  # after the window closes
         path = self._write_csv(rows)
 
@@ -263,9 +276,12 @@ class TwoSwapChainFixtureTests(_ReportCase):
         self.assertEqual(foreign["processId"], 999)
         self.assertEqual(foreign["swapChainAddress"], "0xBBB")
 
-    def test_a_second_mlvapp_swap_chain_prefers_the_busier_one(self) -> None:
-        # A short-lived secondary swap chain for the SAME pid (e.g. a window resize tearing one
-        # down and recreating it) must not be preferred over the dominant, longer-lived one.
+    def test_a_second_mlvapp_swap_chain_is_summed_into_the_logical_preview(self) -> None:
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol HARDENING): a swap chain recreated mid-run
+        # for the SAME pid (e.g. a window resize tearing one down and recreating it) is one
+        # continuous logical MLVApp preview, not two competing chains -- the old "prefer the
+        # busier one" behaviour silently dropped the shorter-lived chain's frames from both the
+        # count and the rate.
         rows = [_csv_row(swap_chain="0xDDD", time_in_ms=5000 + i * 1000) for i in range(2)]
         rows += [_csv_row(swap_chain="0xCCC", time_in_ms=10000 + i * 1000) for i in range(8)]
         path = self._write_csv(rows)
@@ -273,8 +289,12 @@ class TwoSwapChainFixtureTests(_ReportCase):
         report = self.call(path, _result_json())
 
         self.assertEqual(report["status"], "OK")
-        self.assertEqual(report["selectedChain"]["swapChainAddress"], "0xCCC")
-        self.assertEqual(report["selectedChain"]["presentedCount"], 8)
+        self.assertEqual(report["selectedChain"]["presentedCount"], 10)
+        self.assertEqual(report["selectedChain"]["displayedCount"], 10)
+        self.assertCountEqual(report["selectedChain"]["swapChainAddresses"], ["0xDDD", "0xCCC"])
+        self.assertEqual(len(report["chains"]), 2)
+        self.assertEqual(len(report["selectedChainRows"]), 10)
+        self.assertAlmostEqual(report["selectedChain"]["presentedFps"], 10 / 40.0)
 
     def test_no_mlvapp_rows_in_window_is_presentmon_unavailable_even_with_other_chains(self) -> None:
         rows = [_csv_row(application="dwm.exe", process_id=999, swap_chain="0xBBB", time_in_ms=5000 + i * 1000) for i in range(4)]
@@ -285,6 +305,90 @@ class TwoSwapChainFixtureTests(_ReportCase):
         self.assertEqual(report["status"], "PRESENTMON_UNAVAILABLE")
         self.assertIn(str(TARGET_PID), report["reason"])
         self.assertEqual(len(report["chains"]), 1)
+
+
+@requires_pwsh
+class RealPresentMon251HeaderFixtureTests(_ReportCase):
+    """CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 3): the sibling tests above all use a
+    convenient 8-column subset. A fixture carrying a column the pinned tool never emits (the old
+    DisplayedTime requirement) hid exactly this defect, so this class instead uses the EXACT
+    28-column header the pinned PresentMon 2.5.1 legacy launch emits, confirmed by directly
+    reading a real presentmon.csv header from a Bachelor capture
+    (tools/profiling/bachelor/playback-attr-3-cuda-*.artifacts/presentmon.csv) -- never a
+    synthetic column list. Non-essential columns carry 'NA', exactly as PresentMon itself writes
+    for a metric it could not compute (observed for MsBetweenDisplayChange/MsUntilDisplayed on
+    the very first present of a real capture)."""
+
+    _REAL_HEADER = [
+        "Application", "ProcessID", "SwapChainAddress", "PresentRuntime", "SyncInterval",
+        "PresentFlags", "AllowsTearing", "PresentMode", "TimeInMs", "MsBetweenSimulationStart",
+        "MsBetweenPresents", "MsBetweenDisplayChange", "MsInPresentAPI", "MsRenderPresentLatency",
+        "MsUntilDisplayed", "CPUStartTimeInMs", "MsBetweenAppStart", "MsCPUBusy", "MsCPUWait",
+        "MsGPULatency", "MsGPUTime", "MsGPUBusy", "MsGPUWait", "MsAnimationError", "AnimationTime",
+        "MsFlipDelay", "MsAllInputToPhotonLatency", "MsClickToPhotonLatency",
+    ]
+
+    def _real_row(
+        self, *, process_id: object = TARGET_PID, swap_chain: str = "0xCCC",
+        time_in_ms: object, between_display_change: str = "16.6", until_displayed: str = "8.3",
+    ) -> dict[str, str]:
+        values = {name: "NA" for name in self._REAL_HEADER}
+        values.update({
+            "Application": "MLVApp.exe",
+            "ProcessID": str(process_id),
+            "SwapChainAddress": swap_chain,
+            "PresentRuntime": "DXGI",
+            "SyncInterval": "0",
+            "PresentFlags": "512",
+            "AllowsTearing": "0",
+            "PresentMode": "Composed: Flip",
+            "TimeInMs": str(time_in_ms),
+            "MsBetweenPresents": "16.6",
+            "MsBetweenDisplayChange": between_display_change,
+            "MsUntilDisplayed": until_displayed,
+        })
+        return values
+
+    def _write_real_csv(self, rows: list[dict[str, str]]) -> Path:
+        path = self.tmp / "presentmon.csv"
+        lines = [",".join(self._REAL_HEADER)]
+        for row in rows:
+            lines.append(",".join(row[name] for name in self._REAL_HEADER))
+        path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+        return path
+
+    def test_the_real_28_column_header_is_accepted_and_produces_a_report(self) -> None:
+        rows = [
+            self._real_row(
+                time_in_ms=5000 + i * 1000,
+                between_display_change=("NA" if i == 0 else "16.6"),
+                until_displayed=("8.3" if i == 0 else "16.6"),
+            )
+            for i in range(10)
+        ]
+        path = self._write_real_csv(rows)
+
+        report = self.call(path, _result_json())
+
+        self.assertEqual(report["status"], "OK", report)
+        self.assertEqual(report["selectedChain"]["processId"], TARGET_PID)
+        # All 10 rows displayed: row 0 via MsUntilDisplayed (MsBetweenDisplayChange reads NA, as
+        # PresentMon reports for the very first present of a capture, with no prior display
+        # change to diff against), the rest via MsBetweenDisplayChange.
+        self.assertEqual(report["selectedChain"]["displayedCount"], 10)
+        self.assertEqual(len(report["selectedChainRows"]), 10)
+
+    def test_a_row_with_na_display_metrics_is_presented_but_not_displayed(self) -> None:
+        # PresentMon legitimately writes NA for metrics it cannot compute yet -- never mistaken
+        # for a schema mismatch, and never counted as a display when both signals are absent.
+        row = self._real_row(time_in_ms=5000, between_display_change="NA", until_displayed="NA")
+        path = self._write_real_csv([row])
+
+        report = self.call(path, _result_json())
+
+        self.assertEqual(report["status"], "DISPLAY_ASLEEP")
+        self.assertEqual(report["selectedChain"]["presentedCount"], 1)
+        self.assertEqual(report["selectedChain"]["displayedCount"], 0)
 
 
 if __name__ == "__main__":

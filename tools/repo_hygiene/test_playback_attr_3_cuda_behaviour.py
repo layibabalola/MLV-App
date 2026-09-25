@@ -3473,7 +3473,14 @@ class SmokeRunFailedPresentMonCleanupTests(_PwshCase):
     def _failure_block(self) -> str:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
         start_marker = "$presentMonProc = Start-PresentMonCapture $presentMonPath"
-        end_marker = "\n$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc"
+        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 1): the span now ends right after the
+        # SMOKE_RUN_FAILED if-block's own closing brace -- everything hoisted above the
+        # PresentMon wait (reading result.json, resolving the run log, publishing smoke evidence,
+        # and the Wait call itself, now inside a try block) is deliberately EXCLUDED here, since
+        # extracting a truncated try/catch would leave the synthetic script below with an
+        # unbalanced brace. $rawResult is the first statement of that hoisted block, so it is a
+        # stable boundary that keeps the extracted span self-contained.
+        end_marker = "$rawResult = [IO.File]::ReadAllText($resultPath)"
         start = text.index(start_marker)
         end = text.index(end_marker, start)
         return text[start:end]

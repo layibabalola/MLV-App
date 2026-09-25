@@ -1098,11 +1098,26 @@ $envs = @(
 $envList = "'" + ($envs -join "','") + "'"
 function ConvertTo-PsSingleQuoted([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
 $cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted $exePath) -Input $(ConvertTo-PsSingleQuoted $clipPath) -Output $(ConvertTo-PsSingleQuoted $resultPath) -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor 4 -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
-# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1: recorded immediately before PresentMon starts so
-# Get-AttrCudaPresentMonDisplayReport can turn PresentMon's own TimeInMs (ms since this capture
-# began) back into a wall-clock timestamp and clip to the playback window below.
-$presentMonCaptureStartUtc = (Get-Date).ToUniversalTime()
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2 (sol BLOCKER 2 / fable HARDENING): PresentMon's own
+# TimeInMs=0 origin is its internal trace-session start, which lands somewhere between process
+# creation and Start-PresentMonCapture returning (it blocks up to 3s to confirm the process is
+# still alive) -- neither endpoint of that interval IS the true origin, so the interval is
+# bracketed instead of guessed at as a single instant. $presentMonProc.StartTime is the OS's own
+# report of when the child process itself began (available without any extra probing), and is
+# used as the windowing anchor below: it can only be AT OR BEFORE PresentMon's true trace-session
+# start (process creation necessarily precedes ETW session init), so windowing against it never
+# excludes a row that truly falls inside the playback window -- the one failure direction that
+# would silently under-report a real display rate. The full bracket (pre-spawn wall clock, the
+# OS-reported process start, post-spawn wall clock) and the residual uncertainty it implies are
+# all persisted below, before parsing, so a consumer needing a tighter join than this one can see
+# exactly how much slack to allow rather than trusting a single unbracketed stamp.
+$presentMonPreSpawnUtc = (Get-Date).ToUniversalTime()
 $presentMonProc = Start-PresentMonCapture $presentMonPath
+$presentMonPostSpawnUtc = (Get-Date).ToUniversalTime()
+$presentMonProcessStartUtc = $null
+try { $presentMonProcessStartUtc = $presentMonProc.StartTime.ToUniversalTime() } catch { $presentMonProcessStartUtc = $null }
+$presentMonCaptureStartUtc = if ($null -ne $presentMonProcessStartUtc) { $presentMonProcessStartUtc } else { $presentMonPreSpawnUtc }
+$presentMonCaptureStartUncertaintyMs = ($presentMonPostSpawnUtc - $presentMonCaptureStartUtc).TotalMilliseconds
 # ATTR3-SMOKE-RUNNER-DEPS-1 (sol, PR #144 major 3): the smoke-failure ordering fix only covered a
 # NORMAL child return -- a terminating exception while starting or running the nested pwsh (the
 # executable missing, launch redirection throwing under ErrorActionPreference Stop) used to skip
@@ -1175,11 +1190,11 @@ if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not (Test-Path -Lite
     exit 18
 }
 
-$presentMonDoneResult = Wait-PresentMonCapture $presentMonProc
-if ($presentMonDoneResult.status -ne 'done' -or [int]$presentMonDoneResult.exitCode -ne 0) {
-    throw "PresentMon capture invalid status=$($presentMonDoneResult.status) rc=$($presentMonDoneResult.exitCode)"
-}
-
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 1 / fable HARDENING): the smoke run's own
+# result and log are read and published BEFORE PresentMon is ever waited on, so a PresentMon that
+# hangs past its wait timeout or exits nonzero can no longer destroy a passed smoke run's
+# evidence -- only a PresentMon PARSING failure was covered before this round; a WAIT failure
+# was not.
 $rawResult = [IO.File]::ReadAllText($resultPath)
 $resultJson = $rawResult | ConvertFrom-Json -Depth 100
 if ($rawResult -notmatch [regex]::Escape($SourceCommit)) { throw "result does not report pinned source commit $SourceCommit" }
@@ -1205,10 +1220,17 @@ if ($rawResult -notmatch [regex]::Escape($SourceCommit)) { throw "result does no
 try {
     $runLog = Resolve-AttrCudaSmokeRunLog -ResultJsonPath $resultPath -ContainingRoot $Work
 } catch {
+    # PresentMon has not been waited on yet at this point (that now happens further down, after
+    # smoke evidence publishes) -- stopped here exactly like the SMOKE_RUN_FAILED branch above,
+    # never left to run out its own --timed budget for a run this job is about to fail anyway.
+    $presentMonStop = Stop-PresentMonCapture -Proc $presentMonProc
     $unavailable = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='SMOKE_LOG_UNAVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
         message=$_.Exception.Message; smokeExitCode=$smokeRc; resultJson=$resultPath
+        presentMonConfirmedExited=$presentMonStop.confirmedExited
+        presentMonKillError=$presentMonStop.killError
+        presentMonWaitError=$presentMonStop.waitError
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $unavailable (Join-Path $Pub 'summary.json')
@@ -1220,19 +1242,51 @@ $rawLog = [IO.File]::ReadAllText($logPath)
 $rows = Get-FrameRows $rawLog
 $rows | Export-Csv -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -NoTypeInformation
 
-# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1: publish the smoke artifacts BEFORE any PresentMon
-# parsing. They are already known-good the moment the run log and frame rows are resolved -- a
-# PresentMon post-step failure (missing csv, zero displayed samples in the playback window) must
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2: publish the smoke artifacts BEFORE any PresentMon
+# parsing, AND before PresentMon is even waited on. They are already known-good the moment the
+# run log and frame rows are resolved -- a PresentMon post-step failure (a hang past the wait
+# timeout, a nonzero exit, a missing csv, zero displayed samples in the playback window) must
 # never destroy evidence that a smoke run already passed. Previously these were only published at
-# the very end of a fully successful run, interleaved with the PresentMon parse itself, so an
-# uncaught failure in that parse (Import-Csv on a missing file, or the old unguarded "no positive
-# samples" throw) left nothing published at all -- exactly the 3-of-8 baseline failure this closes.
+# the very end of a fully successful run, interleaved with the PresentMon wait and parse
+# themselves, so an uncaught failure in either (the old unguarded Wait throw; Import-Csv on a
+# missing file; the old unguarded "no positive samples" throw) left nothing published at all --
+# exactly the 3-of-8 baseline failure this closes.
 [void](Publish-AttrCudaFileCopy -Source $resultPath -Destination (Join-Path $Pub 'result.json'))
 [void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'smoke-stdout.txt') -Destination (Join-Path $Pub 'smoke-stdout.txt'))
 [void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'smoke-stderr.txt') -Destination (Join-Path $Pub 'smoke-stderr.txt'))
 [void](Publish-AttrCudaFileCopy -Source (Join-Path $legOut 'probe-timeline.csv') -Destination (Join-Path $Pub 'probe-timeline.csv'))
 [void](New-AttrCudaDirectory -Path (Join-Path $Pub 'logs'))
 [void](Publish-AttrCudaFileCopy -Source $logPath -Destination (Join-Path $Pub 'logs\smoke-run.log'))
+
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 1 / fable HARDENING): PresentMon is waited on
+# only now, AFTER every smoke artifact above is already on disk. A wait failure -- a hang past
+# TimeoutSeconds or a nonzero exit code -- is now a typed PRESENTMON_UNAVAILABLE terminal (the
+# same outcome and exit code Get-AttrCudaPresentMonDisplayReport already returns for a PresentMon
+# that fails during parsing), never an uncaught throw that would have destroyed everything just
+# published. Wait-PresentMonCapture itself is unchanged -- it still throws PRESENTMON_TIMEOUT
+# internally -- only this call site's handling of that throw changed.
+$presentMonWaitError = $null
+try {
+    $presentMonDoneResult = Wait-PresentMonCapture $presentMonProc
+    if ($presentMonDoneResult.status -ne 'done' -or [int]$presentMonDoneResult.exitCode -ne 0) {
+        throw "PresentMon capture invalid status=$($presentMonDoneResult.status) rc=$($presentMonDoneResult.exitCode)"
+    }
+} catch {
+    $presentMonWaitError = $_.Exception.Message
+}
+if ($null -ne $presentMonWaitError) {
+    $displayFailure = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='PRESENTMON_UNAVAILABLE'
+        fixtureRehearsal=$FixtureRehearsal
+        reason=$presentMonWaitError
+        chains=@()
+        presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')
+        sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $displayFailure (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=PRESENTMON_UNAVAILABLE REASON=`"$presentMonWaitError`" ARTIFACTS=$Pub"
+    exit 23
+}
 
 # Backend-availability gate (swarm ruling, 2026-09-16): parse the run's own diagnostic
 # fields BEFORE any verdict. A run where the CUDA backend never loaded, or where the R16
@@ -1306,7 +1360,20 @@ if (Test-Path -LiteralPath $presentMonPath -PathType Leaf) {
 }
 # hub (sol step-0 key): persist the PresentMon clock anchor BEFORE parsing, so a later join of app swap timestamps
 # (gpu_window.swap utc=) against PresentMon TimeInMs never has to re-derive the origin -- step 0 got it wrong.
-Save-Json ([ordered]@{ schema='playback-attr-3-cuda-presentmon-capture.v1'; captureStartUtc=$presentMonCaptureStartUtc.ToString('o') }) (Join-Path $Pub 'presentmon-capture.json')
+# CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 2 / fable HARDENING): captureStartUtc alone was
+# a single guessed instant with no stated error bar. The full bracket -- the wall clock sampled
+# immediately before/after Start-PresentMonCapture, the OS-reported process start time, and the
+# uncertainty this implies -- is persisted alongside it, so a consumer needing a tighter join than
+# this job's own 2500ms settle time can see exactly how much slack to allow instead of trusting an
+# unbracketed stamp as exact.
+Save-Json ([ordered]@{
+    schema='playback-attr-3-cuda-presentmon-capture.v2'
+    captureStartUtc=$presentMonCaptureStartUtc.ToString('o')
+    preSpawnUtc=$presentMonPreSpawnUtc.ToString('o')
+    postSpawnUtc=$presentMonPostSpawnUtc.ToString('o')
+    processStartUtc=$(if ($null -ne $presentMonProcessStartUtc) { $presentMonProcessStartUtc.ToString('o') } else { $null })
+    captureStartUncertaintyMs=$presentMonCaptureStartUncertaintyMs
+}) (Join-Path $Pub 'presentmon-capture.json')
 $displayReport = Get-AttrCudaPresentMonDisplayReport -CsvPath $presentMonPath -ResultJson $resultJson -CaptureStartUtc $presentMonCaptureStartUtc
 if ($displayReport.status -ne 'OK') {
     $displayFailure = [ordered]@{

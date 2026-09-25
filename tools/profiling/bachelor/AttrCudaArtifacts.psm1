@@ -1876,7 +1876,7 @@ function Get-AttrCudaPresentMonDisplayReport {
     typed non-throwing refusal -- PRESENTMON_UNAVAILABLE or DISPLAY_ASLEEP -- never an uncaught
     exception once the smoke run itself has already passed.
     .DESCRIPTION
-    CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1. Three defects this closes:
+    CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2. Defects this closes:
       - a missing or unreadable presentmon.csv used to reach Import-Csv unguarded and crash the
         whole job with nothing published (evidence: 3 of 8 baseline attempts on Bachelor died at
         Import-Csv of a missing out\diagnostic\presentmon.csv after a full smoke run);
@@ -1884,27 +1884,39 @@ function Get-AttrCudaPresentMonDisplayReport {
         run, destroying every artifact already produced instead of reporting a typed outcome;
       - PresentMon runs --timed 55 against a --seconds 40 playback, so its raw CSV always
         contains idle desktop/startup presents outside the measured window; without restricting
-        to that window, those contaminate the rate for whichever swap chain looks busiest.
-    Every row is grouped by (ProcessID, SwapChainAddress) -- the actual display identity
-    PresentMon reports, since a PID alone conflates multiple swap chains (e.g. a window resize
-    tearing down and recreating one) and a swap chain address alone says nothing about which
-    process owns it. The MLVApp preview chain is the group whose ProcessID matches the exact PID
-    run-release-gui-smoke.ps1 launched and waited on (result.json `process.id`), preferring the
-    chain with the most presented rows among ties.
-    Windowing: TimeInMs is read as milliseconds since -CaptureStartUtc (the wall clock recorded by
-    the caller immediately before PresentMon was started); only rows whose derived timestamp
-    falls within [process.startedAtUtc, process.endedAtUtc] -- the exact lifetime of the launched
-    MLVApp process -- count toward either rate, so idle time before launch or after exit (up to
-    ~15s of it, per --timed 55 against --seconds 40) never counts as a display sample.
-    A "displayed" sample is MsBetweenDisplayChange > 0 (a genuine screen update); a "presented"
-    sample is any row for the chain, including MsBetweenDisplayChange == 0 (a frame PresentMon
-    saw the app hand to the swap chain that never actually changed the screen) -- kept, never
+        to that window, those contaminate the rate for whichever swap chain looks busiest;
+      - (HARNESS-2, sol BLOCKER 3) the required-column set used to include a `DisplayedTime`
+        column that the pinned PresentMon 2.5.1 legacy launch never emits -- every real capture
+        read PRESENTMON_UNAVAILABLE. The required set now matches the real legacy CSV header
+        exactly (Application, ProcessID, SwapChainAddress, PresentMode, MsBetweenPresents,
+        MsBetweenDisplayChange, MsUntilDisplayed, TimeInMs, all confirmed present in real Bachelor
+        captures), and "displayed" is derived from MsBetweenDisplayChange or MsUntilDisplayed --
+        both real columns -- never from the fictional one;
+      - (HARNESS-2, sol HARDENING) a swap chain recreated mid-run (e.g. a resize) used to split
+        one continuous MLVApp preview across two (ProcessID, SwapChainAddress) groups, and only
+        the busier one was reported, silently dropping the other's frames. The logical preview is
+        now every row for the target PID, summed across every swap chain address it used inside
+        the window.
+    Every row is also grouped by (ProcessID, SwapChainAddress) for .chains -- the actual display
+    identity PresentMon reports, since a PID alone conflates multiple swap chains and a swap chain
+    address alone says nothing about which process owns it -- but .selectedChain and
+    .selectedChainRows are the PID-level aggregate described above, not a single address's rows.
+    Windowing: TimeInMs is read as milliseconds since -CaptureStartUtc (the wall clock the caller
+    brackets around PresentMon's own startup -- see playback-attr-3-cuda-job.ps1); only rows whose
+    derived timestamp falls within [process.startedAtUtc, process.endedAtUtc] -- the exact
+    lifetime of the launched MLVApp process -- count toward either rate, so idle time before
+    launch or after exit (up to ~15s of it, per --timed 55 against --seconds 40) never counts as a
+    display sample.
+    A "displayed" sample is MsBetweenDisplayChange > 0, or (when that field is NA -- observed on
+    the very first present of a capture) MsUntilDisplayed > 0: either is a genuine screen update.
+    A "presented" sample is any row for the PID, including one that never displayed -- kept, never
     discarded, so the presented rate is not silently inflated by discarding it and not silently
     deflated by treating it as a display.
     Returns .status one of 'OK' | 'PRESENTMON_UNAVAILABLE' | 'DISPLAY_ASLEEP'; .reason is $null
     only for 'OK'. On 'OK', .chains lists every (ProcessID, SwapChainAddress) group observed in
-    the window and .selectedChain is the MLVApp one; .selectedChainRows carries only its
-    positive-MsBetweenDisplayChange rows, shaped exactly like this job's historical pmRows
+    the window, for audit; .selectedChain is the PID-level aggregate (its swapChainAddresses lists
+    every address summed into it); .selectedChainRows carries only its positive-display rows,
+    shaped exactly like this job's historical pmRows
     (ordinal/timeInMs/msBetweenDisplayChange/displayFpsEquivalent/presentMode), for
     presentmon-series.csv -- tools/profiling/refresh_period_histogram.py depends on that exact
     column name and never sees this function or its chain-selection at all.
@@ -1977,7 +1989,13 @@ function Get-AttrCudaPresentMonDisplayReport {
         return (& $unavailable "PresentMon output at $CsvPath has no rows")
     }
 
-    $requiredColumns = @('Application', 'ProcessID', 'SwapChainAddress', 'PresentMode', 'MsBetweenPresents', 'MsBetweenDisplayChange', 'DisplayedTime', 'TimeInMs')
+    # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol BLOCKER 3): matches the columns the PINNED
+    # PresentMon 2.5.1 legacy launch actually emits -- confirmed against real Bachelor captures
+    # (tools/profiling/bachelor/playback-attr-3-cuda-*.artifacts/presentmon.csv). There is no
+    # DisplayedTime column in that schema (that was only ever a synthetic-fixture column, never a
+    # real one, and required it made every real capture PRESENTMON_UNAVAILABLE); 'displayed' is
+    # derived below from MsBetweenDisplayChange and MsUntilDisplayed instead, both real columns.
+    $requiredColumns = @('Application', 'ProcessID', 'SwapChainAddress', 'PresentMode', 'MsBetweenPresents', 'MsBetweenDisplayChange', 'MsUntilDisplayed', 'TimeInMs')
     $columns = @($rawRows[0].PSObject.Properties.Name)
     $missingColumns = @($requiredColumns | Where-Object { $columns -notcontains $_ })
     if ($missingColumns.Count -gt 0) {
@@ -2006,6 +2024,9 @@ function Get-AttrCudaPresentMonDisplayReport {
         [double]$betweenPresents = 0.0
         $hasBetweenPresents = [double]::TryParse([string]$row.MsBetweenPresents, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$betweenPresents)
 
+        [double]$untilDisplayed = 0.0
+        $hasUntilDisplayed = [double]::TryParse([string]$row.MsUntilDisplayed, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$untilDisplayed)
+
         [void]$windowedRows.Add([pscustomobject]@{
             ordinal = $ordinal
             application = [string]$row.Application
@@ -2015,8 +2036,14 @@ function Get-AttrCudaPresentMonDisplayReport {
             timeInMs = $timeInMs
             msBetweenPresents = if ($hasBetweenPresents) { $betweenPresents } else { $null }
             msBetweenDisplayChange = if ($hasDisplayChange) { $displayChange } else { $null }
-            displayedTime = [string]$row.DisplayedTime
-            displayed = ($hasDisplayChange -and $displayChange -gt 0)
+            msUntilDisplayed = if ($hasUntilDisplayed) { $untilDisplayed } else { $null }
+            # PresentMon's real legacy schema carries no boolean "was this frame displayed"
+            # column -- a genuine screen update is either a positive MsBetweenDisplayChange (this
+            # present changed what is on screen, relative to the previous display change) or,
+            # when that field reads NA (observed on the very first present of a capture, before
+            # any prior display change exists to measure from), a positive MsUntilDisplayed (this
+            # present was itself clocked reaching the screen).
+            displayed = (($hasDisplayChange -and $displayChange -gt 0) -or ($hasUntilDisplayed -and $untilDisplayed -gt 0))
         })
         $ordinal++
     }
@@ -2047,12 +2074,34 @@ function Get-AttrCudaPresentMonDisplayReport {
     if ($mlvAppChains.Count -eq 0) {
         return (& $unavailable "no PresentMon rows in the playback window belong to MLVApp process id $targetPid" $chains)
     }
-    $selected = $mlvAppChains[0]
+
+    # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-2 (sol HARDENING): the logical MLVApp preview is bound to
+    # its PID, not to a single swap chain address. A window resize or mode change can tear down
+    # and recreate the swap chain mid-run, splitting one continuous preview across two
+    # (ProcessID, SwapChainAddress) groups; picking only the busier one (the old behaviour)
+    # silently dropped the other's frames from both counts and rates. Every row for the target
+    # PID, across every address it used inside the window, is summed into one logical chain here
+    # -- $chains above still lists each address separately, for audit.
+    $mlvAppRows = @($windowedRows | Where-Object { $_.processId -eq $targetPid })
+    $mlvAppDisplayedRows = @($mlvAppRows | Where-Object { $_.displayed })
+    $presentedCount = $mlvAppRows.Count
+    $displayedCount = $mlvAppDisplayedRows.Count
+    $selected = [pscustomobject]@{
+        processId = $targetPid
+        swapChainAddress = ($mlvAppChains.swapChainAddress -join ', ')
+        swapChainAddresses = @($mlvAppChains.swapChainAddress)
+        application = $mlvAppChains[0].application
+        presentedCount = $presentedCount
+        displayedCount = $displayedCount
+        presentedFps = if ($windowSeconds -gt 0) { $presentedCount / $windowSeconds } else { $null }
+        displayedFps = if ($windowSeconds -gt 0) { $displayedCount / $windowSeconds } else { $null }
+        isMlvAppChain = $true
+    }
 
     if ($selected.displayedCount -le 0) {
         return [pscustomobject]@{
             status = 'DISPLAY_ASLEEP'
-            reason = "MLVApp chain (processId=$($selected.processId) swapChainAddress=$($selected.swapChainAddress)) presented $($selected.presentedCount) frame(s) in the playback window but displayed 0 -- the panel may be asleep or the window occluded"
+            reason = "MLVApp process id $($selected.processId) presented $($selected.presentedCount) frame(s) across $($mlvAppChains.Count) swap chain(s) in the playback window but displayed 0 -- the panel may be asleep or the window occluded"
             chains = @($chains)
             selectedChain = $selected
             selectedChainRows = @()
@@ -2060,14 +2109,13 @@ function Get-AttrCudaPresentMonDisplayReport {
     }
 
     $selectedChainRows = @(
-        $windowedRows |
-            Where-Object { $_.processId -eq $selected.processId -and $_.swapChainAddress -eq $selected.swapChainAddress -and $_.displayed } |
+        $mlvAppDisplayedRows |
             ForEach-Object {
                 [pscustomobject]@{
                     ordinal = $_.ordinal
                     timeInMs = $_.timeInMs
                     msBetweenDisplayChange = $_.msBetweenDisplayChange
-                    displayFpsEquivalent = 1000.0 / $_.msBetweenDisplayChange
+                    displayFpsEquivalent = if ($null -ne $_.msBetweenDisplayChange -and $_.msBetweenDisplayChange -gt 0) { 1000.0 / $_.msBetweenDisplayChange } else { $null }
                     presentMode = $_.presentMode
                 }
             }
