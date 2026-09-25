@@ -152,9 +152,34 @@ public:
             bool zoomFitEnabled = false;
             bool fastPlaybackScaleEligible = false;
             uint64_t presentationGeneration = 0;
-            /* Requested playback scale factor (1, 2, 4, or 8). The renderer may
-             * reject incompatible clip dimensions and report the active scale. */
+            /* Playback scale factor actually sent to the render thread (1, 2, 4,
+             * or 8) -- i.e. EFFECTIVE scale, already passed through
+             * MainWindow::effectivePlaybackScaleFactorForRequest()'s
+             * CUDA-S4-TEXTURE-ROUTE-CLAMP-1 clamp. The renderer may further
+             * reject incompatible clip dimensions and report the active scale
+             * (see ReadyFrame::playbackScaleFactorActive below). This field is
+             * NOT the user/policy-requested scale before that clamp -- see
+             * playbackScaleFactorRequestedBeforeGpuTextureRouteClamp. */
             int playbackScaleFactor = 1;
+            /* CUDA-ATTRIBUTION-BASELINE-1: the scale MainWindow::
+             * playbackScaleFactorPolicyDecision() picked BEFORE the S4 texture-
+             * route clamp above may have forced it down to 1. Equal to
+             * playbackScaleFactor when no clamp occurred this request. Recorded
+             * per-request (not just as a last-value session summary) so an
+             * attribution leg can tell whether requested scales 4/2/1 actually
+             * exercised different processing resolutions or were silently
+             * clamped to the same one. */
+            int playbackScaleFactorRequestedBeforeGpuTextureRouteClamp = 1;
+            /* CUDA-ATTRIBUTION-BASELINE-1 round 2 (sol minor finding):
+             * MainWindow::m_playbackQualityMode at the moment THIS request
+             * was issued. The manifest emission site runs later, on the
+             * async pipeline's completion callback, by which time the live
+             * GUI setting may have moved on -- reading it there is a GUI-
+             * quality_mode-changed-mid-flight race, the same class of bug
+             * phase3_mode had (see ReadyFrame::phase3Mode). Captured here,
+             * synchronously with the request, like playbackScaleFactor
+             * above. */
+            int playbackQualityMode = 0;
             MainWindowGpuPreviewPolicyState gpuPreviewPolicy;
             GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
             GpuPreviewProcessingConfig gpuPreviewProcessingConfig;
@@ -186,6 +211,23 @@ public:
             double playbackTimelineAdvanceIssueStageTime = 0.0;
             double playbackTimelineSourceFrameReadyEmitStageTime = 0.0;
             double playbackTimelineSourceDrawBeginStageTime = 0.0;
+            /* CUDA-ATTRIBUTION-BASELINE-1 round 6 (sol + astra BLOCKER): which
+             * loop lap this request's frameNumber belongs to
+             * (MainWindow::m_playbackSmokeLoopWrapCount at the moment this
+             * request was issued -- 0 for the first pass through the cut
+             * range, 1 after the first loop wrap, and so on). Captured
+             * synchronously with the request, like playbackScaleFactor above,
+             * because a lookahead request issued near the loop boundary can
+             * legitimately belong to a later lap than the request that
+             * spawned it -- see queuePlaybackLookaheadRequests(). Combined
+             * with frameNumber this is the SOURCE-FRAME OCCURRENCE identity:
+             * two presentations of frameNumber 5 in two different laps are
+             * two distinct occurrences (both real, both should count), while
+             * two presentations of frameNumber 5 in the SAME lap are the same
+             * occurrence (a stale re-present, must not inflate the presented
+             * count). Raw frameNumber alone cannot distinguish these two
+             * cases; see PlaybackPresentedFrameIdentityTracker.h. */
+            uint64_t playbackSmokeLoopEpoch = 0;
         };
 
         const uint8_t *rawImage8 = nullptr;
@@ -195,6 +237,14 @@ public:
         uint32_t frameNumber = 0;
         uint64_t requestSerial = 0;
         OutputMode outputMode = OutputProcessed8;
+        /* CUDA-ATTRIBUTION-BASELINE-1 round 2: the Phase3 mode actually executed
+         * for THIS frame (FrameSlot::phase3Mode, set by renderDecodedSlot/
+         * runSerial from activePhase3Mode -- which can differ from the
+         * requested mode on live fallback). Not the currently configured
+         * policy; see MainWindow's manifest emission, which used to
+         * substitute the configuration here and is exactly what this field
+         * exists to stop. */
+        Phase3Mode phase3Mode = Phase3Mode::Disabled;
         int renderedImageWidth = 0;
         int renderedImageHeight = 0;
         int playbackScaleFactorActive = 1;

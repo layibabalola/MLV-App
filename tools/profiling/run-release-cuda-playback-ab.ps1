@@ -819,6 +819,7 @@ function Read-SmokeSummary {
     if ($null -eq $presentedFrames) {
         $presentedFrames = Convert-ToNullableInt64 (Get-NestedValue $json "validation.presentedFrames")
     }
+    $summaryLegacyFieldsNotAuthoritative = Get-NestedValue $json "log.summaryLegacyFieldsNotAuthoritative"
     $logPath = Get-NestedValue $json "log.path"
     $gpuTextureNoReadbackFrames = $null
     $gpuTextureReadbackFrames = $null
@@ -926,6 +927,15 @@ function Read-SmokeSummary {
         presentedFrames = $presentedFrames
         presentedFps = Convert-ToNullableDouble (Get-NestedValue $summary "presented_fps")
         timelineFps = Convert-ToNullableDouble (Get-NestedValue $summary "timeline_fps")
+        # CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra minor, round-3 PARTIAL):
+        # carry the source's non-authoritative label forward instead of
+        # dropping it. Fails closed to $false (not authoritative) whenever
+        # the source JSON predates log.summaryLegacyFieldsNotAuthoritative --
+        # an absent label is not evidence the field is safe.
+        timelineFpsAuthoritative = (
+            ($null -ne $summaryLegacyFieldsNotAuthoritative) -and
+            -not (@($summaryLegacyFieldsNotAuthoritative) -contains "timeline_fps")
+        )
         guiStatusText = Get-NestedValue $json "playbackFps.guiStatusText"
         guiStatusFps = Convert-ToNullableDouble (Get-NestedValue $json "playbackFps.guiStatusValue")
         visibleGuiStatusText = Get-NestedValue $json "playbackFps.visibleBottomLeftGuiStatusText"
@@ -1719,6 +1729,14 @@ function New-PlaybackCompare {
     [pscustomobject]@{
         presentedFps = New-MetricDelta -BaselineValue $BaselineSummary.presentedFps -CandidateValue $CandidateSummary.presentedFps
         timelineFps = New-MetricDelta -BaselineValue $BaselineSummary.timelineFps -CandidateValue $CandidateSummary.timelineFps
+        # CUDA-ATTRIBUTION-BASELINE-1 round 6 (astra minor, round 4/round-3
+        # PARTIAL): the per-leg summary already carries timelineFpsAuthoritative
+        # (line ~837), but this delta dropped it when it was built -- a
+        # comparison of two non-authoritative legs read as an ordinary,
+        # unqualified delta. Authoritative only when BOTH legs are; fails
+        # closed to $false (via PowerShell's -and short-circuit on $null)
+        # the same way the per-leg field does.
+        timelineFpsAuthoritative = ($BaselineSummary.timelineFpsAuthoritative -and $CandidateSummary.timelineFpsAuthoritative)
         guiStatusFps = New-MetricDelta -BaselineValue $BaselineSummary.guiStatusFps -CandidateValue $CandidateSummary.guiStatusFps
         visibleGuiFps = New-MetricDelta -BaselineValue $BaselineSummary.visibleGuiFps -CandidateValue $CandidateSummary.visibleGuiFps
         avgPresentIntervalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPresentIntervalMs -CandidateValue $CandidateSummary.avgPresentIntervalMs

@@ -529,7 +529,7 @@ function Save-AttrCudaCommittedBlobBytes {
 # never discovered, never inferred.
 #
 # WHAT Assert-AttrCudaClosureComplete (below) ACTUALLY PROVES, STATED HONESTLY. It is a
-# REGRESSION TRIPWIRE over these six reviewed, byte-pinned files at generator time -- never an
+# REGRESSION TRIPWIRE over these seven reviewed, byte-pinned files at generator time -- never an
 # exhaustive proof that no future edit to them can smuggle in an unstaged load. PowerShell
 # resolves some commands dynamically (a computed string, a resolved alias), and no static census
 # can enumerate every spelling of "load a file" a determined future edit could use. What it DOES
@@ -544,10 +544,10 @@ function Save-AttrCudaCommittedBlobBytes {
 # THE SAFETY PROPERTY FOR WHATEVER THIS CENSUS CANNOT SEE IS THE RUNTIME PATH, NOT THIS
 # FUNCTION: a staged file that fails to load in the smoke child is reported as SMOKE_RUN_FAILED
 # (playback-attr-3-cuda-job.ps1's failure branch, ~:734-780), never silently masked as a
-# PresentMon timeout or a clean result. Today's six real files contain none of the forms this
+# PresentMon timeout or a clean result. Today's seven real files contain none of the forms this
 # census cannot see (hub-verified against the real repo by
 # test_the_real_current_repo_at_head_classifies_cleanly); this census exists to catch a
-# regression the moment one of these six files is edited to add one, not to prove no such form
+# regression the moment one of these seven files is edited to add one, not to prove no such form
 # could ever exist anywhere PowerShell can run.
 #
 # ATTR3-VISUAL-QUALITY-EVIDENCE-1 round 2: added gui-smoke-color-artifact-scan.ps1 -- round 1
@@ -557,13 +557,19 @@ function Save-AttrCudaCommittedBlobBytes {
 # CUDA-S4-TEXTURE-ROUTE-CLAMP-1 round 2: added gui-smoke-gpu-texture-route-validation.ps1 --
 # run-release-gui-smoke.ps1 dot-sources it (~:93) but round 1 never staged it, so the same
 # closure-completeness tests caught the same gap the same way, again.
+#
+# CUDA-ATTRIBUTION-BASELINE-1 round 8b: added playback-smoke-log-parsing.ps1 --
+# run-release-gui-smoke.ps1 dot-sources it (~:96, added by this same PR's round 4, commit
+# b9b93e85) but round 4 never staged it, so the same closure-completeness tests caught the
+# same gap the same way, again (hosted CI on PR #155, ATTRCUDA_UNCLASSIFIED_SCRIPT_REFERENCE).
 $script:AttrCudaSmokeRunnerClosureManifest = @(
     'tools/profiling/run-release-gui-smoke.ps1',
     'tools/profiling/gui-smoke-screenshot-provenance.ps1',
     'tools/profiling/provenance-stamp.ps1',
     'tools/profiling/gui-smoke-process-boundary.psm1',
     'tools/profiling/gui-smoke-color-artifact-scan.ps1',
-    'tools/profiling/gui-smoke-gpu-texture-route-validation.ps1'
+    'tools/profiling/gui-smoke-gpu-texture-route-validation.ps1',
+    'tools/profiling/playback-smoke-log-parsing.ps1'
 )
 
 function Get-AttrCudaSmokeRunnerClosureManifest {
@@ -912,7 +918,7 @@ function Assert-AttrCudaClosureComplete {
     .DESCRIPTION
     ATTR3-SMOKE-RUNNER-DEPS-1 round 3, round 4 (PR #144). Generator-time (and CI-time) only --
     never embedded in an emitted job, same reason as Resolve-AttrCudaCommittedBlobId. This is a
-    REGRESSION TRIPWIRE over these six reviewed files, not an exhaustive proof -- see the module
+    REGRESSION TRIPWIRE over these seven reviewed files, not an exhaustive proof -- see the module
     header above the manifest for the honest statement of what it does and does not guarantee. It
     runs Get-AttrCudaScriptLoadSites over each manifest file's committed text at -Commit and
     requires every site to be exactly one of:

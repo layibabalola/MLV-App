@@ -477,6 +477,11 @@ function Get-PlaybackProofSummary {
                 presentedFrames = $_.presentedFrames
                 presentedFps = $_.presentedFps
                 timelineFps = $_.timelineFps
+                # CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra minor, round-3
+                # PARTIAL): propagate the label one more hop instead of
+                # dropping it again. Fails closed to $false when the input
+                # (an older Summary.clipResults[] entry) predates the label.
+                timelineFpsAuthoritative = if ($null -ne $_.timelineFpsAuthoritative) { [bool]$_.timelineFpsAuthoritative } else { $false }
                 gpuTextureNoReadbackFrames = $_.gpuTextureNoReadbackFrames
                 fallbackFrameCount = $_.fallbackFrameCount
                 glProbeActiveCount = $_.glProbeActiveCount

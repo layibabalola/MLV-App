@@ -7,6 +7,8 @@ empty-but-successful report, or mis-rounding a refresh multiple at the bucket bo
 from __future__ import annotations
 
 import csv
+import json
+import math
 
 import pytest
 
@@ -16,8 +18,10 @@ from refresh_period_histogram import (
     bucket_label,
     build_report,
     compute_buckets,
+    compute_deadline_evaluation,
     compute_refresh_period,
     compute_region_stats,
+    main,
     parse_frame_log_rows,
     parse_presentmon_intervals,
     percentile,
@@ -281,6 +285,124 @@ def test_percentile_matches_known_p50_p95():
 def test_percentile_requires_at_least_one_value():
     with pytest.raises(RefreshHistogramError):
         percentile([], 0.5)
+
+
+# --- deadline evaluation (CUDA-ATTRIBUTION-BASELINE-1) -----------------------------
+
+def test_deadline_evaluation_two_refreshes_at_lower_target_is_not_a_miss():
+    # 60Hz panel (16.67ms refresh), 30fps target (33.34ms intended period): every
+    # frame landing on exactly 2 refreshes is CORRECT cadence, not a missed deadline.
+    intervals = [33.34] * 20
+    result = compute_deadline_evaluation(intervals, target_fps=30.0)
+    assert result["intendedPeriodMs"] == pytest.approx(33.34, abs=0.01)
+    assert result["missedDeadlineCount"] == 0
+    assert result["missedDeadlineShare"] == pytest.approx(0.0)
+
+
+def test_deadline_evaluation_flags_intervals_beyond_tolerance():
+    intervals = [33.34] * 15 + [100.0] * 5  # 5 frames land ~3x the intended period
+    result = compute_deadline_evaluation(intervals, target_fps=30.0, tolerance_multiplier=1.5)
+    assert result["missedDeadlineCount"] == 5
+    assert result["missedDeadlineShare"] == pytest.approx(0.25)
+
+
+def test_deadline_evaluation_rejects_non_positive_target_fps():
+    with pytest.raises(RefreshHistogramError, match="positive"):
+        compute_deadline_evaluation([16.67], target_fps=0.0)
+    with pytest.raises(RefreshHistogramError, match="positive"):
+        compute_deadline_evaluation([16.67], target_fps=-30.0)
+
+
+def test_deadline_evaluation_rejects_tolerance_at_or_below_one():
+    with pytest.raises(RefreshHistogramError, match="toleranceMultiplier"):
+        compute_deadline_evaluation([16.67], target_fps=30.0, tolerance_multiplier=1.0)
+
+
+def test_deadline_evaluation_rejects_non_finite_tolerance():
+    # CUDA-ATTRIBUTION-BASELINE-1 round 2 (astra minor finding): on 2bc8cc0a
+    # `tolerance_multiplier <= 1.0` is False for both NaN and +inf (NaN
+    # comparisons are always False; inf > 1.0), so both slipped past the
+    # guard. An infinite tolerance then makes deadline_ms infinite, so no
+    # interval is ever "missed" -- a silent false missedDeadlineCount=0
+    # instead of a rejection. This test fails on 2bc8cc0a (no exception
+    # raised) and passes once non-finite values are rejected.
+    with pytest.raises(RefreshHistogramError, match="toleranceMultiplier"):
+        compute_deadline_evaluation([1000.0], target_fps=30.0, tolerance_multiplier=math.nan)
+    with pytest.raises(RefreshHistogramError, match="toleranceMultiplier"):
+        compute_deadline_evaluation([1000.0], target_fps=30.0, tolerance_multiplier=math.inf)
+    with pytest.raises(RefreshHistogramError, match="toleranceMultiplier"):
+        compute_deadline_evaluation([1000.0], target_fps=30.0, tolerance_multiplier=-math.inf)
+
+
+def test_deadline_evaluation_omitted_from_report_without_target_fps(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    report = build_report(str(csv_path), str(log_path))
+    assert report["deadlineEvaluation"] is None
+
+
+def test_deadline_evaluation_present_in_report_with_target_fps(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 20)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    report = build_report(
+        str(csv_path), str(log_path), refresh_period_ms=16.67, target_fps=60.0, source_fps=24.0
+    )
+    assert report["deadlineEvaluation"] is not None
+    assert report["deadlineEvaluation"]["targetFps"] == 60.0
+    assert report["deadlineEvaluation"]["sourceFps"] == 24.0
+    assert report["deadlineEvaluation"]["expectedRefreshesPerFrame"] == pytest.approx(1.0, abs=0.01)
+
+
+# --- CLI wiring (round 11, sol MINOR: "Deadline unit/report tests do not pin the
+# CLI's live args.target_fps attachment; replacing it with None at
+# refresh_period_histogram.py:438 bypasses deadline output while the direct tests
+# remain green") -- exercises main(argv), not build_report() directly, so a
+# regression at the `target_fps=args.target_fps` call site itself is caught. ------
+
+def test_main_cli_attaches_target_fps_argument_to_the_deadline_evaluation(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 20)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+    out_path = tmp_path / "report.json"
+
+    exit_code = main([
+        "--presentmon-csv", str(csv_path),
+        "--frame-log", str(log_path),
+        "--refresh-period-ms", "16.67",
+        "--target-fps", "60.0",
+        "--out", str(out_path),
+    ])
+
+    assert exit_code == 0
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["deadlineEvaluation"] is not None
+    assert report["deadlineEvaluation"]["targetFps"] == 60.0
+
+
+def test_main_cli_omits_deadline_evaluation_without_target_fps_argument(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 20)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+    out_path = tmp_path / "report.json"
+
+    exit_code = main([
+        "--presentmon-csv", str(csv_path),
+        "--frame-log", str(log_path),
+        "--refresh-period-ms", "16.67",
+        "--out", str(out_path),
+    ])
+
+    assert exit_code == 0
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["deadlineEvaluation"] is None
 
 
 # --- end-to-end build_report ----------------------------------------------------------

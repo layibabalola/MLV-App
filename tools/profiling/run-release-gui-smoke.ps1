@@ -102,6 +102,7 @@ $validationWarnings = @()
 . (Join-Path $PSScriptRoot 'gui-smoke-gpu-texture-route-validation.ps1')
 Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force
 . (Join-Path $PSScriptRoot 'provenance-stamp.ps1')
+. (Join-Path $PSScriptRoot 'playback-smoke-log-parsing.ps1')
 
 if ($RequireFreshScreenshotRender -and -not $CaptureScreenshot) {
     throw "-RequireFreshScreenshotRender requires -CaptureScreenshot."
@@ -188,33 +189,9 @@ if (($CaptureScreenshot -or $FrameTelemetry) -and $Seconds -lt $settledValidatio
     )
 }
 
-function Convert-PlaybackLogLineToObject {
-    param([string]$Line)
-
-    $result = [ordered]@{}
-    $matches = [regex]::Matches($Line, '(?<key>[A-Za-z0-9_]+)=(?<value>"[^"]*"|\S+)')
-    foreach ($match in $matches) {
-        $key = $match.Groups["key"].Value
-        $rawValue = $match.Groups["value"].Value.Trim('"')
-
-        $intValue = 0L
-        $doubleValue = 0.0
-        if ([long]::TryParse($rawValue, [ref]$intValue)) {
-            $result[$key] = $intValue
-        }
-        elseif ([double]::TryParse(
-            $rawValue,
-            [System.Globalization.NumberStyles]::Float,
-            [System.Globalization.CultureInfo]::InvariantCulture,
-            [ref]$doubleValue)) {
-            $result[$key] = $doubleValue
-        }
-        else {
-            $result[$key] = $rawValue
-        }
-    }
-    [pscustomobject]$result
-}
+# Select-PlaybackSmokeRecordLine and Convert-PlaybackLogLineToObject are
+# defined in playback-smoke-log-parsing.ps1 (dot-sourced above) so they can be
+# unit-tested without launching the GUI app.
 
 function Get-LogTimestampUtc {
     param([string]$Line)
@@ -1786,6 +1763,32 @@ $cpuSummaryLine = $recentLines |
 $gpuSummaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.gpu_summary*" } |
     Select-Object -Last 1
+# CUDA-ATTRIBUTION-BASELINE-1: sound, serial-based skip/frame-population
+# accounting, immune to the loop-wrap unsoundness of the timeline-position
+# figures on playback_smoke.summary (see MainWindow.cpp finishPlaybackSmokeTelemetry).
+# CUDA-ATTRIBUTION-BASELINE-1 round 4 (astra major, round-3 regression): the
+# companion playback_smoke.source_frame_population line's own population_basis
+# explanatory text below names this field ("...companion playback_smoke.
+# frame_population -- this is the fix for...") as plain prose, so a bare
+# "*playback_smoke.frame_population*" wildcard also matches THAT line, and
+# with -Last 1 it wins once the source-frame-population line is emitted after
+# it -- silently losing loop_wrap_count and every other field here (parsed
+# from the wrong line's key=value pairs) and reviving the equal-endpoint false
+# "stuck" failure this field exists to prevent. Select-PlaybackSmokeRecordLine
+# anchors on " session=" -- the literal key=value token that starts every
+# actual record -- which the prose reference never has immediately after the
+# field name.
+$framePopulationLine = Select-PlaybackSmokeRecordLine `
+    -Lines $recentLines -FieldName "playback_smoke.frame_population"
+# CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
+# RESOLVED): the frame_population figures above only see frames that BECAME a
+# render request. This line's offered_source_frames is independent of request
+# activity (real elapsed playback time converted to frame units), so it also
+# catches a source frame drop-frame catch-up skipped over before ever issuing
+# a request for it -- see MainWindow.cpp finishPlaybackSmokeTelemetry's
+# comment on m_playbackTimelineSourceFramesOffered.
+$sourceFramePopulationLine = Select-PlaybackSmokeRecordLine `
+    -Lines $recentLines -FieldName "playback_smoke.source_frame_population"
 # Round-4: fields that used to sit beyond QString::arg's %99 limit (garbage)
 # now arrive on a continuation line; merged into the same cpuSummary object.
 $cpuSummaryExtLine = $recentLines |
@@ -1880,6 +1883,8 @@ $playbackStart = if ($playbackStartLine) { Convert-PlaybackLogLineToObject $play
 $playbackSummary = if ($summaryLine) { Convert-PlaybackLogLineToObject $summaryLine } else { $null }
 $cpuSummary = if ($cpuSummaryLine) { Convert-PlaybackLogLineToObject $cpuSummaryLine } else { $null }
 $gpuSummary = if ($gpuSummaryLine) { Convert-PlaybackLogLineToObject $gpuSummaryLine } else { $null }
+$framePopulation = if ($framePopulationLine) { Convert-PlaybackLogLineToObject $framePopulationLine } else { $null }
+$sourceFramePopulation = if ($sourceFramePopulationLine) { Convert-PlaybackLogLineToObject $sourceFramePopulationLine } else { $null }
 if ($cpuSummary -and $cpuSummaryExtLine) {
     $cpuSummaryExt = Convert-PlaybackLogLineToObject $cpuSummaryExtLine
     if ($cpuSummaryExt) {
@@ -2035,6 +2040,81 @@ if ($null -ne $timelineDeltaAbs -and [double]$timelineDeltaAbs -gt 0 -and
     $null -ne $skippedOrUnpresentedFrames) {
     $skippedOrUnpresentedRatio = [double]$skippedOrUnpresentedFrames / [double]$timelineDeltaAbs
 }
+# CUDA-ATTRIBUTION-BASELINE-1: sound replacement, immune to the loop-wrap
+# unsoundness of the timeline-position figures above (a loop can revisit an
+# earlier slider position, or lap all the way back to start, without that
+# meaning "stuck"). requestedFramesBySerial counts render requests issued
+# (a monotonic counter that never resets mid-session), so this ratio is valid
+# even when loopWrapCount > 0. NOT the gate figure any more -- kept only for
+# backward-compatible reporting -- because it also counts speculative
+# render-lookahead requests that were never the frame playback waited on and
+# were intentionally discarded, never reaching presentation. With lookahead
+# enabled that inflates this ratio; see requestedTargetFramesBySerial below.
+$requestedFramesBySerial = Get-ObjectPropertyValue $framePopulation "requested_frames_by_serial"
+$skippedOrUnpresentedFramesBySerial = Get-ObjectPropertyValue $framePopulation "skipped_or_unpresented_frames_by_serial"
+$loopWrapCount = Get-ObjectPropertyValue $framePopulation "loop_wrap_count"
+$timelinePositionBasisSound = Get-ObjectPropertyValue $framePopulation "timeline_position_basis_sound"
+$skippedOrUnpresentedRatioBySerial = $null
+if ($null -ne $requestedFramesBySerial -and [double]$requestedFramesBySerial -gt 0 -and
+    $null -ne $skippedOrUnpresentedFramesBySerial) {
+    $skippedOrUnpresentedRatioBySerial = [double]$skippedOrUnpresentedFramesBySerial / [double]$requestedFramesBySerial
+}
+# CUDA-ATTRIBUTION-BASELINE-1 round 2: the actually-authoritative figure.
+# requestedTargetFramesBySerial (MainWindow::m_nextTargetRenderRequestSerial
+# delta) advances only at the one target request drawFrame() issues per
+# call, excluding every speculative lookahead request -- wrap-immune like
+# requestedFramesBySerial above, but without its lookahead overcount.
+$requestedTargetFramesBySerial = Get-ObjectPropertyValue $framePopulation "requested_target_frames_by_serial"
+$skippedOrUnpresentedFramesByTargetSerial = Get-ObjectPropertyValue $framePopulation "skipped_or_unpresented_frames_by_target_serial"
+$lookaheadRequestsBySerial = Get-ObjectPropertyValue $framePopulation "lookahead_requests_by_serial"
+$skippedOrUnpresentedRatioByTargetSerial = $null
+if ($null -ne $requestedTargetFramesBySerial -and [double]$requestedTargetFramesBySerial -gt 0 -and
+    $null -ne $skippedOrUnpresentedFramesByTargetSerial) {
+    $skippedOrUnpresentedRatioByTargetSerial = [double]$skippedOrUnpresentedFramesByTargetSerial / [double]$requestedTargetFramesBySerial
+}
+# CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
+# RESOLVED): requestedTargetFramesBySerial above only sees frames that BECAME
+# a render request -- a source frame drop-frame catch-up skipped over before
+# ever issuing a request for it is invisible to it, so an "optimisation" that
+# quietly requests fewer source frames could pass the ratio above cleanly
+# (astra's repro: 60 source-frame advances, 20 target requests, all 20
+# presented -- 0% loss by that ratio, 66.7% true loss). offeredSourceFrames
+# (MainWindow::m_playbackTimelineSourceFramesOffered's session delta) is
+# independent of request activity, so the ratio built from it catches that.
+$offeredSourceFrames = Get-ObjectPropertyValue $sourceFramePopulation "offered_source_frames"
+$neverRequestedSourceFrames = Get-ObjectPropertyValue $sourceFramePopulation "never_requested_source_frames"
+$requestedThenDiscardedLookaheadFrames = Get-ObjectPropertyValue $sourceFramePopulation "requested_then_discarded_lookahead_frames"
+$requestedThenSkippedTargetFrames = Get-ObjectPropertyValue $sourceFramePopulation "requested_then_skipped_target_frames"
+$presentedViaTargetFrames = Get-ObjectPropertyValue $sourceFramePopulation "presented_via_target_frames"
+$presentedViaLookaheadFrames = Get-ObjectPropertyValue $sourceFramePopulation "presented_via_lookahead_frames"
+$sourceFramePopulationPresentedFrames = Get-ObjectPropertyValue $sourceFramePopulation "presented_frames"
+$sourceFramePopulationSound = Convert-ToNullableBool (Get-ObjectPropertyValue $sourceFramePopulation "partition_sound")
+$sourceFrameLossRatio = Get-ObjectPropertyValue $sourceFramePopulation "source_frame_loss_ratio"
+# CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "the telemetry-off
+# session reports a CONFIDENT 100% loss"): the third state. A session with
+# MLVAPP_PLAYBACK_SMOKE_TELEMETRY off emits source_frame_attribution_measured
+# =false, partition_sound=false and source_frame_loss_ratio="unmeasured"
+# (a non-numeric token) -- distinct from both "sound, 0% loss" and "sound,
+# 100% loss". $null here means an older build that predates this field, not
+# "measured"; treated as not-measured below, matching this script's
+# missing-is-always-an-error convention once telemetry was actually
+# requested (see the validation failure below).
+$sourceFrameAttributionMeasured = Convert-ToNullableBool (Get-ObjectPropertyValue $sourceFramePopulation "source_frame_attribution_measured")
+$sourceFrameLossRatioForGate = $null
+if ($sourceFramePopulationSound -eq $true -and $null -ne $sourceFrameLossRatio) {
+    $sourceFrameLossRatioForGate = [double]$sourceFrameLossRatio
+}
+# Prefer the source-frame figure -- it is the only one of the four that
+# catches skip-before-request loss. Fall back through the progressively
+# less-sound request-based figures only when the newer telemetry did not run
+# (older build, MLVAPP_PLAYBACK_SMOKE_TELEMETRY off) or reported its
+# partition unsound (see the validation failure this triggers below: an
+# unsound partition fails closed rather than silently falling back).
+$skippedOrUnpresentedRatioForGate =
+    if ($null -ne $sourceFrameLossRatioForGate) { $sourceFrameLossRatioForGate }
+    elseif ($null -ne $skippedOrUnpresentedRatioByTargetSerial) { $skippedOrUnpresentedRatioByTargetSerial }
+    elseif ($null -ne $skippedOrUnpresentedRatioBySerial) { $skippedOrUnpresentedRatioBySerial }
+    else { $skippedOrUnpresentedRatio }
 $validatedScaleRequest = if ($null -ne $scaleRequestLast) { $scaleRequestLast } else { $scaleRequestStart }
 $validatedQualityMode = if ($null -ne $qualityModeLast) { $qualityModeLast } else { $qualityModeStart }
 $autoDecision = [pscustomobject]@{
@@ -2154,15 +2234,48 @@ if (-not $LaunchOnlyProbe) {
     if ($null -eq $firstPresentedFrame -or $null -eq $lastPresentedFrame) {
         $validationFailures += "Playback summary did not report first and last presented frame ids."
     }
-    elseif ([int64]$firstPresentedFrame -eq [int64]$lastPresentedFrame) {
-        $validationFailures += "Displayed playback did not advance: first and last presented frame are both $firstPresentedFrame."
+    # CUDA-ATTRIBUTION-BASELINE-1: first==last is NOT sound evidence of a stuck
+    # playback when the clip looped (--loop can lap all the way back to a
+    # position equal to, or indistinguishable from, the start). Only fail
+    # here when frame_population confirms zero loop wraps happened; an
+    # UNKNOWN wrap count (older telemetry, field missing) still fails closed,
+    # matching this script's existing missing-is-always-an-error convention.
+    elseif ([int64]$firstPresentedFrame -eq [int64]$lastPresentedFrame -and
+            ($null -eq $loopWrapCount -or [int64]$loopWrapCount -eq 0)) {
+        $validationFailures += "Displayed playback did not advance: first and last presented frame are both $firstPresentedFrame (loop_wrap_count=$loopWrapCount)."
     }
-    if ($null -eq $skippedOrUnpresentedRatio) {
+    # CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
+    # RESOLVED): the source-frame partition is the only figure that can see
+    # skip-before-request loss. If it ran but reported itself unsound (a
+    # request/presentation counter behaved inconsistently with the bucket
+    # definitions -- see PlaybackSourceFramePopulation::partitionSound), fail
+    # closed here instead of silently trusting whichever request-based figure
+    # $skippedOrUnpresentedRatioForGate fell back to above.
+    # Round 7 (astra major, "the telemetry-off session reports a CONFIDENT
+    # 100% loss"): partition_sound is now unconditionally false whenever
+    # source_frame_attribution_measured is false too (an UNMEASURED session,
+    # not an unsound one). Only raise THIS failure when telemetry actually
+    # ran and still came out unsound -- that is a real bucket-arithmetic bug.
+    # An unmeasured record is legitimate whenever this run did not request
+    # telemetry (-FrameTelemetry:$false); when it DID request telemetry
+    # ($FrameTelemetry, the default) but the record says unmeasured anyway,
+    # that is a wiring failure and must still fail closed.
+    # Round 9 (astra major, "request-based accounting fails OPEN when the
+    # source-frame population record is missing"): a MISSING record must
+    # fail closed too, whenever telemetry was requested -- see
+    # Get-SourceFrameAttributionValidationFailures (playback-smoke-log-parsing.ps1)
+    # for the three-state contract this replaces a two-state (present-only) check with.
+    $validationFailures += Get-SourceFrameAttributionValidationFailures `
+        -SourceFramePopulation $sourceFramePopulation `
+        -AttributionMeasured $sourceFrameAttributionMeasured `
+        -PartitionSound $sourceFramePopulationSound `
+        -FrameTelemetryRequested $FrameTelemetry
+    if ($null -eq $skippedOrUnpresentedRatioForGate) {
         $validationFailures += "Playback summary could not establish a skipped/unpresented-frame ratio."
     }
-    elseif ($skippedOrUnpresentedRatio -gt $MaxSkippedOrUnpresentedRatio) {
+    elseif ($skippedOrUnpresentedRatioForGate -gt $MaxSkippedOrUnpresentedRatio) {
         $validationFailures += ("Skipped/unpresented-frame ratio {0:P2} exceeds the playback-quality limit {1:P2}." -f
-            $skippedOrUnpresentedRatio, $MaxSkippedOrUnpresentedRatio)
+            $skippedOrUnpresentedRatioForGate, $MaxSkippedOrUnpresentedRatio)
     }
 }
 if ($FailOnColorArtifact -and
@@ -2467,8 +2580,15 @@ $result = [pscustomobject]@{
         screenshotGuiStatusValue = $windowScreenshotFpsStatusValue
         smokePresentedFps = Get-ObjectPropertyValue $playbackSummary "presented_fps"
         smokeTimelineFps = Get-ObjectPropertyValue $playbackSummary "timeline_fps"
+        # CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra minor, prior finding 5
+        # PARTIAL): mark this exported consumer surface too -- smokeTimelineFps
+        # is built from the same timeline-position endpoint delta that is
+        # unsound across loop wraps (see skippedOrUnpresentedRatioSound and
+        # its comment above). smokePresentedFps is presented-count-based and
+        # does not share that unsoundness.
+        smokeTimelineFpsAuthoritative = $false
         reportGuidance = "When citing bottom-left GUI FPS, cite sustainedBottomLeftGuiFps/visibleBottomLeftGuiFps and include the sustainedBottomLeftGuiProofPath/*-fps-status.png crop. For stable FPS, run long enough for playback to settle, for example -Seconds 30. Do not use the presented-frame screenshot as FPS proof because it intentionally omits GUI chrome."
-        note = "sustainedBottomLeftGuiFps/visibleBottomLeftGuiFps/screenshotGuiStatusValue is the bottom-left Playback FPS label visible after the requested playback duration in screenshot.windowCapture and enlarged in playbackFps.sustainedBottomLeftGuiProof; guiStatusValue is the later end-of-run summary sample and can differ; smokePresentedFps and smokeTimelineFps are smoke-run telemetry over the full requested duration, and per-stage FPS-equivalent values are 1000 / stage_ms."
+        note = "sustainedBottomLeftGuiFps/visibleBottomLeftGuiFps/screenshotGuiStatusValue is the bottom-left Playback FPS label visible after the requested playback duration in screenshot.windowCapture and enlarged in playbackFps.sustainedBottomLeftGuiProof; guiStatusValue is the later end-of-run summary sample and can differ; smokePresentedFps and smokeTimelineFps are smoke-run telemetry over the full requested duration, and per-stage FPS-equivalent values are 1000 / stage_ms. smokeTimelineFps is NOT authoritative (see smokeTimelineFpsAuthoritative) -- it shares skippedOrUnpresentedRatio's loop-wrap unsoundness."
     }
     playbackArtifacts = $playbackArtifacts
     hostLoad = [pscustomobject]@{
@@ -2521,6 +2641,20 @@ $result = [pscustomobject]@{
         runMetadata = $runMetadata
         playbackStart = $playbackStart
         summary = $playbackSummary
+        # CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra minor, prior finding 5
+        # PARTIAL): mark this exported consumer surface too. summary carries
+        # skipped_or_unpresented_frames/timeline_delta/timeline_delta_abs/
+        # timeline_fps, the same timeline-position-based fields that are
+        # unsound across loop wraps (see validation.skippedOrUnpresentedRatioSound
+        # and MainWindow.cpp finishPlaybackSmokeTelemetry's skippedOrUnpresented
+        # comment). See validation.sourceFrameLossRatio for the authoritative
+        # replacement.
+        summaryLegacyFieldsNotAuthoritative = @(
+            'skipped_or_unpresented_frames',
+            'timeline_delta',
+            'timeline_delta_abs',
+            'timeline_fps'
+        )
     cpuSummary = $cpuSummary
     stageSplitSummary = $stageSplitSummary
     processingDetailSummary = $processingDetailSummary
@@ -2544,6 +2678,9 @@ $result = [pscustomobject]@{
             runMetadata = $runMetadataLine
             playbackStart = $playbackStartLine
             summary = $summaryLine
+            # Same caveat as log.summaryLegacyFieldsNotAuthoritative, as raw
+            # text in this line rather than a parsed field name.
+            summaryLegacyFieldsNotAuthoritative = $true
             cpuSummary = $cpuSummaryLine
             processingDetailSummary = $processingDetailSummaryLine
             debayerDetailSummary = $debayerDetailSummaryLine
@@ -2580,10 +2717,65 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     launchOnlyProbe = [bool]$LaunchOnlyProbe
     firstPresentedFrame = $firstPresentedFrame
     lastPresentedFrame = $lastPresentedFrame
+    # CUDA-ATTRIBUTION-BASELINE-1 round 2: equal first/last frame IDs are NOT
+    # sound evidence of a stuck playback when the clip looped -- a full lap
+    # can return the slider to (or near) its start position while playback
+    # advanced the whole clip and wrapped (same reasoning as the
+    # first==last stuck-playback gate above). Only read "did not advance"
+    # from equal endpoints when loopWrapCount is known to be zero.
     displayedFrameAdvanced = ($null -ne $firstPresentedFrame -and
         $null -ne $lastPresentedFrame -and
-        [int64]$firstPresentedFrame -ne [int64]$lastPresentedFrame)
+        ([int64]$firstPresentedFrame -ne [int64]$lastPresentedFrame -or
+         ($null -ne $loopWrapCount -and [int64]$loopWrapCount -gt 0)))
+    # skippedOrUnpresentedRatio (legacy, timeline-position-based) is not
+    # authoritative whenever timelinePositionBasisSound is false/unknown --
+    # see finishPlaybackSmokeTelemetry's comment on skippedOrUnpresented.
+    # Mark that at this consumer surface, not only in the emitter's comment.
     skippedOrUnpresentedRatio = $skippedOrUnpresentedRatio
+    skippedOrUnpresentedRatioAuthoritative = $false
+    skippedOrUnpresentedRatioSound = (Convert-ToNullableBool $timelinePositionBasisSound)
+    # skippedOrUnpresentedRatioBySerial (all render requests, including
+    # discarded speculative lookaheads) is wrap-immune but overcounts loss
+    # whenever lookaheadRequestsBySerial > 0; also not authoritative --
+    # sourceFrameLossRatio below is.
+    skippedOrUnpresentedRatioBySerial = $skippedOrUnpresentedRatioBySerial
+    skippedOrUnpresentedRatioBySerialAuthoritative = $false
+    # CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
+    # RESOLVED): demoted from authoritative -- this figure only sees frames
+    # that BECAME a target request, so it can pass (0% loss) while
+    # sourceFrameLossRatio below shows substantial source-frame loss (astra's
+    # repro: 66.7%). Kept for backward compatibility, not the gate.
+    skippedOrUnpresentedRatioByTargetSerial = $skippedOrUnpresentedRatioByTargetSerial
+    skippedOrUnpresentedRatioByTargetSerialAuthoritative = $false
+    skippedOrUnpresentedRatioForGate = $skippedOrUnpresentedRatioForGate
+    requestedFramesBySerial = $requestedFramesBySerial
+    requestedTargetFramesBySerial = $requestedTargetFramesBySerial
+    lookaheadRequestsBySerial = $lookaheadRequestsBySerial
+    loopWrapCount = $loopWrapCount
+    # sourceFrameLossRatio is the authoritative playback-quality gate figure
+    # (see skippedOrUnpresentedRatioForGate's selection above and
+    # MainWindow.cpp finishPlaybackSmokeTelemetry's playback_smoke.
+    # source_frame_population comment): offered_source_frames is independent
+    # of request activity, so it is the only figure of the group on this
+    # object that catches a source frame skipped over before ever becoming a
+    # request. Authoritative only while sourceFrameLossRatioSound is true --
+    # see the validation failure this script raises when it is not.
+    offeredSourceFrames = $offeredSourceFrames
+    neverRequestedSourceFrames = $neverRequestedSourceFrames
+    requestedThenDiscardedLookaheadFrames = $requestedThenDiscardedLookaheadFrames
+    requestedThenSkippedTargetFrames = $requestedThenSkippedTargetFrames
+    presentedViaTargetFrames = $presentedViaTargetFrames
+    presentedViaLookaheadFrames = $presentedViaLookaheadFrames
+    sourceFramePopulationPresentedFrames = $sourceFramePopulationPresentedFrames
+    sourceFrameLossRatio = $sourceFrameLossRatio
+    sourceFrameLossRatioAuthoritative = $true
+    sourceFrameLossRatioSound = $sourceFramePopulationSound
+    # CUDA-ATTRIBUTION-BASELINE-1 round 7 (astra major, "the telemetry-off
+    # session reports a CONFIDENT 100% loss"): the third state --
+    # sourceFrameLossRatio is the literal string "unmeasured" (not a number)
+    # and sourceFrameLossRatioSound is false whenever this is false, distinct
+    # from a genuinely unsound-but-measured partition.
+    sourceFrameAttributionMeasured = $sourceFrameAttributionMeasured
     maxSkippedOrUnpresentedRatio = $MaxSkippedOrUnpresentedRatio
     colorArtifactScanPassed = [bool]$colorArtifactScanPassed
     colorArtifactScanVerdict = $colorArtifactVerdict

@@ -1714,6 +1714,13 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     {
         memset(timing, 0, sizeof(*timing));
         timing->available = reconTiming.available || amazeTiming.available;
+        /* CUDA-ATTRIBUTION-BASELINE-1 round 2: this writer used to leave these
+         * two component flags at their memset zero while `available` (their
+         * OR) and the summed timings above were populated -- silently
+         * reverting the three-state availability contract to the old
+         * two-state bug on this route. Match GpuDisplayWindow.cpp's writer. */
+        timing->recon_available = reconTiming.available ? 1 : 0;
+        timing->amaze_available = amazeTiming.available ? 1 : 0;
         timing->upload_ms =
             (reconTiming.available ? reconTiming.upload_ms : 0.0)
             + (amazeTiming.available ? amazeTiming.uploadMs : 0.0);

@@ -10,6 +10,7 @@
 #include "DecodeWorker.h"
 #include "GpuDebayer.h"
 #include "Phase3Breadcrumbs.h"
+#include "PlaybackAchievedScalePolicy.h"
 #include "PlaybackFrameRange.h"
 #include "PlaybackQualityPolicy.h"
 #include "ReconWorker.h"
@@ -1556,6 +1557,7 @@ bool RenderFrameThread::acquireReadySlotLocked( ReadyFrame *frame,
         frame->frameNumber = slot.frameNumber;
         frame->requestSerial = slot.requestSerial;
         frame->outputMode = slot.outputMode;
+        frame->phase3Mode = slot.phase3Mode;
         frame->renderedImageWidth = slot.renderedImageWidth;
         frame->renderedImageHeight = slot.renderedImageHeight;
         frame->playbackScaleFactorActive = slot.playbackScaleFactorActive;
@@ -4747,16 +4749,38 @@ void RenderFrameThread::drawFrame( int slotIndex,
         }
     }
 
-    int playbackScaleFactorActive = playbackScaleFactor;
-    if( m_pMlvObject
-     && ( outputMode == OutputProcessed8 || outputMode == OutputProcessed16 ) )
-    {
-        const int coreActiveScale = m_pMlvObject->playback_scale_factor_active;
-        if( coreActiveScale == 1 || coreActiveScale == 2 || coreActiveScale == 4 || coreActiveScale == 8 )
-        {
-            playbackScaleFactorActive = coreActiveScale;
-        }
-    }
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 2: playbackScaleFactorActive must mean
+     * the scale actually applied to the work this route performed, not the
+     * scale that was merely requested. Only OutputProcessed8/16 ever resize
+     * (mlvFrameOutputDimensions above, driven by the MLV core's own clamp);
+     * OutputDebayered16 always debayers at full source resolution -- see
+     * renderedImageWidth/renderedImageHeight above, which stay at
+     * m_imageWidth/m_imageHeight on this route regardless of the requested
+     * scale. Reporting the requested scale here would let a leg read
+     * "achieved_scale=4" while full-resolution work happened underneath.
+     * The route-vs-scale decision itself lives in PlaybackAchievedScalePolicy
+     * so it is unit-tested (tests/console/test_playback_achieved_scale_policy.cpp)
+     * without the render thread. */
+    const PlaybackOutputRoute achievedScaleRoute =
+        outputMode == OutputProcessed8
+            ? PlaybackOutputRoute::Processed8
+        : outputMode == OutputProcessed16
+            ? PlaybackOutputRoute::Processed16
+            : PlaybackOutputRoute::Debayered16;
+    const int coreActiveScale =
+        m_pMlvObject ? m_pMlvObject->playback_scale_factor_active : 1;
+    const bool coreActiveScaleValid =
+        m_pMlvObject
+        && ( coreActiveScale == 1 || coreActiveScale == 2
+          || coreActiveScale == 4 || coreActiveScale == 8 );
+    const int playbackScaleFactorActive =
+        m_pMlvObject
+            ? PlaybackAchievedScalePolicy::achievedScaleFactor(
+                  achievedScaleRoute,
+                  playbackScaleFactor,
+                  coreActiveScale,
+                  coreActiveScaleValid )
+            : 1;
     slot.playbackScaleFactorActive = playbackScaleFactorActive;
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_playback_scale_factor_effective"),

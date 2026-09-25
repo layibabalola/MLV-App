@@ -47,6 +47,7 @@
 #include "ReceiptCopyMaskDialog.h"
 #include "QRecentFilesMenu.h"
 #include "PlaybackQualityPolicy.h"
+#include "PlaybackPresentedFrameIdentityTracker.h"
 #include "batch/BatchTypes.h"
 #include <atomic>
 #include <deque>
@@ -791,6 +792,23 @@ private:
     bool m_frameChanged;
     int m_currentFrameIndex;
     double m_newPosDropMode;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 3 (astra major, prior finding 4 NOT
+     * RESOLVED): monotonic, wrap-immune accumulator of how many source frames
+     * the CLIP/TIMELINE offered during playback -- real elapsed playback time
+     * converted to frame units, independent of whether any request was ever
+     * issued for them. Incremented at the exact sites playbackHandling()
+     * advances the position (the +1-per-call normal-mode step, and drop-frame
+     * mode's getFramerate()*timeDiff/1000 catch-up step, using the RAW
+     * pre-wrap-subtraction delta so a loop wrap never loses distance
+     * travelled). This is the missing "offered" denominator: every existing
+     * population figure (m_nextRenderRequestSerial,
+     * m_nextTargetRenderRequestSerial) only sees frames that BECAME a
+     * request, so a frame drop-frame catch-up skipped over before ever
+     * issuing a request for it was invisible to all of them. Never reset;
+     * PlaybackFramePopulationPolicy::computeSourceFramePopulation() takes the
+     * session-start/current delta, matching the existing serial-counter
+     * pattern. */
+    double m_playbackTimelineSourceFramesOffered = 0.0;
     bool m_dontDraw;
     bool m_frameStillDrawing;
     bool m_fileLoaded = false;
@@ -1008,9 +1026,61 @@ private:
     int m_playbackSmokeTargetPresentedFrames = 0;
     int m_playbackSmokeFirstPresentedFrame = -1;
     int m_playbackSmokeLastPresentedFrame = -1;
+    /* CUDA-ATTRIBUTION-BASELINE-1: incremented each time playbackHandling()
+     * wraps the timeline position back to cut-in under --loop. The endpoint
+     * timeline-position delta used by the legacy skipped/unpresented estimate
+     * is unsound whenever this is nonzero (a loop can revisit -- or land back
+     * on -- an earlier position that looks identical to "stuck", and a full
+     * lap can make first==last presented frame even though playback advanced
+     * the whole clip). Reset at playback start alongside the other smoke
+     * counters. */
+    uint64_t m_playbackSmokeLoopWrapCount = 0;
     uint64_t m_dualIsoWarmupTelemetryPresentationGeneration = 0;
     int m_dualIsoWarmupTelemetryPresentedFrames = 0;
     uint64_t m_playbackSmokeStartRequestSerial = 0;
+    uint64_t m_playbackSmokeStartTargetRequestSerial = 0;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 3: session-start snapshot of
+     * m_playbackTimelineSourceFramesOffered, consumed by
+     * PlaybackFramePopulationPolicy::computeSourceFramePopulation() in
+     * finishPlaybackSmokeTelemetry(). Reset at playback start alongside the
+     * other smoke counters. */
+    double m_playbackSmokeStartTimelineSourceFramesOffered = 0.0;
+    /* CUDA-ATTRIBUTION-BASELINE-1 hub fix (sol r12 BLOCKER): true iff this
+     * session's first offered occurrence was reached with < 1 frame of
+     * offered-accumulator advance (drop-frame mode's start frame), so that
+     * occurrence is credited as offered. Reset in
+     * beginPlaybackSmokeTelemetry(), set in drawFrame() before the first
+     * noteOfferedFrame(); see PlaybackFramePopulationPolicy::
+     * computeSourceFramePopulation()'s startOccurrenceOffered note. */
+    bool m_playbackSmokeStartOccurrenceOffered = false;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 5 (sol BLOCKER): the per-session
+     * presented-frame split by request origin used to be a plain event
+     * count (++ on every presentation), which is identity-blind -- the same
+     * source frame presented three times inflated this exactly as much as
+     * three distinct frames presented once each, so a drop-frame catch-up
+     * that quietly re-presented a stale frame instead of advancing could
+     * read as zero loss.
+     * Round 6 (sol + astra BLOCKER, round 5 INVERTED): keying identity by
+     * raw displayFrame alone instead collapsed every LAP of a looping
+     * session onto the same identities, since offeredSourceFrames counts
+     * every lap as elapsed playback time. This now tracks distinct (loop
+     * epoch, displayFrame) OCCURRENCES -- see PlaybackPresentedFrameIdentityTracker.h
+     * -- split by both request origin (target vs. lookahead, as before) AND
+     * event (requested vs. presented, new this round: round 6 astra major,
+     * "Request identities must be reconciled too" -- see the class's
+     * noteRequestedFrame()). Its distinct/union count methods are what feed
+     * PlaybackFramePopulationPolicy::computeSourceFramePopulation(). Every
+     * insertion is gated on m_playbackSmokeFrameTelemetry, not merely
+     * m_playbackSmokeActive (round 6 sol + astra major, "the growing
+     * identity tracker runs during ordinary GUI playback") -- see the call
+     * sites in drawFrame(), queuePlaybackLookaheadRequests(), and
+     * notePlaybackSmokePresentedFrame(). Cleared at playback start alongside
+     * the other smoke counters. round 4's separate
+     * m_playbackSmokeReusedLookaheadTargetFrames back-out counter is gone:
+     * a lookahead-covers-current reuse attempt now simply never reaches the
+     * noteRequestedFrame() call site, so the exclusion is structural rather
+     * than arithmetic. */
+    PlaybackPresentedFrameIdentityTracker m_playbackSmokePresentedFrameIdentity;
     uint64_t m_playbackSmokeStartDecodeRequestsIssued = 0;
     uint64_t m_playbackSmokeStartPrepStaleDrops = 0;
     uint64_t m_playbackSmokeStartPrepGenerationDrops = 0;
@@ -1272,6 +1342,20 @@ private:
     bool m_headlessPlaybackProfileUsePlaybackPolicy = false;
     bool m_headlessPlaybackProfileActive = false;
     uint64_t m_nextRenderRequestSerial = 1;
+    /* CUDA-ATTRIBUTION-BASELINE-1 round 2: m_nextRenderRequestSerial advances
+     * for BOTH the one target request drawFrame() issues per call and every
+     * speculative render-lookahead request queuePlaybackLookaheadRequests()
+     * issues alongside it -- lookaheads that are not the frame playback is
+     * actually waiting on are intentionally discarded in drawFrameReady()
+     * (see the playbackLookaheadRequest handling there) and never become a
+     * presented frame. Using m_nextRenderRequestSerial's delta alone as the
+     * presented-frame population denominator therefore counts every
+     * discarded speculative lookahead as "skipped", which overcounts loss
+     * whenever lookahead is enabled. This sibling counter advances only at
+     * the target-request call site, giving a population immune to both the
+     * timeline-wrap problem the by-serial figure was built to fix AND the
+     * lookahead overcount it introduced. */
+    uint64_t m_nextTargetRenderRequestSerial = 1;
     uint64_t m_lastPresentedRequestSerial = 0;
     GpuPreviewProcessingBackendRequest m_gpuPreviewProcessingBackendRequest =
         GpuPreviewProcessingBackendRequest::Auto;

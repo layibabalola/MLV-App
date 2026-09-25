@@ -235,6 +235,66 @@ def compute_buckets(intervals: Sequence[float], refresh_period_ms: float) -> dic
     return buckets
 
 
+def compute_deadline_evaluation(
+    intervals: Sequence[float],
+    target_fps: float,
+    tolerance_multiplier: float = 1.5,
+) -> dict:
+    """Evaluate presented-frame intervals against the INTENDED playback cadence.
+
+    CUDA-ATTRIBUTION-BASELINE-1 (arbiter finding, tools/profiling/refresh_period_histogram.py:33,:48
+    in the pre-fix source): a refresh-multiple histogram alone establishes neither
+    a missed deadline nor causality -- two refreshes per presented frame can be
+    exactly correct at a target FPS below the display's refresh rate (e.g. a 30fps
+    target on a 60Hz panel is SUPPOSED to land near 2 refreshes/frame; that is not
+    lateness). This function evaluates each interval against the INTENDED
+    per-frame period (1000/target_fps ms) instead, independent of the refresh
+    multiple, and reports the expected refreshes/frame separately so a caller can
+    tell "healthy N-refresh cadence" from "missed deadline" instead of conflating
+    them into one bucket count.
+    """
+    if target_fps <= 0:
+        raise RefreshHistogramError(f"targetFps must be positive, got {target_fps!r}")
+    if math.isnan(target_fps) or math.isinf(target_fps):
+        raise RefreshHistogramError(f"targetFps must be a finite positive number, got {target_fps!r}")
+    # CUDA-ATTRIBUTION-BASELINE-1 round 2 (astra minor finding): NaN and
+    # +/-infinity both satisfy `not (x <= 1.0)` being False -- i.e. they slip
+    # past a `tolerance_multiplier <= 1.0` check silently, exactly like the
+    # target_fps NaN/inf check two lines above this one exists to catch.
+    # An infinite tolerance makes deadline_ms infinite, so every interval
+    # below is "not missed" and this would silently report a false
+    # missedDeadlineCount of 0 instead of rejecting the input.
+    if math.isnan(tolerance_multiplier) or math.isinf(tolerance_multiplier):
+        raise RefreshHistogramError(
+            f"toleranceMultiplier must be a finite number, got {tolerance_multiplier!r}"
+        )
+    if tolerance_multiplier <= 1.0:
+        raise RefreshHistogramError(
+            f"toleranceMultiplier must be > 1.0 (it multiplies the intended period to "
+            f"define a miss), got {tolerance_multiplier!r}"
+        )
+    if not intervals:
+        raise RefreshHistogramError("compute_deadline_evaluation requires at least one interval")
+
+    intended_period_ms = 1000.0 / target_fps
+    deadline_ms = intended_period_ms * tolerance_multiplier
+    missed = [v for v in intervals if v > deadline_ms]
+    sorted_intervals = sorted(intervals)
+
+    return {
+        "targetFps": target_fps,
+        "intendedPeriodMs": intended_period_ms,
+        "toleranceMultiplier": tolerance_multiplier,
+        "deadlineMs": deadline_ms,
+        "sampleCount": len(intervals),
+        "missedDeadlineCount": len(missed),
+        "missedDeadlineShare": len(missed) / len(intervals),
+        "p50IntervalMs": percentile(sorted_intervals, 0.50),
+        "p95IntervalMs": percentile(sorted_intervals, 0.95),
+        "p99IntervalMs": percentile(sorted_intervals, 0.99),
+    }
+
+
 def compute_region_stats(frame_rows: Sequence[dict[str, float]]) -> dict:
     regions = {}
     for region in PREP_REGIONS:
@@ -255,6 +315,9 @@ def build_report(
     frame_log_path: str,
     min_frame_rows: int = 10,
     refresh_period_ms: float | None = None,
+    target_fps: float | None = None,
+    source_fps: float | None = None,
+    deadline_tolerance_multiplier: float = 1.5,
 ) -> dict:
     intervals = parse_presentmon_intervals(presentmon_csv_path)
     frame_rows = parse_frame_log_rows(frame_log_path, min_rows=min_frame_rows)
@@ -286,6 +349,19 @@ def build_report(
     buckets = compute_buckets(intervals, refresh_period["refreshPeriodMs"])
     regions = compute_region_stats(frame_rows)
 
+    # CUDA-ATTRIBUTION-BASELINE-1: deadlines, not buckets (arbiter finding).
+    # Only computed when the caller supplies the intended playback cadence --
+    # without it there is no "deadline" to evaluate against, only a refresh
+    # histogram, which is exactly the ambiguity this section exists to resolve.
+    deadline_evaluation = None
+    if target_fps is not None:
+        deadline_evaluation = compute_deadline_evaluation(
+            intervals, target_fps, tolerance_multiplier=deadline_tolerance_multiplier
+        )
+        expected_refreshes_per_frame = deadline_evaluation["intendedPeriodMs"] / refresh_period["refreshPeriodMs"]
+        deadline_evaluation["expectedRefreshesPerFrame"] = expected_refreshes_per_frame
+        deadline_evaluation["sourceFps"] = source_fps
+
     return {
         "schema": SCHEMA,
         "presentMon": {
@@ -304,6 +380,7 @@ def build_report(
             "presentedFrameCount": len(frame_rows),
             "regions": regions,
         },
+        "deadlineEvaluation": deadline_evaluation,
     }
 
 
@@ -325,6 +402,31 @@ def main(argv: Iterable[str] | None = None) -> int:
             "capture is too ambiguous to trust (see compute_refresh_period)."
         ),
     )
+    parser.add_argument(
+        "--target-fps",
+        type=float,
+        default=None,
+        help=(
+            "Intended playback cadence in frames/sec (CUDA-ATTRIBUTION-BASELINE-1: "
+            "deadlines, not buckets). When given, evaluates every PresentMon interval "
+            "against the INTENDED per-frame period (1000/target-fps ms) instead of only "
+            "the refresh-multiple histogram -- a refresh multiple above 1 can be exactly "
+            "correct at a target FPS below the display's refresh rate, so that alone "
+            "does not establish a missed deadline."
+        ),
+    )
+    parser.add_argument(
+        "--source-fps",
+        type=float,
+        default=None,
+        help="Clip's native frame rate, recorded alongside targetFps for context (not used in the deadline math).",
+    )
+    parser.add_argument(
+        "--deadline-tolerance-multiplier",
+        type=float,
+        default=1.5,
+        help="An interval counts as a missed deadline when it exceeds intendedPeriodMs * this multiplier (default 1.5).",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     try:
@@ -333,6 +435,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.frame_log,
             min_frame_rows=args.min_frame_rows,
             refresh_period_ms=args.refresh_period_ms,
+            target_fps=args.target_fps,
+            source_fps=args.source_fps,
+            deadline_tolerance_multiplier=args.deadline_tolerance_multiplier,
         )
     except RefreshHistogramError as exc:
         print(f"refresh_period_histogram: FAIL: {exc}", file=sys.stderr)
