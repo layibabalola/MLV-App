@@ -1812,17 +1812,33 @@ class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
     # match was itself only ONE textual shape -- sol's exact repro replaces the assignment with
     # `host_load_provisional = ($false)` (a parenthesized wrap) and the bare-`\$false\b` regex does
     # not match it (the character immediately after `=\s*` is `(`, not `$`), so the row still
-    # censused as bound. Made expression-aware instead of shape-specific: the assignment's RHS
-    # (everything to end of line, this file's own object-literal convention -- see
-    # ASSIGNMENT_RHS_PATTERN) is normalized by stripping balanced outer parentheses and all
-    # whitespace, then compared against a small set of known-constant-false shapes: `$false`
-    # itself, `(-not $true)`/`(!$true)` after normalization, and a falsy `[bool]` numeric cast
-    # (`[bool]0`, `[bool]0.0`). Anything else (a variable, function call, property access,
-    # ternary) is assumed derived and passes, same as before.
+    # censused as bound. HARDCODED_FALSE_PATTERN is kept below only as the OLD naive detector, for
+    # the contrast assertion in test_a_parenthesized_hardcoded_false_would_fail_this_census (proving
+    # the new detector catches what the old one missed) -- it is no longer used by _is_bound itself.
+    #
+    # round 9 (sol MAJOR item 2): sol's exact repro against the round-8 detector -- "replace the
+    # real `host_load_provisional = $true` with `host_load_provisional = 0`" -- still passed,
+    # because round 8 only BLACKLISTED specific known-false shapes and let everything else through.
+    # A bare `0`, `$null`, `''`, or `'false'` are none of those shapes, so all four sailed through
+    # as "derived". INVERTED per the round-9 brief: a row is bound only if its RHS, once normalized
+    # (balanced-outer-parens stripped, whitespace removed, case-folded), is EXACTLY the literal
+    # `$true`, or is not recognized as any kind of hardcoded constant at all (assumed derived --
+    # a variable, property access, function call, or ternary that genuinely reads host-load state).
+    # Any RECOGNIZED constant that is not `$true` -- $false, $null, an empty or non-empty quoted
+    # string, a bare number, a `[bool]` numeric cast, or a negation of $true/$false -- is unbound,
+    # whatever its value. This closes the whole family in one move instead of enumerating more
+    # false-shaped literals one repro at a time.
     HARDCODED_FALSE_PATTERN = re.compile(r"host_load_provisional\s*=\s*\$false\b")
     ASSIGNMENT_RHS_PATTERN = re.compile(r"host_load_provisional\s*=\s*([^\n]*)")
-    _HARDCODED_FALSE_LITERALS = {"$false", "-not$true", "!$true"}
-    _HARDCODED_FALSE_NUMERIC_CAST_PATTERN = re.compile(r"^\[bool\]0(\.0+)?$")
+    _TRUE_LITERAL = "$true"
+    _CONSTANT_SIMPLE_TOKENS = {"$false", "$null", "-not$true", "-not$false", "!$true", "!$false"}
+    _CONSTANT_NUMERIC_PATTERN = re.compile(r"^-?\d+(\.\d+)?$")
+    _CONSTANT_BOOL_CAST_PATTERN = re.compile(r"^\[bool\]-?\d+(\.\d+)?$")
+    # Single-quoted strings never interpolate in PowerShell, so any content is a genuine constant.
+    # Double-quoted strings are only treated as constant when they contain no `$` -- a `"$var"`
+    # shape is (potentially) derived via interpolation and must not be misclassified as hardcoded.
+    _CONSTANT_SINGLE_QUOTED_STRING_PATTERN = re.compile(r"^'[^']*'$")
+    _CONSTANT_DOUBLE_QUOTED_STRING_PATTERN = re.compile(r'^"[^"$]*"$')
 
     TELEMETRY_ONLY_ROW_FUNCTIONS = {"New-RemoteCdngSummaryRow"}
 
@@ -1854,21 +1870,32 @@ class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
             text = text[1:-1].strip()
         return text
 
-    def _is_hardcoded_false_literal(self, rhs: str) -> bool:
-        normalized = self._strip_balanced_outer_parens(rhs.strip())
-        normalized = re.sub(r"\s+", "", normalized).lower()
-        if normalized in self._HARDCODED_FALSE_LITERALS:
-            return True
-        return bool(self._HARDCODED_FALSE_NUMERIC_CAST_PATTERN.match(normalized))
+    def _classify_rhs(self, rhs: str) -> str:
+        """Returns "true" (the one hardcode this census accepts), "constant" (any OTHER
+        hardcoded literal -- unbound regardless of its value), or "derived" (not a recognized
+        constant shape at all -- trusted as genuine host-load provenance, same as round 8)."""
+        stripped = self._strip_balanced_outer_parens(rhs.strip())
+        compact = re.sub(r"\s+", "", stripped).lower()
+        if compact == self._TRUE_LITERAL:
+            return "true"
+        if (
+            compact in self._CONSTANT_SIMPLE_TOKENS
+            or self._CONSTANT_NUMERIC_PATTERN.match(compact)
+            or self._CONSTANT_BOOL_CAST_PATTERN.match(compact)
+            or self._CONSTANT_SINGLE_QUOTED_STRING_PATTERN.match(stripped)
+            or self._CONSTANT_DOUBLE_QUOTED_STRING_PATTERN.match(stripped)
+        ):
+            return "constant"
+        return "derived"
 
     def _is_bound(self, body: str) -> bool:
         code_only = self._strip_comments(body)
         if "host_load_provisional" not in code_only:
             return False
         match = self.ASSIGNMENT_RHS_PATTERN.search(code_only)
-        if match and self._is_hardcoded_false_literal(match.group(1)):
+        if not match:
             return False
-        return True
+        return self._classify_rhs(match.group(1)) in ("true", "derived")
 
     def test_every_row_function_with_a_real_presented_fps_carries_host_load_provenance(self) -> None:
         source = COMPARE_MACHINE_PERF_SCRIPT.read_text(encoding="utf-8")
@@ -2001,6 +2028,119 @@ class CompareMachinePerfRowHostLoadCensusTests(unittest.TestCase):
         body = matches[0].group(0)
         self.assertTrue(self.REAL_FPS_PATTERN.search(body))
         self.assertFalse(self._is_bound(body))
+
+    def test_a_bare_zero_hardcoded_false_would_fail_this_census(self) -> None:
+        # round 9 (sol MAJOR item 2), sol's EXACT repro: "replace the real
+        # `host_load_provisional = $true` with `host_load_provisional = 0`" -- a smaller edit than
+        # any round-8-caught shape, and it passed the round-8 blacklist-based detector because a
+        # bare `0` matched none of round 8's specific known-false patterns.
+        fixture = (
+            "function New-BypassRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "        host_load_provisional = 0\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(body))
+        self.assertFalse(self._is_bound(body))
+
+    def test_a_null_hardcoded_false_would_fail_this_census(self) -> None:
+        # round 9 (sol MAJOR item 2): $null is truthy-adjacent nonsense for a boolean-shaped flag,
+        # but it is still a hardcoded constant, not derived provenance -- must be unbound.
+        fixture = (
+            "function New-BypassRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "        host_load_provisional = $null\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(body))
+        self.assertFalse(self._is_bound(body))
+
+    def test_an_empty_string_hardcoded_false_would_fail_this_census(self) -> None:
+        # round 9 (sol MAJOR item 2): an empty string is another falsy-in-PowerShell constant with
+        # no `$false`/numeric/`[bool]` token in it at all.
+        fixture = (
+            "function New-BypassRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "        host_load_provisional = ''\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(body))
+        self.assertFalse(self._is_bound(body))
+
+    def test_a_string_literal_false_hardcoded_false_would_fail_this_census(self) -> None:
+        # round 9 (sol MAJOR item 2): the STRING 'false' is truthy in PowerShell (any non-empty
+        # string is $true in a boolean context) -- exactly the kind of surprising hardcode that
+        # only a constant-vs-derived classifier (not a value-truthiness check) catches correctly.
+        fixture = (
+            "function New-BypassRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "        host_load_provisional = 'false'\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(body))
+        self.assertFalse(self._is_bound(body))
+
+    def test_bool_cast_of_one_would_also_fail_this_census(self) -> None:
+        # round 9 regression guard on the inversion itself: [bool]1 is a hardcoded TRUE-valued
+        # constant, but it is not the literal token `$true` this census accepts -- under the
+        # inverted rule, any hardcoded constant other than exactly `$true` is unbound, whatever its
+        # truthiness. (Round 8's blacklist approach would never have caught this at all: it is not
+        # false-shaped.)
+        fixture = (
+            "function New-BypassRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "        host_load_provisional = [bool]1\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        body = matches[0].group(0)
+        self.assertTrue(self.REAL_FPS_PATTERN.search(body))
+        self.assertFalse(self._is_bound(body))
+
+    def test_the_real_hardcoded_true_used_by_two_production_rows_still_passes(self) -> None:
+        # Regression guard: New-ProfileRow and New-FieldLogRow both legitimately hardcode
+        # `host_load_provisional = $true` ("always unrecorded", the safe fail-toward-provisional
+        # direction) -- the ONE hardcoded shape this census must keep accepting.
+        fixture = (
+            "function New-AlwaysUnrecordedRow {\n"
+            "    param([object]$Record)\n"
+            "    [pscustomobject]@{\n"
+            "        presented_fps = 99.0\n"
+            "        host_load_provisional = $true\n"
+            "    }\n"
+            "}\n"
+        )
+        matches = list(self.ROW_FUNCTION_PATTERN.finditer(fixture))
+        self.assertEqual(len(matches), 1)
+        self.assertTrue(self._is_bound(matches[0].group(0)))
 
     def test_a_derived_expression_still_passes_this_census(self) -> None:
         # round 8 regression guard: the expression-aware detector must not become so broad it
