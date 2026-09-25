@@ -20,6 +20,7 @@
 #ifndef PLAYBACKFRAMEPOPULATIONPOLICY_H
 #define PLAYBACKFRAMEPOPULATIONPOLICY_H
 
+#include <cmath>
 #include <cstdint>
 
 struct PlaybackFramePopulation
@@ -250,9 +251,22 @@ public:
         PlaybackSourceFramePopulation result;
         const double rawOffered =
             timelineSourceFramesOfferedNow - timelineSourceFramesOfferedStart;
+        /* CUDA-ATTRIBUTION-POLICY-1 (both #155 reviewers): offered must be
+         * floor(rawOffered) + startOccurrenceOffered, never
+         * round-half-up(rawOffered) + credit. The accumulator counts
+         * DISPLACEMENT and the identity sets count every occurrence TOUCHED
+         * (see startOccurrenceOffered below) -- the touched-span count is
+         * exactly floor(displacement) plus the start-occurrence credit, so
+         * rounding the displacement itself up on frac >= 0.5 (e.g. E=24.6
+         * rounding to 25) double-counts against a credit that already
+         * accounts for the fencepost, fabricating a never-requested frame
+         * on an otherwise sound run. +1e-6 guards against a touched span
+         * that is genuinely N frames reading back as N-epsilon (e.g.
+         * 9.9999999) purely from float accumulation error, without
+         * reintroducing the frac>=0.5 over-rounding a plain +0.5 would. */
         result.offeredSourceFrames =
             rawOffered > 0.0
-                ? static_cast<uint64_t>( rawOffered + 0.5 )
+                ? static_cast<uint64_t>( std::floor( rawOffered + 1e-6 ) )
                 : 0;
         result.attributionMeasured = frameTelemetryMeasured;
 

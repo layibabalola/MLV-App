@@ -874,3 +874,74 @@ TEST(PlaybackFramePopulationPolicy, SourcePopulation_ReusedLookaheadTargetAttemp
     ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
     ASSERT_TRUE(population.partitionSound);
 }
+
+// CUDA-ATTRIBUTION-POLICY-1 (both #155 reviewers, fable's repro): offered
+// must be floor(rawOffered) + startOccurrenceOffered, never
+// round-half-up(rawOffered) + credit. 25 frames touched (10..34), raw
+// offered 24.6 (frac 0.6 >= 0.5). Under the pre-fix round-half-up rule this
+// reads cast(24.6+0.5)=25, then +1 credit=26 -- one MORE than the 25-frame
+// touched span, fabricating a never-requested frame on a run that lost
+// nothing. floor(24.6+1e-6)+1 = 24+1 = 25, matching the touched span
+// exactly. FAILS under the pre-fix rule: it reports offered=26 and
+// neverRequestedSourceFrames=1 instead of 25 and 0.
+TEST(PlaybackFramePopulationPolicy, CUDA_POLICY1_FableRepro_FloorNotRoundHalfUpMatchesTouchedSpan)
+{
+    const PlaybackSourceFramePopulation population =
+        fencepostPopulation( 10, 34, 24.6, /*startOccurrenceOffered=*/1 );
+    ASSERT_EQ(uint64_t(25), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(25), population.presentedFrames);
+    ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+}
+
+// A drop-frame case where frac(rawOffered) < 0.5. Non-regression control:
+// for frac < 0.5, cast(rawOffered+0.5) already equals floor(rawOffered) (the
+// +0.5 truncation never crosses the next integer), so the pre-fix rule
+// already agreed with floor() here and this case does NOT distinguish the
+// two rules -- it exists to prove the fix does not disturb the sub-0.5
+// fencepost case the pre-fix code already got right, alongside the
+// frac >= 0.5 repro above which it got wrong. 30 frames touched (200..229),
+// raw offered 29.4 (frac 0.4), start-occurrence credited.
+TEST(PlaybackFramePopulationPolicy, CUDA_POLICY1_FracBelowHalfDropFrameStaysSound)
+{
+    const PlaybackSourceFramePopulation population =
+        fencepostPopulation( 200, 229, 29.4, /*startOccurrenceOffered=*/1 );
+    ASSERT_EQ(uint64_t(30), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(30), population.presentedFrames);
+    ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+}
+
+// Normal (non-drop-frame) mode: integral rawOffered, no start-occurrence
+// credit -- the majority-case call pattern (MainWindow only ever passes
+// startOccurrenceOffered=1 in drop-frame mode). Asserts nothing changes:
+// floor(30.0+1e-6)=30 and cast(30.0+0.5)=30 agree, exactly as they did
+// before this fix. 30 frames touched (500..529), raw offered exactly 30.0.
+TEST(PlaybackFramePopulationPolicy, CUDA_POLICY1_NormalModeIntegralOfferedUnaffectedByFix)
+{
+    const PlaybackSourceFramePopulation population =
+        fencepostPopulation( 500, 529, 30.0, /*startOccurrenceOffered=*/0 );
+    ASSERT_EQ(uint64_t(30), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(30), population.presentedFrames);
+    ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+}
+
+// Float-integrality guard: rawOffered=9.9999999 is float accumulation drift
+// representing a "true" displacement of exactly 10.0 (10 frames touched,
+// 0..9, no drop-frame credit). A bare std::floor(rawOffered) with no epsilon
+// would read 9 -- one short of the 10-frame touched span -- and report the
+// run as unsound (offeredBucketSound false) even though nothing was lost.
+// std::floor(rawOffered + 1e-6) reads 10, matching exactly. (The pre-fix
+// round-half-up rule also happened to read 10 here, via its own +0.5 pad --
+// this test guards the floor()-without-epsilon mistake specifically, which
+// the "Guard float integrality" requirement calls out by name.)
+TEST(PlaybackFramePopulationPolicy, CUDA_POLICY1_FloatDriftBelowIntegralOfferedIsNotUndercounted)
+{
+    const PlaybackSourceFramePopulation population =
+        fencepostPopulation( 0, 9, 9.9999999, /*startOccurrenceOffered=*/0 );
+    ASSERT_EQ(uint64_t(10), population.offeredSourceFrames);
+    ASSERT_EQ(uint64_t(10), population.presentedFrames);
+    ASSERT_EQ(uint64_t(0), population.neverRequestedSourceFrames);
+    ASSERT_TRUE(population.partitionSound);
+}
