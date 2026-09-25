@@ -213,9 +213,42 @@ Before any verdict the job takes the run's own `gpu_playback_recon.eligibility` 
 snapshot and exits **15 `BACKEND_NOT_AVAILABLE`** unless `cuda_backend_available=1` **and**
 `r16_available=1`, recording both plus `r16_reason`. A log with no eligibility line at all is
 refused the same way: absence of the diagnostic is not evidence of eligibility. Other outcomes:
-12 `VENUE_NOT_QUIESCENT`, 13 `GPU_RECON_FRAMES_ZERO`, 14 `CPU_FALLBACK_DETECTED`, 0
-`MEASUREMENT_CAPTURED`. It publishes `presentmon-series.csv`, `logs\smoke-run.log`,
+12 `VENUE_NOT_QUIESCENT`, 13 `GPU_RECON_FRAMES_ZERO`, 14 `CPU_FALLBACK_DETECTED`, 18
+`SMOKE_RUN_FAILED` (the smoke run itself never produced a passing `result.json`), 23
+`PRESENTMON_UNAVAILABLE` (PresentMon never produced a usable capture for the MLVApp process --
+covers a missing/unreadable/columnless csv, a wait timeout, and a nonzero PresentMon exit code
+alike, all typed and never destroying the smoke evidence already published; a wait timeout or
+nonzero exit also publishes `presentmon.csv`, if it exists, and `presentmon-capture.json` before
+exiting, the same evidence a parsing failure already left behind), 24 `DISPLAY_ASLEEP` (the
+MLVApp chain presented frames but displayed none), 0 `MEASUREMENT_CAPTURED`. Display rates
+(`presentedFps`/`displayedFps`) are for the MLVApp process id, summed across every swap chain
+address it used inside the playback window -- a mid-run swap chain recreation (e.g. a resize) is
+one logical preview, not two. It publishes `presentmon-series.csv`, `presentmon-capture.json`
+(the PresentMon clock anchor, bracketed by a pre-spawn/post-spawn wall-clock pair and the
+OS-reported process start, with the residual uncertainty in ms), `logs\smoke-run.log`,
 `evidence-manifest.json`, `provenance.json` and `artifact-index.json`.
+
+**Clock-bracket windowing.** PresentMon's own `TimeInMs=0` origin cannot be pinned to a single
+instant, so display/presented rows are windowed under BOTH endpoints of the capture-start bracket
+-- the OS-reported process start (or the pre-spawn wall clock, if the OS reported none) and the
+post-spawn wall clock -- never just the earlier one. `summary.json`/`evidence-manifest.json`
+carry the result as `clockBracket`: `earliest`/`latest` (each with `presentedCount`,
+`displayedCount`, `presentedFps`, `displayedFps`), `rowsDifferingInWindowMembership` (how many
+rows, any process, disagree on window membership between the two endpoints), and
+`headline`/`headlineReason` naming which endpoint the reported `chains`/`selectedChain`/
+`selectedChainRows` actually come from -- the endpoint admitting more DISPLAYED MLVApp rows,
+then more presented rows, ties to the earlier endpoint. Neither endpoint is exact; ranking by
+displayed rows first means `DISPLAY_ASLEEP` is reported only when neither endpoint admits a
+displayed MLVApp row.
+
+**Interval statistics exclude interval-less rows.** A row displayed only via `MsUntilDisplayed`
+(observed on the very first present of a capture, when `MsBetweenDisplayChange` reads `NA`) has
+no display-change interval to report -- `evidence-manifest.json`'s `presentMonStats`
+(`meanMs`/`sdMs`/`cvPct`/percentiles/`fpsEquivalentMean`/`count`) and `presentMon.positiveSamples`
+are computed only from rows with a positive `msBetweenDisplayChange`, never a `[double]$null`
+coerced to `0.0`. `presentmon-series.csv` and `presentMonSamples` still carry every displayed row
+(including the interval-less one, with an empty `msBetweenDisplayChange` cell);
+`refresh_period_histogram.py` already skips blank/non-positive cells reading that csv.
 
 The owner's consent for the clip on this card is recorded at
 `.claude-state/coordination/dual-lane/receipts/owner-footage-consent-20260916.json`, with its
