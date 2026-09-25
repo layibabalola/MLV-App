@@ -8861,8 +8861,12 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         QThread::msleep( 5 );
     }
 
-    QElapsedTimer playbackClock;
-    playbackClock.start();
+    // CUDA-PLAYBACK-FULLSCREEN-UI-1 round 2: measures the foreground+fullscreen preamble
+    // below so it can be reported (preamble_ms on the DONE line) without being charged
+    // against the requested playback duration -- playbackClock itself now starts right
+    // before the play trigger, after the preamble and the fail-closed check below.
+    QElapsedTimer preambleClock;
+    preambleClock.start();
     m_playbackSmokeTargetPresentedFrames =
         qMax( 0, options.targetPresentedFrames );
     // RULE 2026-06-26 (Layi): with --loop, check actionLoop BEFORE Play so a short clip (e.g. 16 frames)
@@ -8880,19 +8884,45 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
     // full screen is how the owner watches, and it changes the present path (window size,
     // pixels presented, possibly the Windows present mode) versus windowed playback, so a
     // windowed measurement does not represent what is being tuned. Entered after the
-    // foreground step above and left before the play trigger below; the guard restores
-    // normal window chrome at session end regardless of how this function returns below
-    // (every early-return error path included), not only on the success path.
+    // foreground step above and left at session end via the guard below, which restores
+    // normal window chrome regardless of how this function returns (every early-return
+    // error path included), not only on the success path.
     struct PlaybackSmokeFullscreenGuard
     {
         MainWindow *window;
         ~PlaybackSmokeFullscreenGuard() { if( window ) window->leavePlaybackSmokeFullscreen(); }
     } playbackSmokeFullscreenGuard{ this };
-    enterPlaybackSmokeFullscreen();
+    const bool fullscreenVerified = enterPlaybackSmokeFullscreen();
     // Entering full screen hides chrome and re-lays-out the window -- re-verify (and, if
     // it slipped, re-establish) OS foreground now rather than trusting the pre-fullscreen
     // check above to still describe the window actually being measured.
     forcePlaybackSmokeWindowForeground();
+
+    // CUDA-PLAYBACK-FULLSCREEN-UI-1 round 2: a full-screen measured run must never
+    // silently fall back to windowed or a wrong-sized GPU viewport -- fail closed here,
+    // before the play trigger, rather than logging verified=0 above and measuring anyway.
+    auto logFullscreenSmokeFailure = [&]( const char *reason ) -> int
+    {
+        QScreen *failScreen = this->screen();
+        if( !failScreen ) failScreen = QApplication::primaryScreen();
+        const QSize failScreenSize = failScreen ? failScreen->size() : QSize();
+        const QSize failGpuViewport =
+            GpuDisplayWindow::isActive() ? GpuDisplayWindow::displaySize() : QSize( 0, 0 );
+        err << "[GUI-SMOKE] FAIL reason=" << reason << " screen="
+            << failScreenSize.width() << "x" << failScreenSize.height()
+            << " window=" << size().width() << "x" << size().height()
+            << " gpu_viewport=" << failGpuViewport.width() << "x" << failGpuViewport.height()
+            << "\n";
+        return 13;
+    };
+    if( !fullscreenVerified )
+    {
+        return logFullscreenSmokeFailure( "fullscreen_not_verified" );
+    }
+
+    const qint64 preambleMs = preambleClock.elapsed();
+    QElapsedTimer playbackClock;
+    playbackClock.start();
 
     ui->actionPlay->trigger();
     qApp->processEvents( QEventLoop::AllEvents );
@@ -9208,6 +9238,15 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         }
         QThread::msleep( 10 );
     }
+    const qint64 playedMs = playbackClock.elapsed();
+
+    // CUDA-PLAYBACK-FULLSCREEN-UI-1 round 2: the normal-use Escape/menu toggle this round
+    // adds can leave full screen mid-measurement (e.g. the round-1 Escape shortcut) -- fail
+    // closed rather than report a duration/frame count measured partly or fully windowed.
+    if( !isFullScreen() )
+    {
+        return logFullscreenSmokeFailure( "fullscreen_lost_mid_session" );
+    }
 
     if( m_playbackSmokeTargetPresentedFrames > 0
      && m_playbackSmokePresentedFrames != m_playbackSmokeTargetPresentedFrames )
@@ -9465,6 +9504,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
     out << "[GUI-SMOKE] DONE clip=" << inputInfo.absoluteFilePath()
         << " duration_ms=" << durationMs
+        << " preamble_ms=" << preambleMs
+        << " played_ms=" << playedMs
         << " settle_ms=" << settleMs
         << " settle_cpu_percent=" << options.settleCpuPercent
         << " settle_cpu_stable_ms=" << settleCpuStableMs
@@ -22611,7 +22652,7 @@ void MainWindow::forcePlaybackSmokeWindowForeground( void )
 // sizing in computeDisplaySceneGeometry() (which already branches on
 // ui->actionFullscreen->isChecked() to size from the window's own screen) apply exactly as
 // they would for a user-triggered toggle.
-void MainWindow::enterPlaybackSmokeFullscreen( void )
+bool MainWindow::enterPlaybackSmokeFullscreen( void )
 {
     if( !ui->actionFullscreen->isChecked() )
     {
@@ -22659,6 +22700,7 @@ void MainWindow::enterPlaybackSmokeFullscreen( void )
                .arg( gpuViewport.width() )
                .arg( gpuViewport.height() )
                .arg( devicePixelRatioF(), 0, 'f', 2 );
+    return verified;
 }
 
 // --gui-smoke-playback only (CUDA-PERF-PLAYBACK-FULLSCREEN-1). Restores the pre-smoke

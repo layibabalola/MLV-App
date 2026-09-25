@@ -1406,7 +1406,7 @@ private:
     // screen via the existing (menu-hidden) actionFullscreen toggle for the measured
     // interval; never called from normal (non-smoke) startup. See
     // MainWindow::runGuiPlaybackSmoke().
-    void enterPlaybackSmokeFullscreen( void );
+    bool enterPlaybackSmokeFullscreen( void );
     void leavePlaybackSmokeFullscreen( void );
     QSize playbackSmokeViewportSize( void ) const;
     void onPlaybackSmokeApplicationStateChanged( Qt::ApplicationState state );
