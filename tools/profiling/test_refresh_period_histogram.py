@@ -7,6 +7,7 @@ empty-but-successful report, or mis-rounding a refresh multiple at the bucket bo
 from __future__ import annotations
 
 import csv
+import json
 import math
 
 import pytest
@@ -20,6 +21,7 @@ from refresh_period_histogram import (
     compute_deadline_evaluation,
     compute_refresh_period,
     compute_region_stats,
+    main,
     parse_frame_log_rows,
     parse_presentmon_intervals,
     percentile,
@@ -355,6 +357,52 @@ def test_deadline_evaluation_present_in_report_with_target_fps(tmp_path):
     assert report["deadlineEvaluation"]["targetFps"] == 60.0
     assert report["deadlineEvaluation"]["sourceFps"] == 24.0
     assert report["deadlineEvaluation"]["expectedRefreshesPerFrame"] == pytest.approx(1.0, abs=0.01)
+
+
+# --- CLI wiring (round 11, sol MINOR: "Deadline unit/report tests do not pin the
+# CLI's live args.target_fps attachment; replacing it with None at
+# refresh_period_histogram.py:438 bypasses deadline output while the direct tests
+# remain green") -- exercises main(argv), not build_report() directly, so a
+# regression at the `target_fps=args.target_fps` call site itself is caught. ------
+
+def test_main_cli_attaches_target_fps_argument_to_the_deadline_evaluation(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 20)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+    out_path = tmp_path / "report.json"
+
+    exit_code = main([
+        "--presentmon-csv", str(csv_path),
+        "--frame-log", str(log_path),
+        "--refresh-period-ms", "16.67",
+        "--target-fps", "60.0",
+        "--out", str(out_path),
+    ])
+
+    assert exit_code == 0
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["deadlineEvaluation"] is not None
+    assert report["deadlineEvaluation"]["targetFps"] == 60.0
+
+
+def test_main_cli_omits_deadline_evaluation_without_target_fps_argument(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 20)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+    out_path = tmp_path / "report.json"
+
+    exit_code = main([
+        "--presentmon-csv", str(csv_path),
+        "--frame-log", str(log_path),
+        "--refresh-period-ms", "16.67",
+        "--out", str(out_path),
+    ])
+
+    assert exit_code == 0
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["deadlineEvaluation"] is None
 
 
 # --- end-to-end build_report ----------------------------------------------------------
