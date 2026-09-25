@@ -507,68 +507,86 @@ function Get-HostLoadSnapshot {
         systemUserSeconds = $null
     }
     try {
-        # round 9: syscall + subject-CPU reading FIRST, before any evidence collection -- see the
-        # function-level comment above for why the ordering itself is the fix.
-        $systemTimes = Get-HostLoadSystemTimes -SubjectProcess $SubjectProcess -SubjectNotYetStarted:$SubjectNotYetStarted
-        if ($null -ne $systemTimes) {
-            $snapshot.capturedAtUtc = $systemTimes.capturedAtUtc.ToString("o")
-            $snapshot.systemIdleSeconds = [double]$systemTimes.idleSeconds
-            $snapshot.systemKernelSeconds = [double]$systemTimes.kernelSeconds
-            $snapshot.systemUserSeconds = [double]$systemTimes.userSeconds
-            $snapshot.systemTimesCapturedAtUtc = $systemTimes.capturedAtUtc.ToString("o")
-            $snapshot.systemTimesCollected = $true
-            $snapshot.subjectCpuSeconds = $systemTimes.subjectCpuSeconds
-        }
-        else {
-            # round 9: GetSystemTimes itself was unavailable here (non-Windows, or the native
-            # syscall/Add-Type failed) -- the window-alignment fix this round exists for is moot on
-            # this path (the interval is unknown regardless; see
-            # Get-HostLoadNonSubjectCpuLoadPercent's systemTimesCollected gate), but the subject-CPU
-            # field's own contract (SubjectNotYetStarted -> a genuine 0.0, an unreadable handle ->
-            # $null, never guessed) must still hold independent of platform. This duplicates
-            # Get-HostLoadSystemTimes' own subject-read block exactly, for this fallback path only.
-            if ($SubjectNotYetStarted) {
-                $snapshot.subjectCpuSeconds = 0.0
+        # hub (sol r9 contract BLOCKER, PARK/SPLIT ruling 2026-09-25): WHICH end of the evidence work the
+        # syscall sits on depends on which leg boundary this snapshot marks. The AFTER bracket (and every
+        # during-leg sample) marks the END of an interval that has already happened, so its syscall runs
+        # FIRST (round 9) and evidence latency can no longer stretch the final interval past leg end. The
+        # BEFORE bracket (-SubjectNotYetStarted; its only production caller runs Process.Start right after
+        # it returns) marks the START of the first interval, so its syscall must run LAST, immediately
+        # before the subject starts -- otherwise the evidence latency is pre-leg time folded into the
+        # first interval, diluting an early-leg load burst toward quiet. subjectCpuSeconds is a constant
+        # 0.0 on that path, so moving its syscall later cannot inflate subject CPU (round 8's blocker).
+        $captureSystemTimes = {
+            # round 9: syscall + subject-CPU reading FIRST, before any evidence collection -- see the
+            # function-level comment above for why the ordering itself is the fix.
+            $systemTimes = Get-HostLoadSystemTimes -SubjectProcess $SubjectProcess -SubjectNotYetStarted:$SubjectNotYetStarted
+            if ($null -ne $systemTimes) {
+                $snapshot.capturedAtUtc = $systemTimes.capturedAtUtc.ToString("o")
+                $snapshot.systemIdleSeconds = [double]$systemTimes.idleSeconds
+                $snapshot.systemKernelSeconds = [double]$systemTimes.kernelSeconds
+                $snapshot.systemUserSeconds = [double]$systemTimes.userSeconds
+                $snapshot.systemTimesCapturedAtUtc = $systemTimes.capturedAtUtc.ToString("o")
+                $snapshot.systemTimesCollected = $true
+                $snapshot.subjectCpuSeconds = $systemTimes.subjectCpuSeconds
             }
-            elseif ($null -ne $SubjectProcess) {
-                try {
-                    $SubjectProcess.Refresh()
-                    $subjectTotalProcessorTime = $SubjectProcess.TotalProcessorTime
-                    if ($null -ne $subjectTotalProcessorTime) {
-                        $snapshot.subjectCpuSeconds = [double]$subjectTotalProcessorTime.TotalSeconds
+            else {
+                # round 9: GetSystemTimes itself was unavailable here (non-Windows, or the native
+                # syscall/Add-Type failed) -- the window-alignment fix this round exists for is moot on
+                # this path (the interval is unknown regardless; see
+                # Get-HostLoadNonSubjectCpuLoadPercent's systemTimesCollected gate), but the subject-CPU
+                # field's own contract (SubjectNotYetStarted -> a genuine 0.0, an unreadable handle ->
+                # $null, never guessed) must still hold independent of platform. This duplicates
+                # Get-HostLoadSystemTimes' own subject-read block exactly, for this fallback path only.
+                if ($SubjectNotYetStarted) {
+                    $snapshot.subjectCpuSeconds = 0.0
+                }
+                elseif ($null -ne $SubjectProcess) {
+                    try {
+                        $SubjectProcess.Refresh()
+                        $subjectTotalProcessorTime = $SubjectProcess.TotalProcessorTime
+                        if ($null -ne $subjectTotalProcessorTime) {
+                            $snapshot.subjectCpuSeconds = [double]$subjectTotalProcessorTime.TotalSeconds
+                        }
+                    } catch {
+                        # stays $null -- unreadable, never guessed zero.
                     }
-                } catch {
-                    # stays $null -- unreadable, never guessed zero.
                 }
             }
         }
+        $collectEvidence = {
+                $cpuLoad = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop `
+                    -OperationTimeoutSec $OperationTimeoutSec |
+                    Measure-Object -Property LoadPercentage -Average).Average
+                $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop `
+                    -OperationTimeoutSec $OperationTimeoutSec
+                if ($null -eq $cpuLoad) {
+                    $snapshot.error = "LoadPercentage unavailable from Win32_Processor."
+                }
+                else {
+                    $snapshot.cpuLoadPercent = [double]$cpuLoad
+                }
+                $snapshot.freePhysicalMemoryMb = [Math]::Round($os.FreePhysicalMemory / 1024.0, 1)
+                $snapshot.totalVisibleMemoryMb = [Math]::Round($os.TotalVisibleMemorySize / 1024.0, 1)
 
-        if (-not $SkipEvidenceCollection) {
-            $cpuLoad = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop `
-                -OperationTimeoutSec $OperationTimeoutSec |
-                Measure-Object -Property LoadPercentage -Average).Average
-            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop `
-                -OperationTimeoutSec $OperationTimeoutSec
-            if ($null -eq $cpuLoad) {
-                $snapshot.error = "LoadPercentage unavailable from Win32_Processor."
-            }
-            else {
-                $snapshot.cpuLoadPercent = [double]$cpuLoad
-            }
-            $snapshot.freePhysicalMemoryMb = [Math]::Round($os.FreePhysicalMemory / 1024.0, 1)
-            $snapshot.totalVisibleMemoryMb = [Math]::Round($os.TotalVisibleMemorySize / 1024.0, 1)
-
-            try {
-                $processes = Get-Process -ErrorAction Stop
-                $snapshot.processCount = [int]$processes.Count
-                $snapshot.topCpuConsumers = @(
-                    $processes | Sort-Object CPU -Descending | Select-Object -First $TopProcessCount |
-                        ForEach-Object { $_.ProcessName }
-                )
-            } catch {
-                # topCpuConsumers/processCount stay at their evidence-only defaults (empty/$null) --
-                # this must never block collection of the load-relevant data below.
-            }
+                try {
+                    $processes = Get-Process -ErrorAction Stop
+                    $snapshot.processCount = [int]$processes.Count
+                    $snapshot.topCpuConsumers = @(
+                        $processes | Sort-Object CPU -Descending | Select-Object -First $TopProcessCount |
+                            ForEach-Object { $_.ProcessName }
+                    )
+                } catch {
+                    # topCpuConsumers/processCount stay at their evidence-only defaults (empty/$null) --
+                    # this must never block collection of the load-relevant data below.
+                }
+        }
+        if ($SubjectNotYetStarted -and -not $SkipEvidenceCollection) {
+            . $collectEvidence
+            . $captureSystemTimes
+        }
+        else {
+            . $captureSystemTimes
+            if (-not $SkipEvidenceCollection) { . $collectEvidence }
         }
 
         $snapshot.collected = $snapshot.systemTimesCollected
@@ -1561,6 +1579,8 @@ $preLaunchSystemCpuSettle = Wait-SystemCpuSettle `
     -StableMs $SystemSettleCpuStableMs `
     -MaxMs $SystemSettleCpuMaxMs
 
+# -SubjectNotYetStarted also makes Get-HostLoadSnapshot take its system-times counters AFTER its evidence
+# collection, i.e. immediately before Process.Start below, so the first interval starts at leg start.
 $hostLoadBefore = Get-HostLoadSnapshot -TopProcessCount $HostLoadTopProcessCount -SubjectNotYetStarted
 $startUtc = [datetime]::UtcNow
 $process = [System.Diagnostics.Process]::Start($startInfo)

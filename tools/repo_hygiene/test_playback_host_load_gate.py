@@ -1024,9 +1024,17 @@ class HostLoadSnapshotProducerAlignmentTests(_ProbeCase):
             "    else { [pscustomobject]@{ FreePhysicalMemory = 1024; TotalVisibleMemorySize = 2048 } }\n"
             "}\n"
             "function Get-Process { param($ErrorAction, $Id) @() }\n"
+            # hub (sol r9 contract BLOCKER): the syscall-first order is the AFTER-bracket contract, so this
+            # test now drives the after shape (-SubjectProcess on a real, idle child). The BEFORE shape
+            # (-SubjectNotYetStarted) is pinned to the OPPOSITE order by
+            # test_before_bracket_takes_system_times_after_slow_evidence below.
+            "$subject = Start-Process -FilePath 'powershell.exe' -ArgumentList "
+            "'-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60' -PassThru\n"
+            "try {\n"
             "$callStartUtc = [datetime]::UtcNow\n"
-            "$s = Get-HostLoadSnapshot -TopProcessCount 1 -SubjectNotYetStarted\n"
+            "$s = Get-HostLoadSnapshot -TopProcessCount 1 -SubjectProcess $subject\n"
             "$callEndUtc = [datetime]::UtcNow\n"
+            "} finally { $subject | Stop-Process -Force -ErrorAction SilentlyContinue }\n"
             # round 9 test-harness note: a plain [datetime]<iso-string> cast in PowerShell does not
             # reliably preserve the "Z"/UTC kind the "o"-format string encodes -- production code
             # never notices because it only ever subtracts two such casts from EACH OTHER (any
@@ -1060,6 +1068,54 @@ class HostLoadSnapshotProducerAlignmentTests(_ProbeCase):
             f"systemTimesCapturedAtUtc lagged the call start by {lag_ms}ms out of a {total_ms}ms "
             "call -- the syscall is waiting on slow evidence collection again (round-8 ordering)",
         )
+
+    @unittest.skipUnless(os.name == "nt", "exercises the real GetSystemTimes syscall")
+    def test_before_bracket_takes_system_times_after_slow_evidence(self) -> None:
+        # hub (sol r9 contract BLOCKER): the BEFORE bracket (-SubjectNotYetStarted, evidence enabled)
+        # marks the START of the first interval and its caller starts the subject right after it
+        # returns, so the syscall must land at the END of the call, after the slow evidence work --
+        # not at its start, where the evidence latency would be pre-leg time folded into the first
+        # interval (sol: a 96% early-leg burst read quiet). Same two 900ms CIM mocks as the after-shape
+        # test above; the >=1700ms guard proves the mocks ran.
+        proc = self.run_snippet(
+            "function Get-CimInstance {\n"
+            "    param($ClassName, $Filter, $ErrorAction, $OperationTimeoutSec)\n"
+            "    Start-Sleep -Milliseconds 900\n"
+            "    if ($ClassName -eq 'Win32_Processor') { [pscustomobject]@{ LoadPercentage = 5 } }\n"
+            "    else { [pscustomobject]@{ FreePhysicalMemory = 1024; TotalVisibleMemorySize = 2048 } }\n"
+            "}\n"
+            "function Get-Process { param($ErrorAction, $Id) @() }\n"
+            "$callStartUtc = [datetime]::UtcNow\n"
+            "$s = Get-HostLoadSnapshot -TopProcessCount 1 -SubjectNotYetStarted\n"
+            "$callEndUtc = [datetime]::UtcNow\n"
+            "$syscallCapturedAtUtc = [datetime]::Parse($s.systemTimesCapturedAtUtc, "
+            "[System.Globalization.CultureInfo]::InvariantCulture, "
+            "[System.Globalization.DateTimeStyles]::RoundtripKind)\n"
+            "Write-Host \"SYSTEM_TIMES_COLLECTED=$($s.systemTimesCollected)\"\n"
+            "Write-Host \"SUBJECT=$($s.subjectCpuSeconds)\"\n"
+            "Write-Host \"END_GAP_MS=$(($callEndUtc - $syscallCapturedAtUtc).TotalMilliseconds)\"\n"
+            "Write-Host \"TOTAL_CALL_MS=$(($callEndUtc - $callStartUtc).TotalMilliseconds)\"\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("SYSTEM_TIMES_COLLECTED=True", proc.stdout)
+        self.assertIn("SUBJECT=0", proc.stdout)
+        end_gap_ms = float(next(l for l in proc.stdout.splitlines() if l.startswith("END_GAP_MS="))[len("END_GAP_MS="):])
+        total_ms = float(next(l for l in proc.stdout.splitlines() if l.startswith("TOTAL_CALL_MS="))[len("TOTAL_CALL_MS="):])
+        self.assertGreaterEqual(total_ms, 1700.0, "both mocked CIM sleeps must actually have run")
+        self.assertLess(
+            end_gap_ms, 400.0,
+            f"the before bracket's syscall landed {end_gap_ms}ms before the call returned (of {total_ms}ms) -- "
+            "it is running before the slow evidence collection, diluting the first interval",
+        )
+
+    def test_the_before_bracket_call_site_uses_the_evidence_first_shape(self) -> None:
+        # The ordering above is keyed on -SubjectNotYetStarted; pin that the one production before-bracket
+        # call passes it and keeps evidence enabled, so dropping either silently restores the dilution.
+        source = Path(SMOKE_SCRIPT).read_text(encoding="utf-8")
+        calls = [l for l in source.splitlines() if l.lstrip().startswith("$hostLoadBefore = Get-HostLoadSnapshot")]
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("-SubjectNotYetStarted", calls[0])
+        self.assertNotIn("-SkipEvidenceCollection", calls[0])
 
     @unittest.skipUnless(os.name == "nt", "spawns a real Windows child process and needs the real syscall")
     def test_slow_evidence_collection_does_not_inflate_a_real_subjects_recorded_cpu(self) -> None:
