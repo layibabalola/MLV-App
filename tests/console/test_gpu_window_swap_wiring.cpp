@@ -175,3 +175,58 @@ TEST(GpuWindowSwapWiring, ResetSwapTelemetrySetsSessionIdBeforeAnyWindowLookup)
     ASSERT_TRUE(sessionIdAt >= 0);
     ASSERT_TRUE(windowLookupAt > sessionIdAt);
 }
+
+// CUDA-PERF-DISPLAY-IDENTITY-3 (sol BLOCKER on #161): with telemetry off the instrument does no work at all --
+// no clock sample and no state change at session begin/end, and the screenshot-path swap never enters the recorder.
+
+namespace
+{
+QString functionBody(const QString & source, const QString & signature, const QString & nextSignature)
+{
+    const int at = source.indexOf(signature);
+    const int next = source.indexOf(nextSignature, at);
+    if (at < 0 || next <= at) return QString();
+    return source.mid(at, next - at);
+}
+} // namespace
+
+TEST(GpuWindowSwapWiring, TelemetryOffSessionBeginDoesNoWork)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/GpuDisplayWindow.cpp"));
+    const QString body = functionBody(source,
+        QStringLiteral("void GpuDisplayWindow::resetSwapTelemetry(quint64 sessionId)"),
+        QStringLiteral("GpuWindowSwapTelemetrySnapshot GpuDisplayWindow::swapTelemetrySnapshot()"));
+    ASSERT_FALSE(body.isEmpty());
+    const int gateAt = body.indexOf(QStringLiteral("if ( !swapTelemetryEnabled() ) return;"));
+    ASSERT_TRUE(gateAt >= 0);
+    ASSERT_TRUE(body.indexOf(QStringLiteral("mlv_stage_timing_now")) > gateAt);
+    ASSERT_TRUE(body.indexOf(QStringLiteral("g_swapTelemetrySessionActive = true;")) > gateAt);
+}
+
+TEST(GpuWindowSwapWiring, TelemetryOffSessionEndDoesNoWork)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/GpuDisplayWindow.cpp"));
+    const QString body = functionBody(source,
+        QStringLiteral("GpuWindowSwapTelemetrySnapshot GpuDisplayWindow::swapTelemetrySnapshot()"),
+        QStringLiteral("void GpuDisplayWindow::noteRealSwap()"));
+    ASSERT_FALSE(body.isEmpty());
+    const int gateAt = body.indexOf(QStringLiteral("if ( !swapTelemetryEnabled() ) return GpuWindowSwapTelemetrySnapshot();"));
+    ASSERT_TRUE(gateAt >= 0);
+    ASSERT_TRUE(body.indexOf(QStringLiteral("mlv_stage_timing_now")) > gateAt);
+    ASSERT_TRUE(body.indexOf(QStringLiteral("g_swapTelemetrySessionActive = false;")) > gateAt);
+}
+
+TEST(GpuWindowSwapWiring, TelemetryOffCaptureSwapNeverEntersTheRecorder)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/GpuDisplayWindow.cpp"));
+    ASSERT_TRUE(source.contains(QStringLiteral("if ( swapTelemetryEnabled() ) win->noteRealSwap();")));
+}
+
+TEST(GpuWindowSwapWiring, GuiTestsLinkTheOpenMpRuntimeTheSwapClockNeeds)
+{
+    // mlv_stage_timing_now() falls back to omp_get_wtime(); without libgomp gui_tests failed to link
+    // (hosted Windows GUI Pilot, #159 and #161).
+    const QString pro = readRepoFile(QStringLiteral("tests/gui/gui_tests.pro"));
+    ASSERT_TRUE(pro.contains(QStringLiteral("win32: LIBS += -llibgomp-1")));
+}
+

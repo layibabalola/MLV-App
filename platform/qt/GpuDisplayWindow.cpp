@@ -123,6 +123,9 @@ QSize GpuDisplayWindow::displaySize()
 
 void GpuDisplayWindow::resetSwapTelemetry(quint64 sessionId)
 {
+    // Telemetry off: no clock sample, no state change -- the instrument does no work at all
+    // (CUDA-PERF-DISPLAY-IDENTITY-3, sol on #161).
+    if ( !swapTelemetryEnabled() ) return;
     // Session identity is set unconditionally, before any window lookup, so it is
     // correct even when no window is active yet at session begin (hardening: the
     // summary must never print a different session than playback_smoke.gate's).
@@ -137,6 +140,9 @@ void GpuDisplayWindow::resetSwapTelemetry(quint64 sessionId)
 
 GpuWindowSwapTelemetrySnapshot GpuDisplayWindow::swapTelemetrySnapshot()
 {
+    // Telemetry off: return the default (telemetryEnabled=false) snapshot before any clock sample
+    // or state change; no session was ever opened by resetSwapTelemetry either.
+    if ( !swapTelemetryEnabled() ) return GpuWindowSwapTelemetrySnapshot();
     // Closes the session: called once, at playback-smoke session end. Deactivating
     // before returning means any swap that happens later in this same synchronous
     // call stack -- e.g. a queued or screenshot-capture swap after the gate -- is not
@@ -1032,7 +1038,7 @@ bool GpuDisplayWindow::grabPresentedFramebufferIfActive(QImage *outImage,
     // Real swap path 2 of 2: this manual swap runs outside Qt's own paint-event cycle, so
     // QOpenGLWindow's frameSwapped() signal (path 1, connected in the constructor) does
     // NOT fire for it -- record it explicitly so swap telemetry covers every real swap.
-    win->noteRealSwap();
+    if ( swapTelemetryEnabled() ) win->noteRealSwap();
     if ( madeCurrent ) win->doneCurrent();
 
     if ( outImage ) *outImage = win->m_captureReadbackImage;
