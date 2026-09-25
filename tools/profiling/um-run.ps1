@@ -21,6 +21,23 @@
 # names, share-side hash verification before each rename, renames that never overwrite, and every
 # side-file in place before the job is dropped. `pwsh -File` cannot pass arrays, so -SideFile also
 # accepts a ';'-separated list.
+#
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (hub ruling): a client cutoff must never declare
+# failure while the agent may still own the job -- rounds 6-10 tried to size a cutoff that
+# provably outlasts the agent, but the deployed agent has a silent kill/drain/publish window (no
+# heartbeat write between its own deadline and publishing a receipt) that no heartbeat threshold
+# can prove past. So every outcome this script can report is now named and made truthful by
+# construction instead:
+#   - RECEIPT -- $resultFile appeared; returned, as always.
+#   - RETRACTED -- the queue-wait ceiling was reached, the job was never claimed, and this client
+#     successfully withdrew it from the inbox before the agent could ever see it: a clean refusal,
+#     never a failure.
+#   - UNRESOLVED -- this client stopped waiting while the agent may still own the job (claimed, no
+#     receipt, no proof of death). Not a failure and not retryable on this evidence alone: the
+#     agent may still publish $resultFile after this client has already given up.
+# This script never synthesizes a FAILED verdict from its own timeout: the only way this function
+# ever reports a failure is a receipt that itself says so (an ordinary exitCode != 0), which is
+# already the caller's business, not this wait loop's.
 
 [CmdletBinding(DefaultParameterSetName = 'Script')]
 param(
@@ -43,30 +60,33 @@ param(
     # Keep a generator's own job id (so outbox\<JobId>.result.json and its artifacts line up).
     [string]$JobId = '',
     # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: once past claimedAt + -TimeoutSec, this client
-    # keeps waiting as long as heartbeat.txt proves the agent is still alive -- there is no longer
-    # a fixed budget+grace cutoff (see the liveness wait below). This is the ABSOLUTE outer ceiling
-    # on top of that: even a genuinely, provably still-alive agent is only trusted for this much
-    # longer than the job's own requested budget before this client gives up regardless. Default
-    # mirrors -MaxQueueWaitSec's own reasoning (a bound sized to outlast a lot of legitimate extra
-    # work, not a guessed round number) -- generous enough that a job which legitimately consumes
-    # its whole budget and then needs real recovery time (a slow kill, a slow SMB receipt write
-    # under load) is never cut off while still proving progress, but still a genuine ceiling: a
-    # stuck-but-heartbeating agent can hold this client for at most -TimeoutSec + this long, never
-    # forever.
+    # keeps waiting as long as the agent may still own the job (proof of liveness, OR -- round 11 --
+    # its own started marker still sitting in running\, proof it has not yet finished with this job
+    # either way). This is the ABSOLUTE outer ceiling on top of that: even a job the agent may still
+    # own is only trusted for this much longer than its own requested budget before this client
+    # stops regardless (UNRESOLVED, never FAILED -- see this file's own header). Default mirrors
+    # -MaxQueueWaitSec's own reasoning (a bound sized to outlast a lot of legitimate extra work, not
+    # a guessed round number).
     [int]$MaxClaimedWaitSec = 86400,
-    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: forwarded to Invoke-UmRunDrop. Claim-first means
-    # this is now a promise about THIS caller's own worst-case time from claim to every side-file
-    # and the job itself being in place (see UmRunDrop.psm1's own header) -- production callers
-    # (attr3-footage-stage.ps1) pass no -SideFile and need no more than the unchanged default; a
-    # caller that DOES pass a large -SideFile (the manual ATTR3-FIXTURE-REHEARSAL-1 operator
-    # workflow) states its own real transfer time here instead of relying on an implicit assumption.
-    [int]$OrphanMetaGraceSec = 60,
     # Test-only: invoked with no arguments the instant the queue deadline is judged reached and no
     # claim has been seen yet, immediately BEFORE the recheck that follows it -- lets a test land a
-    # claim marker write deterministically inside what is otherwise a sub-millisecond window between
+    # claim marker deterministically inside what is otherwise a sub-millisecond window between
     # this script's last (negative) marker check and its final diagnosis (round 7, sol blocker).
     # Production never passes this.
-    [scriptblock]$TestHookAtQueueDeadline = $null
+    [scriptblock]$TestHookAtQueueDeadline = $null,
+    # Test-only: invoked with no arguments immediately after this client's own retraction rename
+    # attempt (round 11, item 2), whether it succeeded or failed, BEFORE the marker recheck that
+    # follows it -- lets a test land a claim marker deterministically inside the retraction race,
+    # the same way -TestHookAtQueueDeadline already does for the marker-appears-first race.
+    # Production never passes this.
+    [scriptblock]$TestHookAfterRetractionRename = $null,
+    # Test-only: invoked with no arguments immediately BEFORE the receipt recheck that guards the
+    # absolute-outer-ceiling throw -- lets a test plant a receipt in that exact window to prove the
+    # recheck is load-bearing (round 11, fable minor). Production never passes this.
+    [scriptblock]$TestHookBeforeOuterCeilingReceiptRecheck = $null,
+    # Test-only: same, for the receipt recheck that guards the liveness-lost throw. Production
+    # never passes this.
+    [scriptblock]$TestHookBeforeLivenessLostReceiptRecheck = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -98,13 +118,18 @@ if ($PSCmdlet.ParameterSetName -eq 'Command') {
 }
 if (-not (Test-Path $ScriptPath)) { throw "Script not found: $ScriptPath" }
 
-$dropLines = @(Invoke-UmRunDrop -Inbox $inbox -Outbox $outbox -ScriptPath $ScriptPath -JobId $JobId -SideFile $SideFile -JobTimeoutSec $TimeoutSec -OrphanMetaGraceSec $OrphanMetaGraceSec)
+$dropLines = @(Invoke-UmRunDrop -Inbox $inbox -Outbox $outbox -ScriptPath $ScriptPath -JobId $JobId -SideFile $SideFile -JobTimeoutSec $TimeoutSec)
 $jobId = $null
+$nonce = $null
 foreach ($line in $dropLines) {
-    if ($line -like 'UMRUN_JOBID=*') { $jobId = $line.Substring('UMRUN_JOBID='.Length) } else { Write-Host $line }
+    if ($line -like 'UMRUN_JOBID=*') { $jobId = $line.Substring('UMRUN_JOBID='.Length) }
+    elseif ($line -like 'UMRUN_NONCE=*') { $nonce = $line.Substring('UMRUN_NONCE='.Length) }
+    else { Write-Host $line }
 }
 if (-not $jobId) { throw "UmRunDrop returned no job id" }
+if (-not $nonce) { throw "UmRunDrop returned no claim nonce" }
 
+$jobFile       = Join-Path $inbox "$jobId.job.ps1"
 $resultFile    = Join-Path $outbox "$jobId.result.json"
 $startedMarker = Join-Path $running "$jobId.started.json"
 
@@ -115,10 +140,22 @@ $startedMarker = Join-Path $running "$jobId.started.json"
 # merely-queued job, then throw a message that affirmatively misdiagnoses a healthy, still-running
 # job as a dead agent. So there are two phases, and the client always knows which one it is in:
 #   - QUEUED: waiting to see running\<jobId>.started.json, a marker a compatible agent writes the
-#     instant it claims the job (read here rather than guessed at). Ceiling: $MaxQueueWaitSec.
+#     instant it claims the job (read here rather than guessed at). Ceiling: $MaxQueueWaitSec, then
+#     RETRACTED (round 11).
 #   - CLAIMED: once the marker appears, patience past the job's own -TimeoutSec no longer comes
-#     from a constant -- round 10 replaces it with the liveness wait below.
-$submittedAt    = Get-Date
+#     from a constant -- the liveness wait below, ending in UNRESOLVED, never FAILED.
+#
+# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (sol MAJOR + fable MAJOR, item 5c): every deadline
+# below is a [DateTimeOffset], compared only against other [DateTimeOffset]s. [DateTimeOffset]
+# comparisons are defined on the absolute instant represented, regardless of the value's own
+# offset -- unlike plain [DateTime], whose comparison operators compare raw ticks and silently
+# ignore Kind, so a Local-kind "now" and a Utc-kind "now" for the very same instant compare as
+# UNEQUAL by exactly the host's own UTC offset. That ambiguity is what let a hypothetical
+# regression (building a deadline from the CLAIM MARKER's own agent-host timestamp instead of this
+# client's own observation -- the exact round-7 bug class) escape detection on some host
+# timezones and not others (round 10/11 sol+fable minor). Using [DateTimeOffset] throughout removes
+# the ambiguity at its source rather than trying to out-guess it in a test.
+$submittedAt    = [DateTimeOffset]::Now
 $queueDeadline  = $submittedAt.AddSeconds($MaxQueueWaitSec)
 $claimedAt      = $null
 $budgetDeadline = $null
@@ -132,129 +169,122 @@ function Get-UmRunResultIfPresent {
     return $null
 }
 
-# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: replaces the old fixed budget+grace cutoff. Once
-# past claimedAt + -TimeoutSec, the client's patience comes from PROOF the agent is still working
-# on this job -- heartbeat.txt fresh by the SHARE's own clock (Get-UmRunShareNowUtc, the same
-# round-6 probe UmRunDrop.psm1 uses for its own orphan-age check -- reused here, not duplicated,
-# so a submitter and this client never disagree about what "fresh" means) -- rather than a
-# constant nobody could derive a real bound for. The agent tags heartbeat.txt with " job=<id>"
-# (normal execution) or " adopt job=<id>" (post-restart adoption) every wait-slice while a job is
-# genuinely running -- ultra-magnus-agent.ps1's own wait-slice is hard-capped at 5s regardless of
-# its own -PollSeconds -- so a tag naming a DIFFERENT job proves the agent has moved off this one
-# without ever producing a receipt, which is liveness-lost for OUR purposes even if the agent
-# itself is fine. A heartbeat line with no job= tag at all (a plain between-jobs heartbeat, or one
-# this client happened to read mid-write) is not treated as a mismatch -- only an EXPLICIT
-# different job id is.
-function Get-UmRunAgentLiveness {
-    param(
-        [Parameter(Mandatory = $true)][string]$HeartbeatPath,
-        [Parameter(Mandatory = $true)][string]$Inbox,
-        [Parameter(Mandatory = $true)][string]$JobId,
-        [Parameter(Mandatory = $true)][int]$MaxHeartbeatAgeSec
-    )
-    if (-not (Test-Path -LiteralPath $HeartbeatPath)) {
-        return [pscustomobject]@{ Fresh = $false; AgeSec = $null; HeartbeatUtc = $null; JobMismatch = $false; OtherJobId = $null }
-    }
-    $shareNowUtc = Get-UmRunShareNowUtc -Directory $Inbox
-    $heartbeatUtc = (Get-Item -LiteralPath $HeartbeatPath -Force).LastWriteTimeUtc
-    $ageSec = ($shareNowUtc - $heartbeatUtc).TotalSeconds
-    $jobMismatch = $false
-    $otherJobId = $null
-    # The agent's own heartbeat write (Write-AsciiFileWithRetry) is not atomic across processes --
-    # a read landing mid-write could in principle see a torn line. Not retried here: the failure
-    # mode is a missed `job=` match (treated as "no tag present", never a false mismatch, since
-    # $jobMismatch only ever flips true on an ACTUAL different id), which self-corrects on the
-    # very next poll and never produces a wrong FINAL outcome -- only, at worst, one extra
-    # PollSeconds of this client second-guessing an otherwise-fresh heartbeat.
-    $line = Get-Content -LiteralPath $HeartbeatPath -Raw -ErrorAction SilentlyContinue
-    if ($line -and $line -match '(?:^|\s)job=(\S+)\s*$') {
-        if ($Matches[1] -ne $JobId) { $jobMismatch = $true; $otherJobId = $Matches[1] }
-    }
-    return [pscustomobject]@{
-        Fresh        = (-not $jobMismatch) -and ($ageSec -le $MaxHeartbeatAgeSec)
-        AgeSec       = $ageSec
-        HeartbeatUtc = $heartbeatUtc
-        JobMismatch  = $jobMismatch
-        OtherJobId   = $otherJobId
-    }
-}
-
-# ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 7 (sol/fable blocker): claimedAt used to come from the
-# marker's own startedUtc field -- a timestamp stamped by the AGENT HOST's clock -- while every
-# deadline built from it is compared against THIS CLIENT's Get-Date a few lines down. Those are two
-# different clocks with no guarantee they agree; sufficient skew (or slow client-side setup after
-# the marker is published) computes an already-expired deadline and throws before the agent's own
-# timeout receipt can land. Round 6 hit the same class in the orphan self-heal and fixed it there by
-# probing a THIRD, shared clock domain (the file server's) -- right for that call, because both
-# timestamps being compared there are remotely authored. Here the client is setting a deadline for
-# its OWN wait, so the simpler and stricter fix is to never leave the client's own clock domain at
-# all: $claimedAt is the client's own Get-Date at the instant it first observes the marker, never
-# the agent's stamp of when it wrote it. That can only differ from the agent's real claim instant by
-# at most one -PollSeconds of propagation -- i.e. it errs toward MORE client patience, never less,
-# and no cross-machine clock comparison is possible because only one clock is ever read. Round 10:
-# $budgetDeadline (claimedAt + -TimeoutSec) is no longer a hard stop -- it is the instant patience
-# stops being unconditional and starts depending on liveness (below).
 while ($true) {
     $r = Get-UmRunResultIfPresent -Path $resultFile
     if ($null -ne $r) { return $r }
 
     if ($null -eq $claimedAt -and (Test-Path -LiteralPath $startedMarker)) {
-        $claimedAt      = Get-Date
+        $claimedAt      = [DateTimeOffset]::Now
         $budgetDeadline = $claimedAt.AddSeconds($TimeoutSec)
     }
 
     if ($null -ne $claimedAt) {
         # CLAIMED phase. THE THREE OUTCOMES from here: (1) a receipt appears -- returned above on
-        # the next iteration; (2) liveness is lost -- thrown below, naming since when; (3) the
-        # absolute outer ceiling is reached despite proven liveness -- thrown below, naming it.
-        if ((Get-Date) -ge $budgetDeadline) {
+        # the next iteration; (2) UNRESOLVED because liveness is lost AND this job's own started
+        # marker is also gone; (3) UNRESOLVED because the absolute outer ceiling is reached. Neither
+        # (2) nor (3) is ever reported as a failure -- see this file's own header.
+        if ([DateTimeOffset]::Now -ge $budgetDeadline) {
+            $outerCeiling = $claimedAt.AddSeconds($TimeoutSec + $MaxClaimedWaitSec)
+            if ([DateTimeOffset]::Now -ge $outerCeiling) {
+                if ($TestHookBeforeOuterCeilingReceiptRecheck) { & $TestHookBeforeOuterCeilingReceiptRecheck }
+                $r = Get-UmRunResultIfPresent -Path $resultFile
+                if ($null -ne $r) { return $r }
+                throw "UNRESOLVED: $jobId was claimed by the agent and has kept proving liveness past its own budget (${TimeoutSec}s) for the full -MaxClaimedWaitSec (${MaxClaimedWaitSec}s) -- this client is stopping at its absolute outer ceiling, not failing: the agent may still own $jobId and its receipt may still land at $resultFile after this; not retryable on this evidence alone"
+            }
             $liveness = Get-UmRunAgentLiveness -HeartbeatPath $hb -Inbox $inbox -JobId $jobId -MaxHeartbeatAgeSec $MaxHeartbeatAgeSec
             if (-not $liveness.Fresh) {
-                $r = Get-UmRunResultIfPresent -Path $resultFile
-                if ($null -ne $r) { return $r }
-                if ($liveness.JobMismatch) {
-                    throw "$jobId was claimed by the agent, but heartbeat.txt now names a DIFFERENT job ($($liveness.OtherJobId)) -- the agent has moved on without ever publishing $resultFile for $jobId; this client is giving up, but the agent may still be alive and $resultFile may still land later if this is a stale read"
+                if (Test-Path -LiteralPath $startedMarker) {
+                    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (item 3): the deployed agent
+                    # writes NO heartbeat between its own deadline and publishing a receipt
+                    # (Stop-ProcessTree, stream drain, and Publish-JobResult are all silent) -- a
+                    # window that can outlast a stale or job-mismatched heartbeat on its own.
+                    # running\<jobId>.started.json is proof the agent still owns this job
+                    # regardless: the ONLY code path that ever removes it (Complete-StartedMarker,
+                    # in both the deployed agent and the tracked double) runs strictly AFTER a
+                    # receipt is durably published to $resultFile -- so the marker's mere presence
+                    # is still "may still own the job", never lost liveness. This never overrides
+                    # the absolute outer ceiling above; it only means THIS particular cutoff does
+                    # not fire THIS particular poll.
+                } else {
+                    if ($TestHookBeforeLivenessLostReceiptRecheck) { & $TestHookBeforeLivenessLostReceiptRecheck }
+                    $r = Get-UmRunResultIfPresent -Path $resultFile
+                    if ($null -ne $r) { return $r }
+                    if ($liveness.JobMismatch) {
+                        throw "UNRESOLVED: $jobId was claimed by the agent, but heartbeat.txt now names a DIFFERENT job ($($liveness.OtherJobId)) and its own started marker is gone too -- the agent has moved on without a receipt for $jobId that this client can see; this client is stopping, not failing: $resultFile may still land later if this is a stale read; not retryable on this evidence alone"
+                    }
+                    if ($null -eq $liveness.HeartbeatUtc) {
+                        throw "UNRESOLVED: $jobId was claimed by the agent, but $hb no longer exists and its own started marker is gone too -- this client is stopping, not failing: the agent may still own $jobId and its receipt may still land at $resultFile after this; not retryable on this evidence alone"
+                    }
+                    throw "UNRESOLVED: $jobId was claimed by the agent, but it stopped proving liveness: $hb was last written at $($liveness.HeartbeatUtc.ToString('o')) (the share's own clock), now $([int]$liveness.AgeSec)s old -- past the -MaxHeartbeatAgeSec $MaxHeartbeatAgeSec s freshness threshold, and its own started marker is gone too -- this client is stopping, not failing: the agent may still own $jobId and its receipt may still land at $resultFile after this; not retryable on this evidence alone"
                 }
-                if ($null -eq $liveness.HeartbeatUtc) {
-                    throw "$jobId was claimed by the agent, but $hb no longer exists -- this client is giving up, but the agent still owns $jobId and its receipt may still land at $resultFile after this"
-                }
-                throw "$jobId was claimed by the agent, but it stopped proving liveness: $hb was last written at $($liveness.HeartbeatUtc.ToString('o')) (the share's own clock), now $([int]$liveness.AgeSec)s old -- past the -MaxHeartbeatAgeSec $MaxHeartbeatAgeSec s freshness threshold; this client is giving up, but the agent still owns $jobId and its receipt may still land at $resultFile after this"
-            }
-            $outerCeiling = $claimedAt.AddSeconds($TimeoutSec + $MaxClaimedWaitSec)
-            if ((Get-Date) -ge $outerCeiling) {
-                $r = Get-UmRunResultIfPresent -Path $resultFile
-                if ($null -ne $r) { return $r }
-                throw "$jobId was claimed by the agent and has kept proving liveness past its own budget (${TimeoutSec}s) for the full -MaxClaimedWaitSec (${MaxClaimedWaitSec}s) -- this client is giving up at its absolute outer ceiling regardless of liveness, but the agent still owns $jobId and its receipt may still land at $resultFile after this"
             }
         }
     } else {
-        # QUEUED phase (unchanged ceiling/recheck logic).
-        if ((Get-Date) -ge $queueDeadline) {
+        # QUEUED phase.
+        if ([DateTimeOffset]::Now -ge $queueDeadline) {
             # round 7 (sol blocker): the comment above has always promised a receipt-OR-claim
             # recheck, but a plain break was the only path out of the loop and it never rechecked
             # the claim marker -- so a claim landing after the Test-Path above found nothing, but
-            # before this break/throw completes, was still reported as "never claimed" for a job
-            # the agent had, in fact, just started. One more look at the marker right here: if it
-            # has now appeared, switch onto the CLAIMED phase (one more loop iteration) instead of
+            # before this recheck completes, was still reported as "never claimed" for a job the
+            # agent had, in fact, just started. One more look at the marker right here: if it has
+            # now appeared, switch onto the CLAIMED phase (one more loop iteration) instead of
             # ending the loop.
             if ($TestHookAtQueueDeadline) { & $TestHookAtQueueDeadline }
             if (Test-Path -LiteralPath $startedMarker) {
-                $claimedAt      = Get-Date
+                $claimedAt      = [DateTimeOffset]::Now
                 $budgetDeadline = $claimedAt.AddSeconds($TimeoutSec)
                 continue
             }
-            break
+
+            # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (sol BLOCKER, item 2): the queue ceiling
+            # used to just end the loop here, leaving the job sitting in the inbox for the agent to
+            # claim and execute LATER -- after this client had already reported failure to ITS OWN
+            # caller, a receipt or side effect the caller never saw coming. Instead, RETRACT:
+            # atomically rename the job file itself out of the inbox. A compatible agent never
+            # renames or moves a job file except at completion (Move-JobArtifacts / the tracked
+            # double's own final Move-Item), long after claiming it -- so if this rename succeeds
+            # AND the marker still never appears, the job really was never claimed, and this run
+            # never happened from the agent's point of view. If the rename fails, or the marker
+            # appears anyway (the agent won the race in the instant between this client's last
+            # negative check and its own rename), this client cannot prove retraction -- so it
+            # never asserts one, and falls through to the claimed wait instead.
+            $retractedTmp = Join-Path $inbox "$jobId.$([guid]::NewGuid().ToString('N')).retracted.tmp"
+            $renamed = $false
+            try {
+                Move-Item -LiteralPath $jobFile -Destination $retractedTmp -ErrorAction Stop   # no -Force
+                $renamed = $true
+            } catch {
+                $renamed = $false
+            }
+            if ($renamed) { Remove-Item -LiteralPath $retractedTmp -Force -ErrorAction SilentlyContinue }
+            if ($TestHookAfterRetractionRename) { & $TestHookAfterRetractionRename }
+            $stillClaimed = Test-Path -LiteralPath $startedMarker
+            if ($renamed -and -not $stillClaimed) {
+                # Genuinely never claimed: clean up this submission's own claim metadata, by
+                # nonce -- never a blind delete (the same invariant UmRunDrop.psm1's own rollback
+                # now enforces on its post-claim failure path).
+                $metaFinal = Join-Path $inbox "$jobId.meta.json"
+                if (Test-Path -LiteralPath $metaFinal) {
+                    try {
+                        $currentMeta = (Get-Content -LiteralPath $metaFinal -Raw -Encoding ascii) | ConvertFrom-Json
+                        if ($null -ne $currentMeta -and $currentMeta.nonce -eq $nonce) {
+                            Remove-Item -LiteralPath $metaFinal -Force -ErrorAction SilentlyContinue
+                        }
+                    } catch { }
+                }
+                $queuedElapsedSec = [int]([DateTimeOffset]::Now - $submittedAt).TotalSeconds
+                throw "RETRACTED: $jobId reached its queue wait ceiling (-MaxQueueWaitSec ${MaxQueueWaitSec}s, ${queuedElapsedSec}s elapsed) with no $startedMarker marker ever appearing, so this client withdrew it from the inbox before the agent could ever claim it -- nothing was submitted from the agent's point of view; not a failure, retry with a new -JobId if desired"
+            }
+            # Either the rename failed (something else already has this path -- almost certainly
+            # the agent, mid-claim), or it succeeded but the marker appeared anyway (the agent
+            # claimed it in the very same instant; this client's own rename may now make the
+            # agent's own launch fail, but that becomes the agent's own honestly-reported receipt,
+            # never this client's assertion). Either way: never declare retraction or failure while
+            # the job might already be running -- switch to the claimed wait.
+            $claimedAt      = [DateTimeOffset]::Now
+            $budgetDeadline = $claimedAt.AddSeconds($TimeoutSec)
+            continue
         }
     }
     Start-Sleep -Seconds $PollSeconds
 }
-
-# fable/sol major 3 (second half): re-check the receipt once more before throwing -- one that lands
-# in the instant between the deadline check above and this line must still be read, not missed. Only
-# the QUEUED (never-claimed) outcome can still reach here -- every CLAIMED-phase outcome throws (or
-# returns) from inside the loop above, since round 10 needs to name WHICH of the three outcomes fired
-# from the exact context that observed it.
-$r = Get-UmRunResultIfPresent -Path $resultFile
-if ($null -ne $r) { return $r }
-$queuedElapsedSec = [int]((Get-Date) - $submittedAt).TotalSeconds
-throw "Timed out after ${queuedElapsedSec}s: $jobId was never claimed (no $startedMarker marker appeared) and $resultFile never appeared -- it may still be queued behind other work on the agent, or the agent may be unreachable"

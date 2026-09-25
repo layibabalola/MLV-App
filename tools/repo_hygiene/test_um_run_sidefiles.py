@@ -72,14 +72,11 @@ class _Share(unittest.TestCase):
         (self.share / "heartbeat.txt").write_text(line, encoding="utf-8")
 
     def drop(self, copier: str, *, side: list[Path] | None = None, job_id: str = "demo",
-             job_timeout_sec: int | None = None, orphan_grace_sec: int | None = None,
+             job_timeout_sec: int | None = None,
              before_job_visible: str | None = None,
-             after_meta_tmp_written: str | None = None,
-             after_share_clock_probe: str | None = None,
-             after_share_probe_written: str | None = None) -> subprocess.CompletedProcess:
+             after_meta_tmp_written: str | None = None) -> subprocess.CompletedProcess:
         sides = ",".join(_q(p) for p in (side if side is not None else [self.side]))
         timeout_arg = "" if job_timeout_sec is None else f" -JobTimeoutSec {job_timeout_sec}"
-        grace_arg = "" if orphan_grace_sec is None else f" -OrphanMetaGraceSec {orphan_grace_sec}"
         script = self.tmp / "drop.ps1"
         preamble = (
             "$ErrorActionPreference = 'Stop'\n"
@@ -94,17 +91,11 @@ class _Share(unittest.TestCase):
         if after_meta_tmp_written is not None:
             preamble += f"$afterMetaTmpWritten = {after_meta_tmp_written}\n"
             hook_args += " -TestHookAfterMetaTmpWritten $afterMetaTmpWritten"
-        if after_share_clock_probe is not None:
-            preamble += f"$afterShareClockProbe = {after_share_clock_probe}\n"
-            hook_args += " -TestHookAfterShareClockProbe $afterShareClockProbe"
-        if after_share_probe_written is not None:
-            preamble += f"$afterShareProbeWritten = {after_share_probe_written}\n"
-            hook_args += " -TestHookAfterShareProbeWritten $afterShareProbeWritten"
         script.write_text(
             preamble +
             "try {\n"
             f"  Invoke-UmRunDrop -Inbox {_q(self.inbox)} -Outbox {_q(self.outbox)} -ScriptPath {_q(self.job)} "
-            f"-JobId '{job_id}' -SideFile @({sides}){timeout_arg}{grace_arg}{hook_args} -Copier $copier\n"
+            f"-JobId '{job_id}' -SideFile @({sides}){timeout_arg}{hook_args} -Copier $copier\n"
             "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
             encoding="utf-8",
         )
@@ -313,68 +304,6 @@ class UmRunDropModuleTests(_Share):
         self.assertTrue((self.inbox / "demo.meta.json").exists(),
                          "a surfaced rollback failure must mean the metadata really was left behind")
 
-    def test_the_orphan_age_check_reads_the_probe_files_own_share_stamped_clock_not_the_clients(self) -> None:
-        # round 6 fable minor, re-raised at round 7, and NARROWED again by sol at round 8: "no test
-        # fails if the share-clock probe reverts to Get-Date" -- the round-7 version of this test
-        # only asserted the probed value was a PLAUSIBLE reading of now, which is true whether the
-        # module genuinely re-reads the probe file's LastWriteTimeUtc off the share (the mechanism
-        # this test exists to prove) OR simply substitutes the submitter's own Get-Date, since
-        # submitter and share sit on ONE clock in this suite -- sol's narrower revert: replace the
-        # assignment at UmRunDrop.psm1's probe read with a client Get-Date but leave the
-        # -TestHookAfterShareClockProbe call site untouched, and every round-7 assertion here still
-        # passed. -TestHookAfterShareProbeWritten fires right after the probe file is created but
-        # BEFORE its LastWriteTimeUtc is ever read, letting this test stamp the probe file with a
-        # timestamp NO Get-Date call could ever produce (a fixed date decades in the future). The
-        # probed value can only match that sentinel if the code genuinely reads it back off the
-        # file -- a Get-Date substitution reports the real current time and fails this assertion.
-        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":99}', encoding="ascii")
-        sentinel = "2099-01-01T00:00:00Z"
-        stamp_hook = (
-            "{ param($p) "
-            f"[IO.File]::SetLastWriteTimeUtc($p, [datetime]::Parse('{sentinel}').ToUniversalTime()) "
-            "}"
-        )
-        probe_hook = (
-            "{ param($t) "
-            f"Add-Content -LiteralPath {_q(self.log)} "
-            "-Value ('PROBE=' + $t.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')) "
-            "}"
-        )
-        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, orphan_grace_sec=0,
-                          after_share_probe_written=stamp_hook, after_share_clock_probe=probe_hook)
-        self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
-        lines = [ln for ln in self.log.read_text(encoding="utf-8").splitlines() if ln.startswith("PROBE=")]
-        self.assertEqual(len(lines), 1, "the probe hook must fire exactly once, on the orphan-check path")
-        self.assertEqual(lines[0], f"PROBE={sentinel}",
-                         "the probed value must come from re-reading the share-stamped probe file, "
-                         "not from the submitter's own clock")
-
-    def test_the_orphan_age_check_actually_ages_off_the_probed_share_clock_not_just_reads_it(self) -> None:
-        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 9 (astra test-strength minor): the test above
-        # proves the probe file's LastWriteTimeUtc is READ, but it uses -OrphanMetaGraceSec 0, so
-        # the orphan is removed regardless of what $shareNowUtc actually holds (any real clock
-        # reading minus the meta file's own real mtime is >= 0, which already clears a grace of 0)
-        # -- replacing $shareNowUtc at the age subtraction (UmRunDrop.psm1:235) with a plain
-        # (Get-Date).ToUniversalTime() fails no assertion there. A NONZERO grace, plus a probe
-        # stamped decades in the future (so the CORRECT age is enormous and clears the grace by a
-        # wide margin) and a meta.json whose real mtime is "now" (so a client-clock substitution
-        # would compute an age of a few milliseconds, well UNDER the grace), makes the two
-        # behaviours diverge on the actual REMOVE-OR-KEEP outcome.
-        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":99}', encoding="ascii")
-        sentinel = "2099-01-01T00:00:00Z"
-        stamp_hook = (
-            "{ param($p) "
-            f"[IO.File]::SetLastWriteTimeUtc($p, [datetime]::Parse('{sentinel}').ToUniversalTime()) "
-            "}"
-        )
-        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, orphan_grace_sec=5,
-                          after_share_probe_written=stamp_hook)
-        combined = proc.stdout + proc.stderr
-        self.assertIn("removed orphaned metadata", combined, combined)
-        self.assertNotIn("THREW UMRUN_JOBID_IN_USE", combined, combined)
-        self.assertIn("UMRUN_JOBID=demo", combined, combined)
-        self.assertEqual(self.names(), ["demo.job.ps1", "demo.meta.json"])
-
     def test_a_torn_metadata_write_is_rejected_by_readback_verification(self) -> None:
         # sol round 4 minor: "removing metadata readback verification would not fail any test" --
         # -TestHookAfterMetaTmpWritten corrupts the metadata temp file after it is written but
@@ -385,54 +314,51 @@ class UmRunDropModuleTests(_Share):
         self.assertIn("THREW UMRUN_JOB_METADATA_VERIFY_FAILED", proc.stdout, proc.stdout + proc.stderr)
         self.assertEqual(self.names(), [], "a torn metadata write must leave neither metadata nor a job")
 
-    def test_an_orphaned_metadata_from_a_hard_interruption_is_self_healed_after_its_grace_period(self) -> None:
-        # sol round 4 major (item 2/4): metadata with no job and no result can only be left by a
-        # submission hard-interrupted (killed, not thrown) between publishing metadata and exposing
-        # the job -- neither agent ever consumes metadata without its paired job. -OrphanMetaGraceSec
-        # 0 simulates that grace period having already elapsed: the retry must reclaim the JobId
-        # instead of being bricked forever, which is the SUBMIT-RETRY-1 bug this round closes for
-        # the interrupt path (round 2 already closed it for the thrown-exception path).
-        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":99}', encoding="ascii")
-        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, orphan_grace_sec=0)
-        self.assertIn("removed orphaned metadata", proc.stdout, proc.stdout + proc.stderr)
-        self.assertIn("UMRUN_JOBID=demo", proc.stdout, proc.stdout + proc.stderr)
-        self.assertEqual(self.names(), ["demo.job.ps1", "demo.meta.json"])
-        meta = json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))
-        self.assertEqual(meta["timeoutSec"], 3600, "the retry's own fresh metadata, never the stale orphan's")
-
-    def test_an_orphaned_metadata_still_inside_its_grace_period_is_treated_as_possibly_live(self) -> None:
-        # The other half: immediately after it appears, orphaned metadata is indistinguishable from
-        # a live submission mid-rename, so the default grace period still refuses the retry -- this
-        # is the same outcome as test_metadata_that_appears_concurrently_is_not_overwritten below,
-        # named here to make the grace-period boundary explicit.
-        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":99}', encoding="ascii")
-        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600)   # default -OrphanMetaGraceSec
-        self.assertIn("THREW UMRUN_JOBID_IN_USE", proc.stdout, proc.stdout + proc.stderr)
-        self.assertEqual(json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))["timeoutSec"], 99)
-
-    def test_a_stale_orphan_that_cannot_be_removed_is_surfaced_not_silently_kept(self) -> None:
-        # sol round 4 minor (item 2/4, "cleanup failure"): the round-2 rollback cleanup was
-        # SilentlyContinue, so a share hiccup that broke a removal was invisible. The self-heal
-        # removal above is not: a stale orphan that fails to delete (here, a non-empty directory
-        # occupying the meta path -- Remove-Item without -Recurse refuses a non-empty directory)
-        # surfaces a clear UMRUN_JOBID_IN_USE refusal instead of silently proceeding to place a
-        # job the agent could claim against unremovable, unrelated metadata.
-        meta_dir = self.inbox / "demo.meta.json"
-        meta_dir.mkdir()
-        (meta_dir / "unrelated.txt").write_bytes(b"bytes that must survive untouched")
-        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, orphan_grace_sec=0)
-        self.assertIn("THREW UMRUN_JOBID_IN_USE", proc.stdout, proc.stdout + proc.stderr)
-        self.assertIn("could not be removed", proc.stdout, proc.stdout + proc.stderr)
-        self.assertTrue(meta_dir.is_dir(), "an unremovable orphan must be left in place, not partially cleared")
-        self.assertEqual((meta_dir / "unrelated.txt").read_bytes(), b"bytes that must survive untouched")
-        self.assertEqual(self.names(), ["demo.meta.json"])
-
     def test_metadata_that_appears_concurrently_is_not_overwritten(self) -> None:
         (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","timeoutSec":42}', encoding="ascii")
         proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600)
         self.assertIn("THREW UMRUN_JOBID_IN_USE", proc.stdout, proc.stdout + proc.stderr)
         self.assertEqual(json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))["timeoutSec"], 42)
         self.assertEqual(self.names(), ["demo.meta.json"], "no job may be dropped after a metadata conflict")
+
+    def test_an_existing_claim_of_any_age_is_never_reclaimed(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (sol BLOCKER + fable MAJOR): age-based
+        # reclamation is gone entirely -- see UmRunDrop.psm1's own header. A claim that is hours
+        # old (a "paused owner", in the brief's own words) must be refused exactly like a
+        # brand-new one; nothing in this module ever measures or compares its age any more. The
+        # concurrency property the round-11 brief asks for: a paused owner is never displaced.
+        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","nonce":"old-owner"}', encoding="ascii")
+        old = time.time() - 10_000   # ~2.8 hours in the past -- far past every former grace default
+        os.utime(self.inbox / "demo.meta.json", (old, old))
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("THREW UMRUN_JOBID_IN_USE", combined, combined)
+        self.assertIn("choose a new -JobId", combined, combined)
+        self.assertEqual(self.names(), ["demo.meta.json"])
+        self.assertEqual(json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))["nonce"], "old-owner",
+                         "an existing claim, of any age, must never be reclaimed or altered")
+
+    def test_rollback_never_deletes_a_claim_it_does_not_own_by_nonce(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (sol BLOCKER + fable MAJOR, round 10's own
+        # disclosed residual): simulates an operator manually clearing this submission's own stuck
+        # claim and resubmitting the same JobId -- a DIFFERENT nonce's metadata is sitting at
+        # demo.meta.json by the time this call's own post-claim work fails (a racing job.ps1 makes
+        # the final rename lose, exactly as in the plain rollback test above). The rollback must
+        # read the nonce back and refuse to delete what it does not own, leaving the new owner's
+        # claim completely untouched.
+        hook = (
+            "{ [IO.File]::WriteAllText(" + _q(self.inbox / 'demo.meta.json') +
+            ", '{\"jobId\":\"demo\",\"nonce\":\"someone-elses-nonce\"}'); "
+            "[IO.File]::WriteAllText(" + _q(self.inbox / 'demo.job.ps1') + ", 'Write-Output concurrent') }"
+        )
+        proc = self.drop(OBSERVING, side=[], job_timeout_sec=3600, before_job_visible=hook)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("THREW UMRUN_JOBID_IN_USE", combined, combined)
+        self.assertIn("no longer this submission's own claim", combined, combined)
+        meta = json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))
+        self.assertEqual(meta["nonce"], "someone-elses-nonce",
+                         "rollback must never delete a claim it does not own")
+        self.assertEqual((self.inbox / "demo.job.ps1").read_text(encoding="utf-8"), "Write-Output concurrent")
 
     def test_bytes_altered_on_the_share_are_refused_and_nothing_is_placed(self) -> None:
         proc = self.drop(CORRUPTING)
@@ -591,6 +517,94 @@ class UmRunDropModuleTests(_Share):
         self.assertEqual(self.names(), [])
 
 
+class UmRunAgentLivenessTests(_Share):
+    """Get-UmRunAgentLiveness, driven directly (round 11 moved it into UmRunDrop.psm1 from
+    um-run.ps1's own local definition precisely so it could be tested this way -- fast, isolated,
+    and able to reuse the module's existing share-clock test hooks instead of a slow, timing-
+    dependent E2E subprocess race)."""
+
+    def call_liveness(self, *, job_id: str = "demo", max_heartbeat_age_sec: int = 30,
+                       after_first_read_hook: str | None = None) -> dict:
+        script = self.tmp / "liveness.ps1"
+        preamble = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module {_q(MODULE)} -Force\n"
+        )
+        hook_arg = ""
+        if after_first_read_hook is not None:
+            preamble += f"$afterFirstRead = {after_first_read_hook}\n"
+            hook_arg = " -TestHookAfterFirstHeartbeatRead $afterFirstRead"
+        script.write_text(
+            preamble +
+            f"$r = Get-UmRunAgentLiveness -HeartbeatPath {_q(self.share / 'heartbeat.txt')} "
+            f"-Inbox {_q(self.inbox)} -JobId '{job_id}' -MaxHeartbeatAgeSec {max_heartbeat_age_sec}{hook_arg}\n"
+            "$r | ConvertTo-Json -Compress\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_a_stable_different_job_tag_is_a_real_mismatch(self) -> None:
+        self.touch_heartbeat(job_id="someone-else")
+        result = self.call_liveness(job_id="demo")
+        self.assertTrue(result["JobMismatch"], result)
+        self.assertEqual(result["OtherJobId"], "someone-else")
+
+    def test_a_torn_read_that_self_corrects_between_the_two_reads_is_not_a_false_mismatch(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (sol MAJOR): a torn read of a real, complete
+        # "job=<id>" tag can look like a complete tag for a SHORTER, different id on a single read
+        # (e.g. "job=dem" read mid-write of "job=demo"). The second read, a short delay later, is
+        # what actually decides a mismatch -- -TestHookAfterFirstHeartbeatRead fires right after
+        # the first read, before that delay, letting this test rewrite heartbeat.txt to a
+        # genuinely different, COMPLETE, real tag in between: the two reads disagree, so no
+        # mismatch is reported, proving the first read alone is never trusted.
+        self.touch_heartbeat(job_id="dem")   # looks like a complete, different job id on its own
+        hook = (
+            "{ param($t) Start-Sleep -Milliseconds 5; "
+            f"$now = (Get-Date).ToString('o'); "
+            f"Set-Content -LiteralPath {_q(self.share / 'heartbeat.txt')} "
+            "-Value \"alive $now pid=1 host=TESTHOST job=demo\" -Encoding ascii }"
+        )
+        result = self.call_liveness(job_id="demo", after_first_read_hook=hook)
+        self.assertFalse(result["JobMismatch"], result)
+
+    def test_the_liveness_age_check_reads_the_probe_files_own_share_stamped_clock_not_the_clients(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (sol minor, item 5a): "no test fails if
+        # Get-UmRunAgentLiveness's own share-clock probe reverts to the client's own Get-Date" --
+        # true before this test, since submitter and share sit on ONE clock in this suite. Stamping
+        # the probe file with a timestamp decades in the future makes the two behaviours diverge on
+        # the actual Fresh/stale OUTCOME, not just on a probed value nobody asserts against: a
+        # genuine probe read computes an enormous age (stale); a Get-Date substitution computes an
+        # age near zero (fresh), for the exact same real heartbeat file.
+        self.touch_heartbeat(job_id="demo")
+        sentinel = "2099-01-01T00:00:00Z"
+        stamp_hook = (
+            "{ param($p) "
+            f"[IO.File]::SetLastWriteTimeUtc($p, [datetime]::Parse('{sentinel}').ToUniversalTime()) "
+            "}"
+        )
+        script = self.tmp / "liveness-clock.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module {_q(MODULE)} -Force\n"
+            f"$stampHook = {stamp_hook}\n"
+            f"$r = Get-UmRunAgentLiveness -HeartbeatPath {_q(self.share / 'heartbeat.txt')} "
+            f"-Inbox {_q(self.inbox)} -JobId 'demo' -MaxHeartbeatAgeSec 30 "
+            "-TestHookAfterProbeWritten $stampHook\n"
+            "$r | ConvertTo-Json -Compress\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertFalse(result["Fresh"], result)
+        self.assertGreater(result["AgeSec"], 1_000_000_000,
+                           "the age must come from the share-stamped probe clock, not the client's own")
+
+
 class UmRunEndToEndTests(_Share):
     def submit(self, *extra: str, timeout_sec: str = "1", max_queue_wait_sec: str = "5") -> subprocess.CompletedProcess:
         # max_queue_wait_sec is small here on purpose: these tests use a FAKE share with no agent,
@@ -607,9 +621,14 @@ class UmRunEndToEndTests(_Share):
 
     def test_side_file_and_job_land_with_identical_bytes(self) -> None:
         proc = self.submit("-SideFile", str(self.side), "-JobId", "demo")
-        self.assertIn("side-file placed: demo-source.zip", proc.stdout, proc.stdout + proc.stderr)
-        self.assertIn("Timed out", proc.stdout + proc.stderr)
-        self.assertEqual(self.names(), ["demo-source.zip", "demo.job.ps1", "demo.meta.json"])
+        combined = proc.stdout + proc.stderr
+        self.assertIn("side-file placed: demo-source.zip", proc.stdout, combined)
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11: against this fake, agent-less share the
+        # queue-wait ceiling is reached with no marker ever appearing, so this client RETRACTS the
+        # job -- the side-file placed earlier is untouched, but the job and its claim metadata are
+        # withdrawn, never left to outlive this client (the original SUBMIT-RETRY-1 failure shape).
+        self.assertIn("RETRACTED:", combined, combined)
+        self.assertEqual(self.names(), ["demo-source.zip"])
         self.assertEqual(hashlib.sha256((self.inbox / "demo-source.zip").read_bytes()).hexdigest(),
                          hashlib.sha256(self.side.read_bytes()).hexdigest())
 
@@ -648,16 +667,18 @@ class UmRunEndToEndTests(_Share):
             proc.kill()
             proc.communicate()
 
-    def test_an_unclaimed_job_times_out_with_a_queued_diagnosis_never_a_down_diagnosis(self) -> None:
+    def test_an_unclaimed_job_is_retracted_never_a_down_diagnosis(self) -> None:
         # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 2 (fable/sol major 3): the OLD message
         # ("the job never ran or the agent is down") is an affirmative diagnosis the client has not
-        # earned -- it cannot distinguish "dead agent" from "queued behind other work". Against this
-        # fake, agent-less share the job is genuinely never claimed, so the message must say exactly
-        # that, and nothing stronger.
+        # earned -- it cannot distinguish "dead agent" from "queued behind other work". Round 11
+        # (sol blocker, item 2): against this fake, agent-less share the job is genuinely never
+        # claimed, and the queue-wait ceiling now withdraws it from the inbox -- RETRACTED, not a
+        # diagnosis about the agent's health at all.
         proc = self.submit("-JobId", "demo", max_queue_wait_sec="2")
         combined = proc.stdout + proc.stderr
-        self.assertIn("was never claimed", combined, combined)
+        self.assertIn("RETRACTED:", combined, combined)
         self.assertNotIn("the job never ran or the agent is down", combined, combined)
+        self.assertEqual(self.names(), [], "a genuinely retracted job must leave nothing behind")
 
     def test_a_late_claim_extends_the_wait_past_the_original_queue_ceiling_and_past_budget(self) -> None:
         # fable/sol major 3: the agent's deadline starts at CLAIM, not submission, and jobs are
@@ -701,7 +722,12 @@ class UmRunEndToEndTests(_Share):
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
-        combined = (stdout or "") + (stderr or "")
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertEqual(proc.returncode, 0, combined)
         self.assertNotIn("Timed out", combined, combined)
 
@@ -722,6 +748,7 @@ class UmRunEndToEndTests(_Share):
         # with the default) and heartbeat.txt is never refreshed after setUp, so it goes stale
         # almost immediately once the client starts actually checking it (past budget).
         running_dir = self.share / "running"
+        marker_path = running_dir / "demo.started.json"
         proc = subprocess.Popen(
             [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
              "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
@@ -733,24 +760,38 @@ class UmRunEndToEndTests(_Share):
             running_dir.mkdir(parents=True, exist_ok=True)
             skewed = time.gmtime(time.time() - 3600)
             marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", skewed)}
-            (running_dir / "demo.started.json").write_text(json.dumps(marker), encoding="ascii")
+            marker_path.write_text(json.dumps(marker), encoding="ascii")
             # One more poll cycle: under a marker-anchored deadline the client would already have
             # thrown (or misjudged liveness) on the very first check after observing this marker.
             time.sleep(1.0)
             self.assertIsNone(proc.poll(), "a stale agent-clock stamp must not shrink the client's own patience")
+            # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (item 3): the started marker's own
+            # presence is now an independent proof the agent may still own this job (the deployed
+            # agent's silent kill/drain/publish window) -- removing it here simulates that window
+            # having already ended (Complete-StartedMarker already ran, strictly after some receipt
+            # was published) so the stale-heartbeat diagnosis below can actually fire, the same way
+            # a real agent's own marker removal would let it fire in production.
+            marker_path.unlink()
             stdout, stderr = proc.communicate(timeout=15)
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
-        combined = (stdout or "") + (stderr or "")
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        self.assertIn("UNRESOLVED:", combined, combined)
         self.assertIn("claimed by the agent", combined, combined)
-        self.assertNotIn("was never claimed", combined, combined)
+        self.assertNotIn("RETRACTED", combined, combined)
         self.assertIn("stopped proving liveness", combined, combined)
         self.assertIn("MaxHeartbeatAgeSec 2", combined, combined)
-        # round 9 wording, unchanged in spirit under round 10's liveness message: this is THIS
+        self.assertIn("its own started marker is gone too", combined, combined)
+        # round 9 wording, unchanged in spirit under round 11's UNRESOLVED message: this is THIS
         # CLIENT's own patience running out, never a diagnosis the client cannot make.
-        self.assertIn("the agent still owns demo", combined, combined)
+        self.assertIn("the agent may still own demo", combined, combined)
         self.assertIn("its receipt may still land at", combined, combined)
 
     def test_the_outer_ceiling_stops_the_client_even_while_heartbeat_stays_fresh(self) -> None:
@@ -784,14 +825,20 @@ class UmRunEndToEndTests(_Share):
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
-        combined = (stdout or "") + (stderr or "")
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotEqual(proc.returncode, 0, combined)
+        self.assertIn("UNRESOLVED:", combined, combined)
         self.assertIn("claimed by the agent", combined, combined)
         self.assertIn("absolute outer ceiling", combined, combined)
         self.assertIn("MaxClaimedWaitSec (2s)", combined, combined)
         self.assertNotIn("stopped proving liveness", combined,
                          "a continuously fresh heartbeat must never be diagnosed as liveness-lost")
-        self.assertIn("the agent still owns demo", combined, combined)
+        self.assertIn("the agent may still own demo", combined, combined)
 
     def test_a_fresh_heartbeat_naming_a_different_job_is_treated_as_liveness_lost_for_this_one(self) -> None:
         # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: a heartbeat can be FRESH (age-wise) while
@@ -801,6 +848,7 @@ class UmRunEndToEndTests(_Share):
         # must be diagnosed as such (not silently trusted, and not the generic "no heartbeat" or
         # plain staleness wording).
         running_dir = self.share / "running"
+        marker_path = running_dir / "demo.started.json"
         proc = subprocess.Popen(
             [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
              "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
@@ -810,42 +858,83 @@ class UmRunEndToEndTests(_Share):
             time.sleep(1.0)
             running_dir.mkdir(parents=True, exist_ok=True)
             marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-            (running_dir / "demo.started.json").write_text(json.dumps(marker), encoding="ascii")
-            # Fresh, but for a DIFFERENT job -- keep it refreshed so any throw can only be the
-            # mismatch, never plain staleness.
-            deadline = time.monotonic() + 3.0
-            while time.monotonic() < deadline and proc.poll() is None:
+            marker_path.write_text(json.dumps(marker), encoding="ascii")
+            # Fresh, but for a DIFFERENT job -- keep it refreshed so the mismatch is definitely
+            # observed at least once.
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
                 self.touch_heartbeat(job_id="someone-elses-job")
                 time.sleep(0.4)
+            # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (item 3): a job-mismatch alone is not
+            # enough to end the wait any more -- the started marker must ALSO be gone (simulating
+            # Complete-StartedMarker having already run for whatever job the agent is now on).
+            marker_path.unlink()
             stdout, stderr = proc.communicate(timeout=15)
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
-        combined = (stdout or "") + (stderr or "")
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotEqual(proc.returncode, 0, combined)
+        self.assertIn("UNRESOLVED:", combined, combined)
         self.assertIn("claimed by the agent", combined, combined)
         self.assertIn("DIFFERENT job (someone-elses-job)", combined, combined)
+        self.assertIn("its own started marker is gone too", combined, combined)
         self.assertNotIn("stopped proving liveness", combined,
                          "a job-mismatch is its own diagnosis, distinct from plain staleness")
-        self.assertIn("moved on without ever publishing", combined, combined)
+        self.assertIn("moved on without a receipt", combined, combined)
 
-    def test_um_run_forwards_its_own_orphanmetagracesec_argument_to_the_module(self) -> None:
-        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: -OrphanMetaGraceSec is now a real, forwarded
-        # public parameter (docs/playback-attr-3-cuda.md's manual fixture workflow relies on this
-        # reaching Invoke-UmRunDrop, not just existing on um-run.ps1's own param block). A
-        # pre-existing "orphaned" metadata file aged past a small explicit -OrphanMetaGraceSec, but
-        # nowhere near the module's own 60s default, is reclaimed only if the argument actually
-        # propagates -- proving the plumbing, not just that the parameter parses.
-        (self.inbox / "demo.meta.json").write_text('{"jobId":"demo","nonce":"stale"}', encoding="ascii")
-        time.sleep(1.2)   # older than the -OrphanMetaGraceSec below, comfortably under the 60s default
-        proc = self.submit("-JobId", "demo", "-OrphanMetaGraceSec", "1", timeout_sec="1", max_queue_wait_sec="2")
-        combined = proc.stdout + proc.stderr
-        self.assertIn("removed orphaned metadata", combined, combined)
-        self.assertIn("was never claimed", combined, combined)   # fake share, no real agent
-        meta = json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))
-        self.assertEqual(meta["jobId"], "demo")
-        self.assertNotEqual(meta.get("nonce"), "stale", "the retry's own fresh claim, never the stale orphan's")
+    def test_a_job_mismatched_heartbeat_with_the_started_marker_still_present_keeps_waiting(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (item 3, the core of this round's own
+        # principle): the deployed agent writes NO heartbeat between its own deadline and
+        # publishing a receipt (Stop-ProcessTree, stream drain, Publish-JobResult are all silent),
+        # so a stale or mismatched heartbeat alone must not end the wait while running\<id>.
+        # started.json -- proof the agent has not yet finished with this job either way, since
+        # Complete-StartedMarker only ever runs strictly AFTER a receipt is durably published --
+        # is still sitting there. This keeps the marker present THE WHOLE TIME and proves the
+        # client survives well past what would otherwise be an immediate liveness-lost throw,
+        # then returns the late receipt once it appears.
+        running_dir = self.share / "running"
+        proc = subprocess.Popen(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(UM_RUN),
+             "-ScriptPath", str(self.job), "-AgentShare", str(self.share),
+             "-TimeoutSec", "1", "-PollSeconds", "1", "-MaxQueueWaitSec", "5",
+             "-MaxHeartbeatAgeSec", "1", "-JobId", "demo"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(1.0)
+            running_dir.mkdir(parents=True, exist_ok=True)
+            marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            (running_dir / "demo.started.json").write_text(json.dumps(marker), encoding="ascii")
+            # Heartbeat is never refreshed again after this -- it goes stale almost immediately
+            # (past -MaxHeartbeatAgeSec 1) -- and the marker is left in place throughout.
+            time.sleep(3.0)
+            self.assertIsNone(proc.poll(),
+                              "a stale heartbeat must not end the wait while the started marker is "
+                              "still present")
+            result = {"jobId": "demo", "exitCode": 0, "stdout": "late but real", "stderr": "",
+                      "timeoutSec": 1, "timedOut": False}
+            tmp = self.outbox / "demo.result.tmp"
+            tmp.write_text(json.dumps(result), encoding="ascii")
+            tmp.replace(self.outbox / "demo.result.json")
+            stdout, stderr = proc.communicate(timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        self.assertEqual(proc.returncode, 0, combined)
+        self.assertNotIn("UNRESOLVED", combined, combined)
 
     def test_a_claim_landing_exactly_at_the_queue_deadline_is_not_misreported_as_never_claimed(self) -> None:
         # sol blocker (round 7): the final recheck before throwing only ever re-read the RESULT file,
@@ -910,7 +999,12 @@ class UmRunEndToEndTests(_Share):
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
-        combined = (stdout or "") + (stderr or "")
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotIn("was never claimed", combined, combined)
         self.assertNotIn("THREW", combined, combined)
         self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
@@ -980,8 +1074,246 @@ class UmRunEndToEndTests(_Share):
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
-        combined = (stdout or "") + (stderr or "")
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotIn("was never claimed", combined, combined)
+        self.assertNotIn("THREW", combined, combined)
+        self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
+
+    # ---- round 11 (sol BLOCKER, item 2): RETRACT at the queue deadline instead of leaving the job
+    # ---- in the inbox for the agent to claim after this client has already given up ------------
+
+    def test_a_retraction_race_where_the_agent_claims_first_is_honoured_not_retracted(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (item 2's own required race test): the agent
+        # can claim the job in the exact instant between this client's rename attempt and its own
+        # marker recheck -- -TestHookAfterRetractionRename (test-only, fires exactly there) closes
+        # that window deterministically, the same way -TestHookAtQueueDeadline already does for the
+        # marker-appears-BEFORE-the-rename race. um-run.ps1 is invoked via '&' from a wrapper
+        # script so an actual scriptblock can be passed through.
+        running_dir = self.share / "running"
+        wrapper = self.tmp / "run-with-retraction-race-hook.ps1"
+        hook = (
+            "{ "
+            f"New-Item -ItemType Directory -Force -Path {_q(running_dir)} | Out-Null; "
+            "$marker = @{ jobId = 'demo'; startedUtc = (Get-Date).ToUniversalTime().ToString('o') } "
+            "| ConvertTo-Json -Compress; "
+            f"Set-Content -LiteralPath {_q(running_dir / 'demo.started.json')} -Value $marker "
+            "-Encoding ascii -NoNewline "
+            "}"
+        )
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  $r = & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 2 -PollSeconds 1 -MaxQueueWaitSec 0 -JobId 'demo' "
+            "-TestHookAfterRetractionRename $hook\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode)\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.Popen([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            marker_path = running_dir / "demo.started.json"
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not marker_path.exists():
+                time.sleep(0.1)
+            self.assertTrue(marker_path.exists(), "the hook never wrote the claim marker")
+            time.sleep(1.0)
+            result = {"jobId": "demo", "exitCode": 0, "stdout": "late but real", "stderr": "",
+                      "timeoutSec": 2, "timedOut": False}
+            tmp = self.outbox / "demo.result.tmp"
+            tmp.write_text(json.dumps(result), encoding="ascii")
+            tmp.replace(self.outbox / "demo.result.json")
+            stdout, stderr = proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        self.assertNotIn("RETRACTED", combined, combined)
+        self.assertNotIn("THREW", combined, combined)
+        self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
+
+    def test_a_failed_retraction_rename_falls_through_to_the_claimed_wait_not_retracted(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (item 2): if the retraction rename itself
+        # fails for any reason, this client must never assert a retraction it cannot prove --
+        # simulated here by removing the job file out from under the client's own rename attempt,
+        # via -TestHookAtQueueDeadline (fires right before the rename is even attempted), so
+        # Move-Item fails with the source already gone. No marker ever appears either, so this
+        # must resolve as UNRESOLVED once its own (small) claimed-phase patience elapses, never
+        # RETRACTED.
+        wrapper = self.tmp / "run-with-vanished-job-hook.ps1"
+        hook = "{ Remove-Item -LiteralPath " + _q(self.inbox / "demo.job.ps1") + " -Force -ErrorAction SilentlyContinue }"
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  $r = & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 1 -PollSeconds 1 -MaxQueueWaitSec 0 -MaxClaimedWaitSec 1 "
+            "-MaxHeartbeatAgeSec 1 -JobId 'demo' -TestHookAtQueueDeadline $hook\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode)\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                               capture_output=True, text=True, timeout=30)
+        combined = proc.stdout + proc.stderr
+        self.assertNotIn("RETRACTED", combined, combined)
+        self.assertIn("UNRESOLVED:", combined, combined)
+
+    def test_retraction_cleans_up_metadata_by_nonce_never_a_blind_delete(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (item 1's nonce-checked-delete invariant,
+        # applied to the NEW retraction path too): plants a DIFFERENT submission's claim at
+        # demo.meta.json (a different nonce) exactly when the retraction rename fires, simulating
+        # an operator manually clearing this client's own claim and resubmitting the same JobId
+        # while this client was still (usually harmlessly) waiting out its queue ceiling. The
+        # retraction must still succeed (the job file itself is this client's own to withdraw
+        # regardless), but must never delete metadata it does not own.
+        hook = (
+            "{ [IO.File]::WriteAllText(" + _q(self.inbox / 'demo.meta.json') +
+            ", '{\"jobId\":\"demo\",\"nonce\":\"someone-elses-nonce\"}') }"
+        )
+        wrapper = self.tmp / "run-with-retraction-nonce-hook.ps1"
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  $r = & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 1 -PollSeconds 1 -MaxQueueWaitSec 0 -JobId 'demo' "
+            "-TestHookAfterRetractionRename $hook\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode)\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                               capture_output=True, text=True, timeout=30)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("THREW RETRACTED:", combined, combined)
+        meta = json.loads((self.inbox / "demo.meta.json").read_text(encoding="ascii"))
+        self.assertEqual(meta["nonce"], "someone-elses-nonce",
+                         "retraction must never delete metadata it does not own")
+
+    def test_a_receipt_planted_before_the_outer_ceiling_throw_is_still_read(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (fable minor, item 5): the receipt recheck
+        # immediately before the absolute-outer-ceiling throw is pinned here -- deleting those two
+        # lines fails no OTHER test, since the outer-ceiling test above never plants a receipt.
+        running_dir = self.share / "running"
+        hook = (
+            "{ "
+            "$result = @{ jobId = 'demo'; exitCode = 0; stdout = 'late but real'; stderr = ''; "
+            "timeoutSec = 1; timedOut = $false } | ConvertTo-Json -Compress; "
+            f"$tmp = {_q(self.outbox / 'demo.result.tmp')}; "
+            f"$fin = {_q(self.outbox / 'demo.result.json')}; "
+            "Set-Content -LiteralPath $tmp -Value $result -Encoding ascii -NoNewline; "
+            "Move-Item -Force -LiteralPath $tmp -Destination $fin "
+            "}"
+        )
+        wrapper = self.tmp / "run-with-outer-ceiling-receipt-hook.ps1"
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  $r = & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 1 -PollSeconds 1 -MaxQueueWaitSec 5 -MaxClaimedWaitSec 1 -JobId 'demo' "
+            "-TestHookBeforeOuterCeilingReceiptRecheck $hook\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode)\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.Popen([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            running_dir.mkdir(parents=True, exist_ok=True)
+            marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            (running_dir / "demo.started.json").write_text(json.dumps(marker), encoding="ascii")
+            # Keep the heartbeat fresh and job-tagged throughout, so the ONLY way this run can end
+            # is the outer ceiling (never a liveness-lost diagnosis) -- the hook above plants the
+            # receipt in the exact instant right before that throw would otherwise fire.
+            deadline = time.monotonic() + 6.0
+            while time.monotonic() < deadline and proc.poll() is None:
+                self.touch_heartbeat(job_id="demo")
+                time.sleep(0.3)
+            stdout, stderr = proc.communicate(timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
+        self.assertNotIn("THREW", combined, combined)
+        self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
+
+    def test_a_receipt_planted_before_the_liveness_lost_throw_is_still_read(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (fable minor, item 5): the receipt recheck
+        # immediately before the liveness-lost throw is pinned here. THIS TEST removes the started
+        # marker itself (simulating Complete-StartedMarker's own ordering: the marker is only ever
+        # removed strictly AFTER a receipt already exists) well before the hook fires, so the
+        # client is already past budget with a stale heartbeat AND a gone marker by the time it
+        # next polls -- landing in the liveness-lost branch, where the hook plants the receipt
+        # right before the recheck that must still find it.
+        running_dir = self.share / "running"
+        marker_path = running_dir / "demo.started.json"
+        hook = (
+            "{ "
+            "$result = @{ jobId = 'demo'; exitCode = 0; stdout = 'late but real'; stderr = ''; "
+            "timeoutSec = 1; timedOut = $false } | ConvertTo-Json -Compress; "
+            f"$tmp = {_q(self.outbox / 'demo.result.tmp')}; "
+            f"$fin = {_q(self.outbox / 'demo.result.json')}; "
+            "Set-Content -LiteralPath $tmp -Value $result -Encoding ascii -NoNewline; "
+            "Move-Item -Force -LiteralPath $tmp -Destination $fin "
+            "}"
+        )
+        wrapper = self.tmp / "run-with-liveness-lost-receipt-hook.ps1"
+        wrapper.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$hook = {hook}\n"
+            "try {\n"
+            f"  $r = & {_q(UM_RUN)} -ScriptPath {_q(self.job)} -AgentShare {_q(self.share)} "
+            "-TimeoutSec 1 -PollSeconds 1 -MaxQueueWaitSec 5 -MaxHeartbeatAgeSec 1 -JobId 'demo' "
+            "-TestHookBeforeLivenessLostReceiptRecheck $hook\n"
+            "  Write-Output ('E2E_RESULT=OK EXIT=' + $r.exitCode)\n"
+            "} catch { Write-Output ('THREW ' + $_.Exception.Message) }\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.Popen([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            running_dir.mkdir(parents=True, exist_ok=True)
+            marker = {"jobId": "demo", "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            marker_path.write_text(json.dumps(marker), encoding="ascii")
+            # heartbeat.txt is never refreshed after setUp -- it goes stale past -MaxHeartbeatAgeSec
+            # 1 almost immediately once the client starts checking it (past its 1s budget). Give it
+            # comfortably long enough to be both past budget and past staleness while the marker is
+            # still present (the client just keeps waiting silently through that), then remove the
+            # marker so the NEXT poll lands in the liveness-lost branch and fires the hook.
+            time.sleep(2.5)
+            marker_path.unlink()
+            stdout, stderr = proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertNotIn("THREW", combined, combined)
         self.assertIn("E2E_RESULT=OK EXIT=0", combined, combined)
 
@@ -1010,7 +1342,12 @@ class UmRunEndToEndTests(_Share):
         # Checked by exit code and absence of the timeout throw, not by scraping stdout for the
         # returned object's fields: PowerShell's default console formatting of a returned
         # PSCustomObject is not a stable text contract to assert against.
-        combined = (stdout or "") + (stderr or "")
+        # Whitespace-flattened, with "|" removed: PowerShell's own default uncaught-exception
+        # formatting word-wraps a long message at a fixed console width, prefixing each
+        # continuation line with a literal "| " margin -- both would otherwise split a long
+        # asserted phrase across a line break, or embed a stray "|" mid-phrase, by coincidence of
+        # length rather than content. None of this file's own asserted text ever contains "|".
+        combined = " ".join(((stdout or "") + (stderr or "")).replace("|", " ").split())
         self.assertEqual(proc.returncode, 0, combined)
         self.assertNotIn("Timed out", combined, combined)
 
@@ -1024,14 +1361,21 @@ class UmRunEndToEndTests(_Share):
     def test_an_identical_file_already_present_is_accepted(self) -> None:
         shutil.copy2(self.side, self.inbox / "demo-source.zip")
         proc = self.submit("-SideFile", str(self.side), "-JobId", "demo")
-        self.assertIn("already present with matching sha256", proc.stdout, proc.stdout + proc.stderr)
-        self.assertEqual(self.names(), ["demo-source.zip", "demo.job.ps1", "demo.meta.json"])
+        combined = proc.stdout + proc.stderr
+        self.assertIn("already present with matching sha256", proc.stdout, combined)
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11: RETRACTED at the queue-wait ceiling removes
+        # the job and its claim metadata; the side-file (placed before submission even began, and
+        # never this client's to retract) is untouched.
+        self.assertIn("RETRACTED:", combined, combined)
+        self.assertEqual(self.names(), ["demo-source.zip"])
 
     def test_semicolon_list_places_every_file(self) -> None:
         second = self.local / "demo-build.json"
         second.write_text("{}", encoding="utf-8")
         proc = self.submit("-SideFile", f"{self.side};{second}", "-JobId", "demo")
-        self.assertEqual(self.names(), ["demo-build.json", "demo-source.zip", "demo.job.ps1", "demo.meta.json"], proc.stdout + proc.stderr)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("RETRACTED:", combined, combined)
+        self.assertEqual(self.names(), ["demo-build.json", "demo-source.zip"], combined)
 
 
 if __name__ == "__main__":

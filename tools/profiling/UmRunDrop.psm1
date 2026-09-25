@@ -38,36 +38,47 @@
 #     live" up to a grace period, and this reversal simply means that grace period is doing its job
 #     across the WHOLE submission now, not just a single rename.
 #
-# THE THREE CLAIM OUTCOMES (Invoke-UmRunDrop, top of function):
-#   1. no metadata exists for this JobId (or the metadata that does exist has gone stale -- see
-#      below) -> this call claims it, writing its own nonce, and becomes the sole owner of every
-#      side-file and job placement that follows;
-#   2. metadata exists and is fresh (age below -OrphanMetaGraceSec, measured on the SHARE's own
-#      clock via the probe below, never this submitter's) -> refused with UMRUN_JOBID_IN_USE
-#      before this call ever touches a side-file or the job -- the incumbent's ownership, and its
-#      side-files/job in flight, are left completely untouched;
-#   3. metadata exists, is stale, but cannot be removed (e.g. a locked or non-empty path occupying
-#      it) -> refused with a distinct message; nothing is silently reclaimed.
+# THE TWO CLAIM OUTCOMES (Invoke-UmRunDrop, top of function; round 11 removes the former third,
+# age-based-reclaim outcome -- see the header above):
+#   1. no metadata exists for this JobId -> this call claims it, writing its own nonce, and
+#      becomes the sole owner of every side-file and job placement that follows;
+#   2. metadata already exists for this JobId, at ANY age -> refused with UMRUN_JOBID_IN_USE
+#      before this call ever touches a side-file or the job, naming "choose a new -JobId" -- the
+#      incumbent's ownership, and its side-files/job in flight, are left completely untouched.
 #
-# ASTRA round 8 (still live at round 10): a purely age-based reclaim cannot PROVE a claim's owner
-# is dead -- only that it has been quiet for a while -- so a genuinely live submitter that is
-# merely SLOW (a big side-file transfer, not a crash) can, in principle, be reclaimed out from
-# under it if its own placement legitimately takes longer than -OrphanMetaGraceSec. This module
-# does not attempt to disprove that risk with a liveness heartbeat of its own (unlike the AGENT's
-# heartbeat.txt, a submitter has no long-running process on the share to refresh one, and two
-# different HOSTS' clocks cannot be compared for "still executing" the way um-run.ps1's client-side
-# liveness check compares one share's clock to itself). Instead the contract is explicit and
-# caller-facing: -OrphanMetaGraceSec is a promise the CALLER makes about its own worst-case
-# placement time, not a guessed constant. Both production callers of this module
-# (attr3-footage-stage.ps1) never pass a -SideFile at all, so their claim-to-exposure window is a
-# small script copy, comfortably inside the unchanged 60s default; a caller that DOES pass a large
-# side file (the manual ATTR3-FIXTURE-REHEARSAL-1 operator workflow in
-# docs/playback-attr-3-cuda.md) is the one who knows how long that transfer can legitimately take,
-# and now has a real parameter (also exposed on um-run.ps1) to state it, rather than an implicit
-# assumption nobody checked. This is the "or never reclaim" alternative the round-10 brief itself
-# offered, narrowed to "reclaim only past a caller-declared bound" rather than dropped outright,
-# since dropping it entirely would re-introduce the original SUBMIT-RETRY-1 bug (a genuinely dead
-# submission bricking every future retry of an operator-chosen JobId forever).
+# ASTRA round 8 / sol+fable round 10 (both proved this false, hub scope ruling reversed again at
+# round 11 -- see summary.md): a purely age-based reclaim cannot PROVE a claim's owner is dead --
+# only that it has been quiet for a while -- so a genuinely live submitter that is merely SLOW (a
+# big side-file transfer, not a crash) could be reclaimed out from under it if its own placement
+# legitimately took longer than -OrphanMetaGraceSec. Round 10 tried to fix this by making the grace
+# period an explicit caller-declared promise instead of a guessed constant; both round-10 reviewers
+# showed that framing still has no answer for what the DISPLACED owner does when it resumes: it
+# never re-checks its own nonce, so it can go on to roll back or overwrite the NEW owner's live
+# claim (round 10's own disclosed residual, sol/fable BLOCKER+MAJOR at round 10). Round 11 removes
+# age-based reclamation ENTIRELY rather than narrowing it further:
+#   - a claim, once made, is held until the submission that made it either finishes (rolling its
+#     own claim back on failure, or handing off to the agent on success) or an OPERATOR removes it
+#     by hand;
+#   - a second submission for the SAME JobId while a claim exists is refused outright --
+#     "UMRUN_JOBID_IN_USE ... choose a new -JobId" -- regardless of the claim's age;
+#   - production JobIds carry a fresh random component on every submission (see
+#     attr3-footage-stage.ps1), so an orphaned claim from a hard-killed submission blocks nothing
+#     real there -- the next attempt simply mints a new id, exactly like the job-id and result-id
+#     pre-checks above already assume. The one caller who deliberately reuses a FIXED JobId across
+#     retries (the manual ATTR3-FIXTURE-REHEARSAL-1 operator workflow, docs/playback-attr-3-
+#     cuda.md) now gets an explicit, honest refusal instead of a guessed timeout, and picks a new
+#     -JobId to retry -- or, being a human who can inspect the share, removes the stale
+#     inbox\<id>.meta.json by hand first if truly certain the earlier attempt is dead, at which
+#     point the retry's own claim proceeds exactly as it would for a brand-new id. This is the
+#     round-10 brief's own "or never reclaim" alternative, now taken in full rather than narrowed.
+#   - the rollback below (a submission's OWN claim, removed on ITS OWN later failure) now checks
+#     the nonce before deleting: since no code path ever reclaims another submission's claim
+#     automatically any more, the only way $metaFinal could hold a DIFFERENT submission's claim by
+#     the time this one's rollback runs is an operator manually clearing this submission's stuck
+#     claim by hand and resubmitting the same id WHILE this submission was merely slow, not dead --
+#     precisely the round-10 residual, still possible via manual override, now guarded against
+#     directly instead of via an age heuristic. See the rollback's own comment for the window this
+#     compare-then-delete leaves open and why it is safe.
 #
 # Because the claim now happens BEFORE any side-file/job work, the round-8 fix that re-checked
 # metaFinal/final immediately before writing metadata (to narrow a window in which a second,
@@ -192,6 +203,93 @@ function Get-UmRunShareNowUtc {
     }
 }
 
+function Get-UmRunHeartbeatJobTag {
+    <#
+    .SYNOPSIS
+    The job=<id> tag from a heartbeat line, or $null if the line has no such tag. A pure text-shape
+    read with no freshness/mismatch judgement of its own -- see Get-UmRunAgentLiveness, which calls
+    this TWICE to guard against a torn read.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$HeartbeatPath)
+
+    $line = Get-Content -LiteralPath $HeartbeatPath -Raw -ErrorAction SilentlyContinue
+    if ($line -and $line -match '(?:^|\s)job=(\S+)\s*$') { return $Matches[1] }
+    return $null
+}
+
+function Get-UmRunAgentLiveness {
+    <#
+    .SYNOPSIS
+    Is the agent still proving liveness on JobId, per heartbeat.txt?
+    .DESCRIPTION
+    ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 10: um-run.ps1's claimed-phase wait trusts
+    heartbeat.txt fresh by the SHARE's own clock (Get-UmRunShareNowUtc -- the same round-6 probe
+    this module's own former orphan-age check used) rather than a constant nobody could derive a
+    real bound for. The agent tags heartbeat.txt with " job=<id>" (normal execution) or
+    " adopt job=<id>" (post-restart adoption) every wait-slice while a job is genuinely running --
+    the agent's own wait-slice is hard-capped at 5s regardless of its own -PollSeconds -- so a tag
+    naming a DIFFERENT job proves the agent has moved off this one without ever producing a
+    receipt, which is liveness-lost for OUR purposes even if the agent itself is fine. A heartbeat
+    line with no job= tag at all (a plain between-jobs heartbeat, or one read mid-write) is not
+    treated as a mismatch -- only an EXPLICIT different job id is.
+
+    Round 11 (sol MAJOR): a torn read of a real, complete "job=<id>" tag -- the agent's own
+    Write-AsciiFileWithRetry is not atomic across processes -- can look like a complete tag for a
+    SHORTER, different id (e.g. "job=dem" read mid-write of "job=demo"), which the anchored regex
+    below matches just as readily as a genuine one, producing a false mismatch on a single unlucky
+    read. This module (moved here from um-run.ps1 at round 11 so it can be driven directly, the
+    same way every other function here already is) now requires TWO reads, a short delay apart, to
+    agree on the SAME different id before reporting a mismatch: a transient tear essentially never
+    repeats identically on the very next read (the writer has since finished, or is mid a DIFFERENT
+    tear), while a genuinely different, stable job tag reads the same both times.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$HeartbeatPath,
+        [Parameter(Mandatory = $true)][string]$Inbox,
+        [Parameter(Mandatory = $true)][string]$JobId,
+        [Parameter(Mandatory = $true)][int]$MaxHeartbeatAgeSec,
+        [int]$TornReadRetryDelayMs = 75,
+        # Test-only: invoked with the tentative first-read job tag (or $null) immediately after the
+        # first heartbeat read, before the confirmation delay and second read -- lets a test rewrite
+        # heartbeat.txt in between, proving the SECOND read is what actually decides a mismatch, not
+        # the first alone.
+        [scriptblock]$TestHookAfterFirstHeartbeatRead = $null,
+        [scriptblock]$TestHookAfterProbeWritten = $null,
+        [scriptblock]$TestHookAfterProbeRead = $null
+    )
+
+    if (-not (Test-Path -LiteralPath $HeartbeatPath)) {
+        return [pscustomobject]@{ Fresh = $false; AgeSec = $null; HeartbeatUtc = $null; JobMismatch = $false; OtherJobId = $null }
+    }
+    $shareNowUtc = Get-UmRunShareNowUtc -Directory $Inbox `
+        -TestHookAfterProbeWritten $TestHookAfterProbeWritten `
+        -TestHookAfterProbeRead $TestHookAfterProbeRead
+    $heartbeatUtc = (Get-Item -LiteralPath $HeartbeatPath -Force).LastWriteTimeUtc
+    $ageSec = ($shareNowUtc - $heartbeatUtc).TotalSeconds
+
+    $jobMismatch = $false
+    $otherJobId = $null
+    $firstTag = Get-UmRunHeartbeatJobTag -HeartbeatPath $HeartbeatPath
+    if ($TestHookAfterFirstHeartbeatRead) { & $TestHookAfterFirstHeartbeatRead $firstTag }
+    if ($null -ne $firstTag -and $firstTag -ne $JobId) {
+        Start-Sleep -Milliseconds $TornReadRetryDelayMs
+        $secondTag = Get-UmRunHeartbeatJobTag -HeartbeatPath $HeartbeatPath
+        if ($secondTag -eq $firstTag) {
+            $jobMismatch = $true
+            $otherJobId = $firstTag
+        }
+    }
+    return [pscustomobject]@{
+        Fresh        = (-not $jobMismatch) -and ($ageSec -le $MaxHeartbeatAgeSec)
+        AgeSec       = $ageSec
+        HeartbeatUtc = $heartbeatUtc
+        JobMismatch  = $jobMismatch
+        OtherJobId   = $otherJobId
+    }
+}
+
 function Assert-UmRunSideFileName {
     [CmdletBinding()]
     param(
@@ -247,15 +345,6 @@ function Invoke-UmRunDrop {
         # job's own budget for a caller that does state one.
         [int]$JobTimeoutSec = 0,
         [scriptblock]$Copier = { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination },
-        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (sol major -- escalates fable's round-3 minor),
-        # round 10 (widened scope -- see this module's own header): how long metadata with no paired
-        # job and no result is tolerated as "maybe still an in-flight submission" before a later call
-        # for the SAME JobId is allowed to reclaim it. Before round 10 the only window a live
-        # submission could show this shape was a single rename (sub-second); round 10's claim-first
-        # ordering makes it the WHOLE submission (side-files, then the job's own copy), so this is
-        # now a caller-stated promise about its own worst-case placement time, not a guessed
-        # constant -- see the module header for which callers need to raise it.
-        [int]$OrphanMetaGraceSec = 60,
         # Test-only: invoked with no arguments immediately before the job's own rename into view,
         # i.e. the last instant at which "is metadata already published?" is the real contract this
         # module owes the agent (metadata-before-VISIBILITY, not metadata-before-the-job's-own-
@@ -266,23 +355,7 @@ function Invoke-UmRunDrop {
         # actually rejects a torn write rather than merely being present and untested, OR (round 10)
         # plant a competing winner's metadata directly at $metaFinal to prove a losing concurrent
         # claim never overwrites it.
-        [scriptblock]$TestHookAfterMetaTmpWritten = $null,
-        # Test-only: invoked with the round-6 share-clock probe's computed value immediately after
-        # it is read, still inside the probe's own try block -- proves this branch actually executes
-        # and yields a genuine clock reading (round 6/7 fable minor: "no test fails if this reverts
-        # to Get-Date", true of every other test here, since submitter and share sit on one
-        # filesystem and clock and are therefore indistinguishable by final state alone).
-        [scriptblock]$TestHookAfterShareClockProbe = $null,
-        # Test-only: invoked with the probe file's path immediately after it is written, BEFORE its
-        # LastWriteTimeUtc is read. Round 8 (sol minor, narrower than round 6/7's): on one machine,
-        # the share's clock and the submitter's own clock read as the same value, so no assertion on
-        # the FINAL probed timestamp alone can tell "read from the probe file" apart from "the
-        # submitter's own Get-Date" -- replacing the read below with a client Get-Date, while still
-        # calling -TestHookAfterShareClockProbe with it, satisfies every prior assertion. This hook
-        # lets a test stamp the probe file with a timestamp that CANNOT arise from Get-Date (e.g. a
-        # fixed date years away), so the probed value can only match if it truly came from reading
-        # the file back off the share.
-        [scriptblock]$TestHookAfterShareProbeWritten = $null
+        [scriptblock]$TestHookAfterMetaTmpWritten = $null
     )
 
     if ($JobId -and $JobId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "UMRUN_JOBID_INVALID '$JobId'" }
@@ -304,40 +377,13 @@ function Invoke-UmRunDrop {
     if (Test-Path -LiteralPath $final) { throw "UMRUN_JOBID_IN_USE inbox already holds $id.job.ps1" }
     if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) { throw "UMRUN_SCRIPT_MISSING $ScriptPath" }
 
-    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (sol major -- escalates fable's round-3 minor,
-    # "the interrupt window is still open one rename wide"), round 10 (widened -- see module
-    # header): metadata with no job and no result can ONLY be left by a submission that was
-    # hard-interrupted somewhere between claiming and exposing the job below -- neither agent ever
-    # consumes metadata without its paired job (both move together), so this state is never a live
-    # job the agent is running. Once it is older than $OrphanMetaGraceSec, a retry for this JobId
-    # self-heals by reclaiming it, rather than being bricked forever (the exact bug this round
-    # exists to close). Within the grace period it is still treated as possibly live, matching the
-    # pre-round-4 refusal.
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (sol BLOCKER + fable MAJOR): no age-based
+    # reclamation -- see this module's own header. Existing metadata, at ANY age, is refused
+    # outright; only an operator manually removing inbox\<id>.meta.json (or this submission's own
+    # nonce-checked rollback below, on ITS OWN later failure) ever clears a claim.
     $metaFinal = Join-Path $Inbox "$id.meta.json"
     if (Test-Path -LiteralPath $metaFinal) {
-        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 6 (fable minor): the age check used to subtract
-        # $metaFinal's LastWriteTimeUtc from THIS SUBMITTER's own Get-Date -- the "can only be a
-        # dead submission" proof silently assumed the two clocks agree to within
-        # $OrphanMetaGraceSec, so cross-machine skew at or above the grace could let a concurrent
-        # same-JobId submitter reclaim a LIVE submission's metadata. NTFS-over-SMB stamps
-        # LastWriteTimeUtc using the FILE SERVER's clock, not the writer's -- so a nonce probe
-        # written to (and immediately removed from) this same share, right now, is stamped by that
-        # SAME clock. Comparing two timestamps from one clock domain needs no assumption about this
-        # submitter's own clock at all. Round 10: this now calls the shared Get-UmRunShareNowUtc
-        # helper (below) instead of an inline copy, so um-run.ps1's own liveness wait can reuse it.
-        $shareNowUtc = Get-UmRunShareNowUtc -Directory $Inbox `
-            -TestHookAfterProbeWritten $TestHookAfterShareProbeWritten `
-            -TestHookAfterProbeRead $TestHookAfterShareClockProbe
-        $metaAgeSec = ($shareNowUtc - (Get-Item -LiteralPath $metaFinal -Force).LastWriteTimeUtc).TotalSeconds
-        if ($metaAgeSec -lt $OrphanMetaGraceSec) {
-            throw "UMRUN_JOBID_IN_USE inbox already holds $id.meta.json"
-        }
-        try {
-            Remove-Item -LiteralPath $metaFinal -Force -ErrorAction Stop
-        } catch {
-            throw "UMRUN_JOBID_IN_USE inbox\$id.meta.json is orphaned from an interrupted earlier submission (age $([int]$metaAgeSec)s) and could not be removed for retry"
-        }
-        Write-Output ("removed orphaned metadata from an interrupted earlier submission: {0}.meta.json (age {1:N0}s)" -f $id, $metaAgeSec)
+        throw "UMRUN_JOBID_IN_USE inbox already holds $id.meta.json; this JobId is already claimed (or was claimed by an earlier submission that never cleaned up) -- choose a new -JobId to retry, or remove inbox\$id.meta.json by hand if you are certain the earlier submission is dead"
     }
 
     $nonce = [guid]::NewGuid().ToString('N')
@@ -452,21 +498,58 @@ function Invoke-UmRunDrop {
     } catch {
         # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 6 (sol minor): a rollback deletion failure here
         # used to be silently swallowed (SilentlyContinue), so metadata from a refused submission
-        # could outlive it and block a same-JobId retry for the full -OrphanMetaGraceSec against
-        # this module's own "a failed submission leaves no metadata" invariant, with no indication
-        # why. The ORIGINAL failure is still why this submission failed, so it is captured before
-        # attempting cleanup and folded into whatever is thrown, rather than replaced by a
-        # cleanup-only error.
+        # could outlive it, with no indication why. The ORIGINAL failure is still why this
+        # submission failed, so it is captured before attempting cleanup and folded into whatever
+        # is thrown, rather than replaced by a cleanup-only error.
+        #
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (sol BLOCKER + fable MAJOR, round 10's own
+        # disclosed residual): this used to delete $metaFinal unconditionally -- correct only
+        # because round 10 could otherwise displace THIS submission's own live claim out from under
+        # it, making "whatever currently occupies metaFinal" and "this submission's own claim"
+        # provably the same file. Round 11 removes that displacement entirely (see the module
+        # header), but an OPERATOR can still manually clear a stuck-looking claim and resubmit the
+        # same JobId by hand while the original submission was merely slow, not dead -- so this
+        # reads $metaFinal back and deletes it ONLY if its nonce still matches this call's own,
+        # never blindly. Between that read and the Remove-Item, an operator could in principle swap
+        # the file again, but the read already proved OUR claim was still there at that instant --
+        # the same single-rename-width race every other TOCTOU pre-check in this module already
+        # accepts (see the fast pre-checks at the top of this function), and the failure mode of
+        # losing that narrow race is a claim left behind for the operator to notice and clear by
+        # hand, never silent data loss for whoever now owns it.
         $originalError = $_
-        try {
-            Remove-Item -LiteralPath $metaFinal -Force -ErrorAction Stop
-        } catch {
-            throw "$($originalError.Exception.Message) -- additionally, inbox\$id.meta.json could not be removed during rollback and may outlive this refused submission"
+        if (Test-Path -LiteralPath $metaFinal) {
+            # Only a SUCCESSFUL read that proves a DIFFERENT nonce blocks the delete -- a read that
+            # fails outright (e.g. the exact sharing violation the rollback's own Remove-Item is
+            # about to hit too) proves nothing about ownership either way, so it falls through to
+            # the plain removal attempt below and surfaces THAT failure, unchanged from before this
+            # nonce check existed.
+            $ownsClaim = $true
+            $readSucceeded = $false
+            try {
+                $currentMeta = (Get-Content -LiteralPath $metaFinal -Raw -Encoding ascii) | ConvertFrom-Json
+                $readSucceeded = $true
+                $ownsClaim = ($null -ne $currentMeta) -and ($currentMeta.nonce -eq $nonce)
+            } catch {
+                $readSucceeded = $false
+            }
+            if ($readSucceeded -and -not $ownsClaim) {
+                throw "$($originalError.Exception.Message) -- additionally, inbox\$id.meta.json is no longer this submission's own claim (nonce mismatch) and was left untouched, not removed during rollback"
+            }
+            try {
+                Remove-Item -LiteralPath $metaFinal -Force -ErrorAction Stop
+            } catch {
+                throw "$($originalError.Exception.Message) -- additionally, inbox\$id.meta.json could not be removed during rollback and may outlive this refused submission"
+            }
         }
         throw
     }
     Write-Output "submitted $id -> $final"
     Write-Output "UMRUN_JOBID=$id"
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11: the caller needs its OWN claim's nonce back --
+    # never guessed, never re-derived -- to clean up its own metadata later without a blind delete
+    # (um-run.ps1's new RETRACTED path, item 2). Emitted the same way UMRUN_JOBID= already is, and
+    # only ever reached on the same full-success path.
+    Write-Output "UMRUN_NONCE=$nonce"
 }
 
-Export-ModuleMember -Function Assert-UmRunSideFileName, Test-UmRunTrackedFixtureSource, Resolve-UmRunRealDirectory, Get-UmRunShareNowUtc, Invoke-UmRunDrop
+Export-ModuleMember -Function Assert-UmRunSideFileName, Test-UmRunTrackedFixtureSource, Resolve-UmRunRealDirectory, Get-UmRunShareNowUtc, Get-UmRunHeartbeatJobTag, Get-UmRunAgentLiveness, Invoke-UmRunDrop
