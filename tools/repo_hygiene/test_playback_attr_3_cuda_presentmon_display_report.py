@@ -252,6 +252,30 @@ class MissingCsvFixtureTests(_ReportCase):
         report = self.call(path, _result_json(start="not-a-timestamp"))
         self.assertEqual(report["status"], "PRESENTMON_UNAVAILABLE")
 
+    def test_a_header_only_csv_with_zero_data_rows_is_presentmon_unavailable(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: distinct from test_an_empty_csv_is_presentmon_unavailable
+        # above (a genuinely 0-byte file, no header at all) -- this is the shape PresentMon itself
+        # would actually write if it captured a valid session but the process never presented a
+        # single frame inside its own --timed window: a real, well-formed header, zero data rows.
+        path = self.tmp / "presentmon.csv"
+        path.write_text(
+            "Application,ProcessID,SwapChainAddress,PresentMode,MsBetweenPresents,"
+            "MsBetweenDisplayChange,MsUntilDisplayed,TimeInMs\r\n",
+            encoding="utf-8",
+        )
+        report = self.call(path, _result_json())
+        self.assertEqual(report["status"], "PRESENTMON_UNAVAILABLE")
+        self.assertIn("no rows", report["reason"])
+
+    def test_a_columnless_csv_is_presentmon_unavailable_not_a_throw(self) -> None:
+        # A degenerate capture with no header row at all (just blank/garbage lines) -- Import-Csv
+        # itself may throw or hand back rows with no properties; either way this must still be a
+        # typed refusal, never an uncaught exception reaching the job's own outer try/finally.
+        path = self.tmp / "presentmon.csv"
+        path.write_text("\r\n\r\n\r\n", encoding="utf-8")
+        report = self.call(path, _result_json())
+        self.assertEqual(report["status"], "PRESENTMON_UNAVAILABLE")
+
 
 @requires_pwsh
 class ZeroDisplayedFixtureTests(_ReportCase):
