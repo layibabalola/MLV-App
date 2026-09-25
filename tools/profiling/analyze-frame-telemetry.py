@@ -15,6 +15,17 @@ Also joins the companion playback_smoke.timing_validity record (by
 session+index, MainWindow.cpp's playback_smoke.timing_validity emitter) so
 the two derived-residual fields (processed16/8_threading_overhead_ms) are
 labelled "(derived)" rather than read as an independent measurement.
+
+CUDA-ATTRIBUTION-BASELINE-1 round 12 (sol MINOR, "the residual still zero-
+fills an entirely unavailable population"): the round-11 fix only closed the
+gap for the FIELDS table above. The slowest-decile "decode+debayer+scale
+(residual)" line separately subtracted `avg("llrawproc_ms") or 0.0` and
+`avg("processed8_ms") or 0.0` from `avg("render_work_ms")` -- when a
+component is absent from every slow-decile frame, `avg()` returns None and
+`None or 0.0` substitutes a confident zero, so the residual silently absorbs
+the whole missing component instead of reporting unavailable. The residual
+is now None (printed "unavailable") whenever any of its three inputs is
+None.
 """
 import re
 import sys
@@ -139,9 +150,14 @@ def analyze(path):
 
         rt = avg("render_total_ms") or 1.0
         decode_render = avg("render_work_ms")
+        llrawproc_avg = avg("llrawproc_ms")
+        processed8_avg = avg("processed8_ms")
         decode = (
-            decode_render - (avg("llrawproc_ms") or 0.0) - (avg("processed8_ms") or 0.0)
-            if decode_render is not None else None
+            decode_render - llrawproc_avg - processed8_avg
+            if decode_render is not None
+            and llrawproc_avg is not None
+            and processed8_avg is not None
+            else None
         )
         print(f"slowest-decile (n={n}) render_total avg {rt:.1f} ms split:")
 

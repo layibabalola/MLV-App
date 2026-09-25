@@ -150,3 +150,28 @@ def test_slowest_decile_reports_unavailable_instead_of_zero_when_no_slow_frame_h
     analyzer.analyze(str(log_path))
     out = capsys.readouterr().out
     assert "llrawproc (recon etc.)           unavailable" in out
+
+
+def test_decode_residual_is_unavailable_not_zero_filled_when_a_component_is_entirely_absent(tmp_path, capsys):
+    # CUDA-ATTRIBUTION-BASELINE-1 round 12 (sol MINOR): the slowest-decile
+    # residual used `avg("llrawproc_ms") or 0.0`, so an entirely-absent
+    # llrawproc_ms population in the slow decile silently substituted 0.0
+    # and reported a confident (wrong) residual instead of "unavailable".
+    log_path = tmp_path / "trace.log"
+    lines = []
+    for i in range(9):
+        lines.append(_frame_line(1, i, render_total_ms=float(i), render_work_ms=1.0,
+                                  llrawproc_ms=1.0, processed8_ms=1.0))
+    # The slowest-decile frame has render_work_ms and processed8_ms, but
+    # never wrote llrawproc_ms at all -- one of the three residual inputs is
+    # entirely unavailable for this decile.
+    lines.append(_frame_line(1, 9, render_total_ms=100.0, render_work_ms=100.0,
+                              processed8_ms=10.0))
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    analyzer.analyze(str(log_path))
+    out = capsys.readouterr().out
+    assert "decode+debayer+scale (residual)  unavailable" in out, out
+    # A pre-fix run would have printed a confident (and wrong) 90.0 ms here
+    # (100.0 - 0.0 - 10.0) instead of admitting the component is missing.
+    assert "decode+debayer+scale (residual)" in out and "90.0 ms" not in out
