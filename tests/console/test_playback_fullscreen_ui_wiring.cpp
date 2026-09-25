@@ -139,7 +139,7 @@ TEST(PlaybackFullscreenUiWiring, SmokeGeometryVerificationUsesTheSameScreenChoic
     // window fullscreened on a non-primary monitor would spuriously fail verification.
     const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
     const QString body = functionBody(source,
-        QStringLiteral("void MainWindow::enterPlaybackSmokeFullscreen( void )"),
+        QStringLiteral("bool MainWindow::enterPlaybackSmokeFullscreen( void )"),
         QStringLiteral("void MainWindow::leavePlaybackSmokeFullscreen( void )"));
     ASSERT_FALSE(body.isEmpty());
     ASSERT_TRUE(body.contains(QStringLiteral("QScreen *fullscreenScreen = this->screen();")));

@@ -57,7 +57,7 @@ QString functionBody(const QString & source, const QString & signature, const QS
 TEST(PlaybackSmokeFullscreenWiring, HeaderDeclaresTheFullscreenApi)
 {
     const QString header = readRepoFile(QStringLiteral("platform/qt/MainWindow.h"));
-    ASSERT_TRUE(header.contains(QStringLiteral("void enterPlaybackSmokeFullscreen( void );")));
+    ASSERT_TRUE(header.contains(QStringLiteral("bool enterPlaybackSmokeFullscreen( void );")));
     ASSERT_TRUE(header.contains(QStringLiteral("void leavePlaybackSmokeFullscreen( void );")));
     ASSERT_TRUE(header.contains(QStringLiteral("QSize playbackSmokeViewportSize( void ) const;")));
 }
@@ -166,7 +166,7 @@ TEST(PlaybackSmokeFullscreenWiring, EnterTriggersTheExistingActionAndVerifiesGeo
 {
     const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
     const QString body = functionBody(source,
-        QStringLiteral("void MainWindow::enterPlaybackSmokeFullscreen( void )"),
+        QStringLiteral("bool MainWindow::enterPlaybackSmokeFullscreen( void )"),
         QStringLiteral("void MainWindow::leavePlaybackSmokeFullscreen( void )"));
     ASSERT_FALSE(body.isEmpty());
 
@@ -187,6 +187,11 @@ TEST(PlaybackSmokeFullscreenWiring, EnterTriggersTheExistingActionAndVerifiesGeo
     ASSERT_TRUE(verifiedAt >= 0);
     ASSERT_TRUE(logAt > verifiedAt);
     ASSERT_TRUE(body.contains(QStringLiteral("window=%4x%5 gpu_viewport=%6x%7 dpr=%8")));
+
+    // Round 2 (CUDA-PLAYBACK-FULLSCREEN-UI-1): the caller now fails closed on this value,
+    // so it must actually be returned, not just logged.
+    const int returnAt = body.indexOf(QStringLiteral("return verified;"), logAt);
+    ASSERT_TRUE(returnAt > logAt);
 }
 
 TEST(PlaybackSmokeFullscreenWiring, LeaveOnlyTogglesWhenStillCheckedAndMirrorsCtrlF)
@@ -207,7 +212,7 @@ TEST(PlaybackSmokeFullscreenWiring, ForcePlaybackSmokeWindowForegroundIsFullscre
     const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
     const QString body = functionBody(source,
         QStringLiteral("void MainWindow::forcePlaybackSmokeWindowForeground( void )"),
-        QStringLiteral("void MainWindow::enterPlaybackSmokeFullscreen( void )"));
+        QStringLiteral("bool MainWindow::enterPlaybackSmokeFullscreen( void )"));
     ASSERT_FALSE(body.isEmpty());
     ASSERT_TRUE(body.contains(QStringLiteral("const bool wasFullScreen = isFullScreen();")));
     ASSERT_TRUE(body.contains(QStringLiteral("if( !wasFullScreen ) showNormal();")));
@@ -245,4 +250,109 @@ TEST(PlaybackSmokeFullscreenWiring, ForegroundLineCarriesTheNewFullscreenAndView
     const QString tail = source.mid(lineAt, 1200);
     ASSERT_TRUE(tail.contains(QStringLiteral("fullscreen_at_begin=%6 fullscreen_at_gate=%7")));
     ASSERT_TRUE(tail.contains(QStringLiteral("viewport_at_begin=%8x%9 viewport_at_gate=%10x%11")));
+}
+
+// --- CUDA-PLAYBACK-FULLSCREEN-UI-1 round 2: fail-closed on unverified/lost full screen,
+// and the measured-duration clock excludes the foreground+fullscreen preamble.
+
+TEST(PlaybackSmokeFullscreenWiring, PlaybackClockStartsAfterTheFullscreenPreambleAndBeforeTheTrigger)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = functionBody(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    const int fullscreenAt = smokeBody.indexOf(QStringLiteral("enterPlaybackSmokeFullscreen();"));
+    const int secondForegroundAt = smokeBody.indexOf(
+        QStringLiteral("forcePlaybackSmokeWindowForeground();"), fullscreenAt);
+    const int failCheckAt = smokeBody.indexOf(
+        QStringLiteral("if( !fullscreenVerified )"), secondForegroundAt);
+    const int preambleMsAt = smokeBody.indexOf(
+        QStringLiteral("const qint64 preambleMs = preambleClock.elapsed();"), failCheckAt);
+    const int clockDeclAt = smokeBody.indexOf(
+        QStringLiteral("QElapsedTimer playbackClock;"), preambleMsAt);
+    const int clockStartAt = smokeBody.indexOf(QStringLiteral("playbackClock.start();"), clockDeclAt);
+    const int triggerAt = smokeBody.indexOf(QStringLiteral("ui->actionPlay->trigger();"), clockStartAt);
+
+    ASSERT_TRUE(fullscreenAt >= 0);
+    ASSERT_TRUE(secondForegroundAt > fullscreenAt);
+    ASSERT_TRUE(failCheckAt > secondForegroundAt);
+    ASSERT_TRUE(preambleMsAt > failCheckAt);
+    ASSERT_TRUE(clockDeclAt > preambleMsAt);
+    ASSERT_TRUE(clockStartAt > clockDeclAt);
+    ASSERT_TRUE(triggerAt > clockStartAt);
+}
+
+TEST(PlaybackSmokeFullscreenWiring, UnverifiedFullscreenFailsClosedBeforeTheTriggerWithADistinctExitCode)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = functionBody(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    ASSERT_TRUE(smokeBody.contains(
+        QStringLiteral("const bool fullscreenVerified = enterPlaybackSmokeFullscreen();")));
+
+    const int checkAt = smokeBody.indexOf(QStringLiteral("if( !fullscreenVerified )"));
+    ASSERT_TRUE(checkAt >= 0);
+    const int failCallAt = smokeBody.indexOf(
+        QStringLiteral("logFullscreenSmokeFailure( \"fullscreen_not_verified\" )"), checkAt);
+    // Search for the trigger from the check onward -- an earlier, unrelated
+    // ui->actionPlay->trigger() exists upstream (Look Assist auto-warmup settle).
+    const int triggerAt = smokeBody.indexOf(QStringLiteral("ui->actionPlay->trigger();"), checkAt);
+    ASSERT_TRUE(failCallAt > checkAt);
+    ASSERT_TRUE(failCallAt < triggerAt);
+
+    // The shared failure helper is the sole place "return 13" is spelled -- pin the code
+    // there rather than at each call site, and pin its FAIL log shape.
+    const int helperAt = smokeBody.indexOf(QStringLiteral("auto logFullscreenSmokeFailure = "));
+    ASSERT_TRUE(helperAt >= 0);
+    ASSERT_TRUE(helperAt < checkAt);
+    const int helperReturnAt = smokeBody.indexOf(QStringLiteral("return 13;"), helperAt);
+    ASSERT_TRUE(helperReturnAt > helperAt);
+    ASSERT_TRUE(helperReturnAt < checkAt);
+    ASSERT_TRUE(smokeBody.contains(QStringLiteral(
+        "\"[GUI-SMOKE] FAIL reason=\" << reason << \" screen=\"")));
+}
+
+TEST(PlaybackSmokeFullscreenWiring, FullscreenLossMidSessionFailsClosedAfterTheDurationLoopBeforeStoppingPlay)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = functionBody(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    const int loopAt = smokeBody.indexOf(
+        QStringLiteral("while( playbackClock.elapsed() < durationMs && ui->actionPlay->isChecked() )"));
+    ASSERT_TRUE(loopAt >= 0);
+    const int playedMsAt = smokeBody.indexOf(
+        QStringLiteral("const qint64 playedMs = playbackClock.elapsed();"), loopAt);
+    ASSERT_TRUE(playedMsAt > loopAt);
+    const int gateAt = smokeBody.indexOf(QStringLiteral("if( !isFullScreen() )"), playedMsAt);
+    ASSERT_TRUE(gateAt > playedMsAt);
+    const int gateFailCallAt = smokeBody.indexOf(
+        QStringLiteral("logFullscreenSmokeFailure( \"fullscreen_lost_mid_session\" )"), gateAt);
+    ASSERT_TRUE(gateFailCallAt > gateAt);
+
+    // Must run before play is stopped, so the guard is the only thing that ever touches
+    // window state on this path (no early "stop, then decide" ordering to get wrong).
+    const int stopPlayAt = smokeBody.indexOf(QStringLiteral("ui->actionPlay->setChecked( false );"));
+    ASSERT_TRUE(stopPlayAt > gateFailCallAt);
+}
+
+TEST(PlaybackSmokeFullscreenWiring, DoneLineReportsPreambleAndPlayedMsNextToRequestedDuration)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const int doneAt = source.indexOf(QStringLiteral("\"[GUI-SMOKE] DONE clip=\""));
+    ASSERT_TRUE(doneAt >= 0);
+    const QString tail = source.mid(doneAt, 400);
+    const int durationAt = tail.indexOf(QStringLiteral("duration_ms=\" << durationMs"));
+    const int preambleAt = tail.indexOf(QStringLiteral("preamble_ms=\" << preambleMs"));
+    const int playedAt = tail.indexOf(QStringLiteral("played_ms=\" << playedMs"));
+    ASSERT_TRUE(durationAt >= 0);
+    ASSERT_TRUE(preambleAt > durationAt);
+    ASSERT_TRUE(playedAt > preambleAt);
 }
