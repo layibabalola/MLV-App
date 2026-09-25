@@ -25,10 +25,15 @@
 #
 # Usage:
 #   pwsh -NoProfile -File tools\profiling\bachelor\attr3-footage-stage.ps1 -ClipId M16-1243
-# Exits 0 with RESULT=FOOTAGE_STAGED when Bachelor now holds every part at its spec path; exits
-# non-zero with RESULT=FOOTAGE_STAGE_REFUSED (or an ATTR3_FOOTAGE_STAGE_* refusal token) otherwise.
-# Idempotent: a clip already fully present on Bachelor at its spec path transfers nothing new and
-# still reports FOOTAGE_STAGED (every part lands ALREADY_PRESENT).
+# Exits 0 with RESULT=FOOTAGE_STAGED when Bachelor now holds every part at its spec path; exits 1
+# with RESULT=FOOTAGE_STAGE_REFUSED (or an ATTR3_FOOTAGE_STAGE_* refusal token) on an ordinary,
+# safely-retryable failure; exits 2 with RESULT=FOOTAGE_STAGE_UNRESOLVED when um-run.ps1 itself
+# stopped waiting on the placement submission without proof the agent is either done with it or
+# dead (ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11) -- NOT a failure and NOT safely retryable on
+# this evidence alone: the agent may still be running the job and may still publish a receipt for
+# it after this process has already exited. Idempotent: a clip already fully present on Bachelor at
+# its spec path transfers nothing new and still reports FOOTAGE_STAGED (every part lands
+# ALREADY_PRESENT).
 
 $ErrorActionPreference = 'Stop'
 
@@ -248,22 +253,30 @@ function ConvertTo-Attr3FootageStageSafeOutput {
 function Get-Attr3FootageUmRunFailureClass {
     <#
     .SYNOPSIS
-    Classify an um-run.ps1 failure as QUEUED (never claimed), CLAIMED (claimed, then too slow to
-    finish or publish), or UNKNOWN (anything else -- a dead heartbeat, a missing script, ...),
-    from a FIXED substring match only -- the exception's own .Message is never returned or
-    otherwise echoed, since um-run.ps1's timeout messages name real agent-share paths (the result
-    file, the claim marker).
+    Classify an um-run.ps1 failure as RETRACTED (queue ceiling reached, withdrawn before the agent
+    ever claimed it), UNRESOLVED (claimed, then this client stopped waiting without proof of
+    success OR death), or UNKNOWN (anything else -- a dead heartbeat, a missing script, ...), from
+    a FIXED substring match only -- the exception's own .Message is never returned or otherwise
+    echoed, since um-run.ps1's own diagnoses name real agent-share paths (the result file, the
+    claim marker).
     .DESCRIPTION
     ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 4 (fable major): the round-2 CLASS=$exceptionClass
     slot on the outer catch already exists for an unanticipated .NET exception; this reuses that
-    same convention for the two um-run.ps1 phase diagnoses (um-run.ps1:159,162) so a refusal says
-    WHICH bound expired without ever forwarding the message that proves it.
+    same convention for um-run.ps1's own named outcomes so a refusal says WHICH one fired without
+    ever forwarding the message that proves it.
+    ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (hub ruling): um-run.ps1 no longer synthesizes a
+    generic timeout failure at all -- every non-receipt outcome it can throw is now RETRACTED or
+    UNRESOLVED, named as a fixed prefix on the thrown message (see um-run.ps1's own header).
+    Neither is a failure this script may treat as one: RETRACTED is a clean refusal (the job never
+    ran), and UNRESOLVED means the agent may still own the job and its receipt may still land
+    later -- this script's own callers must not retry on UNRESOLVED as if it were an ordinary,
+    safely-retryable failure.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message)
 
-    if ($Message -match 'was never claimed') { return 'QUEUED' }
-    if ($Message -match 'claimed by the agent') { return 'CLAIMED' }
+    if ($Message -match '^RETRACTED:') { return 'RETRACTED' }
+    if ($Message -match '^UNRESOLVED:') { return 'UNRESOLVED' }
     return 'UNKNOWN'
 }
 
@@ -348,7 +361,13 @@ try {
     # Bounded here to the SAME per-caller value already governing the preflight's own execution
     # budget -- derived from the caller's -TimeoutSec, never the global default -- so the whole
     # preflight (queue + exec + grace) stays a small multiple of what the caller actually asked for.
-    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $presenceTimeoutSecValue -MaxQueueWaitSec $presenceTimeoutSecValue 6>$null
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (fable minor, item 3): -MaxClaimedWaitSec is
+    # bounded the same way -MaxQueueWaitSec already is -- left at um-run.ps1's own 86400s default,
+    # an agent that claims this preflight and then goes idle (a lost receipt, an untagged
+    # between-jobs heartbeat that is not proof of work on OUR job) could hold this "optimization,
+    # not a correctness requirement" preflight for up to a day before the exception handler below
+    # ever gets a chance to fall through to the real transfer path.
+    $presenceResult = & $umRun -ScriptPath $presenceJob.jobFile -JobId $presenceJob.jobId -AgentShare $AgentShare -TimeoutSec $presenceTimeoutSecValue -MaxQueueWaitSec $presenceTimeoutSecValue -MaxClaimedWaitSec $presenceTimeoutSecValue 6>$null
     $presentIndexArray = @(Get-Attr3FootagePresentPartIndexes -Stdout $presenceResult.stdout -ClipId $ClipId)
 } catch {
     # Presence is an optimization, not a correctness requirement -- if the preflight itself could
@@ -495,10 +514,24 @@ try {
     # -- so a dead or wedged agent that never claims this job fails in a bounded multiple of what
     # the caller asked for instead of sitting queued for up to a day. A caller who wants more queue
     # patience simply asks for a larger -TimeoutSec, which raises both bounds together.
+    # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (item 3): -MaxClaimedWaitSec is bounded the same
+    # way -MaxQueueWaitSec already is, rather than left at um-run.ps1's own 86400s default -- an
+    # agent that claims this job and then goes idle (a lost receipt, an untagged heartbeat that is
+    # not proof of work on OUR job) would otherwise hold this client for up to a day past this
+    # run's own budget before ever reporting UNRESOLVED.
     try {
-        $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $timeoutSecValue -MaxQueueWaitSec $timeoutSecValue 6>$null
+        $result = & $umRun -ScriptPath $job.jobFile -JobId $job.jobId -AgentShare $AgentShare -TimeoutSec $timeoutSecValue -MaxQueueWaitSec $timeoutSecValue -MaxClaimedWaitSec $timeoutSecValue 6>$null
     } catch {
         $submitFailClass = Get-Attr3FootageUmRunFailureClass -Message ([string]$_.Exception.Message)
+        if ($submitFailClass -eq 'UNRESOLVED') {
+            # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (hub ruling): UNRESOLVED means the agent
+            # may still own this job and may still publish a receipt for it later -- it is neither
+            # a success nor a safely-retryable failure (unlike FOOTAGE_STAGE_REFUSED, which a caller
+            # may treat as clear to resubmit), so it gets its own RESULT= line and exit code.
+            Remove-Attr3FootageStageAttemptResidue
+            Write-Output "RESULT=FOOTAGE_STAGE_UNRESOLVED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId)"
+            exit 2
+        }
         throw "ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED job could not be submitted or its result could not be retrieved CLASS=$submitFailClass"
     }
 

@@ -250,12 +250,13 @@ pwsh -NoProfile -File "tools\profiling\bachelor\attr3-stage-fixture-job.ps1" `
 #     MANDATORY: um-run.ps1 defaults to the Ultra-Magnus share, not Bachelor's. -JobId is
 #     <stageJobId> from step (i) -- DISTINCT from step (iv)'s <attrJobId> below; reusing one
 #     id for both submissions is rejected with UMRUN_JOBID_IN_USE.
-#     -OrphanMetaGraceSec (round 10, default 60s): the JobId is claimed BEFORE the fixture's
-#     own bytes are transferred, so this states how long that transfer may legitimately take
-#     before a later retry of the SAME <stageJobId> is allowed to reclaim it as abandoned --
-#     raise it (e.g. -OrphanMetaGraceSec 300) for `large_dual_iso` on a slow link; the 60s
-#     default is sized for the small `tiny_dual_iso` fixture and for every automated caller,
-#     which never passes -SideFile at all.
+#     ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11: a JobId's claim is never reclaimed by age any
+#     more -- it is held until the submission that made it finishes (success or its own rollback)
+#     or an operator removes it by hand. Retrying THIS SAME <stageJobId> while an earlier attempt's
+#     claim is still sitting in the inbox (e.g. after killing a stuck `large_dual_iso` transfer) is
+#     refused outright with "choose a new -JobId" -- pick a fresh <stageJobId> for the retry, or,
+#     only if you are certain the earlier attempt is dead, remove
+#     \\bachelor\mlv-agent\inbox\<stageJobId>.meta.json by hand first.
 pwsh -NoProfile -File "tools\profiling\um-run.ps1" `
     -ScriptPath "<staging-dir>\<stageJobId>.job.ps1" -SideFile "<repo>\tests\fixtures\clips\<name>" `
     -JobId <stageJobId> -AgentShare \\bachelor\mlv-agent

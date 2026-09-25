@@ -1155,6 +1155,23 @@ class QueueWaitBoundTests(unittest.TestCase):
             "never um-run.ps1's 86400s default",
         )
 
+    def test_both_um_run_call_sites_pass_a_caller_derived_max_claimed_wait_sec(self) -> None:
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11 (fable minor, item 3): an idle agent's
+        # untagged between-jobs heartbeat is not proof of work on OUR job -- a lost-receipt failure
+        # mode could otherwise hold either call for the full -MaxClaimedWaitSec default (86400s, a
+        # day) instead of a bounded multiple of what the caller actually asked for.
+        text = GENERATOR.read_text(encoding="utf-8")
+        self.assertIn(
+            "-MaxClaimedWaitSec $presenceTimeoutSecValue", text,
+            "the presence preflight must bound its own claimed-phase wait to its own capped "
+            "budget, never um-run.ps1's 86400s default",
+        )
+        self.assertIn(
+            "-MaxClaimedWaitSec $timeoutSecValue", text,
+            "the placement submission must bound its claimed-phase wait to the caller's own "
+            "-TimeoutSec, never um-run.ps1's 86400s default",
+        )
+
 
 # PowerShell block-comment stripper for _production_um_run_references below: a `<# ... #>`
 # doc-comment (e.g. a function's .SYNOPSIS/.DESCRIPTION) can mention "um-run.ps1" in prose on a
@@ -2100,7 +2117,11 @@ class Attr3FootageStageCliEndToEndTests(unittest.TestCase):
         combined = proc.stdout + proc.stderr
         self.assertNotEqual(proc.returncode, 0)
         self.assertLess(elapsed, 90, "a dead agent must fail in a bounded multiple of -TimeoutSec, not hang for a day")
-        self.assertIn("PRESENCE PREFLIGHT=INCONCLUSIVE CLASS=QUEUED", combined, combined)
+        # ATTR3-FOOTAGE-STAGE-SUBMIT-RETRY-1 round 11: um-run.ps1 no longer synthesizes a generic
+        # "QUEUED" timeout failure -- a dead agent that never claims the preflight is now
+        # RETRACTED (withdrawn from the inbox before it could ever be claimed), never a diagnosis
+        # about the agent's health.
+        self.assertIn("PRESENCE PREFLIGHT=INCONCLUSIVE CLASS=RETRACTED", combined, combined)
         self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
         self._no_console_leak(combined)
 
