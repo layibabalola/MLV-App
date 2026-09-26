@@ -120,6 +120,7 @@ _BASE_CMD_TAIL = (
 
 @requires_pwsh
 @requires_git
+@unittest.skipIf(os.name != "nt", "the ATTR-3 host jobs are Windows-only (drive-letter path parameters); Windows CI runs this")
 class ContactSheetSwitchTests(unittest.TestCase):
     def setUp(self) -> None:
         if PWSH is None:  # pragma: no cover - guarded by requires_pwsh too
@@ -624,6 +625,7 @@ class MeasuredSmokeSessionIdTests(unittest.TestCase):
 
 @requires_pwsh
 @requires_git
+@unittest.skipIf(os.name != "nt", "the ATTR-3 host jobs are Windows-only (drive-letter path parameters); Windows CI runs this")
 class ContactSheetDefaultOffPreCardCommitTests(unittest.TestCase):
     """B4 (r1c BLOCKER fix): a default-off generation must succeed against a commit that
     predates tools/profiling/make-contact-sheet.py entirely -- the composer blob must never
