@@ -451,7 +451,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             for label, supplied in (("--presentmon-csv", presentmon_csv), ("--frame-log", frame_log)):
                 if supplied is not None:
                     resolved = os.path.realpath(supplied)
-                    if os.path.commonpath([artifacts_root, resolved]) != artifacts_root:
+                    try:
+                        inside = os.path.commonpath([artifacts_root, resolved]) == artifacts_root
+                    except ValueError:  # different drive / path authority: certainly not inside
+                        inside = False
+                    if not inside:
                         raise RefreshHistogramError(
                             f"{label} {supplied!r} is outside --artifacts-dir {args.artifacts_dir!r}; the status and the "
                             "data it authorizes must come from the same leg -- refusing"
@@ -477,10 +481,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 
         # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): the CLI -- the tool anyone
         # actually runs, and the one the runbook documents -- must not be able to reach build_report
-        # without a known presentMonStatus. build_report() itself keeps presentmon_status optional
-        # for direct library/test callers who already have their own reason to bypass this (e.g.
-        # this file's own unit tests exercising bucket math in isolation); only this CLI entrypoint
-        # fails closed.
+        # without a known presentMonStatus. (Since PRESENTMON-HARNESS-ROBUSTNESS-3 build_report() refuses a
+        # missing status too; this CLI check stays so the refusal names the CLI's own options.)
         if presentmon_csv is None or frame_log is None:
             raise RefreshHistogramError(
                 "--presentmon-csv and --frame-log are required unless --artifacts-dir is given"

@@ -350,19 +350,45 @@ def test_omitted_presentmon_status_is_refused_by_the_library_function(tmp_path):
         build_report(str(csv_path), str(log_path))
 
 
-def test_cli_refuses_data_paths_outside_the_artifacts_dir(tmp_path, capsys):
+@pytest.mark.parametrize("outside_option", ["--presentmon-csv", "--frame-log"])
+def test_cli_refuses_each_data_path_outside_the_artifacts_dir(tmp_path, capsys, outside_option):
     # PRESENTMON-HARNESS-ROBUSTNESS-3 (sol pre-review BLOCKER): leg A's 'ok' status must not
-    # authorize leg B's data.
+    # authorize leg B's data. One outside path per case, so each binding is proven on its own
+    # (sol pre-review #2: a combined case could not detect one binding being dropped).
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
     leg_a = _write_artifacts_dir(tmp_path / "a", summary={"presentMonStatus": "ok"})
     leg_b = _write_artifacts_dir(tmp_path / "b", summary={"presentMonStatus": "degraded"})
+    inside = {
+        "--presentmon-csv": str(leg_a / "presentmon-series.csv"),
+        "--frame-log": str(leg_a / "logs" / "smoke-run.log"),
+    }
+    outside = {
+        "--presentmon-csv": str(leg_b / "presentmon-series.csv"),
+        "--frame-log": str(leg_b / "logs" / "smoke-run.log"),
+    }
+    argv = ["--artifacts-dir", str(leg_a)]
+    for option in ("--presentmon-csv", "--frame-log"):
+        argv += [option, outside[option] if option == outside_option else inside[option]]
 
-    rc = main([
-        "--artifacts-dir", str(leg_a),
-        "--presentmon-csv", str(leg_b / "presentmon-series.csv"),
-        "--frame-log", str(leg_b / "logs" / "smoke-run.log"),
-    ])
+    rc = main(argv)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "outside --artifacts-dir" in err and outside_option in err
+
+
+def test_cli_refuses_a_data_path_on_another_drive_as_a_typed_failure(tmp_path, capsys, monkeypatch):
+    # sol pre-review #2 HARDENING: os.path.commonpath raises ValueError across drives; that must be
+    # the CLI's normal typed refusal, not an escaping exception.
+    leg = _write_artifacts_dir(tmp_path, summary={"presentMonStatus": "ok"})
+
+    def _commonpath_across_drives(paths):
+        raise ValueError("Paths don't have the same drive")
+
+    monkeypatch.setattr("tools.profiling.refresh_period_histogram.os.path.commonpath", _commonpath_across_drives)
+
+    rc = main(["--artifacts-dir", str(leg), "--presentmon-csv", str(leg / "presentmon-series.csv")])
 
     assert rc == 1
     assert "outside --artifacts-dir" in capsys.readouterr().err
