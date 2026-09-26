@@ -64,10 +64,16 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutDir,
 
+    # UM-CUDA-BENCH-VENUE-1: selects the -AgentRoot default below by a fixed per-venue literal,
+    # same as playback-attr-3-cuda-job.ps1's own -Venue. 'bachelor' is the default and keeps
+    # -AgentRoot's default byte-for-byte what it always was.
+    [ValidateSet('bachelor', 'ultra-magnus')]
+    [string]$Venue = 'bachelor',
+
     # `~` is admitted because Windows temp roots carry 8.3 short names (RUNNER~1, OBABAL~1) and
     # the behavioural tests point -AgentRoot at one; it is inert everywhere this value is used.
     [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
-    [string]$AgentRoot = 'C:\mlvtmp\mlv-agent',
+    [string]$AgentRoot = $(if ($Venue -eq 'ultra-magnus') { 'G:\Temp\mlv-gpu-profile\agent' } else { 'C:\mlvtmp\mlv-agent' }),
 
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 )
@@ -142,6 +148,7 @@ param([switch]$VerifyOnly)
 
 $ErrorActionPreference = 'Stop'
 $JobId = '__JOB_ID__'
+$Venue = '__VENUE__'
 $AgentRoot = '__AGENT_ROOT__'
 $CacheDirName = '__CACHE_DIR_NAME__'
 $ClosureEntries = __CLOSURE_ENTRIES__
@@ -171,6 +178,7 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
             exitCode = $Code
             failedStep = $Step
             message = $Message
+            venue = $Venue
             stagedOnHost = $env:COMPUTERNAME
             steps = $StepLog
         }
@@ -180,7 +188,7 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
             Say "RESULT_JSON_NOT_WRITTEN $($_.Exception.Message)"
         }
     }
-    Write-Output "RESULT=SMOKE_RUNNER_STAGE_FAILED STEP=$Step EXIT=$Code"
+    Write-Output "RESULT=SMOKE_RUNNER_STAGE_FAILED STEP=$Step EXIT=$Code VENUE=$Venue HOST=$env:COMPUTERNAME"
     exit $Code
 }
 
@@ -194,9 +202,9 @@ function Complete-AlreadyStaged([string]$CacheDirPathValue) {
         exitCode = 0; alreadyStaged = $true
         cacheDirName = $CacheDirName; cacheDirPath = $CacheDirPathValue
         files = @($ClosureEntries | ForEach-Object { [ordered]@{ name = $_.name; sha256 = $_.sha256 } })
-        stagedOnHost = $env:COMPUTERNAME; steps = $StepLog
+        venue = $Venue; stagedOnHost = $env:COMPUTERNAME; steps = $StepLog
     }) | ConvertTo-Json -Depth 10))
-    Write-Output "RESULT=SMOKE_RUNNER_STAGE_OK ALREADY=1 CACHE_DIR=$CacheDirName PATH=$CacheDirPathValue"
+    Write-Output "RESULT=SMOKE_RUNNER_STAGE_OK ALREADY=1 CACHE_DIR=$CacheDirName PATH=$CacheDirPathValue VENUE=$Venue HOST=$env:COMPUTERNAME"
     exit 0
 }
 
@@ -252,7 +260,7 @@ $StepLog['closureDecode'] = 0
 
 # Everything above is read-only: no file has been created or written. -VerifyOnly stops here.
 if ($VerifyOnly) {
-    Write-Output "RESULT=VERIFY_ONLY_OK CACHE_DIR=$CacheDirName FILES=$($ClosureEntries.Count)"
+    Write-Output "RESULT=VERIFY_ONLY_OK CACHE_DIR=$CacheDirName FILES=$($ClosureEntries.Count) VENUE=$Venue HOST=$env:COMPUTERNAME"
     exit 0
 }
 
@@ -322,9 +330,9 @@ try { [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value ((
     exitCode = 0; alreadyStaged = $false
     cacheDirName = $CacheDirName; cacheDirPath = $cacheDirPath
     files = @($ClosureEntries | ForEach-Object { [ordered]@{ name = $_.name; sha256 = $_.sha256 } })
-    stagedOnHost = $env:COMPUTERNAME; steps = $StepLog
+    venue = $Venue; stagedOnHost = $env:COMPUTERNAME; steps = $StepLog
 }) | ConvertTo-Json -Depth 10)) } catch { Complete-Failed 23 'publishResult' $_.Exception.Message }
-Write-Output "RESULT=SMOKE_RUNNER_STAGE_OK CACHE_DIR=$CacheDirName PATH=$cacheDirPath FILES=$($ClosureEntries.Count)"
+Write-Output "RESULT=SMOKE_RUNNER_STAGE_OK CACHE_DIR=$CacheDirName PATH=$cacheDirPath FILES=$($ClosureEntries.Count) VENUE=$Venue HOST=$env:COMPUTERNAME"
 exit 0
 '@
 
@@ -354,6 +362,7 @@ $jobPath = Join-Path $OutDir "$jobId.job.ps1"
 # caller-controlled value happens to spell.
 $text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
     JOB_ID = $jobId
+    VENUE = $Venue
     AGENT_ROOT = $AgentRoot
     CACHE_DIR_NAME = $CacheDirName
     CLOSURE_ENTRIES = $closureEntriesLiteral
@@ -368,6 +377,7 @@ Write-Output "RESULT=SMOKE_RUNNER_STAGE_JOB_EMITTED SOURCE=$SourceCommit CLOSURE
 [pscustomobject]@{
     jobFile = $jobPath
     jobId = $jobId
+    venue = $Venue
     sourceCommit = $SourceCommit
     closureDigest = $closureDigest
     cacheDirName = $CacheDirName

@@ -2131,6 +2131,57 @@ class Attr3FootageStageCliEndToEndTests(unittest.TestCase):
         self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
         self.assertNotIn("does not match the pattern", combined)
 
+    # ---- UM-CUDA-BENCH-VENUE-1: -Venue is a THIRD fixed named argument, same $args discipline,
+    #      checked against a fixed two-member allowlist -- never a caller-typed share/root. -------
+
+    def test_an_unknown_venue_value_is_rejected_with_a_fixed_token(self) -> None:
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path),
+             "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE-VENUE", "-Venue", "dell-field"],
+            capture_output=True, text=True,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0, combined)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_VENUE_INVALID", combined)
+        self.assertNotIn("RESULT=FOOTAGE_STAGED", combined)
+
+    def test_a_path_shaped_venue_value_never_reaches_output(self) -> None:
+        hostile = r"C:\%s\real-owner-footage.raw" % TOKEN
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path),
+             "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE-VENUE", "-Venue", hostile],
+            capture_output=True, text=True,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_VENUE_INVALID", combined)
+        self.assertNotIn(hostile, combined)
+        self.assertNotIn(TOKEN, combined)
+
+    def test_a_duplicate_venue_argument_is_refused_as_surplus(self) -> None:
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path),
+             "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE-VENUE", "-Venue", "bachelor",
+             "-Venue", "ultra-magnus"],
+            capture_output=True, text=True,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT", combined)
+
+    def test_an_explicit_bachelor_venue_reaches_the_resolver_same_as_the_default(self) -> None:
+        # -Venue bachelor must behave exactly as omitting it: both reach past arg-parsing to the
+        # resolver, which then refuses this synthetic id the same way either way.
+        proc = subprocess.run(
+            [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(self.cli_path),
+             "-ClipId", "NOT-A-REAL-CLIP-ID-ATTR3-STAGE-VENUE", "-Venue", "bachelor"],
+            capture_output=True, text=True,
+        )
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("ATTR3_FOOTAGE_STAGE_VENUE_INVALID", combined)
+        self.assertNotIn("ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT", combined)
+
     def test_a_path_shaped_error_action_value_never_reaches_output(self) -> None:
         # ATTR3-FOOTAGE-STAGE-1 round 9 (sol + astra major: common-parameter binder echo). Before
         # this round, [CmdletBinding()] made this script an "advanced" one, so PowerShell's own

@@ -93,8 +93,15 @@ try {
 # token below, before the offending token is ever compared to anything but a fixed literal name.
 $ClipId = $null
 $TimeoutSec = '1800'
+# UM-CUDA-BENCH-VENUE-1: a THIRD fixed named argument, same discipline as the two above -- matched
+# case-insensitively, refused if duplicated, and its value is checked below against a FIXED
+# two-member allowlist (never a caller-typed share/root -- see the -AgentShare/-AgentRootOnHost
+# round-4 comment right below this block, which this does not reopen: a caller can only pick
+# between two pre-vetted destinations, never name a new one).
+$Venue = 'bachelor'
 $sawClipId = $false
 $sawTimeoutSec = $false
+$sawVenue = $false
 $argCursor = 0
 while ($argCursor -lt $args.Count) {
     $argToken = [string]$args[$argCursor]
@@ -116,10 +123,22 @@ while ($argCursor -lt $args.Count) {
         $argCursor += 2
         continue
     }
+    if ($argToken -ieq '-Venue' -and -not $sawVenue) {
+        if (($argCursor + 1) -ge $args.Count) {
+            throw 'ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT an unsupported or unexpected argument was supplied'
+        }
+        $Venue = [string]$args[$argCursor + 1]
+        $sawVenue = $true
+        $argCursor += 2
+        continue
+    }
     throw 'ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT an unsupported or unexpected argument was supplied'
 }
 if (-not $sawClipId) {
     throw 'ATTR3_FOOTAGE_STAGE_SURPLUS_ARGUMENT an unsupported or unexpected argument was supplied'
+}
+if ($Venue -cne 'bachelor' -and $Venue -cne 'ultra-magnus') {
+    throw 'ATTR3_FOOTAGE_STAGE_VENUE_INVALID -Venue must be exactly bachelor or ultra-magnus'
 }
 
 # ATTR3-FOOTAGE-STAGE-1 round 5 (sol/astra: ClipId validation failure prints a fixed token). A
@@ -165,14 +184,22 @@ $presenceTimeoutSecValue = [Math]::Max($MinAttr3FootageStageTimeoutSec, [Math]::
 # public parameters -- the id-only interface's actual remaining authority boundary, since a
 # caller-supplied share or agent root could redirect every byte this script transfers and every
 # job it submits to a destination of the CALLER's choosing, not the owner-consented one. Both are
-# now fixed constants, equal to what were previously their only-ever-used defaults; nothing on
-# this script's public surface can change either. A test that needs a synthetic stand-in share
-# calls the underlying functions (the AttrCudaOwnerFootage.psm1 part-to-share transfer function,
-# New-Attr3FootageStageJob, New-Attr3FootagePresenceJob) directly with its own
-# -AgentRoot/-StagingDirectory, never through this CLI -- exactly the same split the
-# resolver-only-source-of-parts contract above already relies on.
-$AgentShare = '\\bachelor\mlv-agent'
-$AgentRootOnHost = 'C:\mlvtmp\mlv-agent'
+# fixed constants, equal to what were previously their only-ever-used defaults; nothing on this
+# script's public surface can name a NEW destination -- UM-CUDA-BENCH-VENUE-1's -Venue only
+# SELECTS between these two pre-vetted pairs (checked against a fixed two-member allowlist above,
+# never taken as free text), so the redirection boundary this round closed is unchanged. A test
+# that needs a synthetic stand-in share calls the underlying functions (the
+# AttrCudaOwnerFootage.psm1 part-to-share transfer function, New-Attr3FootageStageJob,
+# New-Attr3FootagePresenceJob) directly with its own -AgentRoot/-StagingDirectory, never through
+# this CLI -- exactly the same split the resolver-only-source-of-parts contract above already
+# relies on.
+if ($Venue -ceq 'ultra-magnus') {
+    $AgentShare = '\\Ultra-Magnus\g\Temp\mlv-gpu-profile\agent'
+    $AgentRootOnHost = 'G:\Temp\mlv-gpu-profile\agent'
+} else {
+    $AgentShare = '\\bachelor\mlv-agent'
+    $AgentRootOnHost = 'C:\mlvtmp\mlv-agent'
+}
 
 # ATTR3-FOOTAGE-STAGE-1 round 11: -Verbose:$false belt-and-suspenders over the script-scoped
 # $VerbosePreference pin above -- an explicit -Verbose:$false always wins over ambient preference
@@ -387,7 +414,7 @@ foreach ($presentIndex in $presentIndexArray) { [void]$presentIndexes.Add([int]$
 $needsWork = @($parts | Where-Object { -not $presentIndexes.Contains([int]$_.index) })
 
 if ($needsWork.Count -eq 0) {
-    Write-Output "RESULT=FOOTAGE_STAGED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($presenceJob.jobId) ALREADY_PRESENT=true"
+    Write-Output "RESULT=FOOTAGE_STAGED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($presenceJob.jobId) ALREADY_PRESENT=true VENUE=$Venue"
     exit 0
 }
 
@@ -540,7 +567,7 @@ try {
             # later invocation of this same ClipId once the earlier attempt is known dead, knows
             # there is something at this JobId's own share staging directory to reclaim once a
             # receipt lands or the attempt is abandoned.
-            Write-Output "RESULT=FOOTAGE_STAGE_UNRESOLVED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId) RESIDUE=RETAINED"
+            Write-Output "RESULT=FOOTAGE_STAGE_UNRESOLVED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId) RESIDUE=RETAINED VENUE=$Venue"
             exit 2
         }
         throw "ATTR3_FOOTAGE_STAGE_SUBMIT_FAILED job could not be submitted or its result could not be retrieved CLASS=$submitFailClass"
@@ -561,11 +588,11 @@ try {
 
 if ($attemptFailed) {
     Remove-Attr3FootageStageAttemptResidue
-    Write-Output "RESULT=FOOTAGE_STAGE_REFUSED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId)"
+    Write-Output "RESULT=FOOTAGE_STAGE_REFUSED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId) VENUE=$Venue"
     exit 1
 }
 
-Write-Output "RESULT=FOOTAGE_STAGED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId)"
+Write-Output "RESULT=FOOTAGE_STAGED CLIP=$ClipId PARTS=$($parts.Count) JOB=$($job.jobId) VENUE=$Venue"
 exit 0
 } catch {
     # ATTR3-FOOTAGE-STAGE-1 round 7 (class b: outer boundary) -- see the opening comment on this
@@ -580,6 +607,6 @@ exit 0
         exit 1
     }
     $exceptionClass = $_.Exception.GetType().Name
-    Write-Output "RESULT=FOOTAGE_STAGE_ERROR CLIP=$ClipId CLASS=$exceptionClass"
+    Write-Output "RESULT=FOOTAGE_STAGE_ERROR CLIP=$ClipId CLASS=$exceptionClass VENUE=$Venue"
     exit 1
 }

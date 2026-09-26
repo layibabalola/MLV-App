@@ -55,10 +55,16 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutDir,
 
+    # UM-CUDA-BENCH-VENUE-1: selects the -AgentRoot default below by a fixed per-venue literal,
+    # same as playback-attr-3-cuda-job.ps1's own -Venue. 'bachelor' is the default and keeps
+    # -AgentRoot's default byte-for-byte what it always was.
+    [ValidateSet('bachelor', 'ultra-magnus')]
+    [string]$Venue = 'bachelor',
+
     # `~` is admitted because Windows temp roots carry 8.3 short names (RUNNER~1, OBABAL~1) and
     # the behavioural tests point -AgentRoot at one; it is inert everywhere this value is used.
     [ValidatePattern('^[A-Za-z]:\\[A-Za-z0-9 _.~\\-]+$')]
-    [string]$AgentRoot = 'C:\mlvtmp\mlv-agent'
+    [string]$AgentRoot = $(if ($Venue -eq 'ultra-magnus') { 'G:\Temp\mlv-gpu-profile\agent' } else { 'C:\mlvtmp\mlv-agent' })
 )
 
 $ErrorActionPreference = 'Stop'
@@ -141,6 +147,7 @@ param([switch]$VerifyOnly)
 $ErrorActionPreference = 'Stop'
 $SourceCommit = '__SOURCE_COMMIT__'
 $JobId = '__JOB_ID__'
+$Venue = '__VENUE__'
 $AgentRoot = '__AGENT_ROOT__'
 $ManifestName = '__MANIFEST_NAME__'
 $ManifestSha256 = '__MANIFEST_SHA256__'
@@ -173,6 +180,7 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
             exitCode = $Code
             failedStep = $Step
             message = $Message
+            venue = $Venue
             stagedOnHost = $env:COMPUTERNAME
             steps = $StepLog
         }
@@ -183,7 +191,7 @@ function Complete-Failed([int]$Code, [string]$Step, [string]$Message) {
             Say "RESULT_JSON_NOT_WRITTEN $($_.Exception.Message)"
         }
     }
-    Write-Output "RESULT=STAGE_FAILED STEP=$Step EXIT=$Code"
+    Write-Output "RESULT=STAGE_FAILED STEP=$Step EXIT=$Code VENUE=$Venue HOST=$env:COMPUTERNAME"
     exit $Code
 }
 
@@ -290,7 +298,7 @@ $StepLog['manifestBinding'] = 0
 
 # Everything above is read-only. -VerifyOnly stops here, having touched nothing.
 if ($VerifyOnly) {
-    Write-Output "RESULT=VERIFY_ONLY_OK SOURCE=$SourceCommit FILES=$($sideFiles.Count) MANIFEST=$ManifestName"
+    Write-Output "RESULT=VERIFY_ONLY_OK SOURCE=$SourceCommit FILES=$($sideFiles.Count) MANIFEST=$ManifestName VENUE=$Venue HOST=$env:COMPUTERNAME"
     exit 0
 }
 
@@ -379,12 +387,13 @@ $result = [ordered]@{
     cache = $Cache
     published = $published
     manifestPublishedLast = $true
+    venue = $Venue
     stagedOnHost = $env:COMPUTERNAME
     stagedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     steps = $StepLog
 }
 try { [void](Publish-AttrCudaText -Path (Join-Path $Pub 'result.json') -Value ($result | ConvertTo-Json -Depth 10)) } catch { Complete-Failed 23 'publishResult' $_.Exception.Message }
-Write-Output "RESULT=STAGE_OK SOURCE=$SourceCommit FILES=$($published.Count) CACHE=$Cache ARTIFACTS=$Pub"
+Write-Output "RESULT=STAGE_OK SOURCE=$SourceCommit FILES=$($published.Count) CACHE=$Cache VENUE=$Venue HOST=$env:COMPUTERNAME ARTIFACTS=$Pub"
 exit 0
 '@
 
@@ -395,6 +404,7 @@ $expectedLiteral = '@(' + (($expected | ForEach-Object {
 $text = $template.
     Replace('__SOURCE_COMMIT__', $SourceCommit).
     Replace('__JOB_ID__', $JobId).
+    Replace('__VENUE__', $Venue).
     Replace('__AGENT_ROOT__', $AgentRoot.Replace("'", "''")).
     Replace('__MANIFEST_NAME__', $names.buildManifestName).
     Replace('__MANIFEST_SHA256__', $manifestSha256).
@@ -408,6 +418,7 @@ $text = $text.Replace('__EMBEDDED_FUNCTIONS__', $embeddedFunctions)
 [pscustomobject]@{
     jobFile = $jobPath
     jobId = $JobId
+    venue = $Venue
     sourceCommit = $SourceCommit
     agentRoot = $AgentRoot
     # Exactly these files must be dropped into <agent root>\inbox beside the job, by their
