@@ -497,6 +497,49 @@ def test_resolve_status_raises_when_no_files_exist(tmp_path):
         resolve_presentmon_status_from_artifacts(str(tmp_path))
 
 
+def test_resolve_status_raises_a_typed_error_on_malformed_summary_json(tmp_path):
+    # HARDENING (sol PRE-REVIEW #2): malformed JSON used to raise json.JSONDecodeError straight
+    # through main()'s try/except RefreshHistogramError, producing an uncaught traceback instead
+    # of the CLI's normal FAIL/exit-1 refusal.
+    (tmp_path / "summary.json").write_text("{not valid json", encoding="utf-8")
+
+    with pytest.raises(RefreshHistogramError, match="summary.json.*not valid JSON"):
+        resolve_presentmon_status_from_artifacts(str(tmp_path))
+
+
+def test_resolve_status_raises_a_typed_error_on_malformed_evidence_manifest_json(tmp_path):
+    (tmp_path / "evidence-manifest.json").write_text("{not valid json", encoding="utf-8")
+
+    with pytest.raises(RefreshHistogramError, match="evidence-manifest.json.*not valid JSON"):
+        resolve_presentmon_status_from_artifacts(str(tmp_path))
+
+
+def test_cli_with_malformed_summary_json_fails_closed_not_a_traceback(tmp_path, capsys):
+    artifacts_dir = _write_artifacts_dir(tmp_path, summary={"presentMonStatus": "ok"})
+    (artifacts_dir / "summary.json").write_text("{not valid json", encoding="utf-8")
+
+    rc = main(["--artifacts-dir", str(artifacts_dir)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "refresh_period_histogram: FAIL:" in err
+    assert "not valid JSON" in err
+
+
+def test_cli_with_malformed_evidence_manifest_json_fails_closed_not_a_traceback(tmp_path, capsys):
+    artifacts_dir = _write_artifacts_dir(
+        tmp_path, evidence_manifest={"presentMon": {"status": "ok"}}
+    )
+    (artifacts_dir / "evidence-manifest.json").write_text("{not valid json", encoding="utf-8")
+
+    rc = main(["--artifacts-dir", str(artifacts_dir)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "refresh_period_histogram: FAIL:" in err
+    assert "not valid JSON" in err
+
+
 # --- end-to-end build_report ----------------------------------------------------------
 
 def test_build_report_end_to_end(tmp_path):

@@ -25,6 +25,9 @@ Get-AttrCudaPresentMonDisplayReport against real csv fixtures.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -32,6 +35,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "tools" / "profiling" / "bachelor" / "AttrCudaArtifacts.psm1"
 ATTRIBUTION_GENERATOR = ROOT / "tools" / "profiling" / "bachelor" / "playback-attr-3-cuda-job.ps1"
+BACHELOR_DIR = ATTRIBUTION_GENERATOR.parent
+
+PWSH = shutil.which("pwsh")
+requires_pwsh = unittest.skipIf(PWSH is None, "pwsh is not on PATH")
+
+
+def _run_pwsh_file(script: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(script)],
+        capture_output=True,
+        text=True,
+    )
 
 
 class TemplateOrderingTests(unittest.TestCase):
@@ -437,6 +453,93 @@ class TemplateOrderingTests(unittest.TestCase):
         end = module_text.index("\n}\n\nExport-ModuleMember", start)
         function_text = module_text[start:end]
         self.assertEqual(function_text.count("presentModes = @("), 2)
+
+
+@requires_pwsh
+class EmbeddedFunctionCoverageTests(unittest.TestCase):
+    """PRESENTMON-HARNESS-ROBUSTNESS-2 r1c (sol PRE-REVIEW #2 BLOCKER): the emitted job has no
+    checkout and cannot Import-Module on its host -- every function the template CALLS must be
+    present in the REAL text Get-AttrCudaEmbeddedFunctionSource splices in, not merely listed in
+    one of the generator's own -Name arrays (a name could be typo'd, or a new call added without
+    ever touching either -Name list, and a check against the quoted list alone would still pass).
+    This runs the generator's own embedding statements verbatim -- the exact source text between
+    Import-Module and the second Get-AttrCudaEmbeddedFunctionSource call's closing parens -- against
+    the real modules, so the assembled text checked here is byte-for-byte what Bachelor receives.
+    A missing embed (this round's blocker: Get-AttrCudaAppSwapTelemetry / Get-AttrCudaTemporalCoverage
+    called at template:1540/1545 but absent from the -Name list at generator:436-464) reds this
+    test instead of surfacing only as a CommandNotFoundException after PresentMon has already run."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8").replace("\r\n", "\n")
+        start = text.index("Import-Module (Join-Path $PSScriptRoot 'AttrCudaArtifacts.psm1') -Force")
+        second_call = text.index("$embeddedFunctions = $embeddedFunctions + ", start)
+        end = text.index("\n))\n", second_call) + len("\n))")
+        cls.embedding_snippet = text[start:end].replace("$PSScriptRoot", "$bachelorRoot")
+
+        # The body ONLY -- unlike this file's other classes, which keep the "$template = @'"
+        # prefix (harmless there, since they only ever substring-search it) -- because this class
+        # feeds the text to PowerShell's own parser, and a bare unterminated "@'" opener with no
+        # matching "'@" is a real parse error ("missing the terminator: '@"), not junk to ignore.
+        template_marker = "$template = @'"
+        template_start = text.index(template_marker) + len(template_marker)
+        template_end = text.index("\n'@", template_start)
+        cls.template = text[template_start:template_end]
+
+    def test_every_called_attrcuda_command_is_defined_in_the_real_embedded_text(self) -> None:
+        # Both halves use PowerShell's own AST parser, exactly like
+        # test_every_module_helper_call_names_all_mandatory_parameters in
+        # test_playback_attr_3_cuda_behaviour.py: CommandAst.GetCommandName() for call sites (so a
+        # comment mentioning a function's name, e.g. line ~853's "(Get-AttrCudaEmbeddedFunctionSource),
+        # so there is only ever one definition ...", can never be mistaken for a call), and
+        # FunctionDefinitionAst.Name for what the real embedding actually defines. __TOKEN__
+        # placeholders are substituted with a dummy variable reference first, the same way that
+        # sibling test parses the generator's own placeholder-bearing source.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            template_path = tmp_path / "template.txt"
+            template_path.write_text(self.template, encoding="utf-8")
+            out_path = tmp_path / "missing.txt"
+            script = tmp_path / "probe.ps1"
+            script.write_text(
+                "$ErrorActionPreference = 'Stop'\n"
+                f"$bachelorRoot = '{BACHELOR_DIR}'\n"
+                f"{self.embedding_snippet}\n"
+                "$definedNames = [System.Collections.Generic.HashSet[string]]::new()\n"
+                "$tokens = $null; $errors = $null\n"
+                "$embeddedAst = [System.Management.Automation.Language.Parser]::ParseInput("
+                "$embeddedFunctions, [ref]$tokens, [ref]$errors)\n"
+                "foreach ($fn in $embeddedAst.FindAll("
+                "{ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {\n"
+                "    [void]$definedNames.Add($fn.Name)\n"
+                "}\n"
+                f"$templateText = Get-Content -LiteralPath '{template_path}' -Raw\n"
+                "$templateText = [regex]::Replace($templateText, '__[A-Z0-9_]+__', '$attrCudaPlaceholder')\n"
+                "$tokens = $null; $errors = $null\n"
+                "$templateAst = [System.Management.Automation.Language.Parser]::ParseInput("
+                "$templateText, [ref]$tokens, [ref]$errors)\n"
+                "$called = [System.Collections.Generic.HashSet[string]]::new()\n"
+                "foreach ($call in $templateAst.FindAll("
+                "{ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {\n"
+                "    $name = $call.GetCommandName()\n"
+                "    if ($name -and $name -match '-AttrCuda') { [void]$called.Add($name) }\n"
+                "}\n"
+                "$missing = @($called | Where-Object { -not $definedNames.Contains($_) } | Sort-Object)\n"
+                f"Set-Content -LiteralPath '{out_path}' -Value $missing -Encoding UTF8\n"
+                "Write-Output ('CALLED_COUNT=' + $called.Count)\n"
+                "Write-Output 'PROBE_DONE'\n",
+                encoding="utf-8",
+            )
+            proc = _run_pwsh_file(script)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("PROBE_DONE", proc.stdout, proc.stdout + proc.stderr)
+            self.assertNotIn("CALLED_COUNT=0", proc.stdout, "no *-AttrCuda* calls found in the template at all")
+            missing = [line for line in out_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(
+                missing, [],
+                f"called in the template but not defined in the real embedded text: {missing} "
+                f"-- add each to the -Name list(s) in {ATTRIBUTION_GENERATOR.name}",
+            )
 
 
 if __name__ == "__main__":

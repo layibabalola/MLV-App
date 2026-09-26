@@ -281,14 +281,20 @@ def resolve_presentmon_status_from_artifacts(artifacts_dir: str) -> tuple[str, s
     summary_path = os.path.join(artifacts_dir, DEFAULT_SUMMARY_JSON_NAME)
     if os.path.isfile(summary_path):
         with open(summary_path, encoding="utf-8") as fh:
-            summary = json.load(fh)
+            try:
+                summary = json.load(fh)
+            except json.JSONDecodeError as exc:
+                raise RefreshHistogramError(f"{summary_path!r} is not valid JSON: {exc}") from exc
         if isinstance(summary, dict) and "presentMonStatus" in summary:
             return summary["presentMonStatus"], summary.get("presentMonStatusReason")
 
     manifest_path = os.path.join(artifacts_dir, DEFAULT_EVIDENCE_MANIFEST_JSON_NAME)
     if os.path.isfile(manifest_path):
         with open(manifest_path, encoding="utf-8") as fh:
-            manifest = json.load(fh)
+            try:
+                manifest = json.load(fh)
+            except json.JSONDecodeError as exc:
+                raise RefreshHistogramError(f"{manifest_path!r} is not valid JSON: {exc}") from exc
         present_mon = manifest.get("presentMon") if isinstance(manifest, dict) else None
         if isinstance(present_mon, dict) and "status" in present_mon:
             return present_mon["status"], present_mon.get("statusReason")

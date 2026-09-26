@@ -460,7 +460,14 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Get-AttrCudaPresentMonDisplayReport',
     # PRESENTMON-HARNESS-ROBUSTNESS-2: sanitizes free-form reason text before it is embedded in a
     # RESULT= stdout line's quoted REASON="..." field -- see its own header in AttrCudaArtifacts.psm1.
-    'ConvertTo-AttrCudaResultLineSafeText'
+    'ConvertTo-AttrCudaResultLineSafeText',
+    # PRESENTMON-HARNESS-ROBUSTNESS-2 r1c (sol PRE-REVIEW #2 BLOCKER): the sufficiency gate's two
+    # coverage-arm helpers, called by the emitted template's PresentMon status block below but
+    # missing from this list -- every otherwise-successful leg hit CommandNotFoundException on a
+    # host with no checkout/Import-Module before publishing presentMonStatus. Both are self-
+    # contained (no calls to other AttrCuda functions), so no further names are needed.
+    'Get-AttrCudaAppSwapTelemetry',
+    'Get-AttrCudaTemporalCoverage'
 )
 # ATTR3-FOOTAGE-BIND-1 PR-B round 4b: the private verified-part directory (one hard link per
 # verified part, under a neutral name derived from its index, so nothing downstream -- the smoke
