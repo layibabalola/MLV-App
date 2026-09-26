@@ -317,7 +317,14 @@ def build_report(
     # Checked BEFORE either file is even read: a caller that already knows the leg is degraded
     # (or verified_zero_displayed/unavailable) gets a clear, immediate refusal naming the status,
     # never a histogram computed from evidence its own producer already flagged as insufficient.
-    if presentmon_status is not None and presentmon_status != PRESENTMON_STATUS_OK:
+    # PRESENTMON-HARNESS-ROBUSTNESS-3 (sol pre-review HARDENING): the library itself fails closed -- no caller can
+    # get a measured-looking report without stating the leg's PresentMon status.
+    if presentmon_status is None:
+        raise RefreshHistogramError(
+            "presentmon_status is required: refusing to build a refresh-period histogram without the leg's "
+            "PresentMon sufficiency status"
+        )
+    if presentmon_status != PRESENTMON_STATUS_OK:
         reason_suffix = f": {presentmon_status_reason}" if presentmon_status_reason else ""
         raise RefreshHistogramError(
             f"refusing to present a refresh-period histogram as measured: presentMonStatus="
@@ -392,8 +399,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         help=(
             "A leg's published artifacts directory (evidence-manifest.json's artifactRoot). "
             "--presentmon-csv/--frame-log default to the standard paths inside it, and "
-            "--presentmon-status/--presentmon-status-reason are read from its summary.json "
-            "(preferred) or evidence-manifest.json unless given explicitly. Required whenever "
+            "the leg's presentMonStatus is ALWAYS read from its summary.json (preferred) or "
+            "evidence-manifest.json and is authoritative: an explicit --presentmon-status must agree with it, "
+            "and explicit --presentmon-csv/--frame-log must resolve inside this directory. Required whenever "
             "--presentmon-status is not given: this tool refuses to compute a histogram without "
             "knowing the leg's PresentMon sufficiency status, and this is the only way to supply "
             "it other than typing it by hand."
@@ -436,6 +444,18 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     try:
         if args.artifacts_dir is not None:
+            # PRESENTMON-HARNESS-ROBUSTNESS-3 (sol pre-review BLOCKER): the status and the data it authorizes must come
+            # from the SAME leg. With --artifacts-dir, explicit --presentmon-csv/--frame-log must resolve inside that
+            # directory; a path into another leg's artifacts is refused.
+            artifacts_root = os.path.realpath(args.artifacts_dir)
+            for label, supplied in (("--presentmon-csv", presentmon_csv), ("--frame-log", frame_log)):
+                if supplied is not None:
+                    resolved = os.path.realpath(supplied)
+                    if os.path.commonpath([artifacts_root, resolved]) != artifacts_root:
+                        raise RefreshHistogramError(
+                            f"{label} {supplied!r} is outside --artifacts-dir {args.artifacts_dir!r}; the status and the "
+                            "data it authorizes must come from the same leg -- refusing"
+                        )
             if presentmon_csv is None:
                 presentmon_csv = os.path.join(args.artifacts_dir, DEFAULT_PRESENTMON_CSV_NAME)
             if frame_log is None:

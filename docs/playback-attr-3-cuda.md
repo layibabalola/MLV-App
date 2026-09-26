@@ -338,8 +338,14 @@ py -3 tools\profiling\refresh_period_histogram.py `
 `--artifacts-dir` is the leg's own published artifact root (`evidence-manifest.json`'s
 `artifactRoot`). It does three things at once: `--presentmon-csv`/`--frame-log` default to the
 standard paths inside it (`presentmon-series.csv`, `logs\smoke-run.log`), and
-`--presentmon-status`/`--presentmon-status-reason` are read from its `summary.json` (preferred) or
-`evidence-manifest.json` (`presentMon.status`/`statusReason`).
+the leg's `presentMonStatus` (and reason) is ALWAYS read from its `summary.json` (preferred) or
+`evidence-manifest.json` (`presentMon.status`/`statusReason`) and is authoritative.
+
+**PRESENTMON-HARNESS-ROBUSTNESS-3: one leg, one status.** With `--artifacts-dir`, an explicit
+`--presentmon-status` may only AGREE with the leg's published status (a contradiction is refused, exit 1), and
+explicit `--presentmon-csv`/`--frame-log` must resolve INSIDE that directory (another leg's data is refused), so one
+leg's `ok` can never authorize another leg's capture. The emitted report always carries `presentMonStatus`
+and `presentMonStatusReason`.
 
 **PRESENTMON-HARNESS-ROBUSTNESS-2 (sol BLOCKER, pre-review): the status is not optional.** This
 tool refuses to compute a histogram at all -- before reading either input file -- unless it knows

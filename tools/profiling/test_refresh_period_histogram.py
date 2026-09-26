@@ -130,7 +130,7 @@ def test_all_2_refresh_with_nominal_buckets_as_2(tmp_path):
     log_path = tmp_path / "mlvapp.log"
     _write_frame_log(log_path, count=10, start=1)
 
-    report = build_report(str(csv_path), str(log_path), refresh_period_ms=16.67)
+    report = build_report(str(csv_path), str(log_path), presentmon_status="ok", refresh_period_ms=16.67)
     assert report["presentMon"]["refreshPeriodSource"] == "nominal"
     assert report["presentMon"]["refreshPeriodMeasurement"] == "nominal"
     assert report["presentMon"]["refreshPeriodMs"] == pytest.approx(16.67)
@@ -150,7 +150,7 @@ def test_all_2_refresh_without_nominal_is_an_error(tmp_path):
     _write_frame_log(log_path, count=10, start=1)
 
     with pytest.raises(RefreshHistogramError, match="ambiguous"):
-        build_report(str(csv_path), str(log_path))
+        build_report(str(csv_path), str(log_path), presentmon_status="ok")
 
     with pytest.raises(RefreshHistogramError, match="ambiguous"):
         compute_refresh_period(values)
@@ -165,7 +165,7 @@ def test_refresh_period_ms_rejects_nan(tmp_path):
     _write_frame_log(log_path, count=10, start=1)
 
     with pytest.raises(RefreshHistogramError, match="finite"):
-        build_report(str(csv_path), str(log_path), refresh_period_ms=float("nan"))
+        build_report(str(csv_path), str(log_path), presentmon_status="ok", refresh_period_ms=float("nan"))
 
 
 def test_refresh_period_ms_rejects_inf(tmp_path):
@@ -175,9 +175,9 @@ def test_refresh_period_ms_rejects_inf(tmp_path):
     _write_frame_log(log_path, count=10, start=1)
 
     with pytest.raises(RefreshHistogramError, match="finite"):
-        build_report(str(csv_path), str(log_path), refresh_period_ms=float("inf"))
+        build_report(str(csv_path), str(log_path), presentmon_status="ok", refresh_period_ms=float("inf"))
     with pytest.raises(RefreshHistogramError, match="finite"):
-        build_report(str(csv_path), str(log_path), refresh_period_ms=float("-inf"))
+        build_report(str(csv_path), str(log_path), presentmon_status="ok", refresh_period_ms=float("-inf"))
 
 
 def test_refresh_period_ms_rejects_non_positive(tmp_path):
@@ -187,9 +187,9 @@ def test_refresh_period_ms_rejects_non_positive(tmp_path):
     _write_frame_log(log_path, count=10, start=1)
 
     with pytest.raises(RefreshHistogramError, match="positive"):
-        build_report(str(csv_path), str(log_path), refresh_period_ms=0.0)
+        build_report(str(csv_path), str(log_path), presentmon_status="ok", refresh_period_ms=0.0)
     with pytest.raises(RefreshHistogramError, match="positive"):
-        build_report(str(csv_path), str(log_path), refresh_period_ms=-5.0)
+        build_report(str(csv_path), str(log_path), presentmon_status="ok", refresh_period_ms=-5.0)
 
 
 # --- missing column / empty series are errors, never zeros -------------------------
@@ -338,17 +338,48 @@ def test_ok_presentmon_status_builds_a_report_normally(tmp_path):
     assert report["presentMon"]["sampleCount"] == 20
 
 
-def test_omitted_presentmon_status_still_builds_via_the_library_function(tmp_path):
-    # build_report() itself stays flexible for direct library/test callers (every other test in
-    # this file that doesn't care about status enforcement calls it exactly this way) -- the
-    # refusal on omission belongs to the CLI (see the CLI-level tests below), not to this function.
+def test_omitted_presentmon_status_is_refused_by_the_library_function(tmp_path):
+    # PRESENTMON-HARNESS-ROBUSTNESS-3 (sol pre-review HARDENING): build_report() itself fails closed
+    # -- no direct caller can get a measured-looking report without stating the leg's status.
     csv_path = tmp_path / "presentmon-series.csv"
     _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
     log_path = tmp_path / "mlvapp.log"
     _write_frame_log(log_path, count=10, start=1)
 
-    report = build_report(str(csv_path), str(log_path))
-    assert report["presentMon"]["sampleCount"] == 20
+    with pytest.raises(RefreshHistogramError, match="presentmon_status is required"):
+        build_report(str(csv_path), str(log_path))
+
+
+def test_cli_refuses_data_paths_outside_the_artifacts_dir(tmp_path, capsys):
+    # PRESENTMON-HARNESS-ROBUSTNESS-3 (sol pre-review BLOCKER): leg A's 'ok' status must not
+    # authorize leg B's data.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    leg_a = _write_artifacts_dir(tmp_path / "a", summary={"presentMonStatus": "ok"})
+    leg_b = _write_artifacts_dir(tmp_path / "b", summary={"presentMonStatus": "degraded"})
+
+    rc = main([
+        "--artifacts-dir", str(leg_a),
+        "--presentmon-csv", str(leg_b / "presentmon-series.csv"),
+        "--frame-log", str(leg_b / "logs" / "smoke-run.log"),
+    ])
+
+    assert rc == 1
+    assert "outside --artifacts-dir" in capsys.readouterr().err
+
+
+def test_cli_accepts_explicit_data_paths_inside_the_artifacts_dir(tmp_path):
+    leg = _write_artifacts_dir(tmp_path, summary={"presentMonStatus": "ok"})
+    out_path = tmp_path / "out.json"
+
+    rc = main([
+        "--artifacts-dir", str(leg),
+        "--presentmon-csv", str(leg / "presentmon-series.csv"),
+        "--frame-log", str(leg / "logs" / "smoke-run.log"),
+        "--out", str(out_path),
+    ])
+
+    assert rc == 0
 
 
 # --- CLI enforcement: the tool itself must not be able to skip the status ----------------------
@@ -579,7 +610,7 @@ def test_build_report_end_to_end(tmp_path):
     log_path = tmp_path / "mlvapp.log"
     _write_frame_log(log_path, count=10, start=1)
 
-    report = build_report(str(csv_path), str(log_path))
+    report = build_report(str(csv_path), str(log_path), presentmon_status="ok")
     assert report["schema"] == "mlvapp.refresh-period-histogram.v1"
     assert report["presentMon"]["sampleCount"] == 20
     assert report["presentMon"]["buckets"]["1"]["count"] == 12
