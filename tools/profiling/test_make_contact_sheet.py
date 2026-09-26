@@ -297,3 +297,44 @@ def test_main_end_to_end_writes_sheet_and_stats(tmp_path=None):
     assert stats["schema"] == mcs.SCHEMA_STATS
     assert stats["tile_count"] == 6
     assert len(stats["tiles"]) == 6
+
+
+def test_stats_sheet_path_and_frames_dir_are_relative_never_absolute():
+    # H3 (CUDA-PLAYBACK-CONTACT-SHEET-1 r1c): a published stats sidecar must never carry an
+    # absolute local path -- it can expose a local username outside the fixed artifacts
+    # layout. sheet_out/frames_dir here are both absolute (tempfile.mkdtemp() always is), so
+    # this fails unless the sidecar rewrites them relative to its own directory.
+    from pathlib import Path
+
+    workdir = Path(tempfile.mkdtemp())
+    frames_dir = workdir / "frames"
+    frames_dir.mkdir()
+    for i in range(2):
+        _write_frame(str(frames_dir), i, (50 + i * 40, 50 + i * 40, 50 + i * 40))
+    sheet_out = workdir / "contact-sheet" / "sheet.png"
+    stats_out = workdir / "contact-sheet" / "stats.json"
+    frames = mcs.load_frames(frames_dir)
+    sheet, tile_stats = mcs.compose_sheet(frames, frames_dir, Args())
+    sheet_out.parent.mkdir(parents=True, exist_ok=True)
+    mcs.save_under_budget(sheet, sheet_out, 4_000_000)
+
+    stats_doc = {
+        "schema": mcs.SCHEMA_STATS,
+        "sheet_path": mcs._relative_or_name(sheet_out, stats_out.parent),
+        "frames_dir": mcs._relative_or_name(frames_dir, stats_out.parent),
+        "tiles": tile_stats,
+    }
+    assert stats_doc["sheet_path"] == "sheet.png"
+    assert stats_doc["frames_dir"] == "../frames"
+    assert not Path(stats_doc["sheet_path"]).is_absolute()
+    assert not Path(stats_doc["frames_dir"]).is_absolute()
+    assert str(workdir) not in stats_doc["sheet_path"]
+    assert str(workdir) not in stats_doc["frames_dir"]
+
+
+def test_relative_or_name_falls_back_to_basename_when_relpath_is_impossible():
+    import unittest.mock as mock
+    from pathlib import Path
+
+    with mock.patch("os.path.relpath", side_effect=ValueError("no common drive")):
+        assert mcs._relative_or_name(Path("Z:/some/sheet.png"), Path("C:/other")) == "sheet.png"

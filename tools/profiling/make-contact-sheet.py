@@ -44,6 +44,7 @@ USAGE
 """
 import argparse
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -52,6 +53,16 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 SCHEMA_STATS = "contact-sheet-stats.v1"
+
+
+def _relative_or_name(path: Path, base: Path) -> str:
+    """H3: never an absolute local path in a published sidecar -- relative to the
+    artifacts dir (here, the stats sidecar's own directory) when possible, falling back to
+    just the basename when the two are on different drives (os.path.relpath raises)."""
+    try:
+        return os.path.relpath(str(path), str(base)).replace(os.sep, "/")
+    except ValueError:
+        return path.name
 
 HEADER_HEIGHT = 150
 TILE_LABEL_HEIGHT = 22
@@ -320,8 +331,8 @@ def main():
     args.stats_out.parent.mkdir(parents=True, exist_ok=True)
     stats_doc = {
         "schema": SCHEMA_STATS,
-        "sheet_path": str(args.sheet_out),
-        "frames_dir": str(args.frames_dir),
+        "sheet_path": _relative_or_name(args.sheet_out, args.stats_out.parent),
+        "frames_dir": _relative_or_name(args.frames_dir, args.stats_out.parent),
         "clip_id": args.clip_id,
         "host": args.host,
         "gpu": args.gpu,
