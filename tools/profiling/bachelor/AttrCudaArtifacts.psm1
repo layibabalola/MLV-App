@@ -1863,10 +1863,40 @@ function Get-AttrCudaEligibilityVerdict {
         r16Reason = & $read 'r16_reason'
         cudaBackendAttempted = & $read 'cuda_backend_attempted'
         cudaBackendResolved = & $read 'cuda_backend_resolved'
+        # CUDA-PLAYBACK-CONTACT-SHEET-1 r1d: the SAME line already carries the actual GPU
+        # identity ("CUDA / <device name>", from igpu_recon_cuda.cu's cudaGetDeviceProperties
+        # probe) and the actual playback scale factor the run used -- read them here rather
+        # than have a caller re-probe or assume a constant, so a contact sheet composed from
+        # this run can be labelled with the identity the run itself measured.
+        cudaBackendDescription = & $read 'cuda_backend_description'
+        scale = & $read 'scale'
         r16ProbeRan = & $read 'r16_probe_ran'
         admitted = $admitted
         exitCode = $(if ($admitted) { 0 } else { 15 })
     }
+}
+
+function ConvertTo-AttrCudaQuotedProcessArgument {
+    <#
+    .SYNOPSIS
+    Quote one value for a Start-Process -ArgumentList element that may contain a space.
+    .DESCRIPTION
+    Start-Process's -ArgumentList does NOT quote array elements before joining them into the
+    child's command line -- confirmed empirically: an unquoted element containing a space
+    (e.g. a GPU description such as "CUDA / NVIDIA GeForce RTX 4090") silently splits into
+    several argv entries in the child process, the exact class of bug the r1c -c-quoting
+    BLOCKER was about. Wrapping every element in double quotes here (doubling any embedded
+    double quote, matching Windows' own command-line convention, which both the Python and
+    .NET argv parsers that Start-Process's children use already understand) keeps it as one
+    argv entry regardless of embedded spaces.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+    '"' + $Value.Replace('"', '""') + '"'
 }
 
 function Get-AttrCudaPresentMonDisplayReport {
@@ -2268,4 +2298,5 @@ Export-ModuleMember -Function `
     Resolve-AttrCudaSmokeRunLog, `
     Get-AttrCudaLastEligibilityLine, `
     Get-AttrCudaEligibilityVerdict, `
+    ConvertTo-AttrCudaQuotedProcessArgument, `
     Get-AttrCudaPresentMonDisplayReport

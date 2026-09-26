@@ -427,3 +427,71 @@ TEST(ContactSheetCaptureWiring, B4_DoneLineOmitsFramesWrittenFieldEntirelyWhenOp
         QStringLiteral("<< \" diagnostic_log_file=\" << CrashForensics::currentLogFilePath()\n"
                         "        << \" contact_sheet_frames_written=\"")));
 }
+
+// --- r1d pre-review #2 finding (sol, prereview-cs1b-sol-20260926T0450Z) ----------------------
+
+TEST(ContactSheetCaptureWiring, FinishTelemetryClearsFrameAndTimelineFlagsAfterEverySummaryReadsThem)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString finishBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )"),
+        QStringLiteral("bool MainWindow::primePlaybackCacheOnPlayStart( void )"));
+    ASSERT_FALSE(finishBody.isEmpty());
+
+    // HARDENING fix: a capture-playback frame emitted after the measured session closes (e.g.
+    // a contact-sheet capture pass's frames, drawn via beginPlaybackSmokeTelemetry-suppressed
+    // restarts) must stop passing the m_playbackSmokeFrameTelemetry/
+    // m_playbackSmokeTimelineTelemetry gates elsewhere -- otherwise it is logged (e.g.
+    // playback_auto.decision) carrying this now-closed session's id.
+    const int clearFrameAt = finishBody.indexOf(QStringLiteral("m_playbackSmokeFrameTelemetry = false;"));
+    const int clearTimelineAt = finishBody.indexOf(QStringLiteral("m_playbackSmokeTimelineTelemetry = false;"));
+    ASSERT_TRUE(clearFrameAt >= 0);
+    ASSERT_TRUE(clearTimelineAt >= 0);
+
+    // Cleared LAST: every read of either flag inside this same function (the
+    // playback_smoke.summary line's frame_telemetry field and the playback_smoke.foreground
+    // line's telemetry_enabled field) must see the session's TRUE value, not a value this same
+    // call already zeroed -- clearing earlier would make this session's own summary misreport
+    // a telemetry-enabled session as disabled.
+    const int summaryFrameTelemetryReadAt = finishBody.indexOf(
+        QStringLiteral(".arg( bool01( m_playbackSmokeFrameTelemetry ) )"));
+    const int foregroundGuardAt = finishBody.indexOf(QStringLiteral("if ( m_playbackSmokeFrameTelemetry )"));
+    ASSERT_TRUE(summaryFrameTelemetryReadAt >= 0);
+    ASSERT_TRUE(foregroundGuardAt >= 0);
+    ASSERT_TRUE(clearFrameAt > summaryFrameTelemetryReadAt);
+    ASSERT_TRUE(clearFrameAt > foregroundGuardAt);
+    ASSERT_TRUE(clearTimelineAt > summaryFrameTelemetryReadAt);
+    ASSERT_TRUE(clearTimelineAt > foregroundGuardAt);
+}
+
+TEST(ContactSheetCaptureWiring, MeasuredSessionMarkerIsLoggedOnceOnTheFirstGenuinePlayStop)
+{
+    const QString header = readRepoFile(QStringLiteral("platform/qt/MainWindow.h"));
+    ASSERT_TRUE(header.contains(QStringLiteral("bool m_playbackSmokeMeasuredSessionLogged = false;")));
+
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString finishBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )"),
+        QStringLiteral("bool MainWindow::primePlaybackCacheOnPlayStart( void )"));
+    ASSERT_FALSE(finishBody.isEmpty());
+
+    // HARDENING (sol pre-review #2): an explicit, one-shot marker naming which session is the
+    // MEASURED one -- gated on the one-shot flag (never logged twice) and on a genuine
+    // "play-stop" (never a "play-restart", which is an internal re-open, not the deliberate
+    // end of a timed measurement) -- so a Bachelor job's parser can bind to this id directly
+    // instead of assuming the first playback_smoke.summary line is always it.
+    const int markerGuardAt = finishBody.indexOf(
+        QStringLiteral("if( !m_playbackSmokeMeasuredSessionLogged && qstrcmp( reason, \"play-stop\" ) == 0 )"));
+    ASSERT_TRUE(markerGuardAt >= 0);
+    const QString markerBlock = finishBody.mid(markerGuardAt, 400);
+    ASSERT_TRUE(markerBlock.contains(QStringLiteral("m_playbackSmokeMeasuredSessionLogged = true;")));
+    ASSERT_TRUE(markerBlock.contains(QStringLiteral("\"playback_smoke.measured_session id=%1\"")));
+
+    // Must run before m_playbackSmokeActive is cleared is irrelevant here (the marker reads
+    // only the session id, not m_playbackSmokeActive) -- but it must still precede the
+    // frame/timeline-telemetry clear this same round adds, since both are one-time,
+    // end-of-session actions and must not be reordered relative to each other by a future
+    // edit without deliberately reconsidering this test.
+    const int clearFrameAt = finishBody.indexOf(QStringLiteral("m_playbackSmokeFrameTelemetry = false;"));
+    ASSERT_TRUE(clearFrameAt > markerGuardAt);
+}

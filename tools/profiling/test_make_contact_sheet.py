@@ -126,6 +126,46 @@ def test_tile_label_pixels_present_for_each_frame():
         assert label_region.max() > 100, "expected bright label glyph pixels in the label strip"
 
 
+def test_resolve_frame_image_path_prefers_frames_dir_over_cwd_for_a_relative_path():
+    from pathlib import Path
+
+    # HARDENING (r1d, sol pre-review #2): real production sidecars carry a RELATIVE "path"
+    # field -- just the basename -- see noteContactSheetPresentedFrame's own H3 comment in
+    # MainWindow.cpp. That relative path must resolve against frames_dir, never against
+    # whatever directory happens to be the composer's current working directory at
+    # composition time.
+    frames_dir = Path(_make_frames_dir(n=1))
+    sidecar_json_path = frames_dir / "frame-00.json"
+    sidecar = json.loads(sidecar_json_path.read_text(encoding="utf-8"))
+    sidecar["path"] = "frame-00.png"
+    sidecar_json_path.write_text(json.dumps(sidecar), encoding="utf-8")
+
+    # An unrelated image of the SAME basename, sitting in some other directory this test makes
+    # the process's cwd -- it must never be selected in place of the real capture.
+    other_dir = Path(tempfile.mkdtemp())
+    Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8), "RGB").save(other_dir / "frame-00.png")
+
+    original_cwd = os.getcwd()
+    os.chdir(other_dir)
+    try:
+        resolved = mcs._resolve_frame_image_path(sidecar, frames_dir)
+    finally:
+        os.chdir(original_cwd)
+
+    assert resolved == frames_dir / "frame-00.png"
+
+
+def test_resolve_frame_image_path_still_honours_an_absolute_path():
+    from pathlib import Path
+
+    # Backward compatibility: an older/synthetic sidecar carrying an absolute path (as every
+    # OTHER test's _write_frame fixture does) must still resolve, unchanged.
+    frames_dir = Path(_make_frames_dir(n=1))
+    frames = mcs.load_frames(frames_dir)
+    resolved = mcs._resolve_frame_image_path(frames[0], frames_dir)
+    assert resolved == frames_dir / "frame-00.png"
+
+
 def test_header_reports_look_assist_and_clip_id_never_a_path():
     from pathlib import Path
 
@@ -180,6 +220,35 @@ def test_header_reports_unknown_majority_render_path_when_none_present():
     frames = mcs.load_frames(Path(d))
     lines = mcs.build_header_lines(Args(), frames)
     assert any("render_path(majority)=unknown" in line for line in lines)
+
+
+def test_header_reports_unknown_host_gpu_scale_when_empty_never_a_falsy_real_value():
+    from pathlib import Path
+
+    # CUDA-PLAYBACK-CONTACT-SHEET-1 r1d (sol BLOCKER): a job that could not determine one of
+    # these (an empty string, never a guessed real value) must render "unknown" on the sheet,
+    # not a blank or falsy-looking field that could be mistaken for a real host/GPU/scale.
+    d = Path(_make_frames_dir(n=1))
+    frames = mcs.load_frames(d)
+    lines = mcs.build_header_lines(Args(host="", gpu="", scale=""), frames)
+    identity_line = next(line for line in lines if line.startswith("clip="))
+    assert "host=unknown" in identity_line
+    assert "gpu=unknown" in identity_line
+    assert "scale=unknown" in identity_line
+
+
+def test_header_reports_real_host_gpu_scale_when_supplied():
+    from pathlib import Path
+
+    d = Path(_make_frames_dir(n=1))
+    frames = mcs.load_frames(d)
+    lines = mcs.build_header_lines(
+        Args(host="BACHELOR", gpu="CUDA / NVIDIA GeForce RTX 4090", scale="4"), frames
+    )
+    identity_line = next(line for line in lines if line.startswith("clip="))
+    assert "host=BACHELOR" in identity_line
+    assert "gpu=CUDA / NVIDIA GeForce RTX 4090" in identity_line
+    assert "scale=4" in identity_line
 
 
 def test_header_flags_frames_not_captured_via_the_playback_path():

@@ -93,9 +93,19 @@ def _load_font(size):
 
 
 def _resolve_frame_image_path(sidecar_path, frames_dir):
-    sidecar_json_path = Path(sidecar_path.get("path", ""))
-    if sidecar_json_path.is_file():
-        return sidecar_json_path
+    # HARDENING (r1d, sol pre-review #2): the sidecar's own "path" field is relative to
+    # frames_dir (the directory the sidecar itself sits in -- see the app's own
+    # noteContactSheetPresentedFrame, which writes it relative for exactly this reason), never
+    # to whatever directory happens to be the composer's own current working directory.
+    # Resolving a relative path bare (against cwd) could silently pick up an unrelated
+    # same-named file sitting there instead of the real capture -- resolve against frames_dir
+    # first, and only try the path as-is when it is already absolute.
+    raw_path = sidecar_path.get("path", "")
+    if raw_path:
+        candidate = Path(raw_path)
+        in_frames_dir = candidate if candidate.is_absolute() else (frames_dir / candidate)
+        if in_frames_dir.is_file():
+            return in_frames_dir
     fallback = frames_dir / (sidecar_path.get("_stem", "") + ".png")
     if fallback.is_file():
         return fallback

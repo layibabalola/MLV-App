@@ -25495,9 +25495,10 @@ void MainWindow::noteContactSheetPresentedFrame(
     const QString frameBaseName =
         QStringLiteral("frame-%1").arg( i, 2, 10, QLatin1Char('0') );
     // H3: the sidecar's own "path" field is never an absolute local path -- just the
-    // basename, relative to this capture's own directory. The composer resolves the image
-    // by that basename when it is a file relative to its own working directory, and always
-    // falls back to <frames_dir>/<json stem>.png otherwise (see
+    // basename, relative to this capture's own directory (frames_dir). The composer resolves
+    // the image against frames_dir FIRST (never its own current working directory, which
+    // could otherwise silently pick up an unrelated same-named file sitting there -- r1d, sol
+    // pre-review #2), and always falls back to <frames_dir>/<json stem>.png otherwise (see
     // _resolve_frame_image_path/make-contact-sheet.py), so publishing this sidecar without
     // rewriting it never breaks composition.
     const QString pngRelativeName = frameBaseName + QStringLiteral(".png");
@@ -25682,6 +25683,19 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
     }
 
     m_playbackSmokeActive = false;
+
+    // CUDA-PLAYBACK-CONTACT-SHEET-1 r1d (sol HARDENING): an explicit, one-shot marker for
+    // which session is the MEASURED one -- the first genuine "play-stop" close of the
+    // process's lifetime (never a "play-restart", which is an internal re-open, not the
+    // deliberate end of a timed measurement) -- so a Bachelor job's parser can bind to this
+    // id directly instead of assuming the first playback_smoke.summary line is always it.
+    if( !m_playbackSmokeMeasuredSessionLogged && qstrcmp( reason, "play-stop" ) == 0 )
+    {
+        m_playbackSmokeMeasuredSessionLogged = true;
+        qInfo().noquote()
+            << QStringLiteral( "playback_smoke.measured_session id=%1" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) );
+    }
 
     qInfo().noquote()
         << QStringLiteral(
@@ -26481,6 +26495,19 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    .arg( swapSnapshot.summary.firstSwapUtc )
                    .arg( swapSnapshot.summary.lastSwapUtc );
     }
+
+    // CUDA-PLAYBACK-CONTACT-SHEET-1 r1d (sol HARDENING): cleared LAST, after every summary
+    // line above has read them (frame_telemetry=%44 on playback_smoke.summary,
+    // telemetry_enabled=%2 on playback_smoke.foreground) -- clearing them earlier would make
+    // this session's own summary misreport a telemetry-enabled session as disabled. Every
+    // frame emitted AFTER this point belongs to no smoke session (e.g. a contact-sheet
+    // capture pass's frames, drawn via beginPlaybackSmokeTelemetry-suppressed restarts): with
+    // these flags left set, such a frame still passed m_playbackSmokeFrameTelemetry/
+    // m_playbackSmokeTimelineTelemetry gates elsewhere (e.g. the playback_auto.decision line
+    // and the playback_timeline_* stageTimingTelemetry fields) and was logged carrying this
+    // now-CLOSED session's id and its frozen presented-frame index.
+    m_playbackSmokeFrameTelemetry = false;
+    m_playbackSmokeTimelineTelemetry = false;
 }
 
 bool MainWindow::primePlaybackCacheOnPlayStart( void )

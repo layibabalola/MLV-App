@@ -1006,6 +1006,13 @@ private:
     bool m_playbackSmokeFrameTelemetry = false;
     bool m_playbackSmokeTimelineTelemetry = false;
     uint64_t m_playbackSmokeSessionId = 0;
+    // CUDA-PLAYBACK-CONTACT-SHEET-1 r1d (sol HARDENING): set once finishPlaybackSmokeTelemetry
+    // has logged the explicit playback_smoke.measured_session marker for the FIRST "play-stop"
+    // close of the process's lifetime, so a Bachelor job's parser can bind to that id instead of
+    // assuming the first playback_smoke.summary line is always the measured one. Never reset --
+    // each Bachelor job launches a fresh MLVApp.exe process, so "once" here already means "once
+    // per run".
+    bool m_playbackSmokeMeasuredSessionLogged = false;
     // Foreground-state telemetry (CUDA-PERF-PLAYBACK-FOREGROUND-1): gated on the same
     // MLVAPP_PLAYBACK_SMOKE_TELEMETRY env var as the swap telemetry above, not a new flag
     // -- see beginPlaybackSmokeTelemetry()/finishPlaybackSmokeTelemetry() and

@@ -464,6 +464,9 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     # to a file under $Work before it is invoked -- the byte-array counterpart of
     # Publish-AttrCudaText, for a payload that arrived base64-decoded rather than copied.
     'Publish-AttrCudaBytes',
+    # CUDA-PLAYBACK-CONTACT-SHEET-1 r1d: quotes a Start-Process -ArgumentList element that may
+    # contain a space (the composer's --host/--gpu values) -- see its own header.
+    'ConvertTo-AttrCudaQuotedProcessArgument',
     'Publish-AttrCudaFileCopy',
     'Publish-AttrCudaFileMove',
     'New-AttrCudaDirectory',
@@ -802,13 +805,25 @@ function Get-MeasuredSmokeSessionId([string]$RawLog) {
     m_contactSheetCaptureActive guard around beginPlaybackSmokeTelemetry -- suppressed for a
     capture restart, but this parser must not depend on that app-side suppression alone).
     .DESCRIPTION
+    HARDENING (r1d, sol): bind to the app's own explicit
+    "playback_smoke.measured_session id=N" marker (MainWindow.cpp's
+    finishPlaybackSmokeTelemetry, logged once per process on the first genuine "play-stop")
+    when the log carries one, rather than positionally assuming the first
+    playback_smoke.summary line is the measured one -- an alternate GUI-smoke mode (e.g. an
+    Auto Look Assist warmup or lifecycle stress pass that opens its own session first) could
+    make that assumption false. Falls back to the old first-summary heuristic against a log
+    from a build that predates the marker, so this never regresses an older build's run:
     finishPlaybackSmokeTelemetry("play-stop") -- and its playback_smoke.summary/gpu_summary
     line pair -- runs for the measured interval strictly BEFORE the contact-sheet capture
-    block even starts (see runGuiPlaybackSmoke's own ordering comment). Every session opened
-    afterwards is therefore chronologically LATER in the log, so the FIRST
-    playback_smoke.summary line's session id is always the measured one, regardless of how
-    many more sessions a capture pass goes on to open.
+    block even starts (see runGuiPlaybackSmoke's own ordering comment), so on such a log every
+    session opened afterwards is chronologically LATER, and the FIRST
+    playback_smoke.summary line's session id is still the measured one.
     #>
+    foreach ($line in ($RawLog -split "`r?`n")) {
+        if ($line -match 'playback_smoke\.measured_session id=(?<session>\d+)') {
+            return $Matches['session']
+        }
+    }
     foreach ($line in ($RawLog -split "`r?`n")) {
         if ($line -match 'playback_smoke\.summary session=(?<session>\d+)') {
             return $Matches['session']
@@ -1645,6 +1660,11 @@ if ($ContactSheetEnabled -and $contactSheetDir -and (Test-Path -LiteralPath $con
     $contactSheetComposeMarker = $null
     $contactSheetPyExe = $null
     $contactSheetPyPrefixArgs = @()
+    # HARDENING (r1d, sol pre-review #2): any deps-probe child that is still alive after a
+    # timed-out Kill() attempt is recorded here, regardless of whether a LATER candidate goes
+    # on to provide a usable interpreter -- published unconditionally below (never folded only
+    # into the "no interpreter found" marker, which a later candidate's success would bypass).
+    $contactSheetOrphanNotes = [System.Collections.Generic.List[object]]::new()
     # BLOCKER fix (r1c): a `-c 'import PIL, numpy'` -ArgumentList element does not survive
     # Start-Process's own argument-list-to-command-line join on every venue -- confirmed on
     # this host, where the direct `python -c "import PIL, numpy"` shell invocation exits 0
@@ -1663,7 +1683,16 @@ if ($ContactSheetEnabled -and $contactSheetDir -and (Test-Path -LiteralPath $con
             $depsArgs = @($candidate.prefix) + @($contactSheetDepsProbeScriptPath)
             $depsProc = Start-Process -FilePath $candidate.exe -ArgumentList $depsArgs -PassThru -WindowStyle Hidden
             if (-not $depsProc.WaitForExit(20000)) {
-                try { $depsProc.Kill() } catch {}
+                # HARDENING (r1d, sol pre-review #2): an empty catch around a bare Kill() left
+                # no trace of a probe child that survived both the timeout and the kill attempt
+                # -- mirror Stop-PresentMonCapture's own already-tested Kill()+bounded-
+                # WaitForExit()+confirmedExited pattern instead of assuming Kill() succeeded.
+                $depsStop = Stop-PresentMonCapture $depsProc
+                if (-not $depsStop.confirmedExited) {
+                    $contactSheetOrphanNotes.Add(
+                        "dependency probe ($($candidate.exe)) did not exit after Kill() " +
+                        "(killError=$($depsStop.killError) waitError=$($depsStop.waitError))")
+                }
             } elseif ($depsProc.ExitCode -eq 0) {
                 $contactSheetPyExe = $candidate.exe
                 $contactSheetPyPrefixArgs = $candidate.prefix
@@ -1684,20 +1713,46 @@ if ($ContactSheetEnabled -and $contactSheetDir -and (Test-Path -LiteralPath $con
             $contactSheetSheetOut = Join-Path $Pub 'contact-sheet\sheet.png'
             $contactSheetStatsOut = Join-Path $Pub 'contact-sheet\stats.json'
             $contactSheetBackendLabel = if ($FixtureRehearsal) { 'fixture' } else { 'cuda' }
+            # CUDA-PLAYBACK-CONTACT-SHEET-1 r1d (sol BLOCKER): without host/GPU/scale every
+            # job-composed sheet's header reads host=unknown gpu=unknown scale=unknown,
+            # defeating a side-by-side host/build/look comparison. Host is this job's own
+            # venue -- the same $env:COMPUTERNAME value ultra-magnus-agent.ps1's own
+            # result.json envelope records as its `host` field, captured independently here
+            # since this job composes the sheet before that envelope is written. GPU and
+            # scale are read from $verdict (the SAME gpu_playback_recon.eligibility line
+            # already parsed above for the backend-availability gate), never re-probed --
+            # [string] so an unset $verdict (e.g. this step run standalone in a test) yields
+            # an empty string, never $null, which the composer renders as "unknown", never a
+            # guessed real value.
+            $contactSheetHostLabel = [string]$env:COMPUTERNAME
+            $contactSheetGpuLabel = [string]$verdict.cudaBackendDescription
+            $contactSheetScaleLabel = [string]$verdict.scale
             $composeArgs = @($contactSheetPyPrefixArgs) + @(
                 $contactSheetComposerScriptPath,
                 '--frames-dir', $contactSheetPubDir,
                 '--sheet-out', $contactSheetSheetOut,
                 '--stats-out', $contactSheetStatsOut,
                 '--clip-id', $ClipId,
+                '--host', $contactSheetHostLabel,
+                '--gpu', $contactSheetGpuLabel,
                 '--build-sha', $SourceCommit,
-                '--backend', $contactSheetBackendLabel
+                '--backend', $contactSheetBackendLabel,
+                '--scale', $contactSheetScaleLabel
             )
+            # BLOCKER fix (r1d): quote every element -- see ConvertTo-AttrCudaQuotedProcessArgument's
+            # own header for why an unquoted GPU description would silently split across argv.
+            $composeArgs = @($composeArgs | ForEach-Object { ConvertTo-AttrCudaQuotedProcessArgument -Value $_ })
             try {
                 $composeProc = Start-Process -FilePath $contactSheetPyExe -ArgumentList $composeArgs -PassThru -WindowStyle Hidden
                 if (-not $composeProc.WaitForExit(60000)) {
-                    try { $composeProc.Kill() } catch {}
+                    # HARDENING (r1d, sol pre-review #2): same fix as the deps-probe above -- a
+                    # bounded WaitForExit after Kill(), with the outcome folded into this leg's
+                    # own marker rather than swallowed by an empty catch.
+                    $composeStop = Stop-PresentMonCapture $composeProc
                     $contactSheetComposeMarker = 'CONTACT_SHEET_COMPOSE_UNAVAILABLE composer did not exit within 60s'
+                    if (-not $composeStop.confirmedExited) {
+                        $contactSheetComposeMarker += " (still running after Kill(): killError=$($composeStop.killError) waitError=$($composeStop.waitError))"
+                    }
                 } elseif ($composeProc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $contactSheetSheetOut) -or -not (Test-Path -LiteralPath $contactSheetStatsOut)) {
                     $contactSheetComposeMarker = "CONTACT_SHEET_COMPOSE_UNAVAILABLE composer exited $($composeProc.ExitCode) or did not write its outputs"
                 }
@@ -1708,6 +1763,9 @@ if ($ContactSheetEnabled -and $contactSheetDir -and (Test-Path -LiteralPath $con
     }
     if ($null -ne $contactSheetComposeMarker) {
         [void](Publish-AttrCudaText -Path (Join-Path $Pub 'contact-sheet\compose-status.txt') -Value $contactSheetComposeMarker)
+    }
+    if ($contactSheetOrphanNotes.Count -gt 0) {
+        [void](Publish-AttrCudaText -Path (Join-Path $Pub 'contact-sheet\compose-warnings.txt') -Value ($contactSheetOrphanNotes -join "`n"))
     }
 }
 $files = Get-ChildItem -LiteralPath $Pub -Recurse -File | ForEach-Object { [ordered]@{ path=$_.FullName.Substring($Pub.Length + 1); sha256=(Get-Sha $_.FullName); bytes=$_.Length } }

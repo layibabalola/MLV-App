@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -38,6 +40,7 @@ from tools.repo_hygiene.test_playback_attr_3_cuda_behaviour import (  # noqa: E4
     _long_path,
     _make_fixture_repo,
     _run_pwsh_file,
+    normalize_pwsh_message_text,
     requires_git,
     requires_pwsh,
     tempfile,
@@ -211,6 +214,25 @@ class ContactSheetSwitchTests(unittest.TestCase):
             "or they will not be indexed",
         )
 
+    def test_compose_step_passes_host_gpu_scale_to_the_composer(self) -> None:
+        # BLOCKER (sol pre-review #2): a job-composed sheet with no --host/--gpu/--scale
+        # renders host=unknown gpu=unknown scale=unknown, defeating the owner's side-by-side
+        # host/build/look comparison. Static check on the emitted job's own compose-step
+        # text -- the runtime leg is proven separately against a real composer run.
+        job_file = self._generate("host-gpu-scale.job.ps1", "-ContactSheet")
+        text = job_file.read_text(encoding="utf-8")
+        snippet = self._extract_compose_step_snippet(text)
+        self.assertIn("'--host', $contactSheetHostLabel", snippet)
+        self.assertIn("'--gpu', $contactSheetGpuLabel", snippet)
+        self.assertIn("'--scale', $contactSheetScaleLabel", snippet)
+        self.assertIn("$env:COMPUTERNAME", snippet)
+        self.assertIn("$verdict.cudaBackendDescription", snippet)
+        self.assertIn("$verdict.scale", snippet)
+        # BLOCKER fix (r1d): every composeArgs element must be quoted before Start-Process --
+        # a bare GPU description containing spaces would otherwise silently split across argv
+        # (the same class of bug as the r1c -c-quoting blocker).
+        self.assertIn("ConvertTo-AttrCudaQuotedProcessArgument", snippet)
+
     def _extract_cmd_construction_snippet(self, text: str) -> str:
         """The real emitted-job lines from the ConvertTo-PsSingleQuoted helper through the end
         of the contact-sheet $cmd-append block -- executed verbatim below with stub inputs, so
@@ -264,6 +286,92 @@ class ContactSheetSwitchTests(unittest.TestCase):
         # The "off" prefix of the "on" command must still match the off command exactly --
         # AdditionalArgs is strictly appended, never interleaved or substituted in.
         self.assertTrue(cmd_on.startswith(cmd_off))
+
+    def _extract_presentmon_helper_functions(self, text: str) -> str:
+        """Start/Wait/Stop-PresentMonCapture -- the compose step's HARDENING fix (r1d) reuses
+        Stop-PresentMonCapture's own already-tested Kill()+bounded-WaitForExit()+
+        confirmedExited pattern, so a standalone probe of the compose step needs it in scope
+        too, exactly as it is in the real job (defined earlier in the same script)."""
+        start = text.index("function Start-PresentMonCapture(")
+        end = text.index("\nfunction Get-FrameRows(", start)
+        return text[start:end]
+
+    def _extract_full_compose_block_snippet(self, text: str) -> str:
+        """Like _extract_compose_step_snippet, but through the compose-warnings.txt publish
+        added in r1d -- the sibling to compose-status.txt that records a deps-probe or
+        composer child that was still alive after a timed-out Kill() attempt."""
+        start_marker = (
+            "# CUDA-PLAYBACK-CONTACT-SHEET-1 r1b: compose the raw captures "
+            "into one labelled sheet +"
+        )
+        end_marker = (
+            "[void](Publish-AttrCudaText -Path (Join-Path $Pub "
+            "'contact-sheet\\compose-warnings.txt') -Value "
+            "($contactSheetOrphanNotes -join \"`n\"))\n    }"
+        )
+        start = text.index(start_marker)
+        end = text.index(end_marker, start) + len(end_marker)
+        return text[start:end]
+
+    def test_deps_probe_records_a_warning_when_the_child_survives_kill(self) -> None:
+        # BLOCKER-adjacent HARDENING (sol pre-review #2): a timed-out deps-probe child that
+        # survives Kill() must be recorded, never silently left running while the job moves on
+        # regardless. Both python.exe and py.exe candidates are forced to "time out and never
+        # actually exit" here, via a fake process object -- no real 20s wait, no real orphan
+        # process -- so this proves the WIRING (Stop-PresentMonCapture is called, its
+        # not-confirmed-exited outcome reaches compose-warnings.txt), not the underlying
+        # Kill()/WaitForExit() primitives, which WaitPresentMonCaptureTimeoutWaitsAfterKillTests
+        # already proves against a real process.
+        job_file = self._generate("deps-probe-orphan.job.ps1", "-ContactSheet")
+        text = job_file.read_text(encoding="utf-8")
+        snippet = self._extract_full_compose_block_snippet(text)
+        presentmon_functions = self._extract_presentmon_helper_functions(text)
+
+        work_dir = self.tmp / "orphan-work"
+        pub_dir = self.tmp / "orphan-pub"
+        raw_dir = pub_dir / "contact-sheet" / "raw"
+        raw_dir.mkdir(parents=True)
+        (raw_dir / "frame-00.png").write_bytes(b"not a real png, never read by this leg")
+
+        probe = self.tmp / "probe-deps-orphan.ps1"
+        probe.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            + presentmon_functions + "\n"
+            f"$Work = '{work_dir}'\n"
+            f"$Pub = '{pub_dir}'\n"
+            f"$contactSheetPubDir = '{raw_dir}'\n"
+            "$ClipId = 'tiny_dual_iso'\n"
+            "$SourceCommit = '" + self.shas[1] + "'\n"
+            "$FixtureRehearsal = $true\n"
+            "New-Item -ItemType Directory -Path $Work -Force | Out-Null\n"
+            # A fake process: WaitForExit always reports "not yet exited" and Kill() is a
+            # no-op that never actually terminates it -- deterministic, no real 20s wait.
+            "function Start-Process {\n"
+            "    param([string]$FilePath, [string[]]$ArgumentList, [switch]$PassThru, [string]$WindowStyle)\n"
+            "    $fake = [pscustomobject]@{ ExitCode = 1; HasExited = $false }\n"
+            "    $fake | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) return $false }\n"
+            "    $fake | Add-Member -MemberType ScriptMethod -Name Kill -Value { }\n"
+            "    return $fake\n"
+            "}\n"
+            + snippet
+            + "\nWrite-Output ('MARKER=' + $contactSheetComposeMarker)\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(probe)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        marker_line = next(l for l in proc.stdout.splitlines() if l.startswith("MARKER="))
+        self.assertIn(
+            "no Python 3 interpreter with Pillow+numpy was found on this venue", marker_line
+        )
+
+        warnings_file = pub_dir / "contact-sheet" / "compose-warnings.txt"
+        self.assertTrue(warnings_file.is_file(), "expected a compose-warnings.txt with the orphan note")
+        warnings_text = warnings_file.read_text(encoding="utf-8")
+        self.assertIn("python.exe", warnings_text)
+        self.assertIn("py.exe", warnings_text)
+        self.assertIn("did not exit after Kill()", warnings_text)
 
     def _extract_compose_step_snippet(self, text: str) -> str:
         """The real emitted job's contact-sheet compose step, run verbatim below (with the
@@ -399,6 +507,11 @@ class ContactSheetSwitchTests(unittest.TestCase):
             "$FixtureRehearsal = $true\n"
             f"{base64_line}\n"
             f"{sha256_line}\n"
+            # CUDA-PLAYBACK-CONTACT-SHEET-1 r1d: the compose step reads GPU/scale off
+            # $verdict (the eligibility-line parse the job does earlier at runtime) --
+            # stubbed here with known values so this test can assert they reach stats.json.
+            "$verdict = [pscustomobject]@{ "
+            "cudaBackendDescription = 'CUDA / NVIDIA GeForce RTX 4090'; scale = '4' }\n"
             "New-Item -ItemType Directory -Path $Work -Force | Out-Null\n"
             # Deliberately does NOT scrub $env:PATH: this leg proves the probe finds a real,
             # capable interpreter when one is genuinely present.
@@ -421,6 +534,10 @@ class ContactSheetSwitchTests(unittest.TestCase):
         # H3: the composed sidecar carries no absolute local path.
         self.assertNotIn(str(self.tmp), stats["sheet_path"])
         self.assertNotIn(str(self.tmp), stats["frames_dir"])
+        # BLOCKER fix (r1d): host/GPU/scale must reach stats.json, not render as "unknown".
+        self.assertEqual(stats["host"], os.environ["COMPUTERNAME"])
+        self.assertEqual(stats["gpu"], "CUDA / NVIDIA GeForce RTX 4090")
+        self.assertEqual(stats["scale"], "4")
         status_file = pub_dir / "contact-sheet" / "compose-status.txt"
         self.assertFalse(
             status_file.exists(), "success leg must not also write the unavailable marker"
@@ -440,6 +557,65 @@ class ContactSheetSwitchTests(unittest.TestCase):
         proc = _run_pwsh_file(script)
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertFalse(out_file.exists())
+
+
+@requires_pwsh
+class MeasuredSmokeSessionIdTests(unittest.TestCase):
+    """HARDENING (sol pre-review #2, r1d): Get-MeasuredSmokeSessionId must bind to the app's
+    explicit playback_smoke.measured_session marker when the log carries one, rather than
+    positionally assuming the first playback_smoke.summary line is the measured session --
+    and must still fall back to that old heuristic against a log from a build that predates
+    the marker."""
+
+    def _function_text(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start = text.index("function Get-MeasuredSmokeSessionId(")
+        end = text.index("\nfunction Get-FrameRows(", start)
+        return text[start:end]
+
+    def _run(self, raw_log: str) -> subprocess.CompletedProcess:
+        tmp = tempfile.TemporaryDirectory(prefix="measured-session-id-")
+        self.addCleanup(tmp.cleanup)
+        script = Path(tmp.name) / "probe.ps1"
+        log_literal = "'" + raw_log.replace("'", "''") + "'"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            + self._function_text() + "\n"
+            f"Write-Output ('ID=' + (Get-MeasuredSmokeSessionId {log_literal}))\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script)
+
+    def test_binds_to_the_explicit_marker_even_when_it_disagrees_with_the_first_summary(self) -> None:
+        # A synthetic case an alternate GUI-smoke mode could produce: an earlier (warmup)
+        # session's summary precedes the real measured one. The marker, not position, wins.
+        log = (
+            "playback_smoke.summary session=1 reason=play-restart elapsed_ms=10\n"
+            "playback_smoke.measured_session id=2\n"
+            "playback_smoke.summary session=2 reason=play-stop elapsed_ms=1000\n"
+        )
+        proc = self._run(log)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ID=2", proc.stdout)
+
+    def test_falls_back_to_the_first_summary_line_when_no_marker_is_present(self) -> None:
+        # A log from a build that predates the marker (or any other reason it is absent) must
+        # still resolve, via the old first-summary heuristic -- no regression for such a build.
+        log = (
+            "playback_smoke.summary session=7 reason=play-stop elapsed_ms=1000\n"
+            "playback_smoke.summary session=8 reason=play-restart elapsed_ms=10\n"
+        )
+        proc = self._run(log)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ID=7", proc.stdout)
+
+    def test_throws_when_neither_marker_nor_summary_is_present(self) -> None:
+        proc = self._run("nothing relevant here\n")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(
+            "no playback_smoke.summary line found",
+            normalize_pwsh_message_text(proc.stdout + proc.stderr),
+        )
 
 
 @requires_pwsh
