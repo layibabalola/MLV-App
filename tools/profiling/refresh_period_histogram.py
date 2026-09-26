@@ -23,6 +23,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import re
 import sys
 from collections import Counter
@@ -41,6 +42,16 @@ PRESENTMON_INTERVAL_COLUMN = "msBetweenDisplayChange"
 # reader of the interval CSV -- refuses to present a degraded leg's numbers as measured, rather
 # than silently re-deriving a weaker threshold from the CSV alone.
 PRESENTMON_STATUS_OK = "ok"
+
+# PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): the CLI's own --presentmon-csv/
+# --frame-log/--presentmon-status used to be three independent, all-optional flags -- the
+# documented command passed the first two and omitted the third, and nothing refused. These are
+# the standard paths a leg's own producer (playback-attr-3-cuda-job.ps1) publishes its artifacts
+# under, so a caller who has the artifacts dir never has to spell out any of the three by hand.
+DEFAULT_PRESENTMON_CSV_NAME = "presentmon-series.csv"
+DEFAULT_FRAME_LOG_RELATIVE_PATH = os.path.join("logs", "smoke-run.log")
+DEFAULT_SUMMARY_JSON_NAME = "summary.json"
+DEFAULT_EVIDENCE_MANIFEST_JSON_NAME = "evidence-manifest.json"
 
 PREP_REGIONS = (
     "prep_region_setup",
@@ -260,6 +271,35 @@ def compute_region_stats(frame_rows: Sequence[dict[str, float]]) -> dict:
     return regions
 
 
+def resolve_presentmon_status_from_artifacts(artifacts_dir: str) -> tuple[str, str | None]:
+    """Read presentMonStatus/presentMonStatusReason from a leg's own published summary.json
+    (preferred -- it is the first file a reader opens) or evidence-manifest.json (presentMon.status/
+    statusReason), so a caller who has the leg's artifacts dir never has to pass --presentmon-status
+    by hand -- and never has the OPTION to silently omit it either: this raises, rather than
+    returning a guessed/absent status, whenever neither file carries the field.
+    """
+    summary_path = os.path.join(artifacts_dir, DEFAULT_SUMMARY_JSON_NAME)
+    if os.path.isfile(summary_path):
+        with open(summary_path, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        if isinstance(summary, dict) and "presentMonStatus" in summary:
+            return summary["presentMonStatus"], summary.get("presentMonStatusReason")
+
+    manifest_path = os.path.join(artifacts_dir, DEFAULT_EVIDENCE_MANIFEST_JSON_NAME)
+    if os.path.isfile(manifest_path):
+        with open(manifest_path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        present_mon = manifest.get("presentMon") if isinstance(manifest, dict) else None
+        if isinstance(present_mon, dict) and "status" in present_mon:
+            return present_mon["status"], present_mon.get("statusReason")
+
+    raise RefreshHistogramError(
+        f"could not find presentMonStatus in {summary_path!r} or {manifest_path!r} -- refusing "
+        "to present a refresh-period histogram as measured without knowing the leg's PresentMon "
+        "sufficiency status"
+    )
+
+
 def build_report(
     presentmon_csv_path: str,
     frame_log_path: str,
@@ -330,8 +370,29 @@ def build_report(
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--presentmon-csv", required=True, help="PresentMon series CSV (msBetweenDisplayChange column)")
-    parser.add_argument("--frame-log", required=True, help="Raw MLVApp log with playback_smoke.frame lines")
+    parser.add_argument(
+        "--presentmon-csv", default=None,
+        help="PresentMon series CSV (msBetweenDisplayChange column). Defaults to "
+        f"{DEFAULT_PRESENTMON_CSV_NAME!r} inside --artifacts-dir when that is given.",
+    )
+    parser.add_argument(
+        "--frame-log", default=None,
+        help="Raw MLVApp log with playback_smoke.frame lines. Defaults to "
+        f"{DEFAULT_FRAME_LOG_RELATIVE_PATH!r} inside --artifacts-dir when that is given.",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        default=None,
+        help=(
+            "A leg's published artifacts directory (evidence-manifest.json's artifactRoot). "
+            "--presentmon-csv/--frame-log default to the standard paths inside it, and "
+            "--presentmon-status/--presentmon-status-reason are read from its summary.json "
+            "(preferred) or evidence-manifest.json unless given explicitly. Required whenever "
+            "--presentmon-status is not given: this tool refuses to compute a histogram without "
+            "knowing the leg's PresentMon sufficiency status, and this is the only way to supply "
+            "it other than typing it by hand."
+        ),
+    )
     parser.add_argument("--out", default="", help="Write JSON here instead of stdout")
     parser.add_argument("--min-frame-rows", type=int, default=10, help="Minimum high-resolution frame rows required")
     parser.add_argument(
@@ -362,14 +423,47 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
+    presentmon_csv = args.presentmon_csv
+    frame_log = args.frame_log
+    presentmon_status = args.presentmon_status
+    presentmon_status_reason = args.presentmon_status_reason
+
     try:
+        if args.artifacts_dir is not None:
+            if presentmon_csv is None:
+                presentmon_csv = os.path.join(args.artifacts_dir, DEFAULT_PRESENTMON_CSV_NAME)
+            if frame_log is None:
+                frame_log = os.path.join(args.artifacts_dir, DEFAULT_FRAME_LOG_RELATIVE_PATH)
+            if presentmon_status is None:
+                presentmon_status, derived_reason = resolve_presentmon_status_from_artifacts(args.artifacts_dir)
+                if presentmon_status_reason is None:
+                    presentmon_status_reason = derived_reason
+
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): the CLI -- the tool anyone
+        # actually runs, and the one the runbook documents -- must not be able to reach build_report
+        # without a known presentMonStatus. build_report() itself keeps presentmon_status optional
+        # for direct library/test callers who already have their own reason to bypass this (e.g.
+        # this file's own unit tests exercising bucket math in isolation); only this CLI entrypoint
+        # fails closed.
+        if presentmon_csv is None or frame_log is None:
+            raise RefreshHistogramError(
+                "--presentmon-csv and --frame-log are required unless --artifacts-dir is given"
+            )
+        if presentmon_status is None:
+            raise RefreshHistogramError(
+                "--presentmon-status is required unless --artifacts-dir is given -- this tool "
+                "refuses to compute a refresh-period histogram without knowing the leg's "
+                "PresentMon sufficiency status. Pass --artifacts-dir to read it from the leg's "
+                "own summary.json/evidence-manifest.json, or pass --presentmon-status explicitly."
+            )
+
         report = build_report(
-            args.presentmon_csv,
-            args.frame_log,
+            presentmon_csv,
+            frame_log,
             min_frame_rows=args.min_frame_rows,
             refresh_period_ms=args.refresh_period_ms,
-            presentmon_status=args.presentmon_status,
-            presentmon_status_reason=args.presentmon_status_reason,
+            presentmon_status=presentmon_status,
+            presentmon_status_reason=presentmon_status_reason,
         )
     except RefreshHistogramError as exc:
         print(f"refresh_period_histogram: FAIL: {exc}", file=sys.stderr)

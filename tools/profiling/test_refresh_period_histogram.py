@@ -7,6 +7,7 @@ empty-but-successful report, or mis-rounding a refresh multiple at the bucket bo
 from __future__ import annotations
 
 import csv
+import json
 
 import pytest
 
@@ -18,10 +19,12 @@ from refresh_period_histogram import (
     compute_buckets,
     compute_refresh_period,
     compute_region_stats,
+    main,
     parse_frame_log_rows,
     parse_presentmon_intervals,
     percentile,
     refresh_multiple,
+    resolve_presentmon_status_from_artifacts,
 )
 
 
@@ -335,9 +338,10 @@ def test_ok_presentmon_status_builds_a_report_normally(tmp_path):
     assert report["presentMon"]["sampleCount"] == 20
 
 
-def test_omitted_presentmon_status_builds_a_report_normally(tmp_path):
-    # Backward compatible: a caller with no status to pass (e.g. an ad hoc CLI invocation
-    # against a bare csv) gets the pre-existing, unconditional behaviour.
+def test_omitted_presentmon_status_still_builds_via_the_library_function(tmp_path):
+    # build_report() itself stays flexible for direct library/test callers (every other test in
+    # this file that doesn't care about status enforcement calls it exactly this way) -- the
+    # refusal on omission belongs to the CLI (see the CLI-level tests below), not to this function.
     csv_path = tmp_path / "presentmon-series.csv"
     _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
     log_path = tmp_path / "mlvapp.log"
@@ -345,6 +349,152 @@ def test_omitted_presentmon_status_builds_a_report_normally(tmp_path):
 
     report = build_report(str(csv_path), str(log_path))
     assert report["presentMon"]["sampleCount"] == 20
+
+
+# --- CLI enforcement: the tool itself must not be able to skip the status ----------------------
+# PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): r1 left the CLI's
+# --presentmon-status flag optional with no alternative, so the documented command (which never
+# passed it) produced a measured-looking histogram from a leg the job itself had already flagged
+# degraded. The CLI now REQUIRES --presentmon-status or --artifacts-dir (which derives it) --
+# never both omitted -- and never silently falls back to the old unconditional behaviour.
+
+def _write_artifacts_dir(tmp_path, *, summary=None, evidence_manifest=None, csv_values=None, frame_log_count=10):
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    csv_path = artifacts_dir / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, csv_values if csv_values is not None else [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_dir = artifacts_dir / "logs"
+    log_dir.mkdir()
+    _write_frame_log(log_dir / "smoke-run.log", count=frame_log_count, start=1)
+    if summary is not None:
+        (artifacts_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    if evidence_manifest is not None:
+        (artifacts_dir / "evidence-manifest.json").write_text(json.dumps(evidence_manifest), encoding="utf-8")
+    return artifacts_dir
+
+
+def test_cli_without_status_or_artifacts_dir_fails_closed(tmp_path, capsys):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    rc = main(["--presentmon-csv", str(csv_path), "--frame-log", str(log_path)])
+
+    assert rc == 1
+    assert "--presentmon-status is required" in capsys.readouterr().err
+
+
+def test_cli_with_explicit_status_and_paths_still_works(tmp_path):
+    # Regression: the pre-existing explicit-flag path (no --artifacts-dir at all) is unchanged.
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+    out_path = tmp_path / "out.json"
+
+    rc = main([
+        "--presentmon-csv", str(csv_path), "--frame-log", str(log_path),
+        "--presentmon-status", "ok", "--out", str(out_path),
+    ])
+
+    assert rc == 0
+    assert json.loads(out_path.read_text(encoding="utf-8"))["presentMon"]["sampleCount"] == 20
+
+
+def test_cli_with_artifacts_dir_derives_paths_and_refuses_a_degraded_summary(tmp_path, capsys):
+    artifacts_dir = _write_artifacts_dir(
+        tmp_path, summary={"presentMonStatus": "degraded", "presentMonStatusReason": "coverage too thin"}
+    )
+
+    rc = main(["--artifacts-dir", str(artifacts_dir)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "degraded" in err
+    assert "coverage too thin" in err
+
+
+def test_cli_with_artifacts_dir_derives_paths_and_builds_when_ok(tmp_path):
+    artifacts_dir = _write_artifacts_dir(tmp_path, summary={"presentMonStatus": "ok"})
+    out_path = tmp_path / "out.json"
+
+    rc = main(["--artifacts-dir", str(artifacts_dir), "--out", str(out_path)])
+
+    assert rc == 0
+    assert json.loads(out_path.read_text(encoding="utf-8"))["presentMon"]["sampleCount"] == 20
+
+
+def test_cli_with_artifacts_dir_falls_back_to_evidence_manifest(tmp_path, capsys):
+    # No summary.json at all -- evidence-manifest.json's nested presentMon.status/statusReason
+    # is read instead.
+    artifacts_dir = _write_artifacts_dir(
+        tmp_path,
+        evidence_manifest={"presentMon": {"status": "verified_zero_displayed", "statusReason": "no display change"}},
+    )
+
+    rc = main(["--artifacts-dir", str(artifacts_dir)])
+
+    assert rc == 1
+    assert "verified_zero_displayed" in capsys.readouterr().err
+
+
+def test_cli_with_artifacts_dir_and_neither_file_present_fails_closed(tmp_path, capsys):
+    artifacts_dir = _write_artifacts_dir(tmp_path)  # no summary.json, no evidence-manifest.json
+
+    rc = main(["--artifacts-dir", str(artifacts_dir)])
+
+    assert rc == 1
+    assert "could not find presentMonStatus" in capsys.readouterr().err
+
+
+def test_cli_explicit_status_overrides_artifacts_dir_derivation(tmp_path):
+    # An explicit --presentmon-status always wins over whatever the artifacts dir would derive --
+    # useful for a caller re-checking a leg under a hypothetical status.
+    artifacts_dir = _write_artifacts_dir(tmp_path, summary={"presentMonStatus": "degraded"})
+    out_path = tmp_path / "out.json"
+
+    rc = main(["--artifacts-dir", str(artifacts_dir), "--presentmon-status", "ok", "--out", str(out_path)])
+
+    assert rc == 0
+    assert json.loads(out_path.read_text(encoding="utf-8"))["presentMon"]["sampleCount"] == 20
+
+
+# --- resolve_presentmon_status_from_artifacts ---------------------------------------------------
+
+def test_resolve_status_reads_summary_json_first(tmp_path):
+    (tmp_path / "summary.json").write_text(
+        json.dumps({"presentMonStatus": "degraded", "presentMonStatusReason": "thin"}), encoding="utf-8"
+    )
+    (tmp_path / "evidence-manifest.json").write_text(
+        json.dumps({"presentMon": {"status": "ok"}}), encoding="utf-8"
+    )
+
+    status, reason = resolve_presentmon_status_from_artifacts(str(tmp_path))
+
+    assert (status, reason) == ("degraded", "thin")
+
+
+def test_resolve_status_falls_back_to_evidence_manifest(tmp_path):
+    (tmp_path / "evidence-manifest.json").write_text(
+        json.dumps({"presentMon": {"status": "unavailable", "statusReason": None}}), encoding="utf-8"
+    )
+
+    status, reason = resolve_presentmon_status_from_artifacts(str(tmp_path))
+
+    assert (status, reason) == ("unavailable", None)
+
+
+def test_resolve_status_raises_when_neither_file_carries_it(tmp_path):
+    (tmp_path / "summary.json").write_text(json.dumps({"result": "GPU_RECON_FRAMES_ZERO"}), encoding="utf-8")
+
+    with pytest.raises(RefreshHistogramError, match="could not find presentMonStatus"):
+        resolve_presentmon_status_from_artifacts(str(tmp_path))
+
+
+def test_resolve_status_raises_when_no_files_exist(tmp_path):
+    with pytest.raises(RefreshHistogramError, match="could not find presentMonStatus"):
+        resolve_presentmon_status_from_artifacts(str(tmp_path))
 
 
 # --- end-to-end build_report ----------------------------------------------------------
