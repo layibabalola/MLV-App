@@ -210,7 +210,12 @@ class ContactSheetSwitchTests(unittest.TestCase):
         # CUDA-PLAYBACK-CONTACT-SHEET-2: the raw-copy logic moved into
         # Publish-AttrCudaContactSheetRawCaptures (also called from both early-refusal exits --
         # see the NOTE-fix tests below), so the main-flow publish step now reads as a call to it.
-        function_def_pos = text.index("function Publish-AttrCudaContactSheetRawCaptures(")
+        # Round 2: the function itself now lives in AttrCudaArtifacts.psm1 and is spliced into
+        # the emitted job at the __EMBEDDED_FUNCTIONS__ token (test_every_called_attrcuda_
+        # command_is_defined_in_the_real_embedded_text requires every -AttrCuda-named call in
+        # the template to come from that splice), so its declaration in the emitted text is the
+        # module's own param()-block style, not the old inline-parameter one.
+        function_def_pos = text.index("function Publish-AttrCudaContactSheetRawCaptures {")
         publish_call_pos = text.index(
             "$contactSheetPubDir = Publish-AttrCudaContactSheetRawCaptures "
             "-Enabled $ContactSheetEnabled -SourceDir $contactSheetDir -PubRoot $Pub"
@@ -699,12 +704,6 @@ class ContactSheetRawCapturesOnRefusalTests(unittest.TestCase):
     eligibility gate (BACKEND_NOT_AVAILABLE) or the GPU-frame gate (GPU_RECON_FRAMES_ZERO),
     both of which exit before the main publish step used to run this copy at all."""
 
-    def _function_text(self) -> str:
-        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
-        start = text.index("function Publish-AttrCudaContactSheetRawCaptures(")
-        end = text.index("\nforeach ($item in @(", start)
-        return text[start:end]
-
     def test_copies_every_file_and_returns_the_raw_dir_when_enabled_and_populated(self) -> None:
         tmp = tempfile.TemporaryDirectory(prefix="contact-sheet-raw-publish-")
         self.addCleanup(tmp.cleanup)
@@ -720,7 +719,6 @@ class ContactSheetRawCapturesOnRefusalTests(unittest.TestCase):
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             f"Import-Module '{MODULE}' -Force\n"
-            + self._function_text() + "\n"
             f"$result = Publish-AttrCudaContactSheetRawCaptures -Enabled $true "
             f"-SourceDir '{source_dir}' -PubRoot '{pub_root}'\n"
             "Write-Output \"RESULT=$result\"\n",
@@ -749,7 +747,6 @@ class ContactSheetRawCapturesOnRefusalTests(unittest.TestCase):
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             f"Import-Module '{MODULE}' -Force\n"
-            + self._function_text() + "\n"
             f"$disabled = Publish-AttrCudaContactSheetRawCaptures -Enabled $false "
             f"-SourceDir '{missing_dir}' -PubRoot '{pub_root}'\n"
             f"$missingSource = Publish-AttrCudaContactSheetRawCaptures -Enabled $true "

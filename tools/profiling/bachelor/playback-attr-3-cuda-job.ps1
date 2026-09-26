@@ -467,6 +467,11 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     # CUDA-PLAYBACK-CONTACT-SHEET-1 r1d: quotes a Start-Process -ArgumentList element that may
     # contain a space (the composer's --host/--gpu values) -- see its own header.
     'ConvertTo-AttrCudaQuotedProcessArgument',
+    # CUDA-PLAYBACK-CONTACT-SHEET-2 round 2: was defined inline in this template until the
+    # PRESENTMON-HARNESS-ROBUSTNESS-2 merge's test_every_called_attrcuda_command_is_defined_in_
+    # the_real_embedded_text required every -AttrCuda-named call in the template to come from
+    # this splice instead -- see its own header in AttrCudaArtifacts.psm1.
+    'Publish-AttrCudaContactSheetRawCaptures',
     'Publish-AttrCudaFileCopy',
     'Publish-AttrCudaFileMove',
     'New-AttrCudaDirectory',
@@ -906,33 +911,6 @@ function Get-LastGpuSummary([string]$RawLog, [string]$MeasuredSessionId) {
         gpuTextureReadbackFrames = [int]$last['gpu_texture_readback_frames']
         gpuTextureNoReadbackFrames = [int]$last['gpu_texture_no_readback_frames']
     }
-}
-
-function Publish-AttrCudaContactSheetRawCaptures([bool]$Enabled, [string]$SourceDir, [string]$PubRoot) {
-    <#
-    .SYNOPSIS
-    Publish the app's raw --contact-sheet-dir PNG+JSON pairs under $PubRoot\contact-sheet\raw,
-    a no-op when the option was off or nothing was captured.
-    .DESCRIPTION
-    NOTE fix (fable, CUDA-PLAYBACK-CONTACT-SHEET-2): a leg that refuses at the eligibility gate
-    (BACKEND_NOT_AVAILABLE) or the GPU-frame gate (GPU_RECON_FRAMES_ZERO) used to exit before
-    the main publish step ever ran this copy, leaving that leg's raw captures stranded in
-    $Work with no measurement to compare against AND no evidence of what was captured. Both
-    early-refusal call sites below now call this too, so a refused -ContactSheet leg still
-    publishes its raw frames -- composing them into a labelled sheet stays a main-flow-only
-    step (it needs the run's own eligibility verdict for GPU/scale labels, which a refused run
-    has no reliable measurement behind anyway).
-    #>
-    if (-not $Enabled -or -not $SourceDir -or -not (Test-Path -LiteralPath $SourceDir)) { return $null }
-    # New-AttrCudaDirectory only (never a raw New-Item -Force) -- matches every other $Pub
-    # subdirectory this job creates.
-    [void](New-AttrCudaDirectory -Path (Join-Path $PubRoot 'contact-sheet'))
-    $rawDir = Join-Path $PubRoot 'contact-sheet\raw'
-    [void](New-AttrCudaDirectory -Path $rawDir)
-    Get-ChildItem -LiteralPath $SourceDir -File | ForEach-Object {
-        [void](Publish-AttrCudaFileCopy -Source $_.FullName -Destination (Join-Path $rawDir $_.Name))
-    }
-    return $rawDir
 }
 
 foreach ($item in @(

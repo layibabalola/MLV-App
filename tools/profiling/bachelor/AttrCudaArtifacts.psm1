@@ -1421,6 +1421,44 @@ function Publish-AttrCudaFileCopy {
     return $slot
 }
 
+function Publish-AttrCudaContactSheetRawCaptures {
+    <#
+    .SYNOPSIS
+    Publish the app's raw --contact-sheet-dir PNG+JSON pairs under $PubRoot\contact-sheet\raw,
+    a no-op when the option was off or nothing was captured.
+    .DESCRIPTION
+    NOTE fix (fable, CUDA-PLAYBACK-CONTACT-SHEET-2): a leg that refuses at the eligibility gate
+    (BACKEND_NOT_AVAILABLE) or the GPU-frame gate (GPU_RECON_FRAMES_ZERO) used to exit before
+    the main publish step ever ran this copy, leaving that leg's raw captures stranded in
+    $Work with no measurement to compare against AND no evidence of what was captured. Both
+    early-refusal call sites below now call this too, so a refused -ContactSheet leg still
+    publishes its raw frames -- composing them into a labelled sheet stays a main-flow-only
+    step (it needs the run's own eligibility verdict for GPU/scale labels, which a refused run
+    has no reliable measurement behind anyway).
+    CUDA-PLAYBACK-CONTACT-SHEET-2 round 2: moved here from an inline definition inside
+    playback-attr-3-cuda-job.ps1's own $template (both call sites are inside that same
+    template, run on Bachelor) -- test_every_called_attrcuda_command_is_defined_in_the_real_
+    embedded_text (PRESENTMON-HARNESS-ROBUSTNESS-2) requires every -AttrCuda-named function
+    the template calls to come from this module's spliced text, not be defined inline.
+    #>
+    param(
+        [bool]$Enabled,
+        [string]$SourceDir,
+        [string]$PubRoot
+    )
+
+    if (-not $Enabled -or -not $SourceDir -or -not (Test-Path -LiteralPath $SourceDir)) { return $null }
+    # New-AttrCudaDirectory only (never a raw New-Item -Force) -- matches every other $Pub
+    # subdirectory this job creates.
+    [void](New-AttrCudaDirectory -Path (Join-Path $PubRoot 'contact-sheet'))
+    $rawDir = Join-Path $PubRoot 'contact-sheet\raw'
+    [void](New-AttrCudaDirectory -Path $rawDir)
+    Get-ChildItem -LiteralPath $SourceDir -File | ForEach-Object {
+        [void](Publish-AttrCudaFileCopy -Source $_.FullName -Destination (Join-Path $rawDir $_.Name))
+    }
+    return $rawDir
+}
+
 function Publish-AttrCudaFileMove {
     <#
     .SYNOPSIS
@@ -2518,6 +2556,7 @@ Export-ModuleMember -Function `
     Get-AttrCudaLastEligibilityLine, `
     Get-AttrCudaEligibilityVerdict, `
     ConvertTo-AttrCudaQuotedProcessArgument, `
+    Publish-AttrCudaContactSheetRawCaptures, `
     Get-AttrCudaPresentMonDisplayReport, `
     Get-AttrCudaAppSwapTelemetry, `
     Get-AttrCudaTemporalCoverage, `
