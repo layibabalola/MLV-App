@@ -493,6 +493,70 @@ class StagingNameSafetyTests(_PwshCase):
         self.assertIn(str(root / "ok.exe"), proc.stdout)
 
 
+@requires_pwsh
+@requires_git
+class StageGeneratorVenueDefaultTests(_PwshCase):
+    """UM-CUDA-BENCH-VENUE-1: -Venue on the two staging generators only selects -AgentRoot's own
+    default (both already trust $AgentRoot alone, with no separate hardcoded floor) -- no override
+    here, so the default actually taking effect is what is under test.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.build = self.tmp / "build"
+        self.names = _fake_build_dir(self.build, SHA_FIXTURE)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+
+    def test_stage_job_default_agent_root_follows_venue(self) -> None:
+        for venue, expected_root in (
+            ("bachelor", "C:\\mlvtmp\\mlv-agent"),
+            ("ultra-magnus", "G:\\Temp\\mlv-gpu-profile\\agent"),
+        ):
+            with self.subTest(venue=venue):
+                out_dir = self.staging / venue
+                script = self.tmp / f"generate-{venue}.ps1"
+                script.write_text(
+                    "$ErrorActionPreference = 'Stop'\n"
+                    f"& '{STAGE_GENERATOR}' -Venue '{venue}' -SourceCommit '{SHA_FIXTURE}' "
+                    f"-BuildDir '{self.build}' -OutDir '{out_dir}' | ConvertTo-Json -Depth 5\n",
+                    encoding="utf-8",
+                )
+                proc = _run_pwsh_file(script)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                payload = json.loads(proc.stdout)
+                self.assertEqual(payload["venue"], venue)
+                self.assertEqual(payload["agentRoot"], expected_root)
+                job_text = Path(payload["jobFile"]).read_text(encoding="utf-8")
+                self.assertIn(f"$Venue = '{venue}'", job_text)
+                self.assertIn(f"$AgentRoot = '{expected_root}'", job_text)
+
+    def test_smoke_runner_stage_job_default_agent_root_follows_venue(self) -> None:
+        for venue, expected_root in (
+            ("bachelor", "C:\\mlvtmp\\mlv-agent"),
+            ("ultra-magnus", "G:\\Temp\\mlv-gpu-profile\\agent"),
+        ):
+            with self.subTest(venue=venue):
+                out_dir = self.staging / f"smoke-{venue}"
+                script = self.tmp / f"generate-smoke-{venue}.ps1"
+                script.write_text(
+                    "$ErrorActionPreference = 'Stop'\n"
+                    f"& '{SMOKE_RUNNER_STAGE_GENERATOR}' -Venue '{venue}' "
+                    f"-SourceCommit '{self.shas[1]}' -OutDir '{out_dir}' "
+                    f"-RepoRoot '{self.repo}' | ConvertTo-Json -Depth 5\n",
+                    encoding="utf-8",
+                )
+                proc = _run_pwsh_file(script)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                payload = json.loads(proc.stdout)[-1]
+                self.assertEqual(payload["venue"], venue)
+                job_text = Path(payload["jobFile"]).read_text(encoding="utf-8")
+                self.assertIn(f"$Venue = '{venue}'", job_text)
+                self.assertIn(f"$AgentRoot = '{expected_root}'", job_text)
+
+
 # --------------------------------------------------------------------------------------------
 # (c) build.json authentication
 # --------------------------------------------------------------------------------------------

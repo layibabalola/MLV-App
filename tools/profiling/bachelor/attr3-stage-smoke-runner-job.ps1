@@ -383,5 +383,10 @@ Write-Output "RESULT=SMOKE_RUNNER_STAGE_JOB_EMITTED SOURCE=$SourceCommit CLOSURE
     cacheDirName = $CacheDirName
     files = @($closureEntries | ForEach-Object { [ordered]@{ name = $_.name; sha256 = $_.sha256 } })
     agentRoot = $AgentRoot
-    cacheDirPath = (Join-Path (Join-Path $AgentRoot 'cache') $CacheDirName)
+    # UM-CUDA-BENCH-VENUE-1: plain string composition, never Join-Path -- Join-Path is
+    # provider-aware and throws "Cannot find drive" for a drive that does not exist on THIS
+    # generator host (e.g. Ultra-Magnus's own G:\ default), even though this is pure path-string
+    # derivation with no filesystem access (mirrors the same fix in playback-attr-3-cuda-job.ps1's
+    # fixture -ClipPath derivation).
+    cacheDirPath = ($AgentRoot.TrimEnd('\') + '\cache\' + $CacheDirName)
 }
