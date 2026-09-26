@@ -29,6 +29,8 @@ if str(ROOT) not in sys.path:
 
 from tools.repo_hygiene.test_playback_attr_3_cuda_behaviour import (  # noqa: E402
     ATTRIBUTION_GENERATOR,
+    MODULE,
+    OWNER_FOOTAGE_MODULE,
     PWSH,
     _long_path,
     _make_fixture_repo,
@@ -199,6 +201,71 @@ class ContactSheetSwitchTests(unittest.TestCase):
         # The "off" prefix of the "on" command must still match the off command exactly --
         # AdditionalArgs is strictly appended, never interleaved or substituted in.
         self.assertTrue(cmd_on.startswith(cmd_off))
+
+    def _extract_compose_step_snippet(self, text: str) -> str:
+        """The real emitted job's contact-sheet compose step, run verbatim below (with the
+        module's real functions imported, real embedded composer bytes, but a controlled
+        $env:PATH) so this proves RUNTIME behaviour, not just that the text is present."""
+        start_marker = (
+            "# CUDA-PLAYBACK-CONTACT-SHEET-1 r1b: compose the raw captures "
+            "into one labelled sheet +"
+        )
+        end_marker = (
+            "[void](Publish-AttrCudaText -Path (Join-Path $Pub "
+            "'contact-sheet\\compose-status.txt') -Value $contactSheetComposeMarker)\n"
+            "    }"
+        )
+        start = text.index(start_marker)
+        end = text.index(end_marker) + len(end_marker)
+        return text[start:end]
+
+    def test_compose_step_records_a_typed_marker_when_no_python_interpreter_is_on_path(self) -> None:
+        # Forces the "unavailable" leg the hub asked for: with no python.exe/py.exe reachable,
+        # both probe attempts in the real emitted compose step must fail closed and the step
+        # must degrade to a non-fatal, typed compose-status.txt marker -- never throw, never
+        # silently produce nothing.
+        job_file = self._generate("compose-unavailable.job.ps1", "-ContactSheet")
+        text = job_file.read_text(encoding="utf-8")
+        snippet = self._extract_compose_step_snippet(text)
+
+        work_dir = self.tmp / "compose-work"
+        pub_dir = self.tmp / "compose-pub"
+        raw_dir = pub_dir / "contact-sheet" / "raw"
+        raw_dir.mkdir(parents=True)
+        (raw_dir / "frame-00.png").write_bytes(b"not a real png, never read by this leg")
+
+        probe = self.tmp / "probe-compose-unavailable.ps1"
+        probe.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            f"$Work = '{work_dir}'\n"
+            f"$Pub = '{pub_dir}'\n"
+            f"$contactSheetPubDir = '{raw_dir}'\n"
+            "$ClipId = 'tiny_dual_iso'\n"
+            "$SourceCommit = '" + self.shas[1] + "'\n"
+            "$FixtureRehearsal = $true\n"
+            "New-Item -ItemType Directory -Path $Work -Force | Out-Null\n"
+            # A PATH with no python.exe/py.exe on it: both probe candidates in the snippet
+            # below must fail to launch and the step must still complete without throwing.
+            "$env:PATH = $Work\n"
+            + snippet
+            + "\nWrite-Output ('MARKER=' + $contactSheetComposeMarker)\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(probe)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        marker_line = next(l for l in proc.stdout.splitlines() if l.startswith("MARKER="))
+        self.assertIn("CONTACT_SHEET_COMPOSE_UNAVAILABLE", marker_line)
+        self.assertIn(
+            "no Python 3 interpreter with Pillow+numpy was found on this venue", marker_line
+        )
+        status_file = pub_dir / "contact-sheet" / "compose-status.txt"
+        self.assertTrue(status_file.is_file(), "expected a compose-status.txt marker file")
+        self.assertIn("CONTACT_SHEET_COMPOSE_UNAVAILABLE", status_file.read_text(encoding="utf-8"))
+        # Never attempted a compose with no interpreter: no sheet/stats output.
+        self.assertFalse((pub_dir / "contact-sheet" / "sheet.png").exists())
+        self.assertFalse((pub_dir / "contact-sheet" / "stats.json").exists())
 
     def test_frame_count_out_of_range_is_refused_at_parameter_binding(self) -> None:
         out_file = self.tmp / "refused.job.ps1"

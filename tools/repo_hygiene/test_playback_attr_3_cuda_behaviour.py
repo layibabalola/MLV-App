@@ -215,6 +215,13 @@ def _make_fixture_repo(path: Path) -> list[str]:
     (path / "tools" / "profiling" / "gui-smoke-gpu-texture-route-validation.ps1").write_text(
         "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
     )
+    # CUDA-PLAYBACK-CONTACT-SHEET-1 r1b: the attribution generator also resolves this path's
+    # committed blob unconditionally (to embed it in the emitted job for the contact-sheet
+    # compose step), same reason as the smoke-runner closure comment above -- every test that
+    # generates a job through it needs the path to exist in the throwaway repo too.
+    (path / "tools" / "profiling" / "make-contact-sheet.py").write_text(
+        "# fixture stand-in for make-contact-sheet.py\n", encoding="utf-8"
+    )
     shas = []
     for index, text in enumerate(("first", "second")):
         (path / "src" / "mlv" / "llrawproc" / "llrawproc.c").write_text(

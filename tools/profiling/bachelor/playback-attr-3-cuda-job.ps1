@@ -460,6 +460,10 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     'Test-AttrCudaPathIsReparsePoint',
     'Get-AttrCudaClosureDirectoryMismatch',
     'Publish-AttrCudaText',
+    # CUDA-PLAYBACK-CONTACT-SHEET-1 r1b: writes the embedded composer script's decoded bytes
+    # to a file under $Work before it is invoked -- the byte-array counterpart of
+    # Publish-AttrCudaText, for a payload that arrived base64-decoded rather than copied.
+    'Publish-AttrCudaBytes',
     'Publish-AttrCudaFileCopy',
     'Publish-AttrCudaFileMove',
     'New-AttrCudaDirectory',
@@ -559,6 +563,26 @@ $shortSha = $SourceCommit.Substring(0, 12)
 $exeName = "MLVApp-playback-attr-3-cuda-$shortSha.exe"
 $reconName = "igpu_recon_cuda-playback-attr-3-cuda-$shortSha.dll"
 
+# CUDA-PLAYBACK-CONTACT-SHEET-1 r1b: the venue has no checkout (see the smoke-runner
+# closure comment above), so the composer that turns raw --contact-sheet-dir captures
+# into one labelled sheet + stats sidecar must ship INLINE, byte-exact as committed at
+# $SourceCommit -- same generator-only, byte-exact mechanism as the smoke-runner closure
+# and the llrawproc blob (Resolve-AttrCudaCommittedBlobId/Save-AttrCudaCommittedBlobBytes),
+# just base64-embedded directly rather than cached: one small text file, not cache-worthy
+# like the six-file closure or the multi-MB llrawproc blob.
+$contactSheetComposerBlobId = Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $SourceCommit -RepoRelativePath 'tools/profiling/make-contact-sheet.py'
+$contactSheetComposerTempPath = Join-Path ([IO.Path]::GetTempPath()) "playback-attr-3-cuda-contact-sheet-composer-$([guid]::NewGuid().ToString('N')).py"
+try {
+    $contactSheetComposerSha256 = Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $contactSheetComposerBlobId -Destination $contactSheetComposerTempPath
+    if ($contactSheetComposerSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "ATTRCUDA_BLOB_SHA_MALFORMED composer script sha256 is not 64 lowercase hex: '$contactSheetComposerSha256'"
+    }
+    $contactSheetComposerBytes = [IO.File]::ReadAllBytes($contactSheetComposerTempPath)
+} finally {
+    if (Test-Path -LiteralPath $contactSheetComposerTempPath) { Remove-Item -LiteralPath $contactSheetComposerTempPath -Force }
+}
+$contactSheetComposerPyBase64 = [Convert]::ToBase64String($contactSheetComposerBytes)
+
 # --- job body template (placeholders are substituted below; the body itself never
 #     touches this generator's variables directly, so there is no accidental capture
 #     of this machine's environment into the emitted script) ----------------------
@@ -585,6 +609,8 @@ $FixtureRehearsal = __FIXTURE_REHEARSAL__
 $FixtureSha256 = '__FIXTURE_SHA256__'
 $ContactSheetEnabled = __CONTACT_SHEET_ENABLED__
 $ContactSheetFrameCount = __CONTACT_SHEET_FRAME_COUNT__
+$ContactSheetComposerPyBase64 = '__CONTACT_SHEET_COMPOSER_PY_BASE64__'
+$ContactSheetComposerSha256 = '__CONTACT_SHEET_COMPOSER_SHA256__'
 $Root = '__AGENT_ROOT__'
 $Cache = Join-Path $Root 'cache'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -1565,6 +1591,70 @@ if ($ContactSheetEnabled -and $contactSheetDir -and (Test-Path -LiteralPath $con
     Get-ChildItem -LiteralPath $contactSheetDir -File | ForEach-Object {
         [void](Publish-AttrCudaFileCopy -Source $_.FullName -Destination (Join-Path $contactSheetPubDir $_.Name))
     }
+    # CUDA-PLAYBACK-CONTACT-SHEET-1 r1b: compose the raw captures into one labelled sheet +
+    # stats sidecar right here, in the job's publish step, so a reader gets the composed
+    # artifact without running make-contact-sheet.py by hand. Pillow/numpy (and Python
+    # itself) are not guaranteed on every venue -- probe first and degrade to a typed,
+    # non-fatal marker (never fail the whole job) when either is missing; the hub can
+    # still compose locally from the published raw frames in that case.
+    $contactSheetComposeMarker = $null
+    $contactSheetPyExe = $null
+    $contactSheetPyPrefixArgs = @()
+    foreach ($candidate in @(
+        [pscustomobject]@{ exe = 'python.exe'; prefix = @() },
+        [pscustomobject]@{ exe = 'py.exe'; prefix = @('-3') }
+    )) {
+        if ($null -ne $contactSheetPyExe) { continue }
+        try {
+            $depsArgs = @($candidate.prefix) + @('-c', 'import PIL, numpy')
+            $depsProc = Start-Process -FilePath $candidate.exe -ArgumentList $depsArgs -PassThru -WindowStyle Hidden
+            if (-not $depsProc.WaitForExit(20000)) {
+                try { $depsProc.Kill() } catch {}
+            } elseif ($depsProc.ExitCode -eq 0) {
+                $contactSheetPyExe = $candidate.exe
+                $contactSheetPyPrefixArgs = $candidate.prefix
+            }
+        } catch {
+            continue
+        }
+    }
+    if ($null -eq $contactSheetPyExe) {
+        $contactSheetComposeMarker = 'CONTACT_SHEET_COMPOSE_UNAVAILABLE no Python 3 interpreter with Pillow+numpy was found on this venue'
+    } else {
+        $contactSheetComposerPayload = Read-AttrCudaBase64Payload -Base64 $ContactSheetComposerPyBase64
+        if ($contactSheetComposerPayload.sha256 -ne $ContactSheetComposerSha256) {
+            $contactSheetComposeMarker = 'CONTACT_SHEET_COMPOSE_UNAVAILABLE embedded composer sha256 mismatch'
+        } else {
+            $contactSheetComposerScriptPath = Join-Path $Work 'contact-sheet-composer.py'
+            [void](Publish-AttrCudaBytes -Path $contactSheetComposerScriptPath -Bytes $contactSheetComposerPayload.bytes)
+            $contactSheetSheetOut = Join-Path $Pub 'contact-sheet\sheet.png'
+            $contactSheetStatsOut = Join-Path $Pub 'contact-sheet\stats.json'
+            $contactSheetBackendLabel = if ($FixtureRehearsal) { 'fixture' } else { 'cuda' }
+            $composeArgs = @($contactSheetPyPrefixArgs) + @(
+                $contactSheetComposerScriptPath,
+                '--frames-dir', $contactSheetPubDir,
+                '--sheet-out', $contactSheetSheetOut,
+                '--stats-out', $contactSheetStatsOut,
+                '--clip-id', $ClipId,
+                '--build-sha', $SourceCommit,
+                '--backend', $contactSheetBackendLabel
+            )
+            try {
+                $composeProc = Start-Process -FilePath $contactSheetPyExe -ArgumentList $composeArgs -PassThru -WindowStyle Hidden
+                if (-not $composeProc.WaitForExit(60000)) {
+                    try { $composeProc.Kill() } catch {}
+                    $contactSheetComposeMarker = 'CONTACT_SHEET_COMPOSE_UNAVAILABLE composer did not exit within 60s'
+                } elseif ($composeProc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $contactSheetSheetOut) -or -not (Test-Path -LiteralPath $contactSheetStatsOut)) {
+                    $contactSheetComposeMarker = "CONTACT_SHEET_COMPOSE_UNAVAILABLE composer exited $($composeProc.ExitCode) or did not write its outputs"
+                }
+            } catch {
+                $contactSheetComposeMarker = "CONTACT_SHEET_COMPOSE_UNAVAILABLE $($_.Exception.Message)"
+            }
+        }
+    }
+    if ($null -ne $contactSheetComposeMarker) {
+        [void](Publish-AttrCudaText -Path (Join-Path $Pub 'contact-sheet\compose-status.txt') -Value $contactSheetComposeMarker)
+    }
 }
 $files = Get-ChildItem -LiteralPath $Pub -Recurse -File | ForEach-Object { [ordered]@{ path=$_.FullName.Substring($Pub.Length + 1); sha256=(Get-Sha $_.FullName); bytes=$_.Length } }
 Save-Json ([ordered]@{ schema='playback-attr-3-cuda-artifact-index.v1'; artifactRoot=$Pub; fixtureRehearsal=$FixtureRehearsal; files=$files }) (Join-Path $Pub 'artifact-index.json')
@@ -1614,6 +1704,8 @@ $text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
     FIXTURE_SHA256 = $FixtureSha256
     CONTACT_SHEET_ENABLED = $contactSheetEnabledLiteral
     CONTACT_SHEET_FRAME_COUNT = $contactSheetFrameCountLiteral
+    CONTACT_SHEET_COMPOSER_PY_BASE64 = $contactSheetComposerPyBase64
+    CONTACT_SHEET_COMPOSER_SHA256 = $contactSheetComposerSha256
     EMBEDDED_FUNCTIONS = $embeddedFunctions
 })
 
