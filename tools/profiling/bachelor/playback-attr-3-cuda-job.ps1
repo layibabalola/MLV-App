@@ -216,7 +216,20 @@ param(
     [ValidatePattern('^[A-Za-z0-9._-]+\.json\z')]
     [string]$ConsentReceiptFileName = 'owner-footage-consent-20260916.json',
 
-    [string]$LlrawprocRelativePath = 'src/mlv/llrawproc/llrawproc.c'
+    [string]$LlrawprocRelativePath = 'src/mlv/llrawproc/llrawproc.c',
+
+    # CUDA-PLAYBACK-CONTACT-SHEET-1: opt-in, off by default like every other optional capture
+    # in this job. When set, the emitted job passes the app's own --contact-sheet-dir/
+    # --contact-sheet-frames through -AdditionalArgs on the SAME leg's un-timed pass (the app
+    # captures those frames strictly after its own measured playback interval closes -- see
+    # runGuiPlaybackSmoke's contact-sheet capture block -- so this never perturbs the leg's
+    # fps/swap-cadence numbers) and publishes the raw PNG+JSON pairs under
+    # artifacts/contact-sheet/raw/. Composing them into one labelled sheet (tools/profiling/
+    # make-contact-sheet.py) is left to a later step, off this job: round-1 scope keeps this
+    # hunk small while UM-CUDA-BENCH-VENUE-1 also edits this file.
+    [switch]$ContactSheet,
+    [ValidateRange(1, 60)]
+    [int]$ContactSheetFrames = 6
 )
 
 $ErrorActionPreference = 'Stop'
@@ -331,6 +344,11 @@ function Resolve-AttrCudaOwnerClipParts {
 $FixtureClipIds = @('tiny_dual_iso', 'large_dual_iso')
 $isFixtureRehearsal = $FixtureClipIds -ccontains $ClipId
 $fixtureRehearsalLiteral = if ($isFixtureRehearsal) { '$true' } else { '$false' }
+
+# CUDA-PLAYBACK-CONTACT-SHEET-1: baked the same way fixtureRehearsalLiteral is above --
+# a plain bool/int literal substituted into the template, never caller text.
+$contactSheetEnabledLiteral = if ($ContactSheet) { '$true' } else { '$false' }
+$contactSheetFrameCountLiteral = [string]$ContactSheetFrames
 
 # ATTR3-FIXTURE-STAGE-1. The compound suffix the two tracked fixtures carry is never spelled
 # as one literal token anywhere in this file: a token ending in it trips this repository's own
@@ -565,6 +583,8 @@ $SmokeRunnerName = '__SMOKE_RUNNER_NAME__'
 $ConsentReceiptFileName = '__CONSENT_RECEIPT__'
 $FixtureRehearsal = __FIXTURE_REHEARSAL__
 $FixtureSha256 = '__FIXTURE_SHA256__'
+$ContactSheetEnabled = __CONTACT_SHEET_ENABLED__
+$ContactSheetFrameCount = __CONTACT_SHEET_FRAME_COUNT__
 $Root = '__AGENT_ROOT__'
 $Cache = Join-Path $Root 'cache'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -1098,6 +1118,18 @@ $envs = @(
 $envList = "'" + ($envs -join "','") + "'"
 function ConvertTo-PsSingleQuoted([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
 $cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted $exePath) -Input $(ConvertTo-PsSingleQuoted $clipPath) -Output $(ConvertTo-PsSingleQuoted $resultPath) -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor 4 -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
+# CUDA-PLAYBACK-CONTACT-SHEET-1: appended, never baked into the base $cmd string above, so a
+# disabled run's $cmd (and therefore this job's emitted text) is byte-identical to before this
+# card. Passed through -AdditionalArgs (run-release-gui-smoke.ps1's own generic extra-args
+# passthrough) rather than adding new named parameters to that runner -- smallest possible touch
+# to a file another concurrent lane (UM-CUDA-BENCH-VENUE-1) also edits.
+$contactSheetDir = $null
+if ($ContactSheetEnabled) {
+    $contactSheetDir = Join-Path $Work 'contact-sheet'
+    New-Item -ItemType Directory -Path $contactSheetDir -Force | Out-Null
+    $contactSheetAdditionalArgs = "@('--contact-sheet-dir', $(ConvertTo-PsSingleQuoted $contactSheetDir), '--contact-sheet-frames', '$ContactSheetFrameCount')"
+    $cmd = "$cmd -AdditionalArgs $contactSheetAdditionalArgs"
+}
 # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2/3 (sol BLOCKER 2 / fable HARDENING, direction corrected
 # HARNESS-3): PresentMon's own TimeInMs=0 origin is its internal trace-session start, which lands
 # somewhere between process creation and Start-PresentMonCapture returning (it blocks up to 3s to
@@ -1518,6 +1550,22 @@ Save-Json ([ordered]@{
     diagnostics = $diagnostics
     artifactRoot = $Pub
 }) (Join-Path $Pub 'summary.json')
+# CUDA-PLAYBACK-CONTACT-SHEET-1: publish the raw per-frame PNG+JSON pairs the app's own
+# --contact-sheet-dir pass wrote (a no-op, touching nothing, when the switch was off -- see
+# $contactSheetDir's declaration above). Composing them into one labelled sheet is left to a
+# later step, off this job (see the -ContactSheet param's own comment). Published BEFORE the
+# artifact index below so these land in it the same way every other published file does.
+if ($ContactSheetEnabled -and $contactSheetDir -and (Test-Path -LiteralPath $contactSheetDir)) {
+    # New-AttrCudaDirectory only (never a raw New-Item -Force), one level at a time, matching
+    # every other $Pub subdirectory in this job (e.g. the 'logs' dir above): it refuses a linked
+    # parent or an occupied non-directory target instead of silently writing through one.
+    [void](New-AttrCudaDirectory -Path (Join-Path $Pub 'contact-sheet'))
+    $contactSheetPubDir = Join-Path $Pub 'contact-sheet\raw'
+    [void](New-AttrCudaDirectory -Path $contactSheetPubDir)
+    Get-ChildItem -LiteralPath $contactSheetDir -File | ForEach-Object {
+        [void](Publish-AttrCudaFileCopy -Source $_.FullName -Destination (Join-Path $contactSheetPubDir $_.Name))
+    }
+}
 $files = Get-ChildItem -LiteralPath $Pub -Recurse -File | ForEach-Object { [ordered]@{ path=$_.FullName.Substring($Pub.Length + 1); sha256=(Get-Sha $_.FullName); bytes=$_.Length } }
 Save-Json ([ordered]@{ schema='playback-attr-3-cuda-artifact-index.v1'; artifactRoot=$Pub; fixtureRehearsal=$FixtureRehearsal; files=$files }) (Join-Path $Pub 'artifact-index.json')
 # The agent-visible result line says which kind of run this was, in the verb itself: the agent's
@@ -1564,6 +1612,8 @@ $text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
     FIXTURE_REHEARSAL = $fixtureRehearsalLiteral
     AGENT_ROOT = $AgentRoot
     FIXTURE_SHA256 = $FixtureSha256
+    CONTACT_SHEET_ENABLED = $contactSheetEnabledLiteral
+    CONTACT_SHEET_FRAME_COUNT = $contactSheetFrameCountLiteral
     EMBEDDED_FUNCTIONS = $embeddedFunctions
 })
 
