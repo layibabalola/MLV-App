@@ -283,6 +283,70 @@ def test_percentile_requires_at_least_one_value():
         percentile([], 0.5)
 
 
+# --- presentmon_status refusal (PRESENTMON-HARNESS-ROBUSTNESS-2) -------------------
+
+def test_degraded_presentmon_status_refuses_to_build_a_report(tmp_path):
+    # The job's own sufficiency gate already found this leg's evidence too thin -- this
+    # consumer must refuse before even reading either file, never compute a histogram
+    # from evidence its own producer flagged as insufficient.
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    with pytest.raises(RefreshHistogramError, match="degraded"):
+        build_report(str(csv_path), str(log_path), presentmon_status="degraded")
+
+
+def test_degraded_presentmon_status_reason_is_echoed_in_the_refusal(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    with pytest.raises(RefreshHistogramError, match="coverage too thin"):
+        build_report(
+            str(csv_path), str(log_path),
+            presentmon_status="degraded",
+            presentmon_status_reason="coverage too thin",
+        )
+
+
+def test_verified_zero_displayed_presentmon_status_also_refuses(tmp_path):
+    # Any non-'ok' status refuses -- not just the literal string 'degraded' -- so a future
+    # distinct status value (e.g. DISPLAY_ASLEEP's verified_zero_displayed) is covered too
+    # without this consumer needing to enumerate every non-ok spelling.
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    with pytest.raises(RefreshHistogramError, match="verified_zero_displayed"):
+        build_report(str(csv_path), str(log_path), presentmon_status="verified_zero_displayed")
+
+
+def test_ok_presentmon_status_builds_a_report_normally(tmp_path):
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    report = build_report(str(csv_path), str(log_path), presentmon_status="ok")
+    assert report["presentMon"]["sampleCount"] == 20
+
+
+def test_omitted_presentmon_status_builds_a_report_normally(tmp_path):
+    # Backward compatible: a caller with no status to pass (e.g. an ad hoc CLI invocation
+    # against a bare csv) gets the pre-existing, unconditional behaviour.
+    csv_path = tmp_path / "presentmon-series.csv"
+    _write_presentmon_csv(csv_path, [16.67] * 12 + [33.34] * 5 + [50.01] * 3)
+    log_path = tmp_path / "mlvapp.log"
+    _write_frame_log(log_path, count=10, start=1)
+
+    report = build_report(str(csv_path), str(log_path))
+    assert report["presentMon"]["sampleCount"] == 20
+
+
 # --- end-to-end build_report ----------------------------------------------------------
 
 def test_build_report_end_to_end(tmp_path):

@@ -32,6 +32,16 @@ SCHEMA = "mlvapp.refresh-period-histogram.v1"
 
 PRESENTMON_INTERVAL_COLUMN = "msBetweenDisplayChange"
 
+# PRESENTMON-HARNESS-ROBUSTNESS-2: the job's own sufficiency gate (playback-attr-3-cuda-job.ps1)
+# is the single source of truth for whether a leg's PresentMon evidence is thin -- it alone knows
+# the app-side denominator (how many times MLVApp itself swapped in the window) that the coverage
+# fraction is computed against; this module only ever sees the exported interval CSV, which cannot
+# reconstruct that denominator on its own. A caller who has the job's presentMonStatus (from
+# summary.json/evidence-manifest.json) passes it through so this histogram -- the one downstream
+# reader of the interval CSV -- refuses to present a degraded leg's numbers as measured, rather
+# than silently re-deriving a weaker threshold from the CSV alone.
+PRESENTMON_STATUS_OK = "ok"
+
 PREP_REGIONS = (
     "prep_region_setup",
     "prep_region_gpu",
@@ -255,7 +265,18 @@ def build_report(
     frame_log_path: str,
     min_frame_rows: int = 10,
     refresh_period_ms: float | None = None,
+    presentmon_status: str | None = None,
+    presentmon_status_reason: str | None = None,
 ) -> dict:
+    # Checked BEFORE either file is even read: a caller that already knows the leg is degraded
+    # (or verified_zero_displayed/unavailable) gets a clear, immediate refusal naming the status,
+    # never a histogram computed from evidence its own producer already flagged as insufficient.
+    if presentmon_status is not None and presentmon_status != PRESENTMON_STATUS_OK:
+        reason_suffix = f": {presentmon_status_reason}" if presentmon_status_reason else ""
+        raise RefreshHistogramError(
+            f"refusing to present a refresh-period histogram as measured: presentMonStatus="
+            f"{presentmon_status!r} (not {PRESENTMON_STATUS_OK!r}){reason_suffix}"
+        )
     intervals = parse_presentmon_intervals(presentmon_csv_path)
     frame_rows = parse_frame_log_rows(frame_log_path, min_rows=min_frame_rows)
 
@@ -325,6 +346,20 @@ def main(argv: Iterable[str] | None = None) -> int:
             "capture is too ambiguous to trust (see compute_refresh_period)."
         ),
     )
+    parser.add_argument(
+        "--presentmon-status",
+        default=None,
+        help=(
+            "The producing job's own presentMonStatus (summary.json/evidence-manifest.json). "
+            "When given and not 'ok', this refuses to compute or present a histogram at all -- "
+            "the job's sufficiency gate already found the evidence too thin/absent to measure."
+        ),
+    )
+    parser.add_argument(
+        "--presentmon-status-reason",
+        default=None,
+        help="The producing job's presentMonStatusReason, echoed into the refusal message.",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     try:
@@ -333,6 +368,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.frame_log,
             min_frame_rows=args.min_frame_rows,
             refresh_period_ms=args.refresh_period_ms,
+            presentmon_status=args.presentmon_status,
+            presentmon_status_reason=args.presentmon_status_reason,
         )
     except RefreshHistogramError as exc:
         print(f"refresh_period_histogram: FAIL: {exc}", file=sys.stderr)
