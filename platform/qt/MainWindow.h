@@ -152,6 +152,8 @@ public:
         int settleCpuMaxMs = 45000;
         QString screenshotOutputPath;
         QString windowScreenshotOutputPath;
+        QString contactSheetDir; // --contact-sheet-dir: opt-in, default empty (off). Paired with contactSheetFrames.
+        int contactSheetFrames = 0; // --contact-sheet-frames: N evenly spaced presented-frame grabs; 0 = off.
         PlaybackProfileScope scope = PlaybackProfileScope::None;
         PlaybackProfileDebayerRequest playbackDebayer =
             PlaybackProfileDebayerRequest::Auto;

@@ -9185,6 +9185,16 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         QThread::msleep( 10 );
     }
 
+    // Snapshot the measured-interval span now, before any later step (stress check,
+    // screenshots, stopping playback) can move the timeline: the un-timed contact-sheet
+    // pass below replays evenly spaced points across exactly this span, after playback
+    // has stopped and playback_smoke/swap telemetry has closed (see its capture block).
+    const qint64 contactSheetMeasuredElapsedMs = playbackClock.elapsed();
+    const int contactSheetStartFrame = options.startFrame;
+    const int contactSheetEndFrame = m_playbackSmokeLastPresentedFrame >= 0
+        ? m_playbackSmokeLastPresentedFrame
+        : ui->horizontalSliderPosition->value();
+
     if( m_playbackSmokeTargetPresentedFrames > 0
      && m_playbackSmokePresentedFrames != m_playbackSmokeTargetPresentedFrames )
     {
@@ -9439,6 +9449,180 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
     }
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
 
+    // Contact-sheet capture: an un-timed pass that replays N evenly spaced frame
+    // positions from the just-measured playback span. Deliberately placed AFTER
+    // actionPlay was unchecked above (which already ran finishPlaybackSmokeTelemetry,
+    // closing both the playback_smoke frame counters -- m_playbackSmokeActive is now
+    // false, so the seeks below cannot increment m_playbackSmokePresentedFrames -- and
+    // the GpuDisplayWindow swap-telemetry session, whose own doc comment guarantees
+    // swaps after swapTelemetrySnapshot() are no-ops for that (now-finished) session).
+    // So each grabPresentedFramebufferIfActive() readback below is free to run without
+    // perturbing the fps/swap-cadence metrics already finalized for this run.
+    int contactSheetFramesWritten = 0;
+    QString contactSheetError;
+    if( !options.contactSheetDir.isEmpty() && options.contactSheetFrames > 0 )
+    {
+        const QDir contactSheetDirInfo( options.contactSheetDir );
+        if( !contactSheetDirInfo.exists() && !QDir().mkpath( options.contactSheetDir ) )
+        {
+            err << "[GUI-SMOKE] ERROR: failed to create contact sheet directory: "
+                << options.contactSheetDir << "\n";
+            return 13;
+        }
+
+        const double contactSheetFps = getFramerate();
+        const int contactSheetClipFrameCount = loadedFrameCount();
+        const int sheetStartFrame = qBound(
+            0, contactSheetStartFrame, qMax( 0, contactSheetClipFrameCount - 1 ) );
+        const int sheetEndFrame = qBound(
+            sheetStartFrame, contactSheetEndFrame, qMax( 0, contactSheetClipFrameCount - 1 ) );
+
+        for( int i = 0; i < options.contactSheetFrames; ++i )
+        {
+            const double fraction = options.contactSheetFrames > 1
+                ? static_cast<double>( i ) / static_cast<double>( options.contactSheetFrames - 1 )
+                : 0.0;
+            const int targetFrame = sheetStartFrame
+                + qRound( fraction * static_cast<double>( sheetEndFrame - sheetStartFrame ) );
+
+            int settledFrame = targetFrame;
+            const bool settled = seekAndSettleLoadedClip(
+                targetFrame, "gui-smoke-contact-sheet-seek", &settledFrame );
+
+            QImage contactFrameImage;
+            QString contactFrameSource = QStringLiteral("app_internal_viewport_grab");
+            QString contactFrameReadbackReason;
+            quint64 contactFramePresentedSerial = 0;
+            bool contactFramePresentedSerialValid = false;
+            if( settled )
+            {
+                if( GpuDisplayWindow::isActive() )
+                {
+                    if( !GpuDisplayWindow::grabPresentedFramebufferIfActive(
+                            &contactFrameImage, &contactFrameReadbackReason,
+                            &contactFramePresentedSerial, &contactFramePresentedSerialValid )
+                     || contactFrameImage.isNull() )
+                    {
+                        contactFrameImage = QImage();
+                    }
+                    else
+                    {
+                        contactFrameSource = QStringLiteral("gl_window_framebuffer_readback");
+                    }
+                }
+                if( contactFrameImage.isNull()
+                 && ( GpuDisplayViewport::isTexturePresentationActive( ui->graphicsView )
+                   || GpuDisplayViewport::hasPresentedGpuReconTexture( ui->graphicsView ) )
+                 && ui->graphicsView && ui->graphicsView->viewport() )
+                {
+                    contactFrameImage = ui->graphicsView->viewport()->grab().toImage();
+                    contactFrameSource = QStringLiteral("app_internal_gl_viewport_grab");
+                }
+                if( contactFrameImage.isNull() && m_pGraphicsItem )
+                {
+                    contactFrameImage = m_pGraphicsItem->pixmap().toImage();
+                    contactFrameSource = QStringLiteral("app_internal_presented_pixmap");
+                }
+                if( contactFrameImage.isNull() && ui->graphicsView && ui->graphicsView->viewport() )
+                {
+                    contactFrameImage = ui->graphicsView->viewport()->grab().toImage();
+                    contactFrameSource = QStringLiteral("app_internal_viewport_grab");
+                }
+            }
+
+            const QString frameBaseName =
+                QStringLiteral("frame-%1").arg( i, 2, 10, QLatin1Char('0') );
+            const QString pngPath = contactSheetDirInfo.absoluteFilePath(
+                frameBaseName + QStringLiteral(".png") );
+            const QString jsonPath = contactSheetDirInfo.absoluteFilePath(
+                frameBaseName + QStringLiteral(".json") );
+
+            bool frameOk = settled && !contactFrameImage.isNull()
+                && contactFrameImage.save( pngPath, "PNG" );
+
+            const double elapsedMsForFrame = contactSheetFps > 0.0
+                ? ( static_cast<double>( settledFrame - sheetStartFrame )
+                    / contactSheetFps ) * 1000.0
+                : 0.0;
+
+            QJsonObject frameJson;
+            frameJson.insert( QStringLiteral("index"), i );
+            frameJson.insert( QStringLiteral("captured_utc"),
+                QDateTime::currentDateTimeUtc().toString( Qt::ISODateWithMs ) );
+            frameJson.insert( QStringLiteral("serial"), static_cast<double>(
+                contactFramePresentedSerialValid ? contactFramePresentedSerial
+                                                  : m_lastPresentedRequestSerial ) );
+            frameJson.insert( QStringLiteral("display_frame"), settledFrame );
+            frameJson.insert( QStringLiteral("elapsed_ms"), elapsedMsForFrame );
+            frameJson.insert( QStringLiteral("texture_source"), contactFrameSource );
+            frameJson.insert( QStringLiteral("path"), pngPath );
+            frameJson.insert( QStringLiteral("look_assist_enabled"),
+                ui->checkBoxLookAssistEnable->isChecked() );
+            frameJson.insert( QStringLiteral("look_assist_scene"),
+                m_lastLookAssistDiagnosticsValid ? m_lastLookAssistScene : QString() );
+            frameJson.insert( QStringLiteral("look_assist_exposure"),
+                ui->horizontalSliderExposure->value() );
+            frameJson.insert( QStringLiteral("look_assist_contrast"),
+                ui->horizontalSliderContrast->value() );
+            frameJson.insert( QStringLiteral("look_assist_pivot"),
+                ui->horizontalSliderPivot->value() );
+            frameJson.insert( QStringLiteral("look_assist_temperature"),
+                ui->horizontalSliderTemperature->value() );
+            frameJson.insert( QStringLiteral("look_assist_tint"),
+                ui->horizontalSliderTint->value() );
+            frameJson.insert( QStringLiteral("look_assist_vibrance"),
+                ui->horizontalSliderVibrance->value() );
+            frameJson.insert( QStringLiteral("look_assist_shadows"),
+                ui->horizontalSliderShadows->value() );
+            frameJson.insert( QStringLiteral("look_assist_highlights"),
+                ui->horizontalSliderHighlights->value() );
+            frameJson.insert( QStringLiteral("settled"), settled );
+            frameJson.insert( QStringLiteral("saved"), frameOk );
+
+            if( frameOk )
+            {
+                QFile sidecarFile( jsonPath );
+                if( sidecarFile.open( QIODevice::WriteOnly | QIODevice::Truncate ) )
+                {
+                    sidecarFile.write( QJsonDocument( frameJson ).toJson( QJsonDocument::Indented ) );
+                    sidecarFile.close();
+                    ++contactSheetFramesWritten;
+                }
+                else
+                {
+                    frameOk = false;
+                }
+            }
+
+            if( !frameOk && contactSheetError.isEmpty() )
+            {
+                contactSheetError = QStringLiteral(
+                    "frame %1 capture failed (settled=%2 reason=%3)" )
+                    .arg( i ).arg( bool01( settled ) ).arg( contactFrameReadbackReason );
+            }
+        }
+
+        logInteractionEvent(
+            QStringLiteral("gui_smoke.contact_sheet"),
+            QStringLiteral("dir=\"%1\" requested_frames=%2 written_frames=%3 "
+                            "start_frame=%4 end_frame=%5 measured_elapsed_ms=%6 error=\"%7\"")
+                .arg( options.contactSheetDir )
+                .arg( options.contactSheetFrames )
+                .arg( contactSheetFramesWritten )
+                .arg( sheetStartFrame )
+                .arg( sheetEndFrame )
+                .arg( contactSheetMeasuredElapsedMs )
+                .arg( contactSheetError ) );
+
+        if( contactSheetFramesWritten != options.contactSheetFrames )
+        {
+            err << "[GUI-SMOKE] ERROR: contact sheet capture incomplete; requested="
+                << options.contactSheetFrames << " written=" << contactSheetFramesWritten
+                << " detail=" << contactSheetError << "\n";
+            return 14;
+        }
+    }
+
     out << "[GUI-SMOKE] DONE clip=" << inputInfo.absoluteFilePath()
         << " duration_ms=" << durationMs
         << " settle_ms=" << settleMs
@@ -9449,6 +9633,7 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         << " settle_cpu_last_percent=" << QString::number( lastMeasuredCpuPercent, 'f', 3 )
         << " settle_cpu_elapsed_ms=" << settleClock.elapsed()
         << " diagnostic_log_file=" << CrashForensics::currentLogFilePath()
+        << " contact_sheet_frames_written=" << contactSheetFramesWritten
         << "\n";
 
     return 0;
