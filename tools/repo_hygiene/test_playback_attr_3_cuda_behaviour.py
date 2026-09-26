@@ -4381,11 +4381,20 @@ class DisplayWakeFunctionTests(_PwshCase):
         self.assertIn("ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE", result["openInputDesktopError"])
         self.assertIs(result["threadJoined"], False)
 
-    def _wake_with_overrides(self, *, running, secure, nudge_override: str) -> tuple:
+    _SAME_AS_BEFORE = object()
+
+    def _wake_with_overrides(self, *, running, secure, nudge_override: str,
+                              running_after=_SAME_AS_BEFORE) -> tuple:
         """Extract Start-AttrCudaDisplayWake's real closure, then override
         Get-AttrCudaScreensaverRunning/-Secure and Invoke-AttrCudaInputDesktopNudge -- same
         flat-scope override technique as test_a_native_load_failure_is_recorded_not_thrown, since
-        the real deployed job is one flat script, never an Import-Module boundary."""
+        the real deployed job is one flat script, never an Import-Module boundary.
+        Get-AttrCudaScreensaverRunning is called TWICE by Start-AttrCudaDisplayWake (before and
+        after the dismiss attempt); a call counter lets the override answer them differently.
+        -running_after defaults to the same value as -running, matching every pre-round-2 caller
+        that only cared about a single before/after reading."""
+        if running_after is self._SAME_AS_BEFORE:
+            running_after = running
         extract_script = self.tmp / "extract.ps1"
         extract_script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
@@ -4402,12 +4411,17 @@ class DisplayWakeFunctionTests(_PwshCase):
         self.assertEqual(extract_proc.returncode, 0, extract_proc.stdout + extract_proc.stderr)
 
         running_literal = "$null" if running is None else ("$true" if running else "$false")
+        running_after_literal = "$null" if running_after is None else ("$true" if running_after else "$false")
         secure_literal = "$null" if secure is None else ("$true" if secure else "$false")
         probe_script = self.tmp / "extracted.ps1"
         with probe_script.open("a", encoding="utf-8") as f:
             f.write(
                 "\n$ErrorActionPreference = 'Stop'\n"
-                f"function Get-AttrCudaScreensaverRunning {{ {running_literal} }}\n"
+                "$script:__wakeRunningCall = 0\n"
+                "function Get-AttrCudaScreensaverRunning {\n"
+                "    $script:__wakeRunningCall++\n"
+                f"    if ($script:__wakeRunningCall -le 1) {{ {running_literal} }} else {{ {running_after_literal} }}\n"
+                "}\n"
                 f"function Get-AttrCudaScreensaverSecure {{ {secure_literal} }}\n"
                 f"function Invoke-AttrCudaInputDesktopNudge {{ {nudge_override} }}\n"
                 "$w = Start-AttrCudaDisplayWake\n"
@@ -4536,6 +4550,68 @@ class DisplayWakeFunctionTests(_PwshCase):
         self.assertIs(result["screensaverSecureOwnerOnly"], False)
         self.assertIsNone(result["inputDesktopNudge"])
         self.assertNotIn("OpenInputDesktop", result["method"])
+
+    def test_dismiss_failed_is_false_when_no_screen_saver_was_running(self) -> None:
+        proc = self._wake_with_overrides(
+            running=False, secure=False,
+            nudge_override="throw 'MUST NOT BE CALLED when the screen saver is not running'")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "w.json").read_text(encoding="utf-8"))
+        self.assertIs(result["dismissFailed"], False)
+
+    def test_dismiss_failed_is_false_when_secure_owner_only_already_gated(self) -> None:
+        proc = self._wake_with_overrides(
+            running=True, secure=True,
+            nudge_override="throw 'MUST NOT BE CALLED when the screen saver is secure'")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "w.json").read_text(encoding="utf-8"))
+        self.assertIs(result["dismissFailed"], False)
+
+    def test_dismiss_failed_is_false_when_the_dismiss_actually_ended_the_screen_saver(self) -> None:
+        proc = self._wake_with_overrides(
+            running=True, secure=False, running_after=False,
+            nudge_override=(
+                "[ordered]@{ attempted=$true; openInputDesktopError=$null; "
+                "setThreadDesktopError=$null; sendInputError=$null; threadJoined=$true }"
+            ))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "w.json").read_text(encoding="utf-8"))
+        self.assertIs(result["screensaverRunningBefore"], True)
+        self.assertIs(result["screensaverRunningAfter"], False)
+        self.assertIs(result["dismissFailed"], False)
+
+    def test_dismiss_failed_is_true_when_still_running_after_a_dismiss_attempt(self) -> None:
+        # CUDA-PERF-DISPLAY-WAKE-3 round 2 (live UM evidence): both Ultra-Magnus legs recorded
+        # screensaverRunningAfter=TRUE with SendInput denied on every keep-alive tick -- the exact
+        # shape this pins, regardless of whether OpenInputDesktop/SetThreadDesktop themselves
+        # succeeded (they did, on both legs).
+        proc = self._wake_with_overrides(
+            running=True, secure=False, running_after=True,
+            nudge_override=(
+                "[ordered]@{ attempted=$true; openInputDesktopError=$null; "
+                "setThreadDesktopError=$null; "
+                "sendInputError='SendInput sent 0 of 2 events (lastError=5)'; threadJoined=$true }"
+            ))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "w.json").read_text(encoding="utf-8"))
+        self.assertIs(result["screensaverRunningBefore"], True)
+        self.assertIs(result["screensaverRunningAfter"], True)
+        self.assertIs(result["dismissFailed"], True)
+
+    def test_dismiss_failed_is_true_when_the_after_probe_itself_fails(self) -> None:
+        # Fail-closed, same shape as the secure/running-unknown gates above: an unknown after-state
+        # must never be read as "dismissed successfully" just because nothing threw.
+        proc = self._wake_with_overrides(
+            running=True, secure=False, running_after=None,
+            nudge_override=(
+                "[ordered]@{ attempted=$true; openInputDesktopError=$null; "
+                "setThreadDesktopError=$null; sendInputError=$null; threadJoined=$true }"
+            ))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "w.json").read_text(encoding="utf-8"))
+        self.assertIs(result["screensaverRunningBefore"], True)
+        self.assertIsNone(result["screensaverRunningAfter"])
+        self.assertIs(result["dismissFailed"], True)
         self.assertNotIn("SecureScreensaverNoDismissAttempted", result["method"])
 
 
@@ -4621,6 +4697,40 @@ class DisplayWakeNeverChangesScreensaverOrPowerSettingsTests(unittest.TestCase):
                 self.assertIsNone(match, f"found {match and match.group(0)!r} in {path.name}")
 
 
+class InputDesktopNudgeMaskTests(unittest.TestCase):
+    """CUDA-PERF-DISPLAY-WAKE-3 round 2 (live UM evidence): OpenInputDesktop/SetThreadDesktop
+    succeeded on both live legs (openInputDesktopError=null, setThreadDesktopError=null) but every
+    SendInput on the reassigned thread still returned lastError=5 (ERROR_ACCESS_DENIED) --
+    DESKTOP_JOURNALPLAYBACK is the access bit Microsoft documents SendInput as needing on the
+    desktop it injects into, which the round 1 mask (READOBJECTS|WRITEOBJECTS|SWITCHDESKTOP) did
+    not include."""
+
+    def setUp(self) -> None:
+        self.text = MODULE.read_text(encoding="utf-8")
+
+    def test_mask_includes_desktop_journalplayback(self) -> None:
+        self.assertIn("uint DESKTOP_JOURNALPLAYBACK = 0x0020;", self.text)
+        desired_access_at = self.text.index("uint desiredAccess = DESKTOP_READOBJECTS")
+        line_end_at = self.text.index(";", desired_access_at)
+        line = self.text[desired_access_at:line_end_at]
+        self.assertIn("DESKTOP_JOURNALPLAYBACK", line,
+                       "DESKTOP_JOURNALPLAYBACK must be OR'd into the mask actually passed to "
+                       "OpenInputDesktop, not just declared")
+
+    def test_mask_stays_minimal_exactly_the_four_named_bits(self) -> None:
+        # The fable-note constraint from round 1 still holds: no fallback to a broader mask (e.g.
+        # GENERIC_ALL) on a continued denial -- a continued failure with this bit present points at
+        # UIPI instead. Pinned to the exact OR expression, not just "GENERIC_ALL absent somewhere",
+        # so an unrelated broadening would still fail this test.
+        desired_access_at = self.text.index("uint desiredAccess =")
+        line_end_at = self.text.index(";", desired_access_at)
+        line = self.text[desired_access_at:line_end_at]
+        self.assertEqual(
+            "uint desiredAccess = DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | "
+            "DESKTOP_SWITCHDESKTOP | DESKTOP_JOURNALPLAYBACK",
+            line)
+
+
 class DisplayWakeJobOrderingTests(unittest.TestCase):
     """Static ordering/shape checks on the generator's own template text (no pwsh required)."""
 
@@ -4687,10 +4797,11 @@ class DisplayWakeJobOrderingTests(unittest.TestCase):
         # DISPLAY_ASLEEP itself, and the success summary.json. CUDA-PERF-DISPLAY-WAKE-3 round 1
         # adds two more: the two KEEPALIVE_FAILED checkpoints (before the smoke launch, and again
         # at the start of the measured interval) -- 15 grows to 17. Round 1b adds a third
-        # KEEPALIVE_FAILED checkpoint (after the measured interval ends) -- 17 grows to 18.
+        # KEEPALIVE_FAILED checkpoint (after the measured interval ends) -- 17 grows to 18. Round 2
+        # adds the DISPLAY_WAKE_DISMISS_FAILED gate -- 18 grows to 19.
         summary_writes = body.count("(Join-Path $Pub 'summary.json')")
         display_wake_fields = body.count("displayWake=$displayWake") + body.count("displayWake = $displayWake")
-        self.assertEqual(18, summary_writes, "a summary.json write site was added/removed after the wake")
+        self.assertEqual(19, summary_writes, "a summary.json write site was added/removed after the wake")
         # +1: the success path also stamps displayWake into evidence-manifest.json, a second file.
         self.assertEqual(summary_writes + 1, display_wake_fields)
 
@@ -4732,6 +4843,22 @@ class DisplayWakeJobOrderingTests(unittest.TestCase):
         self.assertIn("result='SCREENSAVER_SECURE_OWNER_ONLY'", block)
         self.assertIn("displayWake=$displayWake", block)
         self.assertIn("exit 25", block)
+
+    def test_dismiss_failed_publishes_a_typed_result_and_exits_27_before_the_keep_alive_starts(self) -> None:
+        # CUDA-PERF-DISPLAY-WAKE-3 round 2 (live UM evidence, defect class fix): a screen saver
+        # this job could not confirm it actually dismissed must stop the leg here, typed, before the
+        # periodic keep-alive is even armed -- mirrors the secure-owner-only gate immediately above
+        # it in the generator.
+        secure_exit_at = self.text.index("if ($displayWake.screensaverSecureOwnerOnly) {")
+        dismiss_exit_at = self.text.index("if ($displayWake.dismissFailed) {", secure_exit_at)
+        keep_alive_at = self.text.index(
+            "$displayWakeKeepAlive = Start-AttrCudaDisplayWakeKeepAlive", dismiss_exit_at)
+        self.assertGreater(dismiss_exit_at, secure_exit_at,
+                            "the dismiss-failed gate must run after the secure/unknown gate")
+        block = self.text[dismiss_exit_at:keep_alive_at]
+        self.assertIn("result='DISPLAY_WAKE_DISMISS_FAILED'", block)
+        self.assertIn("displayWake=$displayWake", block)
+        self.assertIn("exit 27", block)
 
     def test_keep_alive_health_checkpoints_bracket_the_presentmon_spawn_and_stop_the_leg_typed(self) -> None:
         # CUDA-PERF-DISPLAY-WAKE-3 round 1: two checkpoints, in this order -- the first right
@@ -4903,6 +5030,37 @@ class DisplayWakeKeepAliveFunctionTests(_PwshCase):
         self.assertEqual(0, result["successCount"])
         self.assertEqual(0, result["failureCount"])
         self.assertIn("ATTRCUDA_KEEPALIVE_NATIVE_UNAVAILABLE", result["setupError"])
+
+
+class DisplayWakeKeepAlivePerTickDesktopSwitchTests(unittest.TestCase):
+    """CUDA-PERF-DISPLAY-WAKE-3 round 2 (live UM evidence, defect class fix): each keep-alive tick
+    must follow the input desktop the same way the one-time dismiss does -- a plain SendInput on
+    the Runspace's own (Default) desktop is exactly what both live Ultra-Magnus legs showed failing
+    on every tick once a screen saver had taken the input desktop. Static text-scan, since a live
+    screen saver cannot be reproduced in this test environment -- see the round-2 brief."""
+
+    def setUp(self) -> None:
+        self.text = MODULE.read_text(encoding="utf-8")
+        loop_start_at = self.text.index("$loopScript = {")
+        loop_end_at = self.text.index(
+            "# CUDA-PERF-DISPLAY-WAKE-3 round 1 (fable hardening): CreateRunspace/Open/BeginInvoke",
+            loop_start_at)
+        self.loop_body = self.text[loop_start_at:loop_end_at]
+
+    def test_each_tick_calls_the_dedicated_thread_input_desktop_nudge(self) -> None:
+        self.assertIn("[MLVAppAttrCudaDisplayWake.InputDesktopNudge]::Run(", self.loop_body)
+
+    def test_the_loop_body_never_calls_sendinput_directly(self) -> None:
+        # A mutation reverting to the round-1 plain SendInput call (on the Runspace's own thread,
+        # which never follows the input desktop) must red this test even if it happens to leave
+        # the InputDesktopNudge.Run call in place too.
+        self.assertNotIn("NativeMethods]::SendInput(", self.loop_body)
+
+    def test_start_keep_alive_passes_a_join_timeout_into_the_loop(self) -> None:
+        self.assertIn("AddArgument($NudgeJoinTimeoutMilliseconds)", self.text)
+        self.assertIn("param($StopEvent, $IntervalSeconds, $NudgeState, $JoinTimeoutMilliseconds)",
+                       self.loop_body)
+        self.assertIn("InputDesktopNudge]::Run([int]$JoinTimeoutMilliseconds)", self.loop_body)
 
 
 # --------------------------------------------------------------------------------------------
