@@ -1253,6 +1253,11 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("0"));
     parser.addOption(contactSheetFramesOpt);
 
+    const QCommandLineOption contactSheetSeekModeOpt(
+        QStringLiteral("contact-sheet-seek-mode"),
+        QStringLiteral("Explicit, labelled alternative to the default contact-sheet capture pass: grabs frames by pausing/seeking after playback stops instead of during a genuine second playback pass. A seeked frame is rendered by a different, non-playback path and can show a different look; sidecars from this mode record playback_path=false. Default off."));
+    parser.addOption(contactSheetSeekModeOpt);
+
     const QCommandLineOption scopeOpt(
         QStringLiteral("scope"),
         QStringLiteral("Force a live scope during the smoke: none, histogram, waveform, parade, vectorscope. If omitted, the user's persisted GUI state is used."),
@@ -1596,6 +1601,7 @@ static int runGuiPlaybackSmoke(QApplication &app)
         ? QFileInfo(parser.value(contactSheetDirOpt)).absoluteFilePath()
         : QString();
     options.contactSheetFrames = contactSheetFrames;
+    options.contactSheetSeekMode = parser.isSet(contactSheetSeekModeOpt);
     options.scope = scope;
     options.playbackDebayer = playbackDebayer;
     options.playbackProcessing = playbackProcessing;

@@ -154,6 +154,110 @@ TEST(ContactSheetCaptureWiring, EachSidecarCarriesTheFieldsTheComposerAndOwnerNe
     }
 }
 
+TEST(ContactSheetCaptureWiring, SeekModeDefaultsToOffSoPlaybackPassCaptureIsTheDefault)
+{
+    const QString header = readRepoFile(QStringLiteral("platform/qt/MainWindow.h"));
+    const QString optionsStruct = sliceBetween(header,
+        QStringLiteral("struct GuiPlaybackSmokeOptions"),
+        QStringLiteral("int runHeadlessPlaybackProfile"));
+    ASSERT_FALSE(optionsStruct.isEmpty());
+    ASSERT_TRUE(optionsStruct.contains(QStringLiteral("bool contactSheetSeekMode = false;")));
+}
+
+TEST(ContactSheetCaptureWiring, CliWiresTheSeekModeFlag)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/main.cpp"));
+    ASSERT_TRUE(source.contains(QStringLiteral("QStringLiteral(\"contact-sheet-seek-mode\")")));
+    ASSERT_TRUE(source.contains(
+        QStringLiteral("options.contactSheetSeekMode = parser.isSet(contactSheetSeekModeOpt);")));
+}
+
+TEST(ContactSheetCaptureWiring, PlaybackModeRestartsPlaybackOnlyAfterTheMeasuredIntervalAndPlaybackStopAndIdleDrain)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    const int timedLoopAt = smokeBody.indexOf(
+        QStringLiteral("while( playbackClock.elapsed() < durationMs && ui->actionPlay->isChecked() )"));
+    const int stopPlaybackAt = smokeBody.indexOf(QStringLiteral("ui->actionPlay->setChecked( false );"));
+    const int idleDrainAt = smokeBody.indexOf(
+        QStringLiteral("for( int attempt = 0; attempt < 400 && m_pRenderThread && !m_pRenderThread->isIdle(); ++attempt )"),
+        stopPlaybackAt);
+    const int captureActiveAt = smokeBody.indexOf(QStringLiteral("m_contactSheetCaptureActive = true;"));
+    const int restartPlayAt = smokeBody.indexOf(QStringLiteral("ui->actionPlay->trigger();"), captureActiveAt);
+
+    ASSERT_TRUE(timedLoopAt >= 0);
+    ASSERT_TRUE(stopPlaybackAt > timedLoopAt);
+    ASSERT_TRUE(idleDrainAt > stopPlaybackAt);
+    // The playback-mode branch (which sets m_contactSheetCaptureActive and then restarts
+    // playback) lives inside the same capture guard as the seek-mode branch, so it too must
+    // sit strictly after the measured interval's stop + idle-drain -- never inside it.
+    ASSERT_TRUE(captureActiveAt > idleDrainAt);
+    ASSERT_TRUE(restartPlayAt > captureActiveAt);
+}
+
+TEST(ContactSheetCaptureWiring, PerPresentedFrameHookIsCalledFromTheSameSiteAsPlaybackSmokeTelemetryAndGatedOnItsOwnFlag)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+
+    // Declared next to notePlaybackSmokePresentedFrame and called from the same real-
+    // presented-frame call site (finishPresentedFrame), immediately after it -- so every
+    // playback-mode contact-sheet grab is of a frame actually presented during playback,
+    // the same event that drives the playback_smoke fps/frame counters.
+    const int noteCallAt = source.indexOf(
+        QStringLiteral("notePlaybackSmokePresentedFrame( displayFrame, readyFrame, requestContext );"));
+    const int hookCallAt = source.indexOf(
+        QStringLiteral("noteContactSheetPresentedFrame( displayFrame, readyFrame, requestContext );"));
+    ASSERT_TRUE(noteCallAt >= 0);
+    ASSERT_TRUE(hookCallAt > noteCallAt);
+    ASSERT_TRUE(hookCallAt - noteCallAt < 200);
+
+    // Gated on its own flag, never on m_playbackSmokeActive -- it must keep working (and keep
+    // counting) after the measured interval's playback_smoke session has already closed.
+    const QString hookBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::noteContactSheetPresentedFrame("),
+        QStringLiteral("void MainWindow::finishPlaybackSmokeTelemetry"));
+    ASSERT_FALSE(hookBody.isEmpty());
+    ASSERT_TRUE(hookBody.contains(QStringLiteral("if( !m_contactSheetCaptureActive ) return;")));
+    ASSERT_FALSE(hookBody.contains(QStringLiteral("m_playbackSmokeActive")));
+}
+
+TEST(ContactSheetCaptureWiring, PlaybackModeSidecarRecordsRenderPathAndPlaybackPathTrue)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString hookBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::noteContactSheetPresentedFrame("),
+        QStringLiteral("void MainWindow::finishPlaybackSmokeTelemetry"));
+    ASSERT_FALSE(hookBody.isEmpty());
+    ASSERT_TRUE(hookBody.contains(QStringLiteral("QStringLiteral(\"render_path\")")));
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"playback_path\"), true );")));
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("mainWindowGpuPlaybackPipelineStatusToken( contactFramePipelineStatus )")));
+}
+
+TEST(ContactSheetCaptureWiring, SeekModeSidecarRecordsPlaybackPathFalse)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+    // Not sliceBetween(..., "else"): the seek branch's own body contains several inner
+    // if/else fallback chains, whose first "else" would truncate the slice long before the
+    // sidecar-writing code below it. Slice to the playback-mode branch's own distinctive
+    // first statement instead, which only appears after the seek branch's closing brace.
+    const QString seekBranch = sliceBetween(smokeBody,
+        QStringLiteral("if( options.contactSheetSeekMode )"),
+        QStringLiteral("m_contactSheetCaptureDir = options.contactSheetDir;"));
+    ASSERT_FALSE(seekBranch.isEmpty());
+    ASSERT_TRUE(seekBranch.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"playback_path\"), false );")));
+}
+
 TEST(ContactSheetCaptureWiring, GpuWindowReadbackIsTriedBeforeAnyCpuPathFallback)
 {
     const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));

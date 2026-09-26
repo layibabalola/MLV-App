@@ -154,6 +154,13 @@ public:
         QString windowScreenshotOutputPath;
         QString contactSheetDir; // --contact-sheet-dir: opt-in, default empty (off). Paired with contactSheetFrames.
         int contactSheetFrames = 0; // --contact-sheet-frames: N evenly spaced presented-frame grabs; 0 = off.
+        // --contact-sheet-seek-mode: opt-in, default off. The default capture pass replays the
+        // measured span via a genuine second (un-timed) PLAYBACK pass, so every grab comes from
+        // the real playback fast path (CUDA texture-present included) the owner is auditing --
+        // never a paused/seeked frame, which is rendered by a different, non-playback path and
+        // can show a different look. This flag keeps the OLD seek-then-grab capture available as
+        // an explicit, labelled alternative (its sidecars record playback_path=false).
+        bool contactSheetSeekMode = false;
         PlaybackProfileScope scope = PlaybackProfileScope::None;
         PlaybackProfileDebayerRequest playbackDebayer =
             PlaybackProfileDebayerRequest::Auto;
@@ -1018,6 +1025,20 @@ private:
     int m_playbackSmokeTargetPresentedFrames = 0;
     int m_playbackSmokeFirstPresentedFrame = -1;
     int m_playbackSmokeLastPresentedFrame = -1;
+    // Contact-sheet capture-during-playback (CUDA-PLAYBACK-CONTACT-SHEET-1 r1b): an un-timed
+    // SECOND playback pass, run after the measured interval closes and playback_smoke telemetry
+    // has finished, so every grab below is of a genuinely presented playback frame -- never a
+    // paused/seeked one. Independent of m_playbackSmokeActive/m_playbackSmokePresentedFrames on
+    // purpose: this must keep working (and keep counting) even though the measured-interval
+    // telemetry session it runs after is already closed. See noteContactSheetPresentedFrame().
+    bool m_contactSheetCaptureActive = false;
+    QString m_contactSheetCaptureDir;
+    QVector<int> m_contactSheetCaptureTargetFrames;
+    int m_contactSheetCaptureNextTargetIndex = 0;
+    int m_contactSheetCaptureStartFrame = 0;
+    double m_contactSheetCaptureFps = 0.0;
+    int m_contactSheetCaptureFramesWritten = 0;
+    QString m_contactSheetCaptureError;
     uint64_t m_dualIsoWarmupTelemetryPresentationGeneration = 0;
     int m_dualIsoWarmupTelemetryPresentedFrames = 0;
     uint64_t m_playbackSmokeStartRequestSerial = 0;
@@ -1392,6 +1413,13 @@ private:
                                           const RenderFrameThread::ReadyFrame &readyFrame,
                                           const PresentationRequestContext &requestContext );
     void finishPlaybackSmokeTelemetry( const char *reason );
+    // --contact-sheet-dir's playback-mode capture pass only (CUDA-PLAYBACK-CONTACT-SHEET-1 r1b):
+    // called from the same real-presented-frame call site as notePlaybackSmokePresentedFrame
+    // (finishPresentedFrame), gated on m_contactSheetCaptureActive, never on m_playbackSmokeActive
+    // -- see runGuiPlaybackSmoke()'s contact-sheet capture block.
+    void noteContactSheetPresentedFrame( uint64_t displayFrame,
+                                        const RenderFrameThread::ReadyFrame &readyFrame,
+                                        const PresentationRequestContext &requestContext );
     // --gui-smoke-playback only (CUDA-PERF-PLAYBACK-FOREGROUND-1): forces the main window
     // and the GPU display window to the OS foreground and verifies with
     // GetForegroundWindow(); never called from normal (non-smoke) startup or from the
