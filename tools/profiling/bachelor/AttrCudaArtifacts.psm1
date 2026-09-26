@@ -2617,11 +2617,13 @@ function Start-AttrCudaDisplayWake {
     .screensaverRunningAfter (each $true/$false/$null -- $null only when that probe itself
     failed), .screensaverSecure (SPI_GETSCREENSAVESECURE, read-only, CUDA-PERF-DISPLAY-WAKE-2
     round 1c: $true/$false/$null -- $null when the probe itself failed), .screensaverSecureOwnerOnly
-    ($true whenever the screen saver is already running AND its secure state is EITHER secure OR
-    UNKNOWN -- CUDA-PERF-DISPLAY-WAKE-3 round 1 fail-closed fix: a probe failure is never treated
-    as "not secure", since that would arm a dismissal attempt against a screen saver this job
-    cannot prove is safe to touch), .screensaverSecureReason ($null, 'secure', or 'unknown' --
-    which of the two conditions set .screensaverSecureOwnerOnly, for evidence/diagnostics), the
+    ($true unless the screen saver is CONFIRMED not running (.screensaverRunningBefore -eq $false),
+    or CONFIRMED running with a CONFIRMED not-secure state (-eq $true / -eq $false) -- CUDA-PERF-
+    DISPLAY-WAKE-3 round 1 fail-closed fix: a secure-probe failure is never treated as "not secure";
+    round 1b fail-closed fix: a running-probe failure ($null) is never treated as "not running"
+    either, since either failure would arm a dismissal attempt against a screen saver this job
+    cannot prove is safe to touch), .screensaverSecureReason ($null, 'secure', 'unknown', or
+    'running_unknown' -- which condition set .screensaverSecureOwnerOnly, for evidence/diagnostics), the
     caller's signal to stop the leg with a typed SCREENSAVER_SECURE_OWNER_ONLY result rather than
     attempting anything: ending a password-protected (or unprovably-not-password-protected) screen
     saver is an owner action), .inputDesktopNudge (the nested evidence from
@@ -2639,13 +2641,26 @@ function Start-AttrCudaDisplayWake {
     $screensaverActive = Get-AttrCudaScreensaverActive
     $screensaverBefore = Get-AttrCudaScreensaverRunning
     $screensaverSecure = Get-AttrCudaScreensaverSecure
-    # CUDA-PERF-DISPLAY-WAKE-3 round 1 (sol BLOCKER, fail-closed on unknown): only a CONFIRMED
-    # $false reads as "not secure" -- $true and $null (the probe itself failed) both gate the same
-    # way. The prior `-eq $true` here let a probe failure silently fall through to the dismissal
-    # branches below, on a screen saver this job never actually confirmed was safe to touch.
-    $screensaverSecureOwnerOnly = ($screensaverBefore -eq $true) -and ($screensaverSecure -ne $false)
+    # CUDA-PERF-DISPLAY-WAKE-3 round 1 (sol BLOCKER, fail-closed on unknown secure state) and
+    # round 1b (sol BLOCKER, fail-closed on unknown RUNNING state): only a CONFIRMED $false reads
+    # as "not secure", and only a CONFIRMED $false reads as "not running". A prior `-eq $true`
+    # gate on screensaverBefore let a running-state probe failure fall through to the plain
+    # SendInput dismissal branch below (elseif ($nativeAvailable) at ~line 2678) -- exactly the
+    # branch meant for "confirmed not running" -- on a screen saver this job never actually
+    # confirmed was safe to touch. Only a definite running=$false, or (running=$true AND
+    # secure=$false), may ever reach a dismissal path; running=$null is treated the same as
+    # running=$true+secure-unknown (owner-only, no input of any kind).
+    $screensaverSecureOwnerOnly = if ($screensaverBefore -eq $false) {
+        $false
+    } elseif ($screensaverBefore -eq $true) {
+        $screensaverSecure -ne $false
+    } else {
+        $true
+    }
     $screensaverSecureReason = if (-not $screensaverSecureOwnerOnly) {
         $null
+    } elseif ($null -eq $screensaverBefore) {
+        'running_unknown'
     } elseif ($null -eq $screensaverSecure) {
         'unknown'
     } else {
@@ -2661,7 +2676,9 @@ function Start-AttrCudaDisplayWake {
         # boundary: no dismiss attempt of any kind is made, on either path below. The caller (the
         # attribution job) is expected to stop the leg on this flag before touching footage or the
         # smoke run.
-        $sendInputError = if ($screensaverSecureReason -eq 'unknown') {
+        $sendInputError = if ($screensaverSecureReason -eq 'running_unknown') {
+            'ATTRCUDA_SCREENSAVER_SECURE_OWNER_ONLY whether a screen saver is running could not be read, so secure dismissal cannot be ruled out; treated as running+secure -- no dismiss attempted -- ending it is an owner action'
+        } elseif ($screensaverSecureReason -eq 'unknown') {
             'ATTRCUDA_SCREENSAVER_SECURE_OWNER_ONLY screen saver is running and whether it is secure (password on resume) could not be read; treated as secure -- no dismiss attempted -- ending it is an owner action'
         } else {
             'ATTRCUDA_SCREENSAVER_SECURE_OWNER_ONLY screen saver is running and secure (password on resume); no dismiss attempted -- ending it is an owner action'
@@ -2786,10 +2803,13 @@ function Start-AttrCudaDisplayWakeKeepAlive {
     DISPLAY-WAKE-3 round 1 adds .nudgeState.successCount/.failureCount/.lastError/
     .lastFailureUtc, so a caller can tell a healthy tick from a failed one instead of only
     counting attempts. .setupError is $null when the background pipeline started; non-$null means
-    CreateRunspace/Open/BeginInvoke itself failed (recorded, never thrown -- CUDA-PERF-
-    DISPLAY-WAKE-3 round 1 hardening) and .runspace/.powershell/.asyncResult are all $null, so
-    Stop-AttrCudaDisplayWakeKeepAlive and Get-AttrCudaDisplayWakeKeepAliveHealth both already
-    tolerate that shape.
+    either CreateRunspace/Open/BeginInvoke itself failed (recorded, never thrown -- CUDA-PERF-
+    DISPLAY-WAKE-3 round 1 hardening) or the native P/Invoke type could not be loaded at all
+    (CUDA-PERF-DISPLAY-WAKE-3 round 1b: no Runspace is even started in that case, since a loop with
+    no native method to call could never do anything -- a prior version discarded that Boolean and
+    started an always-healthy-looking loop that silently nudged nothing on every tick), and in
+    either case .runspace/.powershell/.asyncResult are all $null, so Stop-AttrCudaDisplayWakeKeepAlive
+    and Get-AttrCudaDisplayWakeKeepAliveHealth both already tolerate that shape.
     #>
     [CmdletBinding()]
     param(
@@ -2797,7 +2817,33 @@ function Start-AttrCudaDisplayWakeKeepAlive {
         [int]$IntervalSeconds = 15
     )
 
-    [void](Register-AttrCudaDisplayWakeNativeMethods)
+    # CUDA-PERF-DISPLAY-WAKE-3 round 1b (sol BLOCKER): the Boolean result was previously discarded
+    # ([void]) -- when the native P/Invoke type could not be loaded, the loop below silently did
+    # nothing on every tick (its own "if type exists" guard just never matched), leaving
+    # .nudgeState at all zeros and .setupError $null. Get-AttrCudaDisplayWakeKeepAliveHealth reads
+    # exactly those two fields, so it reported a completely non-functional keep-alive as healthy.
+    # Captured here instead: a load failure is recorded as a typed .setupError up front, the same
+    # non-throwing shape a CreateRunspace/Open/BeginInvoke failure already gets below, and no
+    # Runspace is even started for a keep-alive that could never do anything.
+    $nativeAvailable = Register-AttrCudaDisplayWakeNativeMethods
+    if (-not $nativeAvailable) {
+        return [ordered]@{
+            stopEvent = [System.Threading.ManualResetEventSlim]::new($false)
+            runspace = $null
+            powershell = $null
+            asyncResult = $null
+            nudgeState = [System.Collections.Hashtable]::Synchronized(@{
+                count = 0
+                successCount = 0
+                failureCount = 0
+                lastError = $null
+                lastFailureUtc = $null
+            })
+            intervalSeconds = $IntervalSeconds
+            setupError = 'ATTRCUDA_KEEPALIVE_NATIVE_UNAVAILABLE native P/Invoke type could not be loaded; no keep-alive loop was started'
+            startedUtc = (Get-Date).ToUniversalTime().ToString('o')
+        }
+    }
     $stopEvent = [System.Threading.ManualResetEventSlim]::new($false)
     # Synchronized wrapper: the loop thread below and this (the caller's) thread both touch the
     # same underlying Hashtable instance -- a plain Hashtable is not safe for that, .Synchronized
@@ -2897,23 +2943,38 @@ function Get-AttrCudaDisplayWakeKeepAliveHealth {
     Non-throwing point-in-time health read of a Start-AttrCudaDisplayWakeKeepAlive handle -- the
     caller's "never proceed silently" check, meant to be called at more than one point in a leg
     (CUDA-PERF-DISPLAY-WAKE-3 round 1: before the smoke launch, and again at the start of the
-    measured interval).
+    measured interval; round 1b adds a third call right after the measured interval ends -- a
+    failure discovered only there must still stop the leg typed, never read as a clean
+    measurement just because at least one frame displayed).
     .DESCRIPTION
     .healthy is $false when: the keep-alive never started at all (.setupError, from
-    Start-AttrCudaDisplayWakeKeepAlive's own setup failure), at least one nudge attempt has failed
-    since it started (.failureCount -gt 0, via the loop's own recorded .lastError), or its
-    background pipeline has completed on its own (.asyncResult.IsCompleted) while .stopEvent was
-    never signalled -- the caller never asked it to stop, so a completed pipeline means the loop
-    thread died. Never throws: a read that itself fails folds into .reason as
-    ATTRCUDA_KEEPALIVE_HEALTH_CHECK_FAILED rather than propagating, since a health CHECK failing
-    must never be mistaken for "healthy" by a caller that only checked for a thrown error.
+    Start-AttrCudaDisplayWakeKeepAlive's own setup failure -- CUDA-PERF-DISPLAY-WAKE-3 round 1b:
+    this now also covers a native P/Invoke type that never loaded, which used to look like a
+    healthy zero-attempt loop instead), at least one nudge attempt has failed since it started
+    (.failureCount -gt 0, via the loop's own recorded .lastError), or its background pipeline has
+    completed on its own (.asyncResult.IsCompleted) while .stopEvent was never signalled -- the
+    caller never asked it to stop, so a completed pipeline means the loop thread died. Never
+    throws: a read that itself fails folds into .reason as ATTRCUDA_KEEPALIVE_HEALTH_CHECK_FAILED
+    rather than propagating, since a health CHECK failing must never be mistaken for "healthy" by
+    a caller that only checked for a thrown error.
+    .PARAMETER RequireSuccessSoFar
+    CUDA-PERF-DISPLAY-WAKE-3 round 1b: when set, a zero .successCount (with no other unhealthy
+    condition already true) is ALSO reported unhealthy. Meant for the job's FIRST checkpoint only
+    -- by then the keep-alive has already been running since before footage resolution, package
+    verification and the CPU-quiescence sleeps (round 1c's own 4.5-minute gap), so a genuinely
+    ticking loop is expected to have succeeded at least once; a loop stuck with zero attempts for
+    reasons the three existing checks above do not catch (e.g. a Runspace that opened but never
+    actually invoked the script) must not read as healthy just because nothing has failed yet.
+    Omitted at later checkpoints, where the same "zero so far" reading would otherwise be
+    redundant with whatever already made the earlier checkpoint pass.
     .OUTPUTS
     An ordered hashtable: .healthy, .reason (a typed string prefix, $null when healthy),
-    .failureCount, .lastError, .lastFailureUtc, .setupError, .runspaceStopped.
+    .failureCount, .successCount, .lastError, .lastFailureUtc, .setupError, .runspaceStopped.
     #>
     [CmdletBinding()]
     param(
-        $Handle
+        $Handle,
+        [switch]$RequireSuccessSoFar
     )
 
     if (-not $Handle) {
@@ -2921,6 +2982,7 @@ function Get-AttrCudaDisplayWakeKeepAliveHealth {
             healthy = $false
             reason = 'ATTRCUDA_KEEPALIVE_MISSING no keep-alive handle was supplied'
             failureCount = $null
+            successCount = $null
             lastError = $null
             lastFailureUtc = $null
             setupError = $null
@@ -2931,10 +2993,21 @@ function Get-AttrCudaDisplayWakeKeepAliveHealth {
     try {
         $setupError = $Handle.setupError
         $failureCount = 0
+        $successCount = 0
         $lastError = $null
         $lastFailureUtc = $null
         if ($Handle.nudgeState) {
             $failureCount = [int]$Handle.nudgeState.failureCount
+            # CUDA-PERF-DISPLAY-WAKE-3 round 1b: .successCount is read defensively -- a caller can
+            # still duck-type a handle from an older shape that never had it (this module's own
+            # Set-StrictMode -Version Latest, line 21, turns that missing-member read into a
+            # terminating error), and this function's whole contract is that no shape of $Handle
+            # ever makes it throw. A local try/catch, not a property-existence check: .PSObject.
+            # Properties.Match never sees a Hashtable/OrderedDictionary's keys as properties at
+            # all (it would report 0 even for a key that IS present), so it cannot tell "missing"
+            # from "present" on the fabricated ordered-hashtable handles this module's own test
+            # suite already builds.
+            try { $successCount = [int]$Handle.nudgeState.successCount } catch { }
             $lastError = $Handle.nudgeState.lastError
             $lastFailureUtc = $Handle.nudgeState.lastFailureUtc
         }
@@ -2948,6 +3021,8 @@ function Get-AttrCudaDisplayWakeKeepAliveHealth {
             'ATTRCUDA_KEEPALIVE_RUNSPACE_STOPPED background pipeline completed without a stop request'
         } elseif ($failureCount -gt 0) {
             "ATTRCUDA_KEEPALIVE_NUDGE_FAILED $failureCount failed nudge(s), last: $lastError"
+        } elseif ($RequireSuccessSoFar -and $successCount -eq 0) {
+            'ATTRCUDA_KEEPALIVE_NO_SUCCESSFUL_NUDGE_YET no nudge has succeeded since the keep-alive started'
         } else {
             $null
         }
@@ -2955,6 +3030,7 @@ function Get-AttrCudaDisplayWakeKeepAliveHealth {
             healthy = ($null -eq $reason)
             reason = $reason
             failureCount = $failureCount
+            successCount = $successCount
             lastError = $lastError
             lastFailureUtc = $lastFailureUtc
             setupError = $setupError
@@ -2965,6 +3041,7 @@ function Get-AttrCudaDisplayWakeKeepAliveHealth {
             healthy = $false
             reason = "ATTRCUDA_KEEPALIVE_HEALTH_CHECK_FAILED $($_.Exception.Message)"
             failureCount = $null
+            successCount = $null
             lastError = $null
             lastFailureUtc = $null
             setupError = $null
