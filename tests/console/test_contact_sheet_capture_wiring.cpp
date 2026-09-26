@@ -562,22 +562,121 @@ TEST(ContactSheetCaptureWiring, WrapFlagExistsResetsPerSessionAndIsSetWhenTheTim
     ASSERT_TRUE(resetLastFrameAt >= 0);
     ASSERT_TRUE(resetWrappedAt > resetLastFrameAt);
 
-    // notePlaybackSmokePresentedFrame() must set the flag when a presented frame is lower than
-    // the previous one -- the only way that happens is a Loop wrap -- and must check this
-    // BEFORE m_playbackSmokeLastPresentedFrame is overwritten with the new value, or the
-    // comparison would always see the frame compared against itself.
+    // notePlaybackSmokePresentedFrame() must set the flag when the presented-frame transition
+    // qualifies as a loop wrap (playback_frame_range::isContactSheetLoopWrapTransition -- see
+    // the round-2 LOOP-WRAP-QUALIFICATION test below), and must check this BEFORE
+    // m_playbackSmokeLastPresentedFrame is overwritten with the new value, or the comparison
+    // would always see the frame compared against itself.
     const QString noteBody = sliceBetween(source,
         QStringLiteral("void MainWindow::notePlaybackSmokePresentedFrame("),
         QStringLiteral("void MainWindow::noteContactSheetPresentedFrame("));
     ASSERT_FALSE(noteBody.isEmpty());
     const int wrapCheckAt = noteBody.indexOf(
-        QStringLiteral("static_cast<int>( displayFrame ) < m_playbackSmokeLastPresentedFrame"));
+        QStringLiteral("playback_frame_range::isContactSheetLoopWrapTransition("));
     const int setWrappedAt = noteBody.indexOf(QStringLiteral("m_playbackSmokeWrapped = true;"), wrapCheckAt);
     const int overwriteLastFrameAt = noteBody.indexOf(
         QStringLiteral("m_playbackSmokeLastPresentedFrame = static_cast<int>( displayFrame );"));
     ASSERT_TRUE(wrapCheckAt >= 0);
     ASSERT_TRUE(setWrappedAt > wrapCheckAt);
     ASSERT_TRUE(overwriteLastFrameAt > setWrappedAt);
+}
+
+// --- CUDA-PLAYBACK-CONTACT-SHEET-2 round 2 (BLOCKER: wrapped-span final target unreachable in
+// drop-frame looping playback; HARDENING: LOOP-WRAP-QUALIFICATION) -----------------------------
+
+TEST(ContactSheetCaptureWiring, LoopWrapDetectionIsQualifiedByLoopStateAndJumpSize)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString noteBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::notePlaybackSmokePresentedFrame("),
+        QStringLiteral("void MainWindow::noteContactSheetPresentedFrame("));
+    ASSERT_FALSE(noteBody.isEmpty());
+
+    // A bare "went backward" test also fires for a backward scrub or stress seek with Loop off,
+    // or to an arbitrary earlier frame -- the call must pass the live Loop state and both cut
+    // spinboxes so the pure helper can require an actual loop-width-sized jump.
+    const int callAt = noteBody.indexOf(
+        QStringLiteral("playback_frame_range::isContactSheetLoopWrapTransition("));
+    ASSERT_TRUE(callAt >= 0);
+    const QString callBlock = noteBody.mid(callAt, 400);
+    ASSERT_TRUE(callBlock.contains(QStringLiteral("ui->actionLoop->isChecked()")));
+    ASSERT_TRUE(callBlock.contains(QStringLiteral("ui->spinBoxCutIn->value() - 1")));
+    ASSERT_TRUE(callBlock.contains(QStringLiteral("ui->spinBoxCutOut->value() - 1")));
+    ASSERT_TRUE(callBlock.contains(QStringLiteral("m_playbackSmokeLastPresentedFrame")));
+
+    const QString header = readRepoFile(QStringLiteral("platform/qt/PlaybackFrameRange.h"));
+    ASSERT_TRUE(header.contains(QStringLiteral("inline bool isContactSheetLoopWrapTransition(")));
+    // The un-qualified pre-round-2 shape must actually be gone, not just supplemented.
+    ASSERT_FALSE(noteBody.contains(
+        QStringLiteral("static_cast<int>( displayFrame ) < m_playbackSmokeLastPresentedFrame")));
+}
+
+TEST(ContactSheetCaptureWiring, PlaybackModeCaptureForcesDropFrameModeOffForTheDurationOfTheReplay)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    // BLOCKER fix: drop-frame mode must be captured and forced off BEFORE the un-timed capture
+    // while() loop starts (so playbackHandling takes its deterministic, single-frame-advance
+    // branch for the whole replay), and restored to its prior state AFTER the loop and the
+    // idle-drain wait that follows it, before the timeout/error bookkeeping below reads
+    // m_contactSheetCaptureFramesWritten.
+    const int activeAt = smokeBody.indexOf(QStringLiteral("m_contactSheetCaptureActive = true;"));
+    ASSERT_TRUE(activeAt >= 0);
+    const int forceOffAt = smokeBody.indexOf(
+        QStringLiteral("const bool contactSheetDropFrameModeBefore = ui->actionDropFrameMode->isChecked();"),
+        activeAt);
+    ASSERT_TRUE(forceOffAt > activeAt);
+    const int setCheckedFalseAt = smokeBody.indexOf(
+        QStringLiteral("ui->actionDropFrameMode->setChecked( false );"), forceOffAt);
+    ASSERT_TRUE(setCheckedFalseAt > forceOffAt);
+    const int whileLoopAt = smokeBody.indexOf(QStringLiteral("while( m_contactSheetCaptureActive"), setCheckedFalseAt);
+    ASSERT_TRUE(whileLoopAt > setCheckedFalseAt);
+    const int idleDrainAt = smokeBody.indexOf(
+        QStringLiteral("!m_pRenderThread->isIdle();"), whileLoopAt);
+    ASSERT_TRUE(idleDrainAt > whileLoopAt);
+    const int setCheckedTrueAt = smokeBody.indexOf(
+        QStringLiteral("ui->actionDropFrameMode->setChecked( true );"), idleDrainAt);
+    ASSERT_TRUE(setCheckedTrueAt > idleDrainAt);
+    const int errorBookkeepingAt = smokeBody.indexOf(
+        QStringLiteral("if( m_contactSheetCaptureActive && m_contactSheetCaptureError.isEmpty() )"),
+        setCheckedTrueAt);
+    ASSERT_TRUE(errorBookkeepingAt > setCheckedTrueAt);
+
+    // Both the force-off and the restore must be gated on the SAME captured prior state, so a
+    // run that started with drop-frame mode already off never toggles the action at all.
+    ASSERT_TRUE(smokeBody.contains(
+        QStringLiteral("if( contactSheetDropFrameModeBefore )\n            {\n                ui->actionDropFrameMode->setChecked( false );")));
+    ASSERT_TRUE(smokeBody.contains(
+        QStringLiteral("if( contactSheetDropFrameModeBefore )\n            {\n                ui->actionDropFrameMode->setChecked( true );")));
+
+    // The seek-mode branch never plays at all, so it must not be touched by this fix.
+    const QString seekBranch = sliceBetween(smokeBody,
+        QStringLiteral("if( options.contactSheetSeekMode )"),
+        QStringLiteral("m_contactSheetCaptureDir = options.contactSheetDir;"));
+    ASSERT_FALSE(seekBranch.isEmpty());
+    ASSERT_FALSE(seekBranch.contains(QStringLiteral("actionDropFrameMode")));
+}
+
+TEST(ContactSheetCaptureWiring, ContactSheetTargetFramesAreComputedByTheSharedPureHelper)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    // Both capture modes share ONE target list built from the same real, executable-tested
+    // function (test_playback_frame_range.cpp), rather than each re-deriving the fraction
+    // arithmetic inline where it could silently drift between the two modes.
+    ASSERT_TRUE(smokeBody.contains(
+        QStringLiteral("playback_frame_range::contactSheetTargetFrame(\n                i, options.contactSheetFrames, sheetStartFrame, sheetEndFrame )")));
+
+    const QString header = readRepoFile(QStringLiteral("platform/qt/PlaybackFrameRange.h"));
+    ASSERT_TRUE(header.contains(QStringLiteral("inline int contactSheetTargetFrame(")));
 }
 
 TEST(ContactSheetCaptureWiring, WrappedSpanIsOverriddenToTheLoopCutInCutOutRangeNotLastPresentedFrame)

@@ -9536,11 +9536,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         contactSheetTargetFrames.reserve( options.contactSheetFrames );
         for( int i = 0; i < options.contactSheetFrames; ++i )
         {
-            const double fraction = options.contactSheetFrames > 1
-                ? static_cast<double>( i ) / static_cast<double>( options.contactSheetFrames - 1 )
-                : 0.0;
-            contactSheetTargetFrames.append( sheetStartFrame
-                + qRound( fraction * static_cast<double>( sheetEndFrame - sheetStartFrame ) ) );
+            contactSheetTargetFrames.append( playback_frame_range::contactSheetTargetFrame(
+                i, options.contactSheetFrames, sheetStartFrame, sheetEndFrame ) );
         }
 
         if( options.contactSheetSeekMode )
@@ -9697,6 +9694,24 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             m_contactSheetCaptureError.clear();
             m_contactSheetCaptureActive = true;
 
+            // BLOCKER fix (CUDA-PLAYBACK-CONTACT-SHEET-2 round 2): drop-frame-mode playback
+            // wraps the timeline the instant the NEXT tick's position would reach the loop's
+            // last frame, subtracting the loop width before that position is ever set on the
+            // slider (see advanceDropFrameTick) -- so with Loop checked, the range's last frame
+            // (sheetEndFrame on a wrapped run) is never actually presented, and its capture
+            // target can never be satisfied: this pass spins to its own timeout instead. This
+            // un-timed replay has no real-time pacing requirement of its own (fps/swap-cadence
+            // telemetry for the MEASURED interval already closed above), so force deterministic,
+            // non-dropping single-frame advance for its duration -- every position from
+            // sheetStartFrame..sheetEndFrame is then presented in order, including the last one,
+            // never skipping a frame regardless of the loop-relative drop step. Restored
+            // afterward so the user's own setting is unaffected.
+            const bool contactSheetDropFrameModeBefore = ui->actionDropFrameMode->isChecked();
+            if( contactSheetDropFrameModeBefore )
+            {
+                ui->actionDropFrameMode->setChecked( false );
+            }
+
             QElapsedTimer contactSheetPlaybackClock;
             contactSheetPlaybackClock.start();
             const qint64 contactSheetPlaybackTimeoutMs = qMax<qint64>(
@@ -9747,6 +9762,11 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             {
                 qApp->processEvents( QEventLoop::AllEvents );
                 QThread::msleep( 5 );
+            }
+
+            if( contactSheetDropFrameModeBefore )
+            {
+                ui->actionDropFrameMode->setChecked( true );
             }
 
             if( m_contactSheetCaptureActive && m_contactSheetCaptureError.isEmpty() )
@@ -10428,23 +10448,20 @@ void MainWindow::playbackHandling(int timeDiff)
                 //Drop Frame Mode: calc picture for actual time
                 else
                 {
-                //This is the exact frame we need on the time line NOW!
-                m_newPosDropMode += (getFramerate() * (double)timeDiff / 1000.0);
-                //Loop!
-                if( ui->actionLoop->isChecked() && ( m_newPosDropMode >= ui->spinBoxCutOut->value() - 1 ) )
+                //This is the exact frame we need on the time line NOW! (advanceDropFrameTick:
+                //loop wraps back by the cut range width, or clamps to the last frame -- see
+                //PlaybackFrameRange.h for the BLOCKER note on why the wrapped case can never
+                //return the range's last frame)
+                const playback_frame_range::DropFrameTickResult dropFrameTick =
+                    playback_frame_range::advanceDropFrameTick(
+                        m_newPosDropMode, getFramerate() * (double)timeDiff / 1000.0,
+                        ui->spinBoxCutIn->value(), ui->spinBoxCutOut->value(),
+                        ui->actionLoop->isChecked() );
+                m_newPosDropMode = dropFrameTick.position;
+                //Sync audio
+                if( dropFrameTick.wrapped && ui->actionAudioOutput->isChecked() )
                 {
-                    m_newPosDropMode -= (ui->spinBoxCutOut->value() - ui->spinBoxCutIn->value());
-                    //Sync audio
-                    if( ui->actionAudioOutput->isChecked() )
-                    {
-                        m_tryToSyncAudio = true;
-                    }
-                }
-                //Limit to last frame if not in loop
-                else if( m_newPosDropMode >= ui->spinBoxCutOut->value() - 1 )
-                {
-                    // -1 because 0 <= frame < ui->spinBoxCutOut->value()
-                    m_newPosDropMode = ui->spinBoxCutOut->value() - 1;
+                    m_tryToSyncAudio = true;
                 }
                 //Because we need it NOW, block slider signals and draw after this function in this timerEvent
                 ui->horizontalSliderPosition->blockSignals( true );
@@ -23261,8 +23278,18 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     // one can only mean the Loop action wrapped (cutOut back to cutIn) -- playback otherwise
     // only advances the timeline. Checked against the frame this call is about to overwrite,
     // so it fires exactly once per wrap, however many wraps a short looping clip goes through.
+    //
+    // HARDENING fix (CUDA-PLAYBACK-CONTACT-SHEET-2 round 2, LOOP-WRAP-QUALIFICATION): a bare
+    // "went backward" test also fires for an external backward scrub, or a stress seek to an
+    // arbitrary earlier frame, during a session where Loop never actually wrapped -- see
+    // isContactSheetLoopWrapTransition for why Loop state and jump size now both gate this.
     if( m_playbackSmokePresentedFrames > 0
-     && static_cast<int>( displayFrame ) < m_playbackSmokeLastPresentedFrame )
+     && playback_frame_range::isContactSheetLoopWrapTransition(
+            ui->actionLoop->isChecked(),
+            ui->spinBoxCutIn->value() - 1,
+            ui->spinBoxCutOut->value() - 1,
+            m_playbackSmokeLastPresentedFrame,
+            static_cast<int>( displayFrame ) ) )
     {
         m_playbackSmokeWrapped = true;
     }
