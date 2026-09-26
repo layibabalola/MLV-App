@@ -630,6 +630,16 @@ function Save-Json($Object, [string]$Path) {
 # touch). Order is: read running/secure -> gate -> first (one-time) nudge -> keep-alive; the first
 # two are Start-AttrCudaDisplayWake's own work, the gate is the `if` immediately below, and the
 # keep-alive starts only once the gate has passed.
+#
+# CUDA-PERF-DISPLAY-WAKE-3 round 1b (sol HARDENING): the outer `try`/`finally` that stops the
+# keep-alive and the wake (see the `finally` far below) used to begin only at the owner-footage
+# `try` further down -- everything from Start-AttrCudaDisplayWake here through that later `try`
+# ran OUTSIDE it, so a terminating error in that stretch (package expansion, footage resolution,
+# build-manifest verification) left the wake and keep-alive to be released only by the process
+# itself exiting, never explicitly recorded. The `try` now opens right here, at the first line of
+# the claim-time wake lifetime, so Stop-AttrCudaDisplayWakeKeepAlive/Stop-AttrCudaDisplayWake run
+# on every exit from this point on, including the `exit 25` immediately below.
+try {
 $displayWake = Start-AttrCudaDisplayWake
 if ($displayWake.screensaverSecureOwnerOnly) {
     [void](New-AttrCudaDirectory -Path (Join-Path $Root 'outbox'))
@@ -1076,13 +1086,13 @@ if ($FixtureRehearsal) {
     }
 }
 
-# ATTR3-FOOTAGE-BIND-1 PR-B round 4: everything from here to the end of the job runs inside a
-# `try`/`finally` so the private directory's read-share handles (opened above, owner runs only)
-# are always closed and its neutrally-named links are always cleaned up -- on every exit path
-# below, including an early `exit N` (PowerShell still runs a pending `finally` on `exit`, proven
-# by CI before this shipped) and an uncaught terminating error. $OwnerClipDir stays $null for a
-# fixture run, so the `finally` is a no-op there.
-try {
+# ATTR3-FOOTAGE-BIND-1 PR-B round 4: everything from here to the end of the job runs inside the
+# same outer `try`/`finally` (opened at Start-AttrCudaDisplayWake, above -- CUDA-PERF-
+# DISPLAY-WAKE-3 round 1b) so the private directory's read-share handles (opened above, owner runs
+# only) are always closed and its neutrally-named links are always cleaned up -- on every exit
+# path below, including an early `exit N` (PowerShell still runs a pending `finally` on `exit`,
+# proven by CI before this shipped) and an uncaught terminating error. $OwnerClipDir stays $null
+# for a fixture run, so the `finally` is a no-op there.
 Expand-Archive -LiteralPath (Join-Path $Cache $BasePackageZip) -DestinationPath (Join-Path $Work 'pkg') -Force
 # CUDA-PERF-DISPLAY-WAKE-1/2. OWNER (2026-09-25): "if display is asleep just wake it. its just the
 # blank screensaver". $displayWake/$displayWakeKeepAlive were already started at the very top of
@@ -1199,15 +1209,19 @@ $cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted
 # parsing, so a consumer needing a tighter join than this one can see exactly how much slack to
 # allow rather than trusting a single unbracketed stamp.
 
-# CUDA-PERF-DISPLAY-WAKE-3 round 1: first of two keep-alive health checkpoints (the second is
-# right before the smoke launch below, bracketing the PresentMon spawn gap between them). The
+# CUDA-PERF-DISPLAY-WAKE-3 round 1: first of three keep-alive health checkpoints (the second is
+# right before the smoke launch below, bracketing the PresentMon spawn gap between them; round 1b
+# adds a third, right after PresentMon is waited on, bracketing the measured interval itself --
+# see that checkpoint's own comment further down). The
 # periodic keep-alive ticks on its own timer with no secure-screensaver check of its own (see
 # Start-AttrCudaDisplayWakeKeepAlive's own header) and never throws on a failed nudge (see its
 # loop's own try/catch) -- so its health (did it ever start, has a nudge failed, did its
 # background pipeline die) is never assumed from "no exception happened" and is instead read
 # explicitly, here at the start of the measured interval (PresentMon's own capture window, about
 # to begin).
-$keepAliveHealthAtMeasurementStart = Get-AttrCudaDisplayWakeKeepAliveHealth -Handle $displayWakeKeepAlive
+# CUDA-PERF-DISPLAY-WAKE-3 round 1b: -RequireSuccessSoFar only at this FIRST checkpoint -- see
+# Get-AttrCudaDisplayWakeKeepAliveHealth's own .PARAMETER doc for why only here.
+$keepAliveHealthAtMeasurementStart = Get-AttrCudaDisplayWakeKeepAliveHealth -Handle $displayWakeKeepAlive -RequireSuccessSoFar
 if (-not $keepAliveHealthAtMeasurementStart.healthy) {
     $displayWake['keepAliveHealth'] = $keepAliveHealthAtMeasurementStart
     $keepAliveRefusal = [ordered]@{
@@ -1440,6 +1454,35 @@ if ($null -ne $presentMonWaitError) {
     Save-Json $displayFailure (Join-Path $Pub 'summary.json')
     Write-Output "RESULT=PRESENTMON_UNAVAILABLE REASON=`"$presentMonWaitError`" ARTIFACTS=$Pub"
     exit 23
+}
+
+# CUDA-PERF-DISPLAY-WAKE-3 round 1b (sol BLOCKER): the two existing checkpoints above only
+# bracket the PresentMon SPAWN gap (before it starts, and again before the smoke launch) -- both
+# run before the ~40s synchronous smoke run even begins. A tick that fails DURING that measured
+# interval (or a background pipeline that dies mid-run) was recorded by the keep-alive's own
+# nudgeState, but nothing downstream ever read it again: if PresentMon still displayed at least
+# one frame, $displayReport.status reads OK regardless, and the leg would publish
+# MEASUREMENT_CAPTURED over a run whose wake mechanism had already stopped working. Read a third
+# time, right here -- PresentMon has just been waited on and confirmed done, so the measured
+# interval is unambiguously over and this is the earliest point that is true. A failure here ends
+# the leg the same typed way the earlier two checkpoints already do (never silently, and never
+# read as a clean measurement), rather than continuing on to a report that would call it OK.
+$keepAliveHealthAfterMeasuredInterval = Get-AttrCudaDisplayWakeKeepAliveHealth -Handle $displayWakeKeepAlive
+if (-not $keepAliveHealthAfterMeasuredInterval.healthy) {
+    $displayWake['keepAliveHealth'] = $keepAliveHealthAfterMeasuredInterval
+    if (Test-Path -LiteralPath $presentMonPath -PathType Leaf) {
+        [void](Publish-AttrCudaFileCopy -Source $presentMonPath -Destination (Join-Path $Pub 'presentmon.csv'))
+    }
+    $keepAliveRefusal = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='KEEPALIVE_FAILED'
+        fixtureRehearsal=$FixtureRehearsal
+        displayWake=$displayWake
+        keepAliveCheckpoint='after_measured_interval'
+        sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $keepAliveRefusal (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=KEEPALIVE_FAILED CHECKPOINT=after_measured_interval REASON=$($keepAliveHealthAfterMeasuredInterval.reason) ARTIFACTS=$Pub"
+    exit 26
 }
 
 # Backend-availability gate (swarm ruling, 2026-09-16): parse the run's own diagnostic
