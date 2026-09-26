@@ -654,6 +654,25 @@ if ($displayWake.screensaverSecureOwnerOnly) {
     Write-Output "RESULT=SCREENSAVER_SECURE_OWNER_ONLY ARTIFACTS=$Pub"
     exit 25
 }
+# CUDA-PERF-DISPLAY-WAKE-3 round 2 (live UM evidence, defect class fix): a non-secure screen saver
+# that was running before this job touched the desktop, and that the dismiss attempt above did not
+# CONFIRM ended (still running, or the after-probe itself failed), must stop the leg with a typed
+# refusal here -- before the keep-alive even starts -- rather than silently proceeding into a
+# measurement PASS176 would score against a screen that was never actually showing MLVApp's output.
+# See Start-AttrCudaDisplayWake's own .dismissFailed doc for the fail-closed reasoning.
+if ($displayWake.dismissFailed) {
+    [void](New-AttrCudaDirectory -Path (Join-Path $Root 'outbox'))
+    [void](New-AttrCudaDirectory -Path $Pub)
+    $dismissRefusal = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='DISPLAY_WAKE_DISMISS_FAILED'
+        fixtureRehearsal=$FixtureRehearsal
+        displayWake=$displayWake
+        sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $dismissRefusal (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=DISPLAY_WAKE_DISMISS_FAILED ARTIFACTS=$Pub"
+    exit 27
+}
 $displayWakeKeepAlive = Start-AttrCudaDisplayWakeKeepAlive
 # Folded into $displayWake itself (by reference for .keepAliveNudgeState -- the SAME live
 # Hashtable instance the background loop mutates) rather than added as a separate field at each
