@@ -352,11 +352,11 @@ TEST(PlaybackSmokeFullscreenWiring, DoneLineReportsPreambleAndPlayedMsNextToRequ
     const int doneAt = source.indexOf(QStringLiteral("\"[GUI-SMOKE] DONE clip=\""));
     ASSERT_TRUE(doneAt >= 0);
     const QString tail = source.mid(doneAt, 400);
-    const int durationAt = tail.indexOf(QStringLiteral("duration_ms=\" << durationMs"));
+    const int requestedFieldAt = tail.indexOf(QStringLiteral("duration_ms=\" << durationMs"));
     const int preambleAt = tail.indexOf(QStringLiteral("preamble_ms=\" << preambleMs"));
     const int playedAt = tail.indexOf(QStringLiteral("played_ms=\" << playedMs"));
-    ASSERT_TRUE(durationAt >= 0);
-    ASSERT_TRUE(preambleAt > durationAt);
+    ASSERT_TRUE(requestedFieldAt >= 0);
+    ASSERT_TRUE(preambleAt > requestedFieldAt);
     ASSERT_TRUE(playedAt > preambleAt);
 }
 
