@@ -2271,16 +2271,29 @@ function Register-AttrCudaDisplayWakeNativeMethods {
             public IntPtr dwExtraInfo;
         }
 
-        // INPUT is really a union (mouse/keyboard/hardware); only the mouse arm is ever
-        // populated here, so it is flattened with explicit offsets rather than modelled as a
-        // full union -- the well-known layout for a mouse-only SendInput caller (dwType at 0,
-        // the union member at 8 for the x64 8-byte alignment MOUSEINPUT's trailing IntPtr
-        // requires; total size 40 bytes, matching the real Windows INPUT struct on x64).
+        [StructLayout(LayoutKind.Sequential)]
+        public struct KEYBDINPUT
+        {
+            public ushort wVk;
+            public ushort wScan;
+            public uint dwFlags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        // INPUT is really a union (mouse/keyboard/hardware); only the mouse and keyboard arms
+        // are ever populated here, so it is flattened with explicit offsets rather than modelled
+        // as a full union -- both mi and ki are pinned at the same offset 8, the well-known
+        // layout for a SendInput caller on x64 (dwType at 0, the union member at 8 for the
+        // 8-byte alignment MOUSEINPUT's/KEYBDINPUT's trailing IntPtr requires; total size 40
+        // bytes -- MOUSEINPUT is the larger of the two arms at 32 bytes -- matching the real
+        // Windows INPUT struct on x64).
         [StructLayout(LayoutKind.Explicit)]
         public struct INPUT
         {
             [FieldOffset(0)] public int type;
             [FieldOffset(8)] public MOUSEINPUT mi;
+            [FieldOffset(8)] public KEYBDINPUT ki;
         }
 
         public static class NativeMethods
@@ -2395,11 +2408,32 @@ function Register-AttrCudaDisplayWakeNativeMethods {
                             result.SetThreadDesktopError = "SetThreadDesktop failed (lastError=" + Marshal.GetLastWin32Error() + ")";
                             return;
                         }
+                        // CUDA-PERF-DISPLAY-WAKE-3 round 3 (live UM evidence, defect class fix):
+                        // three UM legs all recorded OpenInputDesktop/SetThreadDesktop/SendInput
+                        // succeeding (every error field null, thread joined) yet
+                        // screensaverRunningAfter stayed true -- the net-zero 1-pixel move this
+                        // replaces is exactly the kind of sub-threshold WM_MOUSEMOVE the classic
+                        // scrnsave window procedure is documented to ignore. Two independent,
+                        // side-effect-free inputs instead, still net-zero on the pointer so the
+                        // owner's cursor never visibly moves: an 8-pixel move (round-tripped back
+                        // to 0,0) well above that ignore threshold, plus a single down+up tap of
+                        // VK_F15 -- one of the F13-F24 block Windows binds to nothing by default
+                        // (no Start Menu, no window, no app shortcut) and, unlike Shift, cannot
+                        // ever trigger the Sticky Keys prompt (that accessibility feature watches
+                        // for Shift specifically, pressed five times; this is a different key,
+                        // pressed once). One tap only, deliberately -- never repeated within this
+                        // single call, so a fast keep-alive interval cannot accumulate toward any
+                        // key-specific OS gesture threshold either.
                         uint INPUT_MOUSE = 0;
+                        uint INPUT_KEYBOARD = 1;
                         uint MOUSEEVENTF_MOVE = 0x0001;
+                        uint KEYEVENTF_KEYUP = 0x0002;
+                        ushort VK_F15 = 0x7E;
                         INPUT[] nudge = new INPUT[] {
-                            new INPUT { type = (int)INPUT_MOUSE, mi = new MOUSEINPUT { dx = 1, dy = 0, mouseData = 0, dwFlags = MOUSEEVENTF_MOVE, time = 0, dwExtraInfo = IntPtr.Zero } },
-                            new INPUT { type = (int)INPUT_MOUSE, mi = new MOUSEINPUT { dx = -1, dy = 0, mouseData = 0, dwFlags = MOUSEEVENTF_MOVE, time = 0, dwExtraInfo = IntPtr.Zero } }
+                            new INPUT { type = (int)INPUT_MOUSE, mi = new MOUSEINPUT { dx = 8, dy = 0, mouseData = 0, dwFlags = MOUSEEVENTF_MOVE, time = 0, dwExtraInfo = IntPtr.Zero } },
+                            new INPUT { type = (int)INPUT_MOUSE, mi = new MOUSEINPUT { dx = -8, dy = 0, mouseData = 0, dwFlags = MOUSEEVENTF_MOVE, time = 0, dwExtraInfo = IntPtr.Zero } },
+                            new INPUT { type = (int)INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = VK_F15, wScan = 0, dwFlags = 0, time = 0, dwExtraInfo = IntPtr.Zero } },
+                            new INPUT { type = (int)INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = VK_F15, wScan = 0, dwFlags = KEYEVENTF_KEYUP, time = 0, dwExtraInfo = IntPtr.Zero } }
                         };
                         uint sent = NativeMethods.SendInput((uint)nudge.Length, nudge, Marshal.SizeOf(typeof(INPUT)));
                         if (sent != nudge.Length)
@@ -2530,13 +2564,67 @@ function Get-AttrCudaScreensaverSecure {
     }
 }
 
+function Wait-AttrCudaScreensaverDismissed {
+    <#
+    .SYNOPSIS
+    Poll Get-AttrCudaScreensaverRunning for up to -TimeoutMilliseconds, stopping the instant a poll
+    reads a CONFIRMED $false. Non-throwing, like every other function in this file.
+    .DESCRIPTION
+    CUDA-PERF-DISPLAY-WAKE-3 round 3 (live UM evidence, defect class fix). Every prior round's
+    after-dismiss read called Get-AttrCudaScreensaverRunning exactly once, IMMEDIATELY after the
+    nudge returned -- with no allowance for the screen saver process to actually receive the
+    injected input and exit. Three UM legs recorded every nudge step succeeding (OpenInputDesktop,
+    SetThreadDesktop, SendInput and the thread join all clean) yet screensaverRunningAfter still
+    read $true. This gives the screen saver a bounded window to react before the after-state is
+    read as a failure, without ever blocking indefinitely: elapsed time is bounded by
+    -TimeoutMilliseconds regardless of how many polls that takes (a slow poll or a slow Start-Sleep
+    can only shrink the number of polls left, never extend the wall-clock budget), and the LAST
+    reading is returned exactly as read -- never coerced into a guess when the window simply runs
+    out.
+    .PARAMETER TimeoutMilliseconds
+    Total wall-clock budget for polling, default 5000 (contract: "up to 5 s").
+    .PARAMETER PollIntervalMilliseconds
+    Sleep between polls, default 250 (contract: "at 250 ms").
+    .OUTPUTS
+    An ordered hashtable: .running (the final $true/$false/$null reading -- $null only when the
+    LAST poll's own probe call itself failed), .pollCount (polls actually performed, always >= 1),
+    .elapsedMilliseconds (wall-clock actually spent polling, from a Stopwatch -- never assumed from
+    -PollIntervalMilliseconds * .pollCount, since the probe call and the loop overhead both take
+    their own time too).
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$TimeoutMilliseconds = 5000,
+        [int]$PollIntervalMilliseconds = 250
+    )
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $pollCount = 0
+    $running = $null
+    while ($true) {
+        $pollCount++
+        $running = Get-AttrCudaScreensaverRunning
+        if ($running -eq $false) { break }
+        if ($stopwatch.ElapsedMilliseconds -ge $TimeoutMilliseconds) { break }
+        Start-Sleep -Milliseconds $PollIntervalMilliseconds
+    }
+    [ordered]@{
+        running = $running
+        pollCount = $pollCount
+        elapsedMilliseconds = $stopwatch.ElapsedMilliseconds
+    }
+}
+
 function Invoke-AttrCudaInputDesktopNudge {
     <#
     .SYNOPSIS
-    Sends the same net-zero 1-pixel SendInput nudge as Start-AttrCudaDisplayWake's plain path, but
-    from a brand-new dedicated thread that first calls OpenInputDesktop + SetThreadDesktop -- the
-    supported way to inject input into whichever desktop is CURRENTLY receiving input, when that is
-    not the desktop this job's own thread was created on.
+    Sends a SendInput nudge from a brand-new dedicated thread that first calls OpenInputDesktop +
+    SetThreadDesktop -- the supported way to inject input into whichever desktop is CURRENTLY
+    receiving input, when that is not the desktop this job's own thread was created on. CUDA-PERF-
+    DISPLAY-WAKE-3 round 3: a stronger nudge than Start-AttrCudaDisplayWake's own plain (not-
+    dismissing) path -- see the C# InputDesktopNudge.Run body for what it sends and why -- because
+    this path is the one actually DISMISSING an already-engaged screen saver, never just resetting
+    an idle timer before one has engaged.
     .DESCRIPTION
     CUDA-PERF-DISPLAY-WAKE-2 round 1c. A live leg on Bachelor (round 1b) recorded
     screensaverRunningBefore=true and a plain SendInput failing with lastError=5
@@ -2612,15 +2700,16 @@ function Start-AttrCudaDisplayWake {
     recorded in the returned evidence, never allowed to block or fail the leg.
     .DESCRIPTION
     Two independent mechanisms, both attempted regardless of whether the other succeeds:
-      - a net-zero 1-pixel pointer nudge -- the same kind of input a real user's mouse produces,
-        which ends an active screensaver. CUDA-PERF-DISPLAY-WAKE-2 round 1c: if the screen saver
-        is ALREADY RUNNING (SPI_GETSCREENSAVERRUNNING) when this is called, a plain SendInput from
-        this thread is expected to fail with ERROR_ACCESS_DENIED (round 1b's live evidence on
-        Bachelor) because the screen saver has taken over the input desktop -- so this dispatches
-        to Invoke-AttrCudaInputDesktopNudge instead, which sends the SAME nudge from a dedicated
-        thread attached to whichever desktop is currently receiving input. Neither is ever
-        attempted when the screen saver is SECURE (SPI_GETSCREENSAVESECURE) -- see
-        .screensaverSecureOwnerOnly below;
+      - a pointer/keyboard nudge -- the same kind of input a real user produces, which ends an
+        active screensaver. CUDA-PERF-DISPLAY-WAKE-2 round 1c: if the screen saver is ALREADY
+        RUNNING (SPI_GETSCREENSAVERRUNNING) when this is called, a plain SendInput from this
+        thread is expected to fail with ERROR_ACCESS_DENIED (round 1b's live evidence on Bachelor)
+        because the screen saver has taken over the input desktop -- so this dispatches to
+        Invoke-AttrCudaInputDesktopNudge instead, which sends a nudge from a dedicated thread
+        attached to whichever desktop is currently receiving input (CUDA-PERF-DISPLAY-WAKE-3
+        round 3: a stronger nudge than the plain path below sends -- see
+        Invoke-AttrCudaInputDesktopNudge's own header). Neither is ever attempted when the screen
+        saver is SECURE (SPI_GETSCREENSAVESECURE) -- see .screensaverSecureOwnerOnly below;
       - SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED), held
         until the caller releases it via Stop-AttrCudaDisplayWake -- attempted regardless of the
         screen-saver branch above, since it never touches the screen saver's own desktop.
@@ -2644,13 +2733,20 @@ function Start-AttrCudaDisplayWake {
     (probe-failed) after-state is never read as a quiet success. Always $false when no dismiss was
     attempted at all. The caller's signal to stop the leg with a typed DISPLAY_WAKE_DISMISS_FAILED
     result rather than proceeding to a measurement it never actually protected from the screen
-    saver), .inputDesktopNudge (the nested evidence from Invoke-AttrCudaInputDesktopNudge, or $null
-    when that path was not taken), .sendInputError/.executionStateError (each $null on success --
-    .sendInputError reflects whichever nudge path actually ran), .screensaverTimeoutSeconds
-    (SPI_GETSCREENSAVETIMEOUT, read-only) and .screensaverActive (SPI_GETSCREENSAVEACTIVE,
-    read-only) -- CUDA-PERF-DISPLAY-WAKE-2, so a run that still ends DISPLAY_ASLEEP shows what
-    timeout it was racing -- and .utc. Never calls an SPI_SET* action and never changes a
-    screen-saver or power setting.
+    saver), .dismissWait (CUDA-PERF-DISPLAY-WAKE-3 round 3, live UM evidence: three legs recorded
+    every nudge step succeeding yet screensaverRunningAfter still true, because the after-state was
+    read IMMEDIATELY after the nudge with no allowance for the screen saver process to receive and
+    act on it. .screensaverRunningAfter now comes from Wait-AttrCudaScreensaverDismissed's bounded
+    poll -- see its own header -- whenever a dismiss was actually attempted; $null when it was not,
+    same gating as .inputDesktopNudge below. .dismissWait itself carries .pollCount and
+    .elapsedMilliseconds, so a still-failing dismiss shows how long/how many polls this job actually
+    waited before giving up), .inputDesktopNudge (the nested evidence from
+    Invoke-AttrCudaInputDesktopNudge, or $null when that path was not taken),
+    .sendInputError/.executionStateError (each $null on success -- .sendInputError reflects
+    whichever nudge path actually ran), .screensaverTimeoutSeconds (SPI_GETSCREENSAVETIMEOUT,
+    read-only) and .screensaverActive (SPI_GETSCREENSAVEACTIVE, read-only) -- CUDA-PERF-DISPLAY-
+    WAKE-2, so a run that still ends DISPLAY_ASLEEP shows what timeout it was racing -- and .utc.
+    Never calls an SPI_SET* action and never changes a screen-saver or power setting.
     #>
     [CmdletBinding()]
     param()
@@ -2740,7 +2836,21 @@ function Start-AttrCudaDisplayWake {
     } else {
         $executionStateError = 'ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE native P/Invoke type could not be loaded'
     }
-    $screensaverAfter = Get-AttrCudaScreensaverRunning
+    # CUDA-PERF-DISPLAY-WAKE-3 round 3 (live UM evidence, defect class fix): a dismiss was actually
+    # attempted under the exact same predicate $dismissFailed below already gates on -- a screen
+    # saver CONFIRMED running before, and not secure/unknown. Only then is the after-state worth
+    # WAITING for (Wait-AttrCudaScreensaverDismissed's bounded poll, see its own header for why an
+    # immediate single read missed all three live UM legs); when nothing was running before, or the
+    # secure/unknown gate already stopped short, a single immediate read is unchanged -- there is
+    # nothing to wait on either way.
+    $dismissAttempted = (-not $screensaverSecureOwnerOnly) -and ($screensaverBefore -eq $true)
+    $dismissWait = $null
+    if ($dismissAttempted) {
+        $dismissWait = Wait-AttrCudaScreensaverDismissed
+        $screensaverAfter = $dismissWait.running
+    } else {
+        $screensaverAfter = Get-AttrCudaScreensaverRunning
+    }
 
     $method = if ($screensaverSecureOwnerOnly) {
         "SecureScreensaverNoDismissAttempted(reason=$screensaverSecureReason)+SetThreadExecutionState(ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED)"
@@ -2771,6 +2881,7 @@ function Start-AttrCudaDisplayWake {
         screensaverSecureOwnerOnly = $screensaverSecureOwnerOnly
         screensaverSecureReason = $screensaverSecureReason
         dismissFailed = $dismissFailed
+        dismissWait = $dismissWait
         inputDesktopNudge = $inputDesktopNudge
         sendInputError = $sendInputError
         executionStateError = $executionStateError
@@ -3216,6 +3327,7 @@ Export-ModuleMember -Function `
     Get-AttrCudaScreensaverTimeoutSeconds, `
     Get-AttrCudaScreensaverActive, `
     Get-AttrCudaScreensaverSecure, `
+    Wait-AttrCudaScreensaverDismissed, `
     Invoke-AttrCudaInputDesktopNudge, `
     Start-AttrCudaDisplayWake, `
     Stop-AttrCudaDisplayWake, `

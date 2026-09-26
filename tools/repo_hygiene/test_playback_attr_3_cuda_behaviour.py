@@ -4170,6 +4170,7 @@ class EmbeddedFunctionContractTests(_PwshCase):
             "Get-AttrCudaScreensaverTimeoutSeconds",
             "Get-AttrCudaScreensaverActive",
             "Get-AttrCudaScreensaverSecure",
+            "Wait-AttrCudaScreensaverDismissed",
             "Invoke-AttrCudaInputDesktopNudge",
             "Start-AttrCudaDisplayWake",
             "Stop-AttrCudaDisplayWake",
@@ -4289,7 +4290,8 @@ class DisplayWakeFunctionTests(_PwshCase):
             "$src = Get-AttrCudaEmbeddedFunctionSource -Name @("
             "'Register-AttrCudaDisplayWakeNativeMethods','Get-AttrCudaScreensaverRunning',"
             "'Get-AttrCudaScreensaverTimeoutSeconds','Get-AttrCudaScreensaverActive',"
-            "'Get-AttrCudaScreensaverSecure','Invoke-AttrCudaInputDesktopNudge',"
+            "'Get-AttrCudaScreensaverSecure','Wait-AttrCudaScreensaverDismissed',"
+            "'Invoke-AttrCudaInputDesktopNudge',"
             "'Start-AttrCudaDisplayWake','Stop-AttrCudaDisplayWake')\n"
             f"Set-Content -LiteralPath '{(self.tmp / 'extracted.ps1')}' -Value $src -Encoding utf8\n",
             encoding="utf-8",
@@ -4402,7 +4404,8 @@ class DisplayWakeFunctionTests(_PwshCase):
             "$src = Get-AttrCudaEmbeddedFunctionSource -Name @("
             "'Register-AttrCudaDisplayWakeNativeMethods','Get-AttrCudaScreensaverRunning',"
             "'Get-AttrCudaScreensaverTimeoutSeconds','Get-AttrCudaScreensaverActive',"
-            "'Get-AttrCudaScreensaverSecure','Invoke-AttrCudaInputDesktopNudge',"
+            "'Get-AttrCudaScreensaverSecure','Wait-AttrCudaScreensaverDismissed',"
+            "'Invoke-AttrCudaInputDesktopNudge',"
             "'Start-AttrCudaDisplayWake')\n"
             f"Set-Content -LiteralPath '{(self.tmp / 'extracted.ps1')}' -Value $src -Encoding utf8\n",
             encoding="utf-8",
@@ -4616,6 +4619,96 @@ class DisplayWakeFunctionTests(_PwshCase):
 
 
 @requires_pwsh
+class ScreensaverDismissWaitTests(_PwshCase):
+    """CUDA-PERF-DISPLAY-WAKE-3 round 3 (live UM evidence, defect class fix): three UM legs all
+    recorded every nudge step succeeding (OpenInputDesktop/SetThreadDesktop/SendInput, thread
+    joined) yet screensaverRunningAfter stayed true, because the prior after-read called
+    Get-AttrCudaScreensaverRunning exactly once, IMMEDIATELY after the nudge, with no allowance
+    for the screen saver process to actually receive and act on the injected input. These are
+    direct tests of Wait-AttrCudaScreensaverDismissed, the bounded poll Start-AttrCudaDisplayWake
+    now calls instead -- by the embedding contract EmbeddedFunctionContractTests proves (byte-
+    identical extraction), testing it directly here is equivalent to testing it through
+    Start-AttrCudaDisplayWake, at a fraction of the wall-clock cost: a small
+    -PollIntervalMilliseconds/-TimeoutMilliseconds here rather than Start-AttrCudaDisplayWake's own
+    real 250ms/5000ms defaults (which DisplayWakeFunctionTests' still-running/unknown-after-probe
+    dismissFailed tests exercise unmodified, at their real cost, so the wiring itself is proven
+    too)."""
+
+    def _wait_with_stub(self, *, stub_body: str, timeout_ms: int = 2000,
+                         interval_ms: int = 10) -> dict:
+        # Same flat-scope override technique as DisplayWakeFunctionTests._wake_with_overrides:
+        # Wait-AttrCudaScreensaverDismissed calls Get-AttrCudaScreensaverRunning INTERNALLY, and an
+        # Import-Module boundary would keep a caller-side redefinition from ever reaching that
+        # internal call -- the real deployed job never has that boundary (both functions are
+        # embedded verbatim into one flat script), so this proves the same thing the real job runs.
+        extract_script = self.tmp / "extract.ps1"
+        extract_script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            "Import-Module '" + str(MODULE) + "' -Force\n"
+            "$src = Get-AttrCudaEmbeddedFunctionSource -Name @("
+            "'Get-AttrCudaScreensaverRunning','Wait-AttrCudaScreensaverDismissed')\n"
+            f"Set-Content -LiteralPath '{(self.tmp / 'extracted.ps1')}' -Value $src -Encoding utf8\n",
+            encoding="utf-8",
+        )
+        extract_proc = _run_pwsh_file(extract_script)
+        self.assertEqual(extract_proc.returncode, 0, extract_proc.stdout + extract_proc.stderr)
+
+        probe_script = self.tmp / "extracted.ps1"
+        with probe_script.open("a", encoding="utf-8") as f:
+            f.write(
+                "\n$ErrorActionPreference = 'Stop'\n"
+                f"function Get-AttrCudaScreensaverRunning {{ {stub_body} }}\n"
+                f"$w = Wait-AttrCudaScreensaverDismissed -TimeoutMilliseconds {timeout_ms} "
+                f"-PollIntervalMilliseconds {interval_ms}\n"
+                f"[IO.File]::WriteAllText('{(self.tmp / 'w.json')}', ($w | ConvertTo-Json -Depth 5))\n"
+            )
+        proc = _run_pwsh_file(probe_script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads((self.tmp / "w.json").read_text(encoding="utf-8"))
+
+    def test_stops_the_instant_a_poll_reads_confirmed_false(self) -> None:
+        # Mutation-style proof: a stub that turns false only on its THIRD call. A premature break
+        # (polling once and trusting it) would read pollCount=1/running=True here; an off-by-one
+        # would read pollCount=2 or 4. Only the real "poll until false or timed out" loop lands on
+        # exactly 3.
+        result = self._wait_with_stub(stub_body=(
+            "$script:__pollCount = [int]$script:__pollCount + 1\n"
+            "if ($script:__pollCount -ge 3) { return $false }\n"
+            "return $true\n"
+        ))
+        self.assertIs(result["running"], False)
+        self.assertEqual(result["pollCount"], 3)
+
+    def test_a_stub_that_never_turns_false_exhausts_the_full_timeout_window(self) -> None:
+        # The other half of the same mutation-style proof: a stub that ALWAYS reads running=true
+        # must not be trusted as dismissed just because it was called a bounded number of times --
+        # the wait must actually spend (at least) its whole timeout budget polling before giving up,
+        # never return early on a merely-large poll count.
+        result = self._wait_with_stub(stub_body="return $true\n", timeout_ms=300, interval_ms=50)
+        self.assertIs(result["running"], True)
+        self.assertGreaterEqual(result["elapsedMilliseconds"], 300)
+        self.assertGreaterEqual(result["pollCount"], 2)
+
+    def test_an_unknown_reading_is_never_coerced_into_a_guess(self) -> None:
+        # Fail-closed, same shape as Start-AttrCudaDisplayWake's own secure/running-unknown gates:
+        # a probe failure ($null) must be returned exactly as read, never silently treated as
+        # either a confirmed dismiss or a confirmed still-running.
+        result = self._wait_with_stub(stub_body="return $null\n", timeout_ms=200, interval_ms=50)
+        self.assertIsNone(result["running"])
+
+    def test_default_parameters_match_the_documented_contract(self) -> None:
+        # "up to 5 s at 250 ms" -- pinned against the real module text (never against a redefined
+        # copy), so a default drifting away from the contract this round promised is caught here.
+        text = MODULE.read_text(encoding="utf-8")
+        func_at = text.index("function Wait-AttrCudaScreensaverDismissed {")
+        param_block_at = text.index("param(", func_at)
+        param_end_at = text.index(")\n", param_block_at)
+        block = text[param_block_at:param_end_at]
+        self.assertIn("[int]$TimeoutMilliseconds = 5000", block)
+        self.assertIn("[int]$PollIntervalMilliseconds = 250", block)
+
+
+@requires_pwsh
 class WakeLifetimeFinallyHardeningTests(_PwshCase):
     """CUDA-PERF-DISPLAY-WAKE-3 round 1b (sol HARDENING): a LIVE proof that the outer try/finally
     actually runs Stop-AttrCudaDisplayWakeKeepAlive/Stop-AttrCudaDisplayWake on a terminating error
@@ -4632,7 +4725,8 @@ class WakeLifetimeFinallyHardeningTests(_PwshCase):
             "$src = Get-AttrCudaEmbeddedFunctionSource -Name @("
             "'Register-AttrCudaDisplayWakeNativeMethods','Get-AttrCudaScreensaverRunning',"
             "'Get-AttrCudaScreensaverTimeoutSeconds','Get-AttrCudaScreensaverActive',"
-            "'Get-AttrCudaScreensaverSecure','Invoke-AttrCudaInputDesktopNudge',"
+            "'Get-AttrCudaScreensaverSecure','Wait-AttrCudaScreensaverDismissed',"
+            "'Invoke-AttrCudaInputDesktopNudge',"
             "'Start-AttrCudaDisplayWake','Stop-AttrCudaDisplayWake',"
             "'Start-AttrCudaDisplayWakeKeepAlive','Stop-AttrCudaDisplayWakeKeepAlive')\n"
             f"Set-Content -LiteralPath '{(self.tmp / 'extracted.ps1')}' -Value $src -Encoding utf8\n",
@@ -4729,6 +4823,73 @@ class InputDesktopNudgeMaskTests(unittest.TestCase):
             "uint desiredAccess = DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | "
             "DESKTOP_SWITCHDESKTOP | DESKTOP_JOURNALPLAYBACK",
             line)
+
+
+class InputDesktopNudgeKeyboardTapTests(unittest.TestCase):
+    """CUDA-PERF-DISPLAY-WAKE-3 round 3 (live UM evidence, defect class fix): OpenInputDesktop/
+    SetThreadDesktop/SendInput all succeeded on three live UM legs, yet screensaverRunningAfter
+    stayed true on every one -- the net-zero 1-pixel mouse move the InputDesktopNudge.Run body used
+    to send is exactly the kind of sub-threshold WM_MOUSEMOVE a classic scrnsave window procedure
+    is documented to ignore. Static text checks on the C# nudge array itself (never evaluated --
+    the real Win32 call cannot be proven this way in CI), so a regression that drops the keyboard
+    tap or shrinks the mouse move back to 1px fails here rather than only showing up as another
+    live UM DISPLAY_WAKE_DISMISS_FAILED leg."""
+
+    def setUp(self) -> None:
+        self.text = MODULE.read_text(encoding="utf-8")
+        nudge_at = self.text.index("INPUT[] nudge = new INPUT[] {")
+        array_end_at = self.text.index("};", nudge_at)
+        self.nudge_array = self.text[nudge_at:array_end_at]
+
+    def test_nudge_includes_a_key_down_and_a_key_up_of_the_same_inert_key(self) -> None:
+        # Removing either event, or the key tap entirely, reds this: the array must carry exactly
+        # one INPUT_KEYBOARD entry with dwFlags=0 (down) and exactly one with KEYEVENTF_KEYUP (up),
+        # both naming the SAME virtual key so a mutation that tapped two different keys is also
+        # caught.
+        self.assertIn("ushort VK_F15 = 0x7E;", self.text,
+                       "VK_F15 (0x7E) is the pinned inert key -- one of the F13-F24 block Windows "
+                       "binds to nothing by default, and unlike Shift can never trigger the "
+                       "Sticky Keys prompt")
+        self.assertEqual(
+            1, self.nudge_array.count("wVk = VK_F15, wScan = 0, dwFlags = 0, time = 0"),
+            "exactly one key-DOWN event (dwFlags=0) for VK_F15")
+        self.assertEqual(
+            1, self.nudge_array.count(
+                "wVk = VK_F15, wScan = 0, dwFlags = KEYEVENTF_KEYUP, time = 0"),
+            "exactly one key-UP event (KEYEVENTF_KEYUP) for VK_F15")
+
+    def test_key_tap_is_never_repeated_within_a_single_nudge_call(self) -> None:
+        # Sticky Keys triggers on FIVE presses of Shift specifically; VK_F15 cannot trigger it at
+        # all, but this pins the deliberate one-tap-per-call design choice itself, independent of
+        # which key is chosen -- a mutation that sent the down+up pair twice (e.g. "for extra
+        # reliability") would still pass the down/up-count test above only if it also duplicated
+        # both, so this counts INPUT_KEYBOARD entries directly.
+        keyboard_events = self.nudge_array.count("type = (int)INPUT_KEYBOARD")
+        self.assertEqual(2, keyboard_events, "exactly one down + one up, never more")
+
+    def test_mouse_move_is_above_a_single_pixel_and_still_net_zero(self) -> None:
+        # CUDA-PERF-DISPLAY-WAKE-3 round 3 diagnosis (b): a screen saver ignores sub-threshold
+        # mouse motion, which is why the round-2 net-zero 1-pixel move alone was not enough. The
+        # move must still be net-zero (dx=8 then dx=-8) so the owner's cursor never visibly ends up
+        # somewhere else.
+        self.assertEqual(1, self.nudge_array.count("dx = 8,"))
+        self.assertEqual(1, self.nudge_array.count("dx = -8,"))
+        self.assertNotIn("dx = 1,", self.nudge_array)
+        self.assertNotIn("dx = -1,", self.nudge_array)
+
+    def test_nudge_array_has_exactly_two_mouse_and_two_keyboard_events(self) -> None:
+        self.assertEqual(2, self.nudge_array.count("type = (int)INPUT_MOUSE"))
+        self.assertEqual(2, self.nudge_array.count("type = (int)INPUT_KEYBOARD"))
+
+    def test_input_struct_declares_both_mouse_and_keyboard_union_arms_at_the_same_offset(self) -> None:
+        # The INPUT struct is a real Win32 union: mi and ki must overlay the SAME FieldOffset(8),
+        # never sit at distinct offsets (which would silently corrupt whichever one SendInput reads
+        # based on .type).
+        struct_at = self.text.index("public struct INPUT")
+        struct_end_at = self.text.index("}", struct_at)
+        block = self.text[struct_at:struct_end_at]
+        self.assertIn("[FieldOffset(8)] public MOUSEINPUT mi;", block)
+        self.assertIn("[FieldOffset(8)] public KEYBDINPUT ki;", block)
 
 
 class DisplayWakeJobOrderingTests(unittest.TestCase):

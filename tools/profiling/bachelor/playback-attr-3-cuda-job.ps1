@@ -461,8 +461,9 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     # CUDA-PERF-DISPLAY-WAKE-1/2: wakes the display from the interactive session before this leg
     # launches MLVApp, holds it awake for the leg, and keeps nudging periodically for the whole
     # leg (SetThreadExecutionState alone does not stop the screen saver) -- see their own header in
-    # AttrCudaArtifacts.psm1. All eight call Register-.../Get-AttrCudaScreensaver*/
-    # Invoke-AttrCudaInputDesktopNudge internally, so all eight must be embedded together.
+    # AttrCudaArtifacts.psm1. All twelve call Register-.../Get-AttrCudaScreensaver*/
+    # Wait-AttrCudaScreensaverDismissed/Invoke-AttrCudaInputDesktopNudge internally, so all twelve
+    # must be embedded together.
     'Register-AttrCudaDisplayWakeNativeMethods',
     'Get-AttrCudaScreensaverRunning',
     'Get-AttrCudaScreensaverTimeoutSeconds',
@@ -471,6 +472,9 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     # the OpenInputDesktop/SetThreadDesktop dedicated-thread nudge Start-AttrCudaDisplayWake
     # dispatches to when the screen saver is already running and not secure.
     'Get-AttrCudaScreensaverSecure',
+    # CUDA-PERF-DISPLAY-WAKE-3 round 3: the bounded after-dismiss poll Start-AttrCudaDisplayWake
+    # calls instead of a single immediate Get-AttrCudaScreensaverRunning read.
+    'Wait-AttrCudaScreensaverDismissed',
     'Invoke-AttrCudaInputDesktopNudge',
     'Start-AttrCudaDisplayWake',
     'Stop-AttrCudaDisplayWake',
