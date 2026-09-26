@@ -1464,7 +1464,11 @@ class OwnerFootagePrivateDirectoryLeakAndRefusalTests(_PwshCase):
     def _extract_cmd_build(self) -> str:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
         start = text.index("$envList = \"'\" + ($envs -join")
-        end = text.index("\n$presentMonProc = Start-PresentMonCapture", start)
+        # CUDA-PERF-DISPLAY-WAKE-3 round 1: ends right before the first keep-alive health
+        # checkpoint (previously "$presentMonProc = Start-PresentMonCapture" itself) -- that
+        # checkpoint needs $displayWake/$displayWakeKeepAlive/$Pub/$FixtureRehearsal, none of which
+        # this minimal $cmd-construction probe defines, and is unrelated to what this test proves.
+        end = text.index("\n$keepAliveHealthAtMeasurementStart = Get-AttrCudaDisplayWakeKeepAliveHealth", start)
         self.assertGreater(end, start, "cmd-build markers moved in the generator")
         return text[start:end]
 
@@ -3532,6 +3536,16 @@ class SmokeRunFailedPresentMonCleanupTests(_PwshCase):
             "function Save-Json($Object, [string]$Path) {\n"
             "    [void](Publish-AttrCudaText -Path $Path -Value ($Object | ConvertTo-Json -Depth 30))\n"
             "}\n"
+            # CUDA-PERF-DISPLAY-WAKE-3 round 1: the extracted failure block now includes the
+            # "before smoke launch" keep-alive health checkpoint, which reads $displayWake and
+            # $displayWakeKeepAlive and calls Get-AttrCudaDisplayWakeKeepAliveHealth (already
+            # available -- this script Import-Modules MODULE above, and that function is exported)
+            # -- none of which this SMOKE_RUN_FAILED/PresentMon-cleanup-focused probe otherwise
+            # needs. A fabricated, already-healthy handle (no real background runspace) keeps that
+            # checkpoint a no-op here, so this test still proves what it always proved.
+            "$displayWake = [ordered]@{}\n"
+            "$displayWakeKeepAlive = [ordered]@{ setupError = $null; asyncResult = $null; stopEvent = $null; "
+            "nudgeState = [ordered]@{ failureCount = 0; lastError = $null; lastFailureUtc = $null } }\n"
             + self._presentmon_functions() + "\n"
             # Swaps out only the launcher: a real PresentMon binary and ETW rights are not
             # available in this test environment, but Stop-PresentMonCapture (under test) must
@@ -4157,6 +4171,7 @@ class EmbeddedFunctionContractTests(_PwshCase):
             "Start-AttrCudaDisplayWake",
             "Stop-AttrCudaDisplayWake",
             "Start-AttrCudaDisplayWakeKeepAlive",
+            "Get-AttrCudaDisplayWakeKeepAliveHealth",
             "Stop-AttrCudaDisplayWakeKeepAlive",
         ),
     }
@@ -4209,6 +4224,9 @@ class DisplayWakeFunctionTests(_PwshCase):
         self.assertIn("SetThreadExecutionState", result["method"])
         self.assertIn(result["screensaverRunningBefore"], (True, False, None))
         self.assertIn(result["screensaverRunningAfter"], (True, False, None))
+        # CUDA-PERF-DISPLAY-WAKE-3 round 1: $null/'secure'/'unknown', matching whichever of the
+        # two gated screensaverSecureOwnerOnly (or neither, when it is $false).
+        self.assertIn(result["screensaverSecureReason"], (None, "secure", "unknown"))
         self.assertIn("utc", result)
         # On a real Windows CI host both native calls succeed; a failure is recorded (never
         # thrown), which the never-throws test below exercises by forcing the native type absent.
@@ -4312,10 +4330,16 @@ class DisplayWakeFunctionTests(_PwshCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         result = json.loads((self.tmp / "n.json").read_text(encoding="utf-8"))
         self.assertIs(result["attempted"], True)
-        for key in ("openInputDesktopError", "setThreadDesktopError", "sendInputError"):
+        for key in ("openInputDesktopError", "setThreadDesktopError", "sendInputError",
+                    "closeDesktopError"):
             self.assertTrue(
                 result[key] is None or isinstance(result[key], str), f"{key}={result[key]!r}")
         self.assertIn(result["threadJoined"], (True, False))
+        # CUDA-PERF-DISPLAY-WAKE-3 round 1: on a real host, OpenInputDesktop/SetThreadDesktop
+        # succeed regardless of whether SendInput itself does (a headless/locked session can still
+        # deny SendInput), and CloseDesktop -- now switched-back-to first -- must then succeed too.
+        if result["openInputDesktopError"] is None and result["setThreadDesktopError"] is None:
+            self.assertIsNone(result["closeDesktopError"])
 
     def test_input_desktop_nudge_does_not_throw_when_native_type_is_unavailable(self) -> None:
         # Same simulated-failure shape as test_a_native_load_failure_is_recorded_not_thrown.
@@ -4393,6 +4417,25 @@ class DisplayWakeFunctionTests(_PwshCase):
         self.assertIs(result["screensaverRunningBefore"], True)
         self.assertIs(result["screensaverSecure"], True)
         self.assertIs(result["screensaverSecureOwnerOnly"], True)
+        self.assertEqual(result["screensaverSecureReason"], "secure")
+        self.assertIsNone(result["inputDesktopNudge"])
+        self.assertIn("ATTRCUDA_SCREENSAVER_SECURE_OWNER_ONLY", result["sendInputError"])
+        self.assertIn("SecureScreensaverNoDismissAttempted", result["method"])
+
+    def test_unknown_secure_state_stops_before_any_dismiss_attempt(self) -> None:
+        # CUDA-PERF-DISPLAY-WAKE-3 round 1 (sol BLOCKER fix): a probe failure (Get-
+        # AttrCudaScreensaverSecure returning $null) must gate exactly like a confirmed-secure
+        # screen saver, never fall through to a dismiss attempt. Same mutation-style proof as the
+        # confirmed-secure test above: the redefined nudge THROWS if this branch is ever reached.
+        proc = self._wake_with_overrides(
+            running=True, secure=None,
+            nudge_override="throw 'MUST NOT BE CALLED when the secure state is unknown'")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "w.json").read_text(encoding="utf-8"))
+        self.assertIs(result["screensaverRunningBefore"], True)
+        self.assertIsNone(result["screensaverSecure"])
+        self.assertIs(result["screensaverSecureOwnerOnly"], True)
+        self.assertEqual(result["screensaverSecureReason"], "unknown")
         self.assertIsNone(result["inputDesktopNudge"])
         self.assertIn("ATTRCUDA_SCREENSAVER_SECURE_OWNER_ONLY", result["sendInputError"])
         self.assertIn("SecureScreensaverNoDismissAttempted", result["method"])
@@ -4482,34 +4525,40 @@ class DisplayWakeJobOrderingTests(unittest.TestCase):
         # (OWNER_FOOTAGE_LINK_CROSS_VOLUME/OWNER_FOOTAGE_LINK_FAILED), VENUE_NOT_QUIESCENT,
         # SMOKE_RUN_FAILED, SMOKE_LOG_UNAVAILABLE, PRESENTMON_UNAVAILABLE, BACKEND_NOT_AVAILABLE,
         # GPU_RECON_FRAMES_ZERO, CPU_FALLBACK_DETECTED, the displayReport failure including
-        # DISPLAY_ASLEEP itself, and the success summary.json.
+        # DISPLAY_ASLEEP itself, and the success summary.json. CUDA-PERF-DISPLAY-WAKE-3 round 1
+        # adds two more: the two KEEPALIVE_FAILED checkpoints (before the smoke launch, and again
+        # at the start of the measured interval) -- 15 grows to 17.
         summary_writes = body.count("(Join-Path $Pub 'summary.json')")
         display_wake_fields = body.count("displayWake=$displayWake") + body.count("displayWake = $displayWake")
-        self.assertEqual(15, summary_writes, "a summary.json write site was added/removed after the wake")
+        self.assertEqual(17, summary_writes, "a summary.json write site was added/removed after the wake")
         # +1: the success path also stamps displayWake into evidence-manifest.json, a second file.
         self.assertEqual(summary_writes + 1, display_wake_fields)
 
     def test_claim_time_wake_and_keep_alive_run_before_footage_package_and_quiescence(self) -> None:
-        # CUDA-PERF-DISPLAY-WAKE-2 round 1c: the wake/keep-alive must be the job's very first
-        # action after claim -- ahead of footage resolution, package/build-manifest verification,
-        # and the CPU-quiescence sleeps -- closing round 1b's 4.5-minute gap.
+        # CUDA-PERF-DISPLAY-WAKE-2 round 1c: the wake must be the job's very first action after
+        # claim -- ahead of footage resolution, package/build-manifest verification, and the
+        # CPU-quiescence sleeps -- closing round 1b's 4.5-minute gap. CUDA-PERF-DISPLAY-WAKE-3
+        # round 1 (sol BLOCKER fix): the secure/unknown gate now runs BEFORE the keep-alive starts
+        # (previously the keep-alive started first), so the keep-alive is armed only once the gate
+        # has already passed.
         embedded_end_at = self.text.index("# --- end embedded verifiers")
         wake_at = self.text.index("$displayWake = Start-AttrCudaDisplayWake")
-        keep_alive_at = self.text.index(
-            "$displayWakeKeepAlive = Start-AttrCudaDisplayWakeKeepAlive", wake_at)
         secure_exit_at = self.text.index(
-            "if ($displayWake.screensaverSecureOwnerOnly) {", keep_alive_at)
-        package_verification_at = self.text.index("foreach ($item in @(", secure_exit_at)
+            "if ($displayWake.screensaverSecureOwnerOnly) {", wake_at)
+        keep_alive_at = self.text.index(
+            "$displayWakeKeepAlive = Start-AttrCudaDisplayWakeKeepAlive", secure_exit_at)
+        package_verification_at = self.text.index("foreach ($item in @(", keep_alive_at)
         footage_marker_at = self.text.index(
             "ATTR3-FIXTURE-STAGE-1: a fixture run authenticates the cached clip's CONTENT",
             package_verification_at)
         quiescence_at = self.text.index("$loads = @()", footage_marker_at)
         self.assertGreater(wake_at, embedded_end_at,
                             "the wake must run only after its own functions are embedded")
-        self.assertGreater(keep_alive_at, wake_at)
-        self.assertLess(keep_alive_at, secure_exit_at)
-        self.assertLess(secure_exit_at, package_verification_at,
-                         "the secure-screensaver early exit must run before package verification")
+        self.assertGreater(secure_exit_at, wake_at)
+        self.assertGreater(keep_alive_at, secure_exit_at,
+                            "the keep-alive must start only after the secure/unknown gate has passed")
+        self.assertLess(keep_alive_at, package_verification_at,
+                         "the keep-alive start must still run before package verification")
         self.assertLess(package_verification_at, footage_marker_at,
                          "package verification must still run before footage content is touched")
         self.assertLess(footage_marker_at, quiescence_at,
@@ -4517,11 +4566,51 @@ class DisplayWakeJobOrderingTests(unittest.TestCase):
 
     def test_screensaver_secure_owner_only_publishes_a_typed_result_and_exits_25(self) -> None:
         secure_exit_at = self.text.index("if ($displayWake.screensaverSecureOwnerOnly) {")
-        block_end_at = self.text.index("foreach ($item in @(", secure_exit_at)
+        block_end_at = self.text.index(
+            "$displayWakeKeepAlive = Start-AttrCudaDisplayWakeKeepAlive", secure_exit_at)
         block = self.text[secure_exit_at:block_end_at]
         self.assertIn("result='SCREENSAVER_SECURE_OWNER_ONLY'", block)
         self.assertIn("displayWake=$displayWake", block)
         self.assertIn("exit 25", block)
+
+    def test_keep_alive_health_checkpoints_bracket_the_presentmon_spawn_and_stop_the_leg_typed(self) -> None:
+        # CUDA-PERF-DISPLAY-WAKE-3 round 1: two checkpoints, in this order -- the first right
+        # before Start-PresentMonCapture (the start of the measured interval), the second right
+        # before the smoke launch, bracketing the gap where PresentMon has already spawned but
+        # MLVApp has not yet been told to play.
+        wake_at = self.text.index("$displayWake = Start-AttrCudaDisplayWake")
+        measurement_checkpoint_at = self.text.index(
+            "$keepAliveHealthAtMeasurementStart = Get-AttrCudaDisplayWakeKeepAliveHealth", wake_at)
+        present_mon_capture_at = self.text.index(
+            "$presentMonProc = Start-PresentMonCapture $presentMonPath", measurement_checkpoint_at)
+        smoke_launch_checkpoint_at = self.text.index(
+            "$keepAliveHealthBeforeSmokeLaunch = Get-AttrCudaDisplayWakeKeepAliveHealth",
+            present_mon_capture_at)
+        launch_at = self.text.index(
+            '& "$env:ProgramFiles\\PowerShell\\7\\pwsh.exe" -NoLogo -NoProfile -NonInteractive '
+            '-ExecutionPolicy Bypass -Command $cmd', smoke_launch_checkpoint_at)
+        self.assertGreater(measurement_checkpoint_at, wake_at)
+        self.assertGreater(present_mon_capture_at, measurement_checkpoint_at,
+                            "PresentMon must start only after the first keep-alive health check")
+        self.assertGreater(smoke_launch_checkpoint_at, present_mon_capture_at)
+        self.assertGreater(launch_at, smoke_launch_checkpoint_at,
+                            "MLVApp must launch only after the second keep-alive health check")
+
+        measurement_block = self.text[
+            measurement_checkpoint_at:present_mon_capture_at]
+        self.assertIn("result='KEEPALIVE_FAILED'", measurement_block)
+        self.assertIn("keepAliveCheckpoint='start_of_measured_interval'", measurement_block)
+        self.assertIn("displayWake=$displayWake", measurement_block)
+        self.assertIn("exit 26", measurement_block)
+
+        smoke_launch_block = self.text[smoke_launch_checkpoint_at:launch_at]
+        self.assertIn("result='KEEPALIVE_FAILED'", smoke_launch_block)
+        self.assertIn("keepAliveCheckpoint='before_smoke_launch'", smoke_launch_block)
+        self.assertIn("displayWake=$displayWake", smoke_launch_block)
+        self.assertIn("exit 26", smoke_launch_block)
+        # PresentMon is already running by this second checkpoint: a refusal here must not orphan
+        # it, the same way SMOKE_RUN_FAILED further down never does.
+        self.assertIn("Stop-PresentMonCapture -Proc $presentMonProc", smoke_launch_block)
 
     def test_display_asleep_outcome_specifically_carries_the_wake_evidence(self) -> None:
         status_at = self.text.index("schema='playback-attr-3-cuda-venue.v1'; result=$displayReport.status")
@@ -4563,6 +4652,14 @@ class DisplayWakeKeepAliveFunctionTests(_PwshCase):
         self.assertIs(result["stopped"], True)
         self.assertIsNone(result["error"])
         self.assertGreaterEqual(result["nudgeCount"], mid_count)
+        # CUDA-PERF-DISPLAY-WAKE-3 round 1 (sol BLOCKER fix): every recorded attempt is either a
+        # success or a failure -- on a real host every tick here is expected to succeed, so
+        # failureCount stays 0 and successCount tracks nudgeCount exactly.
+        self.assertIsNone(result["setupError"])
+        self.assertEqual(result["failureCount"], 0)
+        self.assertEqual(result["successCount"], result["nudgeCount"])
+        self.assertIsNone(result["lastError"])
+        self.assertIsNone(result["lastFailureUtc"])
 
     def test_stop_keep_alive_tolerates_a_null_handle(self) -> None:
         # A job's `finally` calls Stop-AttrCudaDisplayWakeKeepAlive even when the try above threw
@@ -4611,6 +4708,142 @@ class DisplayWakeKeepAliveFunctionTests(_PwshCase):
         # The native type never loaded, so the loop's own "if type exists" guard must have kept
         # every tick a no-op rather than throwing -- zero nudges, not a crash.
         self.assertEqual(0, result["nudgeCount"])
+        self.assertEqual(0, result["successCount"])
+        self.assertEqual(0, result["failureCount"])
+        self.assertIsNone(result["setupError"])
+
+
+# --------------------------------------------------------------------------------------------
+# CUDA-PERF-DISPLAY-WAKE-3 round 1: Get-AttrCudaDisplayWakeKeepAliveHealth, the non-throwing
+# health read checked at the job's two checkpoints (before the smoke launch, and again at the
+# start of the measured interval). Exercised against both a real handle from
+# Start-AttrCudaDisplayWakeKeepAlive and fabricated stand-in handles (a plain PSCustomObject
+# duck-types the same shape without a real background pipeline), so every one of .healthy's
+# false-making conditions is independently provable.
+# --------------------------------------------------------------------------------------------
+
+
+@requires_pwsh
+class DisplayWakeKeepAliveHealthTests(_PwshCase):
+    """Get-AttrCudaDisplayWakeKeepAliveHealth: never-throws and every unhealthy reason."""
+
+    def test_missing_handle_is_unhealthy(self) -> None:
+        proc = self.run_with_module(
+            "$h = Get-AttrCudaDisplayWakeKeepAliveHealth -Handle $null\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'h.json')}', ($h | ConvertTo-Json -Depth 5))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "h.json").read_text(encoding="utf-8"))
+        self.assertIs(result["healthy"], False)
+        self.assertIn("ATTRCUDA_KEEPALIVE_MISSING", result["reason"])
+
+    def test_a_real_freshly_started_keep_alive_is_healthy(self) -> None:
+        proc = self.run_with_module(
+            "$k = Start-AttrCudaDisplayWakeKeepAlive -IntervalSeconds 1\n"
+            "$h = Get-AttrCudaDisplayWakeKeepAliveHealth -Handle $k\n"
+            "[void](Stop-AttrCudaDisplayWakeKeepAlive -Handle $k)\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'h.json')}', ($h | ConvertTo-Json -Depth 5))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "h.json").read_text(encoding="utf-8"))
+        self.assertIs(result["healthy"], True)
+        self.assertIsNone(result["reason"])
+        self.assertEqual(result["failureCount"], 0)
+        self.assertIsNone(result["setupError"])
+        self.assertIs(result["runspaceStopped"], False)
+
+    def test_a_recorded_setup_error_is_unhealthy(self) -> None:
+        # Fabricated handle: a real setup failure (CreateRunspace/Open/BeginInvoke throwing) is
+        # not reliably reproducible on a live host, so the health check's own reading of
+        # .setupError is proven directly against a stand-in of the exact shape
+        # Start-AttrCudaDisplayWakeKeepAlive's own catch branch returns.
+        proc = self.run_with_module(
+            "$k = [pscustomobject]@{ setupError = 'boom'; nudgeState = $null; "
+            "asyncResult = $null; stopEvent = $null }\n"
+            "$h = Get-AttrCudaDisplayWakeKeepAliveHealth -Handle $k\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'h.json')}', ($h | ConvertTo-Json -Depth 5))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "h.json").read_text(encoding="utf-8"))
+        self.assertIs(result["healthy"], False)
+        self.assertIn("ATTRCUDA_KEEPALIVE_SETUP_FAILED", result["reason"])
+        self.assertIn("boom", result["reason"])
+
+    def test_a_recorded_nudge_failure_is_unhealthy(self) -> None:
+        proc = self.run_with_module(
+            "$k = [pscustomobject]@{ setupError = $null; asyncResult = $null; stopEvent = $null; "
+            "nudgeState = [pscustomobject]@{ failureCount = 3; lastError = 'ACCESS_DENIED'; "
+            "lastFailureUtc = '2026-01-01T00:00:00Z' } }\n"
+            "$h = Get-AttrCudaDisplayWakeKeepAliveHealth -Handle $k\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'h.json')}', ($h | ConvertTo-Json -Depth 5))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "h.json").read_text(encoding="utf-8"))
+        self.assertIs(result["healthy"], False)
+        self.assertIn("ATTRCUDA_KEEPALIVE_NUDGE_FAILED", result["reason"])
+        self.assertEqual(result["failureCount"], 3)
+        self.assertEqual(result["lastError"], "ACCESS_DENIED")
+
+    def test_a_pipeline_that_completed_without_a_stop_request_is_unhealthy(self) -> None:
+        # Duck-typed stand-ins for .asyncResult.IsCompleted and .stopEvent.IsSet -- the health
+        # check only ever reads those two properties, never the real types, so a PSCustomObject of
+        # the same shape proves the branch without needing to actually kill a background runspace.
+        proc = self.run_with_module(
+            "$k = [pscustomobject]@{ setupError = $null; "
+            "nudgeState = [pscustomobject]@{ failureCount = 0; lastError = $null; lastFailureUtc = $null }; "
+            "asyncResult = [pscustomobject]@{ IsCompleted = $true }; "
+            "stopEvent = [pscustomobject]@{ IsSet = $false } }\n"
+            "$h = Get-AttrCudaDisplayWakeKeepAliveHealth -Handle $k\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'h.json')}', ($h | ConvertTo-Json -Depth 5))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "h.json").read_text(encoding="utf-8"))
+        self.assertIs(result["healthy"], False)
+        self.assertIn("ATTRCUDA_KEEPALIVE_RUNSPACE_STOPPED", result["reason"])
+        self.assertIs(result["runspaceStopped"], True)
+
+    def test_a_stopped_pipeline_after_an_explicit_stop_request_is_not_flagged(self) -> None:
+        # Same IsCompleted=$true shape as above, but stopEvent.IsSet=$true -- the caller DID ask
+        # it to stop, so a completed pipeline here is the expected, healthy outcome.
+        proc = self.run_with_module(
+            "$k = [pscustomobject]@{ setupError = $null; "
+            "nudgeState = [pscustomobject]@{ failureCount = 0; lastError = $null; lastFailureUtc = $null }; "
+            "asyncResult = [pscustomobject]@{ IsCompleted = $true }; "
+            "stopEvent = [pscustomobject]@{ IsSet = $true } }\n"
+            "$h = Get-AttrCudaDisplayWakeKeepAliveHealth -Handle $k\n"
+            f"[IO.File]::WriteAllText('{(self.tmp / 'h.json')}', ($h | ConvertTo-Json -Depth 5))\n"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.tmp / "h.json").read_text(encoding="utf-8"))
+        self.assertIs(result["healthy"], True)
+        self.assertIs(result["runspaceStopped"], False)
+
+
+class DisplayWakeKeepAliveSetupHardeningTests(unittest.TestCase):
+    """Static shape check: CreateRunspace/Open/BeginInvoke wrapped in the non-throwing contract.
+
+    A live repro of RunspaceFactory.CreateRunspace()/Open() actually throwing is not reliably
+    reproducible on a CI host (it would need real resource exhaustion), so this pins the SHAPE
+    instead -- deleting the try/catch or moving $setupError's assignment out of it fails this
+    test, the same static-shape technique DisplayWakeJobOrderingTests already uses for
+    hard-to-execute invariants."""
+
+    def setUp(self) -> None:
+        self.text = MODULE.read_text(encoding="utf-8")
+
+    def test_runspace_setup_is_wrapped_in_a_try_catch_that_records_setup_error(self) -> None:
+        func_at = self.text.index("function Start-AttrCudaDisplayWakeKeepAlive {")
+        func_end_at = self.text.index("\nfunction Get-AttrCudaDisplayWakeKeepAliveHealth {", func_at)
+        body = self.text[func_at:func_end_at]
+        try_at = body.index("try {")
+        create_at = body.index("RunspaceFactory]::CreateRunspace()", try_at)
+        begin_invoke_at = body.index(".BeginInvoke()", create_at)
+        catch_at = body.index("} catch {", begin_invoke_at)
+        setup_error_at = body.index("$setupError = $_.Exception.Message", catch_at)
+        self.assertGreater(create_at, try_at)
+        self.assertGreater(begin_invoke_at, create_at)
+        self.assertGreater(catch_at, begin_invoke_at)
+        self.assertGreater(setup_error_at, catch_at)
 
 
 class DisplayWakeKeepAliveJobOrderingTests(unittest.TestCase):
