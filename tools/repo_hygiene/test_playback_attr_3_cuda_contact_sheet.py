@@ -45,7 +45,10 @@ from tools.repo_hygiene.test_playback_attr_3_cuda_behaviour import (  # noqa: E4
     requires_pwsh,
     tempfile,
 )
-from tools.profiling.test_make_contact_sheet import _write_frame  # noqa: E402
+# The composer's own test helper needs numpy + Pillow, which the hosted CI images do not install (they install
+# hash-pinned requirements that pin neither yet; see the tools/profiling --ignore note in factory-bridge.yml).
+# Only the one real-interpreter compose test needs it (already skipped via _HAS_REAL_PYTHON_DEPS), so it is imported
+# lazily inside that test instead of failing the whole module at import time.
 
 _HAS_REAL_PYTHON_DEPS = (
     importlib.util.find_spec("PIL") is not None and importlib.util.find_spec("numpy") is not None
@@ -492,6 +495,7 @@ class ContactSheetSwitchTests(unittest.TestCase):
         raw_dir.mkdir(parents=True)
         for i in range(4):
             level = 40 + i * 30
+            from tools.profiling.test_make_contact_sheet import _write_frame  # noqa: E402 -- lazy: needs numpy/Pillow
             _write_frame(str(raw_dir), i, (level, level, level))
 
         probe = self.tmp / "probe-compose-available.ps1"
