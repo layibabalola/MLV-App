@@ -112,9 +112,11 @@
 # comparison is recorded as hostMatchesVenue, informational only, so a fixture rehearsal stays
 # portable to any dev/CI host). Submitting to the right host at all is the caller's job (e.g.
 # tools/profiling/um-run.ps1 -AgentShare pointed at the matching share); this generator does not
-# submit anything itself. Usage (Ultra-Magnus, owner clip):
+# submit anything itself. -ScaleFactor (default 4, the shipping default) is a separate,
+# independent knob for the scale passed to run-release-gui-smoke.ps1 -- not tied to -Venue.
+# Usage (Ultra-Magnus, owner clip, scale 1):
 #   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
-#       -Venue ultra-magnus -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> `
+#       -Venue ultra-magnus -ScaleFactor 1 -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> `
 #       -ClipId M16-1243 -OutFile <path>\<jobId>.job.ps1
 
 [CmdletBinding()]
@@ -246,6 +248,13 @@ param(
     # without another round of literal-hunting; today both default to the same bar -- no evidence
     # yet justifies a different one for Ultra-Magnus, and this card does not invent one.
     [double]$CpuQuiescenceThresholdPercent = 20.0,
+
+    # UM-CUDA-BENCH-VENUE-1: the scale factor passed to run-release-gui-smoke.ps1's own
+    # -ScaleFactor. Was an inline literal 4 (the shipping default) with no caller-facing knob at
+    # all; named and overridable so a card can request a different scale (e.g. 1, full
+    # resolution) without editing this file. Default stays 4 -- byte-for-byte the same behavior
+    # this job always had when the caller passes nothing.
+    [int]$ScaleFactor = 4,
 
     # Owner consent for clip M16-1243 on this card; cited (never resolved to a path
     # here) in the evidence manifest for audit trail.
@@ -643,6 +652,7 @@ $Venue = '__VENUE__'
 $ScratchRootFloor = '__SCRATCH_ROOT__'
 $ExpectedComputerName = '__EXPECTED_COMPUTERNAME__'
 $CpuQuiescenceThresholdPercent = __CPU_QUIESCENCE_THRESHOLD_PERCENT__
+$ScaleFactor = __SCALE_FACTOR__
 $Root = '__AGENT_ROOT__'
 $Cache = Join-Path $Root 'cache'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -1252,13 +1262,14 @@ $envs = @(
     'QT_OPENGL=desktop',
     'QT_FORCE_STDERR_LOGGING=1'
 )
-# Shipping default: scale factor 4. Unlike PLAYBACK-ATTR-2, no
-# MLVAPP_PLAYBACK_SCALE_FACTOR override is emitted; -ScaleFactor 4 is explicit
-# below for self-documentation even though it is run-release-gui-smoke.ps1's own
-# default.
+# UM-CUDA-BENCH-VENUE-1: -ScaleFactor is now caller-overridable (was a bare literal 4, the
+# shipping default, with no knob at all). Unlike PLAYBACK-ATTR-2, no
+# MLVAPP_PLAYBACK_SCALE_FACTOR override is emitted; -ScaleFactor $ScaleFactor is explicit below
+# instead, defaulting to 4 -- run-release-gui-smoke.ps1's own default -- when the caller passes
+# nothing.
 $envList = "'" + ($envs -join "','") + "'"
 function ConvertTo-PsSingleQuoted([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
-$cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted $exePath) -Input $(ConvertTo-PsSingleQuoted $clipPath) -Output $(ConvertTo-PsSingleQuoted $resultPath) -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor 4 -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
+$cmd = "& $(ConvertTo-PsSingleQuoted $smoke) -ExePath $(ConvertTo-PsSingleQuoted $exePath) -Input $(ConvertTo-PsSingleQuoted $clipPath) -Output $(ConvertTo-PsSingleQuoted $resultPath) -Seconds 40 -StartFrame 0 -SettleMs 2500 -ScaleFactor $ScaleFactor -UsePersistedPlaybackSettings -RequireLookAssist:`$false -Scope none -FrameTelemetry -PreserveExperimentalEnvironment -ExtraEnvironment @($envList)"
 # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2/3 (sol BLOCKER 2 / fable HARDENING, direction corrected
 # HARNESS-3): PresentMon's own TimeInMs=0 origin is its internal trace-session start, which lands
 # somewhere between process creation and Start-PresentMonCapture returning (it blocks up to 3s to
@@ -1641,7 +1652,7 @@ $manifest = [ordered]@{
     # A rehearsal cites no consent receipt: the fixtures are repository bytes, and recording the
     # owner-footage receipt here would be misleading provenance (sol, PR #137 r2 minor).
     consentReceipt = $(if ($FixtureRehearsal) { $null } else { $ConsentReceiptFileName })
-    scaleFactor = 4
+    scaleFactor = $ScaleFactor
     # The authenticated chain, end to end: this manifest's own bytes, and the DLL-pair manifest
     # it names. Neither is a claim the measurement host had to take on trust.
     buildManifest = [ordered]@{ name=$buildManifestName; sha256=$BuildManifestSha256; dllPairManifestSha256=$dllPairManifestSha256 }
@@ -1760,6 +1771,7 @@ $text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
     SCRATCH_ROOT = $scratchRootForVenue
     EXPECTED_COMPUTERNAME = $expectedComputerNameForVenue
     CPU_QUIESCENCE_THRESHOLD_PERCENT = $CpuQuiescenceThresholdPercent.ToString([Globalization.CultureInfo]::InvariantCulture)
+    SCALE_FACTOR = $ScaleFactor.ToString([Globalization.CultureInfo]::InvariantCulture)
     EMBEDDED_FUNCTIONS = $embeddedFunctions
 })
 
