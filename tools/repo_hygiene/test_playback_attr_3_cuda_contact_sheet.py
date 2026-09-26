@@ -18,6 +18,8 @@ round-1 scope).
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import re
 import sys
 import unittest
@@ -32,6 +34,7 @@ from tools.repo_hygiene.test_playback_attr_3_cuda_behaviour import (  # noqa: E4
     MODULE,
     OWNER_FOOTAGE_MODULE,
     PWSH,
+    _git_run,
     _long_path,
     _make_fixture_repo,
     _run_pwsh_file,
@@ -39,6 +42,66 @@ from tools.repo_hygiene.test_playback_attr_3_cuda_behaviour import (  # noqa: E4
     requires_pwsh,
     tempfile,
 )
+from tools.profiling.test_make_contact_sheet import _write_frame  # noqa: E402
+
+_HAS_REAL_PYTHON_DEPS = (
+    importlib.util.find_spec("PIL") is not None and importlib.util.find_spec("numpy") is not None
+)
+
+
+def _make_fixture_repo_pre_contact_sheet_card(path: Path) -> list[str]:
+    """Like _make_fixture_repo, but tools/profiling/make-contact-sheet.py does not exist at
+    the FIRST commit -- a stand-in for a real pre-CUDA-PLAYBACK-CONTACT-SHEET-1 commit (e.g.
+    c2f9d377). B4 (r1c BLOCKER fix): a default-off (-ContactSheet not passed) generation
+    against such a commit must succeed -- the composer blob must never be resolved when the
+    switch is off, regardless of whether it would even resolve."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git_run(["init", "-q", "-b", "main"], path)
+    _git_run(["config", "commit.gpgsign", "false"], path)
+    _git_run(["config", "user.email", "lane@example.invalid"], path)
+    _git_run(["config", "user.name", "attr3 behaviour fixture"], path)
+    (path / "src" / "mlv" / "llrawproc").mkdir(parents=True)
+    (path / "tools" / "gpu" / "backend").mkdir(parents=True)
+    (path / "tools" / "profiling").mkdir(parents=True)
+    (path / "tools" / "profiling" / "run-release-gui-smoke.ps1").write_text(
+        "# fixture stand-in for run-release-gui-smoke.ps1\n"
+        ". (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')\n"
+        "Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force\n"
+        ". (Join-Path $PSScriptRoot 'provenance-stamp.ps1')\n"
+        ". (Join-Path $PSScriptRoot 'gui-smoke-color-artifact-scan.ps1')\n"
+        ". (Join-Path $PSScriptRoot 'gui-smoke-gpu-texture-route-validation.ps1')\n",
+        encoding="utf-8",
+    )
+    (path / "tools" / "profiling" / "gui-smoke-screenshot-provenance.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    (path / "tools" / "profiling" / "provenance-stamp.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    (path / "tools" / "profiling" / "gui-smoke-process-boundary.psm1").write_text(
+        "# fixture stand-in sibling (imported directly by the runner).\n", encoding="utf-8"
+    )
+    (path / "tools" / "profiling" / "gui-smoke-color-artifact-scan.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    (path / "tools" / "profiling" / "gui-smoke-gpu-texture-route-validation.ps1").write_text(
+        "# fixture stand-in sibling (dot-sourced directly by the runner)\n", encoding="utf-8"
+    )
+    # Deliberately OMITTED from the first commit: tools/profiling/make-contact-sheet.py.
+    shas = []
+    for index, text in enumerate(("first", "second")):
+        (path / "src" / "mlv" / "llrawproc" / "llrawproc.c").write_text(
+            f"/* fixture revision {text} */\n", encoding="utf-8"
+        )
+        if index == 1:
+            (path / "tools" / "profiling" / "make-contact-sheet.py").write_text(
+                "# fixture stand-in for make-contact-sheet.py, added at the second commit\n",
+                encoding="utf-8",
+            )
+        _git_run(["add", "-A"], path)
+        _git_run(["commit", "-q", "-m", f"fixture {index}"], path)
+        shas.append(_git_run(["rev-parse", "HEAD"], path))
+    return shas
 
 # The base smoke invocation's own text, exactly as playback-attr-3-cuda-job.ps1 emits it when
 # -ContactSheet is not passed. A change to this literal is a real change to what every
@@ -61,13 +124,13 @@ class ContactSheetSwitchTests(unittest.TestCase):
         self.repo = self.tmp / "repo"
         self.shas = _make_fixture_repo(self.repo)
 
-    def _generate(self, out_name: str, *extra_args: str) -> Path:
+    def _generate(self, out_name: str, *extra_args: str, sha: str | None = None) -> Path:
         out_file = self.tmp / out_name
         script = self.tmp / f"generate-{out_name}.ps1"
         args = " ".join(extra_args)
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
-            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[1]}' "
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{sha or self.shas[1]}' "
             f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'tiny_dual_iso' "
             f"-FixtureSha256 '{'b' * 64}' -OutFile '{out_file}' "
             f"-RepoRoot '{self.repo}' {args}\n",
@@ -246,9 +309,18 @@ class ContactSheetSwitchTests(unittest.TestCase):
             "$SourceCommit = '" + self.shas[1] + "'\n"
             "$FixtureRehearsal = $true\n"
             "New-Item -ItemType Directory -Path $Work -Force | Out-Null\n"
-            # A PATH with no python.exe/py.exe on it: both probe candidates in the snippet
-            # below must fail to launch and the step must still complete without throwing.
-            "$env:PATH = $Work\n"
+            # CUDA-PLAYBACK-CONTACT-SHEET-1 r1c: a scrubbed $env:PATH alone does not reliably
+            # hide python.exe/py.exe from Start-Process on every host -- Start-Process's own
+            # executable resolution does not strictly follow the current process's $env:PATH
+            # (confirmed on this host: python.exe still launches successfully even after this
+            # override), which is exactly the class of Start-Process resolution surprise this
+            # round's blocker fix (the -c quoting bug) was also about. Shadow the cmdlet
+            # itself instead, deterministically simulating a venue where BOTH candidates fail
+            # to launch, host-independent.
+            "function Start-Process {\n"
+            "    param([string]$FilePath, [string[]]$ArgumentList, [switch]$PassThru, [string]$WindowStyle)\n"
+            "    throw [System.Management.Automation.CommandNotFoundException]::new(\"$FilePath not found (test stub)\")\n"
+            "}\n"
             + snippet
             + "\nWrite-Output ('MARKER=' + $contactSheetComposeMarker)\n",
             encoding="utf-8",
@@ -267,6 +339,93 @@ class ContactSheetSwitchTests(unittest.TestCase):
         self.assertFalse((pub_dir / "contact-sheet" / "sheet.png").exists())
         self.assertFalse((pub_dir / "contact-sheet" / "stats.json").exists())
 
+    @unittest.skipUnless(
+        _HAS_REAL_PYTHON_DEPS, "this host has no Pillow/numpy to prove the SUCCESS leg against"
+    )
+    def test_compose_step_actually_composes_a_real_sheet_and_stats_with_a_real_interpreter(
+        self,
+    ) -> None:
+        # B3 (r1c): the disclosed-open remedy from r1b -- a real tiny PNG+JSON fixture pair,
+        # composed by the REAL emitted snippet against a REAL Python 3 + Pillow + numpy on
+        # this host, proving the deps probe's positive leg (never exercised by the
+        # PATH-scrubbed "unavailable" test alone) actually finds a capable interpreter and
+        # the composer actually runs end to end.
+        # _make_fixture_repo's own make-contact-sheet.py is a one-line stand-in comment (kept
+        # that way so `git archive` stays instant for every OTHER test in this suite) -- swap
+        # in the REAL composer script's bytes for this one commit, so the compose step this
+        # test proves actually runs make-contact-sheet.py's real logic, not a no-op stub.
+        real_composer_bytes = (
+            ROOT / "tools" / "profiling" / "make-contact-sheet.py"
+        ).read_bytes()
+        (self.repo / "tools" / "profiling" / "make-contact-sheet.py").write_bytes(
+            real_composer_bytes
+        )
+        _git_run(["add", "-A"], self.repo)
+        _git_run(["commit", "-q", "-m", "real composer for the r1c positive test"], self.repo)
+        real_composer_sha = _git_run(["rev-parse", "HEAD"], self.repo)
+
+        job_file = self._generate("compose-available.job.ps1", "-ContactSheet", sha=real_composer_sha)
+        text = job_file.read_text(encoding="utf-8")
+        snippet = self._extract_compose_step_snippet(text)
+        # The snippet references $ContactSheetComposerPyBase64/$ContactSheetComposerSha256 --
+        # baked into the real job by the generator, exactly as -AdditionalArgs etc. are; pull
+        # the REAL emitted values out of the job text rather than recomputing them, so this
+        # test proves the real generator's own bytes compose correctly, not a stand-in.
+        base64_line = next(
+            l for l in text.splitlines() if l.startswith("$ContactSheetComposerPyBase64 =")
+        )
+        sha256_line = next(
+            l for l in text.splitlines() if l.startswith("$ContactSheetComposerSha256 =")
+        )
+
+        work_dir = self.tmp / "compose-work-real"
+        pub_dir = self.tmp / "compose-pub-real"
+        raw_dir = pub_dir / "contact-sheet" / "raw"
+        raw_dir.mkdir(parents=True)
+        for i in range(4):
+            level = 40 + i * 30
+            _write_frame(str(raw_dir), i, (level, level, level))
+
+        probe = self.tmp / "probe-compose-available.ps1"
+        probe.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"Import-Module '{OWNER_FOOTAGE_MODULE}' -Force\n"
+            f"$Work = '{work_dir}'\n"
+            f"$Pub = '{pub_dir}'\n"
+            f"$contactSheetPubDir = '{raw_dir}'\n"
+            "$ClipId = 'tiny_dual_iso'\n"
+            "$SourceCommit = '" + real_composer_sha + "'\n"
+            "$FixtureRehearsal = $true\n"
+            f"{base64_line}\n"
+            f"{sha256_line}\n"
+            "New-Item -ItemType Directory -Path $Work -Force | Out-Null\n"
+            # Deliberately does NOT scrub $env:PATH: this leg proves the probe finds a real,
+            # capable interpreter when one is genuinely present.
+            + snippet
+            + "\nWrite-Output ('MARKER=' + $contactSheetComposeMarker)\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(probe)
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        self.assertNotIn("CONTACT_SHEET_COMPOSE_UNAVAILABLE", proc.stdout)
+
+        sheet_out = pub_dir / "contact-sheet" / "sheet.png"
+        stats_out = pub_dir / "contact-sheet" / "stats.json"
+        self.assertTrue(sheet_out.is_file(), "expected a real composed sheet.png")
+        self.assertTrue(stats_out.is_file(), "expected a real composed stats.json")
+        stats = json.loads(stats_out.read_text(encoding="utf-8"))
+        self.assertEqual(stats["schema"], "contact-sheet-stats.v1")
+        self.assertEqual(stats["tile_count"], 4)
+        self.assertEqual(len(stats["tiles"]), 4)
+        # H3: the composed sidecar carries no absolute local path.
+        self.assertNotIn(str(self.tmp), stats["sheet_path"])
+        self.assertNotIn(str(self.tmp), stats["frames_dir"])
+        status_file = pub_dir / "contact-sheet" / "compose-status.txt"
+        self.assertFalse(
+            status_file.exists(), "success leg must not also write the unavailable marker"
+        )
+
     def test_frame_count_out_of_range_is_refused_at_parameter_binding(self) -> None:
         out_file = self.tmp / "refused.job.ps1"
         script = self.tmp / "generate-refused.ps1"
@@ -276,6 +435,61 @@ class ContactSheetSwitchTests(unittest.TestCase):
             f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'tiny_dual_iso' "
             f"-FixtureSha256 '{'b' * 64}' -OutFile '{out_file}' "
             f"-RepoRoot '{self.repo}' -ContactSheet -ContactSheetFrames 0\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(out_file.exists())
+
+
+@requires_pwsh
+@requires_git
+class ContactSheetDefaultOffPreCardCommitTests(unittest.TestCase):
+    """B4 (r1c BLOCKER fix): a default-off generation must succeed against a commit that
+    predates tools/profiling/make-contact-sheet.py entirely -- the composer blob must never
+    be resolved unless -ContactSheet is actually passed."""
+
+    def setUp(self) -> None:
+        if PWSH is None:  # pragma: no cover - guarded by requires_pwsh too
+            self.skipTest("pwsh is not on PATH")
+        self._tmp = tempfile.TemporaryDirectory(prefix="attr3-contact-sheet-precard-")
+        self.tmp = _long_path(Path(self._tmp.name))
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo_pre_contact_sheet_card(self.repo)
+
+    def test_default_off_generation_succeeds_against_a_commit_with_no_composer_file(self) -> None:
+        # self.shas[0] is the PRE-CARD commit: tools/profiling/make-contact-sheet.py does not
+        # exist there at all. -ContactSheet is not passed, matching a real pre-card leg.
+        out_file = self.tmp / "off-pre-card.job.ps1"
+        script = self.tmp / "generate-off-pre-card.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[0]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'tiny_dual_iso' "
+            f"-FixtureSha256 '{'b' * 64}' -OutFile '{out_file}' "
+            f"-RepoRoot '{self.repo}'\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, f"generator failed: {proc.stdout}\n{proc.stderr}")
+        self.assertTrue(out_file.is_file(), "generator reported success but wrote no job file")
+        text = out_file.read_text(encoding="utf-8")
+        self.assertIn("$ContactSheetEnabled = $false", text)
+        self.assertIn("$ContactSheetComposerPyBase64 = ''", text)
+
+    def test_on_generation_against_the_pre_card_commit_still_refuses(self) -> None:
+        # The converse: -ContactSheet against the SAME pre-card commit must still fail
+        # (there is genuinely nothing to embed), proving the off-run's success above is not
+        # simply because blob resolution failures are being swallowed somewhere.
+        out_file = self.tmp / "on-pre-card.job.ps1"
+        script = self.tmp / "generate-on-pre-card.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -SourceCommit '{self.shas[0]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'tiny_dual_iso' "
+            f"-FixtureSha256 '{'b' * 64}' -OutFile '{out_file}' "
+            f"-RepoRoot '{self.repo}' -ContactSheet\n",
             encoding="utf-8",
         )
         proc = _run_pwsh_file(script)

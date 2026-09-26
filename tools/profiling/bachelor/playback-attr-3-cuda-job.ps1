@@ -570,18 +570,29 @@ $reconName = "igpu_recon_cuda-playback-attr-3-cuda-$shortSha.dll"
 # and the llrawproc blob (Resolve-AttrCudaCommittedBlobId/Save-AttrCudaCommittedBlobBytes),
 # just base64-embedded directly rather than cached: one small text file, not cache-worthy
 # like the six-file closure or the multi-MB llrawproc blob.
-$contactSheetComposerBlobId = Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $SourceCommit -RepoRelativePath 'tools/profiling/make-contact-sheet.py'
-$contactSheetComposerTempPath = Join-Path ([IO.Path]::GetTempPath()) "playback-attr-3-cuda-contact-sheet-composer-$([guid]::NewGuid().ToString('N')).py"
-try {
-    $contactSheetComposerSha256 = Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $contactSheetComposerBlobId -Destination $contactSheetComposerTempPath
-    if ($contactSheetComposerSha256 -notmatch '^[0-9a-f]{64}$') {
-        throw "ATTRCUDA_BLOB_SHA_MALFORMED composer script sha256 is not 64 lowercase hex: '$contactSheetComposerSha256'"
+# CUDA-PLAYBACK-CONTACT-SHEET-1 r1c (BLOCKER fix): resolved ONLY when -ContactSheet is
+# set. This path did not exist at every commit this generator can be asked to build (a
+# pre-card $SourceCommit has no tools/profiling/make-contact-sheet.py at all), so
+# resolving it unconditionally broke every default-off generation against such a commit --
+# the one thing -ContactSheet being off is supposed to leave byte-identical.
+if ($ContactSheet) {
+    $contactSheetComposerBlobId = Resolve-AttrCudaCommittedBlobId -RepoRoot $RepoRoot -Commit $SourceCommit -RepoRelativePath 'tools/profiling/make-contact-sheet.py'
+    $contactSheetComposerTempPath = Join-Path ([IO.Path]::GetTempPath()) "playback-attr-3-cuda-contact-sheet-composer-$([guid]::NewGuid().ToString('N')).py"
+    try {
+        $contactSheetComposerSha256 = Save-AttrCudaCommittedBlobBytes -RepoRoot $RepoRoot -BlobId $contactSheetComposerBlobId -Destination $contactSheetComposerTempPath
+        if ($contactSheetComposerSha256 -notmatch '^[0-9a-f]{64}$') {
+            throw "ATTRCUDA_BLOB_SHA_MALFORMED composer script sha256 is not 64 lowercase hex: '$contactSheetComposerSha256'"
+        }
+        $contactSheetComposerBytes = [IO.File]::ReadAllBytes($contactSheetComposerTempPath)
+    } finally {
+        if (Test-Path -LiteralPath $contactSheetComposerTempPath) { Remove-Item -LiteralPath $contactSheetComposerTempPath -Force }
     }
-    $contactSheetComposerBytes = [IO.File]::ReadAllBytes($contactSheetComposerTempPath)
-} finally {
-    if (Test-Path -LiteralPath $contactSheetComposerTempPath) { Remove-Item -LiteralPath $contactSheetComposerTempPath -Force }
+    $contactSheetComposerPyBase64 = [Convert]::ToBase64String($contactSheetComposerBytes)
+    $contactSheetComposerSha256ForTemplate = $contactSheetComposerSha256
+} else {
+    $contactSheetComposerPyBase64 = ''
+    $contactSheetComposerSha256ForTemplate = ''
 }
-$contactSheetComposerPyBase64 = [Convert]::ToBase64String($contactSheetComposerBytes)
 
 # --- job body template (placeholders are substituted below; the body itself never
 #     touches this generator's variables directly, so there is no accidental capture
@@ -782,7 +793,31 @@ function Stop-PresentMonCapture($Proc, [int]$TimeoutSeconds = 10) {
     }
 }
 
-function Get-FrameRows([string]$RawLog) {
+function Get-MeasuredSmokeSessionId([string]$RawLog) {
+    <#
+    .SYNOPSIS
+    The playback_smoke session id of the MEASURED interval -- BLOCKER fix (r1c): with a
+    contact-sheet capture pass on the leg, the raw log can carry more than one
+    playback_smoke session (see MainWindow.cpp's on_actionPlay_toggled and the
+    m_contactSheetCaptureActive guard around beginPlaybackSmokeTelemetry -- suppressed for a
+    capture restart, but this parser must not depend on that app-side suppression alone).
+    .DESCRIPTION
+    finishPlaybackSmokeTelemetry("play-stop") -- and its playback_smoke.summary/gpu_summary
+    line pair -- runs for the measured interval strictly BEFORE the contact-sheet capture
+    block even starts (see runGuiPlaybackSmoke's own ordering comment). Every session opened
+    afterwards is therefore chronologically LATER in the log, so the FIRST
+    playback_smoke.summary line's session id is always the measured one, regardless of how
+    many more sessions a capture pass goes on to open.
+    #>
+    foreach ($line in ($RawLog -split "`r?`n")) {
+        if ($line -match 'playback_smoke\.summary session=(?<session>\d+)') {
+            return $Matches['session']
+        }
+    }
+    throw 'no playback_smoke.summary line found in the MLVApp log'
+}
+
+function Get-FrameRows([string]$RawLog, [string]$MeasuredSessionId) {
     $rows = [System.Collections.Generic.List[object]]::new()
     $keys = @(
         'prep_region_setup_ms', 'prep_region_gpu_ms', 'prep_region_image_ms',
@@ -796,6 +831,10 @@ function Get-FrameRows([string]$RawLog) {
             $values[$match.Groups['key'].Value] = $match.Groups['value'].Value
         }
         if (-not $values.ContainsKey('prep_region_total_ms')) { continue }
+        # BLOCKER fix (r1c): a contact-sheet capture pass can (or, on a code path that fails
+        # to suppress it, could) open further playback_smoke sessions after the measured
+        # one -- select ONLY the measured session's rows, even when more lines exist.
+        if ($values.ContainsKey('session') -and $values['session'] -ne $MeasuredSessionId) { continue }
         $row = [ordered]@{}
         foreach ($key in @('session','index','elapsed_ms','interval_ms','display_frame','serial')) {
             if ($values.ContainsKey($key)) { $row[$key] = $values[$key] }
@@ -812,8 +851,12 @@ function Get-FrameRows([string]$RawLog) {
     return @($rows)
 }
 
-function Get-LastGpuSummary([string]$RawLog) {
-    # Cumulative per-session counters: the LAST line carries the run's final totals.
+function Get-LastGpuSummary([string]$RawLog, [string]$MeasuredSessionId) {
+    # Cumulative per-session counters: the LAST line FOR THE MEASURED SESSION carries that
+    # session's final totals. BLOCKER fix (r1c): a plain "last line in the log" pick is wrong
+    # once a contact-sheet capture pass can open further sessions after the measured one --
+    # each such session emits its own gpu_summary line, chronologically after the measured
+    # session's, so "last" used to mean "the capture pass's, not the measured interval's".
     $last = $null
     foreach ($line in ($RawLog -split "`r?`n")) {
         if ($line -notmatch 'playback_smoke\.gpu_summary ') { continue }
@@ -821,9 +864,10 @@ function Get-LastGpuSummary([string]$RawLog) {
         foreach ($match in [regex]::Matches($line, '(?<key>[A-Za-z0-9_]+)=(?<value>[^\s]+)')) {
             $values[$match.Groups['key'].Value] = $match.Groups['value'].Value
         }
+        if ($values.ContainsKey('session') -and $values['session'] -ne $MeasuredSessionId) { continue }
         $last = $values
     }
-    if ($null -eq $last) { throw 'no playback_smoke.gpu_summary line found in the MLVApp log' }
+    if ($null -eq $last) { throw 'no playback_smoke.gpu_summary line found in the MLVApp log for the measured session' }
     $required = @('cpu_frames','gpu_preview_frames','gpu_recon_readback_frames','gpu_texture_readback_frames','gpu_texture_no_readback_frames')
     foreach ($key in $required) {
         if (-not $last.ContainsKey($key)) { throw "playback_smoke.gpu_summary line missing $key" }
@@ -1307,7 +1351,8 @@ try {
 }
 $logPath = $runLog.path
 $rawLog = [IO.File]::ReadAllText($logPath)
-$rows = Get-FrameRows $rawLog
+$measuredSmokeSessionId = Get-MeasuredSmokeSessionId $rawLog
+$rows = Get-FrameRows $rawLog $measuredSmokeSessionId
 $rows | Export-Csv -LiteralPath (Join-Path $legOut 'probe-timeline.csv') -NoTypeInformation
 
 # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1/2: publish the smoke artifacts BEFORE any PresentMon
@@ -1402,7 +1447,7 @@ if (-not $verdict.admitted) {
     exit $verdict.exitCode
 }
 
-$gpuSummary = Get-LastGpuSummary $rawLog
+$gpuSummary = Get-LastGpuSummary $rawLog $measuredSmokeSessionId
 # CUDA gate fix (MAJOR): gpu_preview_frames is not CUDA reconstruction -- a run with
 # only preview frames and zero recon/readback/texture frames must not pass as CUDA-
 # exercised. Only recon/texture readback and no-readback frames count toward the gate.
@@ -1600,13 +1645,22 @@ if ($ContactSheetEnabled -and $contactSheetDir -and (Test-Path -LiteralPath $con
     $contactSheetComposeMarker = $null
     $contactSheetPyExe = $null
     $contactSheetPyPrefixArgs = @()
+    # BLOCKER fix (r1c): a `-c 'import PIL, numpy'` -ArgumentList element does not survive
+    # Start-Process's own argument-list-to-command-line join on every venue -- confirmed on
+    # this host, where the direct `python -c "import PIL, numpy"` shell invocation exits 0
+    # but the equivalent Start-Process -ArgumentList @('-c','import PIL, numpy') shape exits
+    # 1, so a capable venue was falsely marked as lacking the dependency. A file path has no
+    # such quoting/joining hazard: probe with one small script file instead of an inline -c
+    # program string.
+    $contactSheetDepsProbeScriptPath = Join-Path $Work 'contact-sheet-deps-probe.py'
+    [void](Publish-AttrCudaText -Path $contactSheetDepsProbeScriptPath -Value "import PIL`nimport numpy")
     foreach ($candidate in @(
         [pscustomobject]@{ exe = 'python.exe'; prefix = @() },
         [pscustomobject]@{ exe = 'py.exe'; prefix = @('-3') }
     )) {
         if ($null -ne $contactSheetPyExe) { continue }
         try {
-            $depsArgs = @($candidate.prefix) + @('-c', 'import PIL, numpy')
+            $depsArgs = @($candidate.prefix) + @($contactSheetDepsProbeScriptPath)
             $depsProc = Start-Process -FilePath $candidate.exe -ArgumentList $depsArgs -PassThru -WindowStyle Hidden
             if (-not $depsProc.WaitForExit(20000)) {
                 try { $depsProc.Kill() } catch {}
@@ -1705,7 +1759,7 @@ $text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
     CONTACT_SHEET_ENABLED = $contactSheetEnabledLiteral
     CONTACT_SHEET_FRAME_COUNT = $contactSheetFrameCountLiteral
     CONTACT_SHEET_COMPOSER_PY_BASE64 = $contactSheetComposerPyBase64
-    CONTACT_SHEET_COMPOSER_SHA256 = $contactSheetComposerSha256
+    CONTACT_SHEET_COMPOSER_SHA256 = $contactSheetComposerSha256ForTemplate
     EMBEDDED_FUNCTIONS = $embeddedFunctions
 })
 
