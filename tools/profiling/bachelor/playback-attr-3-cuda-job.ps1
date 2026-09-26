@@ -805,19 +805,21 @@ function Get-MeasuredSmokeSessionId([string]$RawLog) {
     m_contactSheetCaptureActive guard around beginPlaybackSmokeTelemetry -- suppressed for a
     capture restart, but this parser must not depend on that app-side suppression alone).
     .DESCRIPTION
-    HARDENING (r1d, sol): bind to the app's own explicit
-    "playback_smoke.measured_session id=N" marker (MainWindow.cpp's
-    finishPlaybackSmokeTelemetry, logged once per process on the first genuine "play-stop")
-    when the log carries one, rather than positionally assuming the first
-    playback_smoke.summary line is the measured one -- an alternate GUI-smoke mode (e.g. an
-    Auto Look Assist warmup or lifecycle stress pass that opens its own session first) could
-    make that assumption false. Falls back to the old first-summary heuristic against a log
-    from a build that predates the marker, so this never regresses an older build's run:
-    finishPlaybackSmokeTelemetry("play-stop") -- and its playback_smoke.summary/gpu_summary
-    line pair -- runs for the measured interval strictly BEFORE the contact-sheet capture
-    block even starts (see runGuiPlaybackSmoke's own ordering comment), so on such a log every
-    session opened afterwards is chronologically LATER, and the FIRST
-    playback_smoke.summary line's session id is still the measured one.
+    HARDENING (r1d, sol; rebound in CUDA-PLAYBACK-CONTACT-SHEET-2): bind to the app's own
+    explicit "playback_smoke.measured_session id=N" marker when the log carries one, rather
+    than positionally assuming the first playback_smoke.summary line is the measured one -- an
+    alternate GUI-smoke mode (e.g. an Auto Look Assist warmup or lifecycle stress pass that
+    opens its own session first) could make that assumption false. As of
+    CUDA-PLAYBACK-CONTACT-SHEET-2, MainWindow.cpp's runGuiPlaybackSmoke() logs this marker
+    itself, right after the measured play trigger that opens the measured session -- not from
+    finishPlaybackSmokeTelemetry() on a "play-stop", which a warmup settle or an in-loop
+    lifecycle-stress toggle could reach first and mislabel. Falls back to the old first-summary
+    heuristic against a log from a build that predates the marker, so this never regresses an
+    older build's run: on such a log, the measured interval's own
+    playback_smoke.summary/gpu_summary line pair runs strictly BEFORE the contact-sheet capture
+    block even starts (see runGuiPlaybackSmoke's own ordering comment), so every session opened
+    afterwards is chronologically LATER, and the FIRST playback_smoke.summary line's session id
+    is still the measured one.
     #>
     foreach ($line in ($RawLog -split "`r?`n")) {
         if ($line -match 'playback_smoke\.measured_session id=(?<session>\d+)') {
@@ -894,6 +896,33 @@ function Get-LastGpuSummary([string]$RawLog, [string]$MeasuredSessionId) {
         gpuTextureReadbackFrames = [int]$last['gpu_texture_readback_frames']
         gpuTextureNoReadbackFrames = [int]$last['gpu_texture_no_readback_frames']
     }
+}
+
+function Publish-AttrCudaContactSheetRawCaptures([bool]$Enabled, [string]$SourceDir, [string]$PubRoot) {
+    <#
+    .SYNOPSIS
+    Publish the app's raw --contact-sheet-dir PNG+JSON pairs under $PubRoot\contact-sheet\raw,
+    a no-op when the option was off or nothing was captured.
+    .DESCRIPTION
+    NOTE fix (fable, CUDA-PLAYBACK-CONTACT-SHEET-2): a leg that refuses at the eligibility gate
+    (BACKEND_NOT_AVAILABLE) or the GPU-frame gate (GPU_RECON_FRAMES_ZERO) used to exit before
+    the main publish step ever ran this copy, leaving that leg's raw captures stranded in
+    $Work with no measurement to compare against AND no evidence of what was captured. Both
+    early-refusal call sites below now call this too, so a refused -ContactSheet leg still
+    publishes its raw frames -- composing them into a labelled sheet stays a main-flow-only
+    step (it needs the run's own eligibility verdict for GPU/scale labels, which a refused run
+    has no reliable measurement behind anyway).
+    #>
+    if (-not $Enabled -or -not $SourceDir -or -not (Test-Path -LiteralPath $SourceDir)) { return $null }
+    # New-AttrCudaDirectory only (never a raw New-Item -Force) -- matches every other $Pub
+    # subdirectory this job creates.
+    [void](New-AttrCudaDirectory -Path (Join-Path $PubRoot 'contact-sheet'))
+    $rawDir = Join-Path $PubRoot 'contact-sheet\raw'
+    [void](New-AttrCudaDirectory -Path $rawDir)
+    Get-ChildItem -LiteralPath $SourceDir -File | ForEach-Object {
+        [void](Publish-AttrCudaFileCopy -Source $_.FullName -Destination (Join-Path $rawDir $_.Name))
+    }
+    return $rawDir
 }
 
 foreach ($item in @(
@@ -1452,6 +1481,9 @@ $diagnostics = [ordered]@{
     log = [ordered]@{ path = $runLog.path; sha256 = $runLog.sha256; bytes = $runLog.bytes; runNonce = $runLog.runNonce; source = $runLog.source; aggregateSourcePath = $runLog.aggregateSourcePath }
 }
 if (-not $verdict.admitted) {
+    # NOTE fix (fable): publish raw contact-sheet captures even on this early refusal -- see
+    # Publish-AttrCudaContactSheetRawCaptures's own header.
+    [void](Publish-AttrCudaContactSheetRawCaptures -Enabled $ContactSheetEnabled -SourceDir $contactSheetDir -PubRoot $Pub)
     $refusal = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='BACKEND_NOT_AVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
@@ -1468,6 +1500,9 @@ $gpuSummary = Get-LastGpuSummary $rawLog $measuredSmokeSessionId
 # exercised. Only recon/texture readback and no-readback frames count toward the gate.
 $gpuFramesTotal = $gpuSummary.gpuReconReadbackFrames + $gpuSummary.gpuTextureReadbackFrames + $gpuSummary.gpuTextureNoReadbackFrames
 if ($gpuFramesTotal -le 0) {
+    # NOTE fix (fable): publish raw contact-sheet captures even on this early refusal -- see
+    # Publish-AttrCudaContactSheetRawCaptures's own header.
+    [void](Publish-AttrCudaContactSheetRawCaptures -Enabled $ContactSheetEnabled -SourceDir $contactSheetDir -PubRoot $Pub)
     $fallback = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result='GPU_RECON_FRAMES_ZERO'
         fixtureRehearsal=$FixtureRehearsal
@@ -1642,15 +1677,7 @@ Save-Json ([ordered]@{
 # later step, off this job (see the -ContactSheet param's own comment). Published BEFORE the
 # artifact index below so these land in it the same way every other published file does.
 if ($ContactSheetEnabled -and $contactSheetDir -and (Test-Path -LiteralPath $contactSheetDir)) {
-    # New-AttrCudaDirectory only (never a raw New-Item -Force), one level at a time, matching
-    # every other $Pub subdirectory in this job (e.g. the 'logs' dir above): it refuses a linked
-    # parent or an occupied non-directory target instead of silently writing through one.
-    [void](New-AttrCudaDirectory -Path (Join-Path $Pub 'contact-sheet'))
-    $contactSheetPubDir = Join-Path $Pub 'contact-sheet\raw'
-    [void](New-AttrCudaDirectory -Path $contactSheetPubDir)
-    Get-ChildItem -LiteralPath $contactSheetDir -File | ForEach-Object {
-        [void](Publish-AttrCudaFileCopy -Source $_.FullName -Destination (Join-Path $contactSheetPubDir $_.Name))
-    }
+    $contactSheetPubDir = Publish-AttrCudaContactSheetRawCaptures -Enabled $ContactSheetEnabled -SourceDir $contactSheetDir -PubRoot $Pub
     # CUDA-PLAYBACK-CONTACT-SHEET-1 r1b: compose the raw captures into one labelled sheet +
     # stats sidecar right here, in the job's publish step, so a reader gets the composed
     # artifact without running make-contact-sheet.py by hand. Pillow/numpy (and Python

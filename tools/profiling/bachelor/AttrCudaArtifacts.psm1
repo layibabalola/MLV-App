@@ -1885,10 +1885,23 @@ function ConvertTo-AttrCudaQuotedProcessArgument {
     child's command line -- confirmed empirically: an unquoted element containing a space
     (e.g. a GPU description such as "CUDA / NVIDIA GeForce RTX 4090") silently splits into
     several argv entries in the child process, the exact class of bug the r1c -c-quoting
-    BLOCKER was about. Wrapping every element in double quotes here (doubling any embedded
-    double quote, matching Windows' own command-line convention, which both the Python and
-    .NET argv parsers that Start-Process's children use already understand) keeps it as one
-    argv entry regardless of embedded spaces.
+    BLOCKER was about. Wrapping every element in double quotes keeps it as one argv entry
+    regardless of embedded spaces.
+
+    HARDENING (fable NOTE, CUDA-PLAYBACK-CONTACT-SHEET-2): the embedded-quote escaping follows
+    the CommandLineToArgvW/MSVCRT argv-quoting algorithm every value this function quotes is
+    eventually parsed by (Start-Process's child is always a python.exe/py.exe interpreter, or
+    in principle any Windows argv[] consumer): backslashes are literal EXCEPT immediately
+    before a double quote, where each backslash must be doubled and the quote itself escaped
+    as \" -- and a run of backslashes immediately before the CLOSING quote this function adds
+    must also be doubled, since a quote follows them too. A naive doubled-quote ("" instead of
+    \") is a *different* convention (cmd.exe's own), and a value ending in a bare backslash
+    (e.g. a directory path with a trailing separator) would previously reach the parser as an
+    escaped closing quote, corrupting the argument boundary. Every value this helper is
+    actually called with today (hostname, GPU description, scale, build sha, the caller's own
+    footage identifier, frames-dir/sheet-out/stats-out paths without a trailing backslash) contains neither
+    backslashes nor quotes, so this is a correctness hardening with no behaviour change for
+    any current caller.
     #>
     [CmdletBinding()]
     param(
@@ -1896,7 +1909,36 @@ function ConvertTo-AttrCudaQuotedProcessArgument {
         [AllowEmptyString()]
         [string]$Value
     )
-    '"' + $Value.Replace('"', '""') + '"'
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $pendingBackslashes = 0
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq '\') {
+            $pendingBackslashes++
+            continue
+        }
+        if ($ch -eq '"') {
+            # n backslashes immediately before a quote become 2n backslashes plus one escaped
+            # quote -- each original backslash is preserved AND escaped, then the quote itself.
+            [void]$builder.Append('\' * ($pendingBackslashes * 2))
+            [void]$builder.Append('\"')
+            $pendingBackslashes = 0
+            continue
+        }
+        if ($pendingBackslashes -gt 0) {
+            [void]$builder.Append('\' * $pendingBackslashes)
+            $pendingBackslashes = 0
+        }
+        [void]$builder.Append($ch)
+    }
+    # Trailing backslashes (none seen yet followed by a quote) must be doubled: the closing
+    # quote this function appends next would otherwise escape the last one instead of ending
+    # the argument.
+    if ($pendingBackslashes -gt 0) {
+        [void]$builder.Append('\' * ($pendingBackslashes * 2))
+    }
+    [void]$builder.Append('"')
+    $builder.ToString()
 }
 
 function Get-AttrCudaPresentMonDisplayReport {

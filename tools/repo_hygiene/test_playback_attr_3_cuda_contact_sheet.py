@@ -207,12 +207,25 @@ class ContactSheetSwitchTests(unittest.TestCase):
         job_file = self._generate("on-publish-order.job.ps1", "-ContactSheet")
         text = job_file.read_text(encoding="utf-8")
 
-        publish_pos = text.index("$contactSheetPubDir = Join-Path $Pub 'contact-sheet\\raw'")
+        # CUDA-PLAYBACK-CONTACT-SHEET-2: the raw-copy logic moved into
+        # Publish-AttrCudaContactSheetRawCaptures (also called from both early-refusal exits --
+        # see the NOTE-fix tests below), so the main-flow publish step now reads as a call to it.
+        function_def_pos = text.index("function Publish-AttrCudaContactSheetRawCaptures(")
+        publish_call_pos = text.index(
+            "$contactSheetPubDir = Publish-AttrCudaContactSheetRawCaptures "
+            "-Enabled $ContactSheetEnabled -SourceDir $contactSheetDir -PubRoot $Pub"
+        )
         index_pos = text.index(
             "$files = Get-ChildItem -LiteralPath $Pub -Recurse -File"
         )
         self.assertLess(
-            publish_pos,
+            function_def_pos,
+            publish_call_pos,
+            "the helper must be defined before its first call site (no forward references "
+            "in this generated script)",
+        )
+        self.assertLess(
+            publish_call_pos,
             index_pos,
             "contact-sheet frames must be published before the artifact index is built, "
             "or they will not be indexed",
@@ -677,6 +690,233 @@ class ContactSheetDefaultOffPreCardCommitTests(unittest.TestCase):
         proc = _run_pwsh_file(script)
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertFalse(out_file.exists())
+
+
+@requires_pwsh
+class ContactSheetRawCapturesOnRefusalTests(unittest.TestCase):
+    """NOTE fix (fable, CUDA-PLAYBACK-CONTACT-SHEET-2): raw --contact-sheet-dir captures must
+    still be published under $Pub/contact-sheet/raw even when the leg refuses at the
+    eligibility gate (BACKEND_NOT_AVAILABLE) or the GPU-frame gate (GPU_RECON_FRAMES_ZERO),
+    both of which exit before the main publish step used to run this copy at all."""
+
+    def _function_text(self) -> str:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        start = text.index("function Publish-AttrCudaContactSheetRawCaptures(")
+        end = text.index("\nforeach ($item in @(", start)
+        return text[start:end]
+
+    def test_copies_every_file_and_returns_the_raw_dir_when_enabled_and_populated(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="contact-sheet-raw-publish-")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        source_dir = root / "capture"
+        source_dir.mkdir()
+        (source_dir / "frame-00.png").write_bytes(b"\x89PNG-fixture")
+        (source_dir / "frame-00.json").write_text('{"index": 0}', encoding="utf-8")
+        pub_root = root / "pub"
+        pub_root.mkdir()
+
+        script = root / "probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            + self._function_text() + "\n"
+            f"$result = Publish-AttrCudaContactSheetRawCaptures -Enabled $true "
+            f"-SourceDir '{source_dir}' -PubRoot '{pub_root}'\n"
+            "Write-Output \"RESULT=$result\"\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        raw_dir = pub_root / "contact-sheet" / "raw"
+        self.assertTrue((raw_dir / "frame-00.png").is_file())
+        self.assertTrue((raw_dir / "frame-00.json").is_file())
+        self.assertEqual(
+            (raw_dir / "frame-00.json").read_text(encoding="utf-8"), '{"index": 0}'
+        )
+        self.assertIn(f"RESULT={raw_dir}", proc.stdout)
+
+    def test_is_a_no_op_when_disabled_or_the_source_dir_does_not_exist(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="contact-sheet-raw-publish-noop-")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        pub_root = root / "pub"
+        pub_root.mkdir()
+        missing_dir = root / "does-not-exist"
+
+        script = root / "probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            + self._function_text() + "\n"
+            f"$disabled = Publish-AttrCudaContactSheetRawCaptures -Enabled $false "
+            f"-SourceDir '{missing_dir}' -PubRoot '{pub_root}'\n"
+            f"$missingSource = Publish-AttrCudaContactSheetRawCaptures -Enabled $true "
+            f"-SourceDir '{missing_dir}' -PubRoot '{pub_root}'\n"
+            "Write-Output \"DISABLED_IS_NULL=$($null -eq $disabled)\"\n"
+            "Write-Output \"MISSING_SOURCE_IS_NULL=$($null -eq $missingSource)\"\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("DISABLED_IS_NULL=True", proc.stdout)
+        self.assertIn("MISSING_SOURCE_IS_NULL=True", proc.stdout)
+        # Neither call may have created the contact-sheet dir under $Pub.
+        self.assertFalse((pub_root / "contact-sheet").exists())
+
+    def test_both_early_refusal_exits_publish_raw_captures_before_saving_summary_and_exiting(
+        self,
+    ) -> None:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+
+        backend_refusal_at = text.index("if (-not $verdict.admitted) {")
+        backend_publish_at = text.index(
+            "[void](Publish-AttrCudaContactSheetRawCaptures -Enabled $ContactSheetEnabled "
+            "-SourceDir $contactSheetDir -PubRoot $Pub)",
+            backend_refusal_at,
+        )
+        backend_save_at = text.index("Save-Json $refusal (Join-Path $Pub 'summary.json')", backend_refusal_at)
+        backend_exit_at = text.index("exit $verdict.exitCode", backend_refusal_at)
+        self.assertLess(backend_refusal_at, backend_publish_at)
+        self.assertLess(backend_publish_at, backend_save_at)
+        self.assertLess(backend_save_at, backend_exit_at)
+
+        gpu_zero_refusal_at = text.index("if ($gpuFramesTotal -le 0) {")
+        gpu_zero_publish_at = text.index(
+            "[void](Publish-AttrCudaContactSheetRawCaptures -Enabled $ContactSheetEnabled "
+            "-SourceDir $contactSheetDir -PubRoot $Pub)",
+            gpu_zero_refusal_at,
+        )
+        gpu_zero_save_at = text.index(
+            "Save-Json $fallback (Join-Path $Pub 'summary.json')", gpu_zero_refusal_at
+        )
+        gpu_zero_exit_at = text.index("exit 13", gpu_zero_refusal_at)
+        self.assertLess(gpu_zero_refusal_at, gpu_zero_publish_at)
+        self.assertLess(gpu_zero_publish_at, gpu_zero_save_at)
+        self.assertLess(gpu_zero_save_at, gpu_zero_exit_at)
+
+        # The two refusal branches' publish calls are genuinely distinct call sites, not one
+        # shared position both indices above coincidentally matched.
+        self.assertNotEqual(backend_publish_at, gpu_zero_publish_at)
+
+
+@requires_pwsh
+class ConvertToAttrCudaQuotedProcessArgumentBackslashTests(unittest.TestCase):
+    """HARDENING fix (fable NOTE, CUDA-PLAYBACK-CONTACT-SHEET-2): ConvertTo-AttrCudaQuotedProcessArgument
+    must correctly escape a value containing a backslash immediately before a double quote (and
+    a value ending in a bare backslash, which sits immediately before the closing quote this
+    function adds) per the CommandLineToArgvW/MSVCRT argv-quoting convention -- not just
+    values that happen to contain neither."""
+
+    @staticmethod
+    def _argv_decode_one_quoted_argument(quoted: str) -> str:
+        """An independent reference decoder for ONE argument produced by
+        ConvertTo-AttrCudaQuotedProcessArgument, implementing the standard Microsoft C
+        runtime / CommandLineToArgvW parsing rules directly from their public description --
+        written independently of the ps1 implementation under test, so a shared bug in both
+        would have to be a coincidence, not a shared assumption.
+
+        Deliberately does NOT strip the closing quote before scanning: a run of backslashes
+        immediately before THAT quote must be halved exactly like a run before an embedded
+        one (this is precisely the case the backslash-before-quote hardening fixes), so the
+        closing quote has to stay visible to the same backslash-run lookahead the rest of the
+        scan uses, rather than being cut off first.
+        """
+        assert quoted[0] == '"' and quoted[-1] == '"', quoted
+        out: list[str] = []
+        i = 1  # skip the opening quote
+        n = len(quoted)
+        while i < n - 1:
+            ch = quoted[i]
+            if ch == "\\":
+                j = i
+                while j < n and quoted[j] == "\\":
+                    j += 1
+                run = j - i
+                if j < n and quoted[j] == '"':
+                    # j == n - 1 means this run sits right before the CLOSING quote; j < n - 1
+                    # means it precedes an embedded, escaped quote. Both were doubled (plus one
+                    # more backslash for an embedded quote) by the encoder, so both halve back
+                    # the same way here.
+                    out.append("\\" * (run // 2))
+                    if run % 2 == 1:
+                        out.append('"')
+                        i = j + 1
+                    else:
+                        i = j
+                else:
+                    out.append("\\" * run)
+                    i = j
+            else:
+                # A bare, unescaped quote here would mean the encoder emitted an embedded
+                # quote without a preceding backslash -- ConvertTo-AttrCudaQuotedProcessArgument
+                # always precedes an embedded quote with at least one backslash (see its own
+                # `\"` append), so this must never be reached for real encoder output.
+                assert ch != '"', f"unescaped bare quote in quoted body: {quoted!r}"
+                out.append(ch)
+                i += 1
+        return "".join(out)
+
+    def _quote(self, value: str) -> str:
+        tmp = tempfile.TemporaryDirectory(prefix="attr-cuda-quote-arg-")
+        self.addCleanup(tmp.cleanup)
+        script = Path(tmp.name) / "probe.ps1"
+        value_literal = "'" + value.replace("'", "''") + "'"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"Import-Module '{MODULE}' -Force\n"
+            f"$quoted = ConvertTo-AttrCudaQuotedProcessArgument -Value {value_literal}\n"
+            "Write-Output \"BEGIN_QUOTED\"\n"
+            "Write-Output $quoted\n"
+            "Write-Output \"END_QUOTED\"\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = proc.stdout
+        start = out.index("BEGIN_QUOTED\n") + len("BEGIN_QUOTED\n")
+        end = out.index("END_QUOTED", start)
+        # Strip exactly one trailing line separator, never rstrip() generally: the quoted
+        # value can legitimately end in trailing content that rstrip() would also eat.
+        quoted = out[start:end]
+        for newline in ("\r\n", "\n", "\r"):
+            if quoted.endswith(newline):
+                quoted = quoted[: -len(newline)]
+                break
+        return quoted
+
+    def _assert_round_trips(self, value: str) -> None:
+        quoted = self._quote(value)
+        self.assertEqual(
+            self._argv_decode_one_quoted_argument(quoted),
+            value,
+            f"value={value!r} quoted={quoted!r}",
+        )
+
+    def test_plain_value_with_a_space_round_trips(self) -> None:
+        self._assert_round_trips("CUDA / NVIDIA GeForce RTX 4090")
+
+    def test_value_ending_in_a_single_trailing_backslash_round_trips(self) -> None:
+        # e.g. a directory path with a trailing separator. Before this fix, a bare trailing
+        # backslash reached the closing quote unescaped, letting the parser read it as an
+        # escaped quote (\") instead of the argument terminator -- corrupting the boundary.
+        self._assert_round_trips("C:\\mlvtmp\\contact-sheet\\")
+
+    def test_value_ending_in_an_even_run_of_trailing_backslashes_round_trips(self) -> None:
+        self._assert_round_trips("C:\\mlvtmp\\\\")
+
+    def test_value_with_a_backslash_immediately_before_an_embedded_quote_round_trips(self) -> None:
+        self._assert_round_trips('a\\"b')
+
+    def test_value_with_two_backslashes_immediately_before_an_embedded_quote_round_trips(self) -> None:
+        self._assert_round_trips('a\\\\"b')
+
+    def test_value_with_a_bare_embedded_quote_and_no_backslash_round_trips(self) -> None:
+        self._assert_round_trips('say "hello"')
+
+    def test_empty_value_round_trips(self) -> None:
+        self._assert_round_trips("")
 
 
 if __name__ == "__main__":  # pragma: no cover
