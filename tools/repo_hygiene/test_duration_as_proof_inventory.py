@@ -8,13 +8,17 @@ re-derives every candidate site (see that module's docstring for the four patter
 src/, platform/qt/ and tests/, and this test diffs that live output against the checked-in,
 hand-classified tools/repo_hygiene/duration_as_proof_inventory.json.
 
-A site is identified by (path, anchor) -- anchor is NORMALIZED LINE TEXT (see
-duration_as_proof_scan.normalize_anchor), never a line number, so a site that merely moves
-(another line inserted above it) does not need reclassification, but ANY change to the line's
-own text does: the anchor no longer matches, the old inventory row goes stale, and the new text
-is unclassified. Both directions fail the gate:
-  - a NEW or CHANGED site (test_every_live_site_is_pinned_and_classified)
-  - a STALE row the live scan no longer finds (test_no_stale_inventory_rows)
+A site is identified by (path, anchor, occurrence_count) -- anchor is NORMALIZED LINE TEXT
+(see duration_as_proof_scan.normalize_anchor), never a line number, and occurrence_count is
+how many physical lines in that file currently share that anchor (len of the row's own
+"lines" list). So a site that merely moves (another line inserted above it) does not need
+reclassification, but ANY change to the line's own text does -- the anchor no longer
+matches -- and so does adding a new, otherwise-identical copy of an already-classified
+anchor: the count changes, so the (path, anchor, count) key changes too, and the new copy
+cannot silently ride in on the old row's classification. Both directions fail the gate:
+  - a NEW or CHANGED site, or a NEW occurrence of an existing one
+    (test_every_live_site_is_pinned_and_classified)
+  - a STALE row the live scan no longer finds at that count (test_no_stale_inventory_rows)
 
 Positive controls (test_matcher_flags_seeded_positive_control /
 test_matcher_ignores_seeded_negative_control) pin the scanner's own behavior against two
@@ -40,14 +44,18 @@ KNOWN_CLOCKS = {"qpc_stage_clock", "omp_get_wtime_direct", "other"}
 
 
 def _row_key(row: dict) -> tuple:
-    return (row["path"], row["anchor"])
+    # The occurrence count (how many physical lines this anchor is found at) is part of the
+    # site's identity: an inventory row pins the anchor AND how many times it currently
+    # occurs, so a newly added identical copy of a classified line is a different key and
+    # must be classified itself, rather than silently inheriting the original row's verdict.
+    return (row["path"], row["anchor"], len(row.get("lines", [])))
 
 
 class DurationAsProofInventoryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.live_candidates = scan_repo(ROOT)
-        cls.live_by_key = {(c.path, c.anchor): c for c in cls.live_candidates}
+        cls.live_by_key = {(c.path, c.anchor, len(c.lines)): c for c in cls.live_candidates}
         data = json.loads(INVENTORY.read_text(encoding="utf-8"))
         cls.meta = data["_meta"]
         cls.inventory = data["rows"]
@@ -143,17 +151,59 @@ class DurationAsProofInventoryTests(unittest.TestCase):
         self.assertTrue(any("json_ms_key" in t for t in triggers_by_anchor.values()))
         self.assertTrue(any("assert_macro" in t for t in triggers_by_anchor.values()))
 
+    def test_matcher_flags_seeded_json_key_with_default_arg_control(self) -> None:
+        # A `.toDouble(<default>)` / `.toInt(<default>)` read (a default-value fallback, not
+        # the bare no-arg form) must still be recognized -- this is the shape sol/fable found
+        # missing in test_dual_iso_pipeline.cpp's `avg_ms`.toDouble(-1.0) reads.
+        seeded = 'if (sample.value(QStringLiteral("seeded_default_ms")).toDouble(-1.0) > 0.0) { return; }'
+        found = scan_text(seeded, source="<seeded-json-default-arg>")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("json_ms_key", found[0].triggers)
+
+    def test_matcher_flags_seeded_exclusive_getter_control(self) -> None:
+        # A bare (non-macro) comparison against a duration-named getter call must be caught
+        # on its own -- not only when it happens to be wrapped in an ASSERT_*/EXPECT_* macro,
+        # which would let disabling the getter-comparison path hide behind assert_macro
+        # coverage instead of being independently proven (sol's "no exclusive positive
+        # control" hardening finding).
+        seeded = "if (getSeededProbeMilliseconds() > 0.0) { return; }"
+        found = scan_text(seeded, source="<seeded-exclusive-getter>")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("duration_getter", found[0].triggers)
+        self.assertNotIn("assert_macro", found[0].triggers)
+
+    def test_matcher_flags_seeded_near_and_double_eq_macro_controls(self) -> None:
+        # ASSERT_NEAR/EXPECT_NEAR (3-arg, tolerance ignored) and ASSERT_DOUBLE_EQ/
+        # ASSERT_FLOAT_EQ (2-arg) were previously outside the macro alternation entirely.
+        seeded = "\n".join([
+            "ASSERT_NEAR(0.0, getSeededNearProbeMs(), 1e-9);",
+            "ASSERT_DOUBLE_EQ(0.0, getSeededDoubleEqProbeMs());",
+        ])
+        found = scan_text(seeded, source="<seeded-near-and-double-eq>")
+        self.assertEqual(len(found), 2, found)
+        for c in found:
+            self.assertIn("assert_macro", c.triggers)
+
     def test_matcher_ignores_seeded_negative_control(self) -> None:
         # None of these compare a duration-suffixed value to a zero literal: a non-zero
         # comparison, a comparison between two non-zero-literal expressions, a duration-shaped
-        # identifier used without any comparison, and an unrelated "ms" substring that is not a
-        # duration suffix (lowercase, mid-word).
+        # identifier used without any comparison, an unrelated "ms" substring that is not a
+        # duration suffix (lowercase, mid-word), a non-zero literal whose text merely ends in
+        # the digit 0 (`10.0`, `0.5`), a duration-named call with a real (non-empty) argument,
+        # a duration-named getter/JSON read compared against a NON-zero literal, and a bare
+        # camelCase `Us`/`Ns` token that is not underscore-delimited.
         seeded = "\n".join([
             "void f() {",
             "    if (some_stage_duration_ms > 5.0) { markRan(); }",
             "    if (stage_a_ms > stage_b_ms) { pickA(); }",
             "    logDuration(some_stage_duration_ms);",
             "    int items = countItems();",
+            "    if (10.0 > some_stage_duration_ms) { markRan(); }",
+            "    if (some_stage_duration_ms > 0.5) { markRan(); }",
+            "    processDuration(some_stage_duration_ms);",
+            "    if (getSeededProbeMilliseconds() > 5.0) { return; }",
+            "    ASSERT_NEAR(1.0, getSeededNearProbeMs(), 1e-9);",
+            "    if (someValueUs > 0) { markRan(); }",
             "}",
         ])
         found = scan_text(seeded, source="<seeded-negative>")
@@ -164,7 +214,10 @@ class DurationAsProofInventoryTests(unittest.TestCase):
         # under src/, platform/qt/ or tests/, so they must never appear as a live repo candidate
         # or a pinned inventory row -- this would only happen if a future edit accidentally wrote
         # the seed strings into a real tracked file.
-        seeded_markers = ("some_stage_duration_ms", "seeded_probe_ms", "getSeededProbeMilliseconds")
+        seeded_markers = (
+            "some_stage_duration_ms", "seeded_probe_ms", "getSeededProbeMilliseconds",
+            "seeded_default_ms", "getSeededNearProbeMs", "getSeededDoubleEqProbeMs",
+        )
         for c in self.live_candidates:
             for marker in seeded_markers:
                 self.assertNotIn(marker, c.anchor, c)
