@@ -2254,6 +2254,30 @@ function Get-AttrCudaPresentMonDisplayReport {
     }
 }
 
+function ConvertTo-AttrCudaResultLineSafeText {
+    <#
+    .SYNOPSIS
+    Sanitize free-form text (an exception message, a typed reason) for embedding inside a
+    RESULT= stdout line's quoted REASON="..." field.
+    .DESCRIPTION
+    PRESENTMON-HARNESS-ROBUSTNESS-2 (fable note): the RESULT line is read by naive downstream
+    parsing (a regex over stdout text), never real shell quoting -- a literal '"' inside the
+    embedded text (e.g. an exception message containing a quoted path or argument) would
+    terminate that field early for such a parser. Quotes are substituted with a visually adjacent
+    apostrophe rather than backslash-escaped, since nothing downstream unescapes backslashes.
+    $null passes through unchanged, so callers do not need their own null guard first.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+    if ($null -eq $Text) { return $Text }
+    $Text.Replace('"', "'")
+}
+
 Export-ModuleMember -Function `
     Get-AttrCudaArtifactNames, `
     New-AttrCudaBuildInfoHeader, `
@@ -2293,4 +2317,5 @@ Export-ModuleMember -Function `
     Resolve-AttrCudaSmokeRunLog, `
     Get-AttrCudaLastEligibilityLine, `
     Get-AttrCudaEligibilityVerdict, `
-    Get-AttrCudaPresentMonDisplayReport
+    Get-AttrCudaPresentMonDisplayReport, `
+    ConvertTo-AttrCudaResultLineSafeText

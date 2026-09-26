@@ -705,17 +705,18 @@ class PresentModeBreakdownFixtureTests(_ReportCase):
 
 @requires_pwsh
 class PresentMonStatusFixtureTests(_ReportCase):
-    """PRESENTMON-HARNESS-ROBUSTNESS-1: the job's own presentMonStatus/-Reason assignment,
+    """PRESENTMON-HARNESS-ROBUSTNESS-1/2: the job's own presentMonStatus/-Reason assignment,
     EXECUTED verbatim from playback-attr-3-cuda-job.ps1 (never hand-reimplemented) against the
-    module's real output. Must read 'degraded' -- never silently 'ok' -- when
+    module's real output. Must read 'degraded' -- never silently 'ok' -- both when
     $pmIntervalRows is empty despite a genuinely displayed row (the exact "very thin
-    admitted-row count" full-screen gap this round closes), and 'ok' once at least one positive
-    interval sample exists."""
+    admitted-row count" full-screen gap round 1 closed) AND when it is merely thin (round 2's
+    sufficiency gate: a nonzero-but-below-threshold count or coverage fraction), and 'ok' only
+    once BOTH the minimum count and minimum coverage thresholds are cleared."""
 
     @classmethod
     def setUpClass(cls) -> None:
         text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
-        start = text.index("$presentMonStatus = if ($pmIntervalRows.Count -gt 0)")
+        start = text.index("$presentMonSufficiencyMinIntervalCount = 30")
         end = text.index("\n\n$dllSha256Lower", start)
         cls.status_source = text[start:end]
         assert "'degraded'" in cls.status_source, cls.status_source
@@ -733,9 +734,13 @@ class PresentMonStatusFixtureTests(_ReportCase):
             "[Globalization.DateTimeStyles]::RoundtripKind)\n"
             f"$csvPath = '{csv_path}'\n"
             f"$resultJson = (Get-Content -LiteralPath '{result_json_path}' -Raw | ConvertFrom-Json)\n"
-            "$report = Get-AttrCudaPresentMonDisplayReport -CsvPath $csvPath -ResultJson $resultJson "
+            # Named $displayReport, matching the real job's own variable name -- the extracted
+            # status_source below (PRESENTMON-HARNESS-ROBUSTNESS-2) dot-accesses
+            # $displayReport.selectedChain.presentedCount, so this probe must use the same name,
+            # not the $report alias the sibling stats-only probe above uses.
+            "$displayReport = Get-AttrCudaPresentMonDisplayReport -CsvPath $csvPath -ResultJson $resultJson "
             "-EarliestCaptureStartUtc $captureStart -LatestCaptureStartUtc $captureStart\n"
-            "$pmRows = @($report.selectedChainRows)\n"
+            "$pmRows = @($displayReport.selectedChainRows)\n"
             "$pmIntervalRows = @($pmRows | Where-Object "
             "{ $null -ne $_.msBetweenDisplayChange -and $_.msBetweenDisplayChange -gt 0 })\n"
             f"{self.status_source}\n"
@@ -773,7 +778,11 @@ class PresentMonStatusFixtureTests(_ReportCase):
 
         self.assertEqual(result["presentMonStatus"], "degraded", result)
 
-    def test_ok_once_at_least_one_positive_interval_sample_exists(self) -> None:
+    def test_degraded_when_only_a_single_positive_interval_sample_exists(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 (sol BLOCKER, PR #174 r1): this is exactly the
+        # round-1 fixture that used to read 'ok' -- a single positive interval over a whole leg
+        # cannot establish cadence, and must now read 'degraded' under the sufficiency gate
+        # (1 positive-interval row is far below the >= 30 minimum count).
         rows = [
             _real_csv_row(time_in_ms=5000, between_display_change="NA", until_displayed="8.3"),
             _real_csv_row(time_in_ms=5017, between_display_change="16.6", until_displayed="16.6"),
@@ -782,17 +791,93 @@ class PresentMonStatusFixtureTests(_ReportCase):
 
         result = self._run_status(path, _result_json())
 
-        self.assertEqual(result["presentMonStatus"], "ok", result)
-        self.assertIsNone(result["presentMonStatusReason"])
+        self.assertEqual(result["presentMonStatus"], "degraded", result)
+        self.assertIsNotNone(result["presentMonStatusReason"])
+        self.assertIn("only 1 positive-interval row(s)", result["presentMonStatusReason"])
+        self.assertIn("below the sufficiency gate", result["presentMonStatusReason"])
 
-    def test_ok_when_every_displayed_row_carries_a_real_interval(self) -> None:
+    def test_degraded_when_a_handful_of_displayed_rows_all_carry_real_intervals(self) -> None:
+        # Every displayed row here DOES carry a genuine interval (unlike the two tests above) --
+        # this isolates the count-threshold arm of the gate: 5 real samples still is not enough
+        # to corroborate cadence over a whole leg (round-1's own fixture used to read 'ok' here).
         rows = [_csv_row(time_in_ms=5000 + i * 1000) for i in range(5)]
+        path = self._write_csv(rows)
+
+        result = self._run_status(path, _result_json())
+
+        self.assertEqual(result["presentMonStatus"], "degraded", result)
+        self.assertIn("only 5 positive-interval row(s)", result["presentMonStatusReason"])
+
+    def test_ok_once_the_sufficiency_gate_is_cleared(self) -> None:
+        # Clears BOTH thresholds: >= 30 positive-interval rows, and coverage
+        # (positiveIntervalCount / presentedCount) >= 0.5 -- every row here is both presented and
+        # displayed with a real interval, so coverage is 1.0.
+        rows = [_csv_row(time_in_ms=3000 + i * 500) for i in range(35)]
         path = self._write_csv(rows)
 
         result = self._run_status(path, _result_json())
 
         self.assertEqual(result["presentMonStatus"], "ok", result)
         self.assertIsNone(result["presentMonStatusReason"])
+
+    def test_degraded_when_count_clears_the_threshold_but_coverage_does_not(self) -> None:
+        # 35 displayed rows with a real positive interval (count clears >= 30) interleaved with 40
+        # MORE MLVApp rows that presented and were never displayed (MsBetweenDisplayChange and
+        # MsUntilDisplayed both 0 -- displayed=False) -- presentedCount rises to 75, so coverage =
+        # 35/75 ~= 0.467, below the 0.5 gate. Isolates the coverage-fraction arm of the gate
+        # independently of the count arm (the exact "high count, most presents never reach the
+        # screen" shape a full-screen/occluded leg could still exhibit).
+        displayed_rows = [_csv_row(time_in_ms=3000 + i * 500) for i in range(35)]
+        undisplayed_rows = [
+            _csv_row(between_display_change="0", until_displayed="0", time_in_ms=3250 + i * 500)
+            for i in range(40)
+        ]
+        path = self._write_csv(displayed_rows + undisplayed_rows)
+
+        result = self._run_status(path, _result_json())
+
+        self.assertEqual(result["presentMonStatus"], "degraded", result)
+        self.assertIn("only 35 positive-interval row(s) out of 75 MLVApp-presented row(s)", result["presentMonStatusReason"])
+        self.assertIn("coverage 46.7%", result["presentMonStatusReason"])
+
+
+@requires_pwsh
+class DisplayFailurePresentMonStatusFixtureTests(_ReportCase):
+    """PRESENTMON-HARNESS-ROBUSTNESS-2 (fable note): the display-failure branch's own
+    presentMonStatus derivation, EXECUTED verbatim from playback-attr-3-cuda-job.ps1 -- never
+    hand-reimplemented. DISPLAY_ASLEEP (PresentMon AFFIRMATIVELY measuring zero displayed frames,
+    a verified negative) must read 'verified_zero_displayed', while PRESENTMON_UNAVAILABLE (and
+    any other non-OK status) keeps the coarse 'unavailable' the other two refusal branches
+    (spawn, wait) still tag literally."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+        cls.derivation = (
+            "$displayFailurePresentMonStatus = if ($displayReport.status -eq 'DISPLAY_ASLEEP') "
+            "{ 'verified_zero_displayed' } else { 'unavailable' }"
+        )
+        assert cls.derivation in text, "the generator's display-failure status derivation moved or changed"
+
+    def _run(self, status: str) -> str:
+        out_path = self.tmp / "status.txt"
+        script = self.tmp / "probe.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$displayReport = [pscustomobject]@{{ status = '{status}' }}\n"
+            f"{self.derivation}\n"
+            f"Set-Content -LiteralPath '{out_path}' -Value $displayFailurePresentMonStatus -NoNewline\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return out_path.read_text(encoding="utf-8")
+
+    def test_display_asleep_reads_verified_zero_displayed(self) -> None:
+        self.assertEqual(self._run("DISPLAY_ASLEEP"), "verified_zero_displayed")
+
+    def test_presentmon_unavailable_keeps_the_coarse_unavailable_status(self) -> None:
+        self.assertEqual(self._run("PRESENTMON_UNAVAILABLE"), "unavailable")
 
 
 if __name__ == "__main__":

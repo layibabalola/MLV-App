@@ -3593,6 +3593,10 @@ class PresentMonSpawnFailureTests(_PwshCase):
         script = self.tmp / "probe.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
+            # PRESENTMON-HARNESS-ROBUSTNESS-2: the spawn guard's RESULT= line now calls the
+            # module's own ConvertTo-AttrCudaResultLineSafeText -- imported here (never
+            # hand-reimplemented) so this probe exercises the real sanitizer, not a stand-in.
+            f"Import-Module '{MODULE}' -Force\n"
             + stub + "\n"
             f"$presentMonPath = '{present_mon_path}'\n"
             "$FixtureRehearsal = $true\n"
@@ -3659,6 +3663,23 @@ class PresentMonSpawnFailureTests(_PwshCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("RESULT=NO_FAILURE_BRANCH_TAKEN", proc.stdout)
         self.assertEqual(summary, {})
+
+    def test_a_quote_in_the_exception_message_does_not_garble_the_result_line(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 (fable note): a '"' inside the exception message used to
+        # land raw inside this stdout line's quoted REASON="..." field, garbling naive downstream
+        # parsing. summary.json's own `reason` (real JSON, already properly escaped) keeps the
+        # quote verbatim -- only the plain-text RESULT= line is sanitized.
+        stub = (
+            "function Start-PresentMonCapture([string]$CsvPath) {\n"
+            '    throw \'bad arg: "--foo" was rejected\'\n'
+            "}\n"
+        )
+        proc, summary = self._run(stub=stub, present_mon_path=self.tmp / "presentmon.csv")
+
+        self.assertEqual(proc.returncode, 23, proc.stdout + proc.stderr)
+        self.assertIn('bad arg: \'--foo\' was rejected', proc.stdout)
+        self.assertNotIn('bad arg: "--foo" was rejected', proc.stdout)
+        self.assertIn('bad arg: "--foo" was rejected', summary.get("reason", ""))
 
 
 @requires_pwsh

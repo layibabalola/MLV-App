@@ -266,10 +266,46 @@ class TemplateOrderingTests(unittest.TestCase):
         self.assertLess(typed_exit, smoke_launch)
 
     def test_the_display_and_wait_failure_branches_carry_a_present_mon_status_field(self) -> None:
-        # PRESENTMON-HARNESS-ROBUSTNESS-1: every typed PresentMon refusal (spawn, wait, parse/
-        # display) now tags presentMonStatus='unavailable' -- a coarse field simple downstream
-        # consumers can key on without re-deriving it from .status/exit code.
-        self.assertEqual(self.template.count("presentMonStatus='unavailable'"), 3)
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: every typed PresentMon refusal (spawn, wait) tags
+        # presentMonStatus='unavailable' literally -- a coarse field simple downstream consumers
+        # can key on without re-deriving it from .status/exit code.
+        self.assertEqual(self.template.count("presentMonStatus='unavailable'"), 2)
+
+    def test_every_result_line_reason_is_sanitized_before_embedding(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 (fable note, applied to all three REASON= sites: spawn,
+        # wait, and display-failure): free-form text (an exception message, a typed reason) must
+        # pass through ConvertTo-AttrCudaResultLineSafeText before it is embedded in a RESULT=
+        # stdout line's quoted REASON="..." field, so a literal '"' inside it cannot garble a
+        # naive downstream parser. Executed end to end (for the spawn branch) in
+        # tools/repo_hygiene/test_playback_attr_3_cuda_behaviour.py::PresentMonSpawnFailureTests;
+        # this is the static tripwire pinning all three call sites, including the ones not
+        # separately executed.
+        self.assertIn(
+            'REASON=`"PresentMon failed to start: $(ConvertTo-AttrCudaResultLineSafeText $presentMonSpawnError)`"',
+            self.template,
+        )
+        self.assertIn(
+            'REASON=`"$(ConvertTo-AttrCudaResultLineSafeText $presentMonWaitError)`"',
+            self.template,
+        )
+        self.assertIn(
+            'REASON=`"$(ConvertTo-AttrCudaResultLineSafeText $displayReport.reason)`"',
+            self.template,
+        )
+        self.assertIn("'ConvertTo-AttrCudaResultLineSafeText'", ATTRIBUTION_GENERATOR.read_text(encoding="utf-8"))
+
+    def test_the_display_failure_branch_distinguishes_verified_zero_displayed(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 (fable note): DISPLAY_ASLEEP is PresentMon
+        # AFFIRMATIVELY measuring zero displayed frames, not PresentMon being unable to measure
+        # at all -- the display-failure branch's presentMonStatus is now derived dynamically from
+        # $displayReport.status rather than the blanket literal 'unavailable' the other two
+        # refusal branches still use.
+        self.assertIn(
+            "$displayFailurePresentMonStatus = if ($displayReport.status -eq 'DISPLAY_ASLEEP') "
+            "{ 'verified_zero_displayed' } else { 'unavailable' }",
+            self.template,
+        )
+        self.assertIn("presentMonStatus=$displayFailurePresentMonStatus", self.template)
 
     def test_the_display_failure_branch_carries_the_already_computed_app_side_measurement(self) -> None:
         # PRESENTMON-HARNESS-ROBUSTNESS-1: the backend-eligibility/GPU-frames gates and the
@@ -293,14 +329,32 @@ class TemplateOrderingTests(unittest.TestCase):
         self.assertLess(typed_check, frame_rows)
         self.assertLess(frame_rows, typed_exit)
 
-    def test_the_success_path_derives_ok_or_degraded_from_the_interval_filtered_count(self) -> None:
-        # PRESENTMON-HARNESS-ROBUSTNESS-1: 'degraded' -- never silently 'ok' -- when display was
-        # confirmed but no row carried a positive MsBetweenDisplayChange interval (the disclosed
-        # "very thin admitted-row count" full-screen gap). Must be derived from
-        # $pmIntervalRows.Count (the same population Get-Stats above already runs on), not
-        # $pmRows.Count (every displayed row, which over-counts exactly the population this
-        # status exists to distinguish).
+    def test_the_success_path_derives_ok_or_degraded_from_a_sufficiency_gate(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 (sol BLOCKER, PR #174 r1): the round-1 rule
+        # ($pmIntervalRows.Count -gt 0) was itself too weak -- a single positive interval still
+        # read fully 'ok'. 'ok' now requires BOTH a minimum absolute count of positive-interval
+        # samples AND a minimum coverage fraction of them relative to how many times MLVApp itself
+        # swapped in the window ($displayReport.selectedChain.presentedCount) -- never a bare
+        # count-only or coverage-only check, and never re-spelled as $pmRows.Count (which
+        # over-counts by including the interval-less NA-first-present row).
+        self.assertIn("$presentMonSufficiencyMinIntervalCount = 30", self.template)
+        self.assertIn("$presentMonSufficiencyMinCoverageFraction = 0.5", self.template)
         self.assertIn(
+            "$presentMonPresentedCount = [int]$displayReport.selectedChain.presentedCount",
+            self.template,
+        )
+        self.assertIn(
+            "$presentMonSufficient = ($pmIntervalRows.Count -ge $presentMonSufficiencyMinIntervalCount) "
+            "-and ($presentMonCoverageFraction -ge $presentMonSufficiencyMinCoverageFraction)",
+            self.template,
+        )
+        self.assertIn(
+            "$presentMonStatus = if ($presentMonSufficient) { 'ok' } else { 'degraded' }",
+            self.template,
+        )
+        # The old blocker rule (bare "any positive sample" gate) must be gone, not merely
+        # superseded elsewhere in the file.
+        self.assertNotIn(
             "$presentMonStatus = if ($pmIntervalRows.Count -gt 0) { 'ok' } else { 'degraded' }",
             self.template,
         )
@@ -309,8 +363,31 @@ class TemplateOrderingTests(unittest.TestCase):
             self.template,
         )
         pm_rows_built = self.template.index("$pmRows = @($displayReport.selectedChainRows)")
-        status_assigned = self.template.index("$presentMonStatus = if ($pmIntervalRows.Count -gt 0)")
-        self.assertLess(pm_rows_built, status_assigned)
+        coverage_computed = self.template.index("$presentMonCoverageFraction = if (")
+        status_assigned = self.template.index("$presentMonStatus = if ($presentMonSufficient)")
+        self.assertLess(pm_rows_built, coverage_computed)
+        self.assertLess(coverage_computed, status_assigned)
+
+    def test_the_sufficiency_rule_and_computed_coverage_are_published(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 (round 1 requirement): the rule, its thresholds, and the
+        # computed coverage are all persisted -- in evidence-manifest.json's presentMon block, at
+        # summary.json's top level, and in the RESULT= stdout line -- so a reader never has to
+        # reverse-engineer the threshold from positiveSamples alone.
+        self.assertIn("presentedCount=$presentMonPresentedCount", self.template)
+        self.assertIn("coverageFraction=$presentMonCoverageFraction", self.template)
+        self.assertIn(
+            "sufficiency=[ordered]@{ minIntervalCount=$presentMonSufficiencyMinIntervalCount; "
+            "minCoverageFraction=$presentMonSufficiencyMinCoverageFraction; "
+            "sufficient=$presentMonSufficient }",
+            self.template,
+        )
+        self.assertIn("presentMonPositiveSamples = $pmIntervalRows.Count", self.template)
+        self.assertIn("presentMonPresentedCount = $presentMonPresentedCount", self.template)
+        self.assertIn("presentMonCoverageFraction = $presentMonCoverageFraction", self.template)
+        self.assertIn(
+            "PRESENTMON_COVERAGE=$([math]::Round($presentMonCoverageFraction, 3))",
+            self.template,
+        )
 
     def test_present_modes_are_a_field_of_get_attr_cuda_present_mon_display_report(self) -> None:
         # PRESENTMON-HARNESS-ROBUSTNESS-1: the module's own chain/selectedChain objects, not a
