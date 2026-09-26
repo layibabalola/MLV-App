@@ -204,7 +204,7 @@ TEST(ContactSheetCaptureWiring, PerPresentedFrameHookIsCalledFromTheSameSiteAsPl
     const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
 
     // Declared next to notePlaybackSmokePresentedFrame and called from the same real-
-    // presented-frame call site (finishPresentedFrame), immediately after it -- so every
+    // presented-frame call site (finishPresentedFrame), shortly after it -- so every
     // playback-mode contact-sheet grab is of a frame actually presented during playback,
     // the same event that drives the playback_smoke fps/frame counters.
     const int noteCallAt = source.indexOf(
@@ -213,7 +213,17 @@ TEST(ContactSheetCaptureWiring, PerPresentedFrameHookIsCalledFromTheSameSiteAsPl
         QStringLiteral("noteContactSheetPresentedFrame( displayFrame, readyFrame, requestContext );"));
     ASSERT_TRUE(noteCallAt >= 0);
     ASSERT_TRUE(hookCallAt > noteCallAt);
-    ASSERT_TRUE(hookCallAt - noteCallAt < 200);
+    ASSERT_TRUE(hookCallAt - noteCallAt < 700);
+
+    // HARDENING (default-off, CUDA-PLAYBACK-CONTACT-SHEET-2): the call itself -- not just the
+    // hook's own early return -- must be gated on a cheap member bool set only when the
+    // contact-sheet options are actually present, so a smoke run with the options off makes
+    // zero noteContactSheetPresentedFrame() calls on the measured-frame hot path.
+    const int callGuardAt = source.lastIndexOf(
+        QStringLiteral("if( m_contactSheetOptionsPresent )"), hookCallAt);
+    ASSERT_TRUE(callGuardAt >= 0);
+    ASSERT_TRUE(callGuardAt < hookCallAt);
+    ASSERT_TRUE(hookCallAt - callGuardAt < 100);
 
     // Gated on its own flag, never on m_playbackSmokeActive -- it must keep working (and keep
     // counting) after the measured interval's playback_smoke session has already closed.
@@ -223,6 +233,30 @@ TEST(ContactSheetCaptureWiring, PerPresentedFrameHookIsCalledFromTheSameSiteAsPl
     ASSERT_FALSE(hookBody.isEmpty());
     ASSERT_TRUE(hookBody.contains(QStringLiteral("if( !m_contactSheetCaptureActive ) return;")));
     ASSERT_FALSE(hookBody.contains(QStringLiteral("m_playbackSmokeActive")));
+}
+
+TEST(ContactSheetCaptureWiring, DefaultOffOptionsPresentFlagIsSetOnlyInsideTheContactSheetBlock)
+{
+    const QString header = readRepoFile(QStringLiteral("platform/qt/MainWindow.h"));
+    ASSERT_TRUE(header.contains(QStringLiteral("bool m_contactSheetOptionsPresent = false;")));
+
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    const int guardAt = smokeBody.indexOf(
+        QStringLiteral("if( !options.contactSheetDir.isEmpty() && options.contactSheetFrames > 0 )"));
+    const int setTrueAt = smokeBody.indexOf(
+        QStringLiteral("m_contactSheetOptionsPresent = true;"), guardAt);
+    ASSERT_TRUE(guardAt >= 0);
+    ASSERT_TRUE(setTrueAt > guardAt);
+    ASSERT_TRUE(setTrueAt - guardAt < 600);
+
+    // Set true exactly once in the whole file, and only inside this block -- an unconditional
+    // or earlier assignment would defeat the whole point of gating the per-present call on it.
+    ASSERT_EQ(1, source.count(QStringLiteral("m_contactSheetOptionsPresent = true;")));
 }
 
 TEST(ContactSheetCaptureWiring, PlaybackModeSidecarRecordsRenderPathAndPlaybackPathTrue)
@@ -464,34 +498,163 @@ TEST(ContactSheetCaptureWiring, FinishTelemetryClearsFrameAndTimelineFlagsAfterE
     ASSERT_TRUE(clearTimelineAt > foregroundGuardAt);
 }
 
-TEST(ContactSheetCaptureWiring, MeasuredSessionMarkerIsLoggedOnceOnTheFirstGenuinePlayStop)
+TEST(ContactSheetCaptureWiring, MeasuredSessionMarkerIsLoggedOnceRightAfterTheMeasuredPlayTrigger)
 {
     const QString header = readRepoFile(QStringLiteral("platform/qt/MainWindow.h"));
     ASSERT_TRUE(header.contains(QStringLiteral("bool m_playbackSmokeMeasuredSessionLogged = false;")));
 
+    // HARDENING (CUDA-PLAYBACK-CONTACT-SHEET-2): the marker must now be logged from
+    // runGuiPlaybackSmoke() itself, immediately after the trigger() that opens the MEASURED
+    // session -- not from finishPlaybackSmokeTelemetry() on a "play-stop", which a Look Assist
+    // Auto-warmup settle or an in-loop clip-lifecycle-stress Play toggle could reach first and
+    // mislabel. It must therefore sit strictly between the measured play trigger and the timed
+    // measurement while() loop -- never inside a warmup/stress block above it, and never after
+    // the loop has already started consuming the measured window.
     const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    const int measuredTriggerAt = smokeBody.indexOf(QStringLiteral("forcePlaybackSmokeWindowForeground();"));
+    const int markerGuardAt = smokeBody.indexOf(
+        QStringLiteral("if( !m_playbackSmokeMeasuredSessionLogged )"), measuredTriggerAt);
+    const int timedLoopAt = smokeBody.indexOf(
+        QStringLiteral("while( playbackClock.elapsed() < durationMs && ui->actionPlay->isChecked() )"));
+    ASSERT_TRUE(measuredTriggerAt >= 0);
+    ASSERT_TRUE(markerGuardAt > measuredTriggerAt);
+    ASSERT_TRUE(timedLoopAt > markerGuardAt);
+
+    const QString markerBlock = smokeBody.mid(markerGuardAt, 400);
+    ASSERT_TRUE(markerBlock.contains(QStringLiteral("m_playbackSmokeMeasuredSessionLogged = true;")));
+    ASSERT_TRUE(markerBlock.contains(QStringLiteral("\"playback_smoke.measured_session id=%1\"")));
+
+    // The old first-"play-stop" binding must be gone from finishPlaybackSmokeTelemetry -- a
+    // leftover copy there would double-log the marker (harmless for the FIRST such call since
+    // the flag is already set, but proof the relocation actually happened, not just an addition).
     const QString finishBody = sliceBetween(source,
         QStringLiteral("void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )"),
         QStringLiteral("bool MainWindow::primePlaybackCacheOnPlayStart( void )"));
     ASSERT_FALSE(finishBody.isEmpty());
+    ASSERT_FALSE(finishBody.contains(QStringLiteral("m_playbackSmokeMeasuredSessionLogged = true;")));
+    ASSERT_FALSE(finishBody.contains(QStringLiteral("qstrcmp( reason, \"play-stop\" )")));
+}
 
-    // HARDENING (sol pre-review #2): an explicit, one-shot marker naming which session is the
-    // MEASURED one -- gated on the one-shot flag (never logged twice) and on a genuine
-    // "play-stop" (never a "play-restart", which is an internal re-open, not the deliberate
-    // end of a timed measurement) -- so a Bachelor job's parser can bind to this id directly
-    // instead of assuming the first playback_smoke.summary line is always it.
-    const int markerGuardAt = finishBody.indexOf(
-        QStringLiteral("if( !m_playbackSmokeMeasuredSessionLogged && qstrcmp( reason, \"play-stop\" ) == 0 )"));
-    ASSERT_TRUE(markerGuardAt >= 0);
-    const QString markerBlock = finishBody.mid(markerGuardAt, 400);
-    ASSERT_TRUE(markerBlock.contains(QStringLiteral("m_playbackSmokeMeasuredSessionLogged = true;")));
-    ASSERT_TRUE(markerBlock.contains(QStringLiteral("\"playback_smoke.measured_session id=%1\"")));
+// --- CUDA-PLAYBACK-CONTACT-SHEET-2 (BLOCKER fix: looped span collapse) -----------------------
 
-    // Must run before m_playbackSmokeActive is cleared is irrelevant here (the marker reads
-    // only the session id, not m_playbackSmokeActive) -- but it must still precede the
-    // frame/timeline-telemetry clear this same round adds, since both are one-time,
-    // end-of-session actions and must not be reordered relative to each other by a future
-    // edit without deliberately reconsidering this test.
-    const int clearFrameAt = finishBody.indexOf(QStringLiteral("m_playbackSmokeFrameTelemetry = false;"));
-    ASSERT_TRUE(clearFrameAt > markerGuardAt);
+TEST(ContactSheetCaptureWiring, WrapFlagExistsResetsPerSessionAndIsSetWhenTheTimelineGoesBackwards)
+{
+    const QString header = readRepoFile(QStringLiteral("platform/qt/MainWindow.h"));
+    ASSERT_TRUE(header.contains(QStringLiteral("bool m_playbackSmokeWrapped = false;")));
+
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+
+    // beginPlaybackSmokeTelemetry() must reset the flag for every new session, right alongside
+    // the first/last-presented-frame fields it already resets -- otherwise a wrap detected in
+    // an EARLIER session (e.g. a warmup) would wrongly force the wrapped span path for a later,
+    // non-looping measured session in the same process.
+    const QString beginBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::beginPlaybackSmokeTelemetry( void )"),
+        QStringLiteral("void MainWindow::notePlaybackSmokePresentedFrame("));
+    ASSERT_FALSE(beginBody.isEmpty());
+    const int resetLastFrameAt = beginBody.indexOf(QStringLiteral("m_playbackSmokeLastPresentedFrame = -1;"));
+    const int resetWrappedAt = beginBody.indexOf(QStringLiteral("m_playbackSmokeWrapped = false;"));
+    ASSERT_TRUE(resetLastFrameAt >= 0);
+    ASSERT_TRUE(resetWrappedAt > resetLastFrameAt);
+
+    // notePlaybackSmokePresentedFrame() must set the flag when a presented frame is lower than
+    // the previous one -- the only way that happens is a Loop wrap -- and must check this
+    // BEFORE m_playbackSmokeLastPresentedFrame is overwritten with the new value, or the
+    // comparison would always see the frame compared against itself.
+    const QString noteBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::notePlaybackSmokePresentedFrame("),
+        QStringLiteral("void MainWindow::noteContactSheetPresentedFrame("));
+    ASSERT_FALSE(noteBody.isEmpty());
+    const int wrapCheckAt = noteBody.indexOf(
+        QStringLiteral("static_cast<int>( displayFrame ) < m_playbackSmokeLastPresentedFrame"));
+    const int setWrappedAt = noteBody.indexOf(QStringLiteral("m_playbackSmokeWrapped = true;"), wrapCheckAt);
+    const int overwriteLastFrameAt = noteBody.indexOf(
+        QStringLiteral("m_playbackSmokeLastPresentedFrame = static_cast<int>( displayFrame );"));
+    ASSERT_TRUE(wrapCheckAt >= 0);
+    ASSERT_TRUE(setWrappedAt > wrapCheckAt);
+    ASSERT_TRUE(overwriteLastFrameAt > setWrappedAt);
+}
+
+TEST(ContactSheetCaptureWiring, WrappedSpanIsOverriddenToTheLoopCutInCutOutRangeNotLastPresentedFrame)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    // The span snapshot reads m_playbackSmokeWrapped and, when set, overrides BOTH
+    // contactSheetStartFrame and contactSheetEndFrame from the Loop action's own cutIn/cutOut
+    // spinboxes -- deterministic settings values, never a presented-frame artifact that can
+    // differ between two hosts measuring the same clip.
+    const int wrappedReadAt = smokeBody.indexOf(
+        QStringLiteral("const bool contactSheetSpanWrapped = m_playbackSmokeWrapped;"));
+    ASSERT_TRUE(wrappedReadAt >= 0);
+    const int overrideGuardAt = smokeBody.indexOf(
+        QStringLiteral("if( contactSheetSpanWrapped )"), wrappedReadAt);
+    ASSERT_TRUE(overrideGuardAt > wrappedReadAt);
+    const QString overrideBlock = smokeBody.mid(overrideGuardAt, 700);
+    ASSERT_TRUE(overrideBlock.contains(QStringLiteral("ui->spinBoxCutIn->value()")));
+    ASSERT_TRUE(overrideBlock.contains(QStringLiteral("ui->spinBoxCutOut->value()")));
+    ASSERT_TRUE(overrideBlock.contains(QStringLiteral("contactSheetStartFrame = contactSheetLoopCutInFrame;")));
+    ASSERT_TRUE(overrideBlock.contains(QStringLiteral("contactSheetEndFrame = contactSheetLoopCutOutFrame;")));
+
+    // The override must run BEFORE sheetStartFrame/sheetEndFrame (the values actually used to
+    // build the evenly spaced target-frame list) are computed from contactSheetStartFrame/
+    // contactSheetEndFrame -- otherwise the wrap override would be silently discarded.
+    const int sheetStartComputedAt = smokeBody.indexOf(QStringLiteral("const int sheetStartFrame = qBound("));
+    ASSERT_TRUE(sheetStartComputedAt > overrideGuardAt);
+}
+
+TEST(ContactSheetCaptureWiring, PlaybackModeSidecarAndDoneLineCarrySpanStartEndAndWrappedFields)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+
+    // noteContactSheetPresentedFrame() (the default playback-mode capture path) stamps every
+    // sidecar with the span the job-level composer/owner needs to know what was actually
+    // covered, using the member fields runGuiPlaybackSmoke set up once for the whole pass.
+    const QString hookBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::noteContactSheetPresentedFrame("),
+        QStringLiteral("void MainWindow::finishPlaybackSmokeTelemetry"));
+    ASSERT_FALSE(hookBody.isEmpty());
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"span_start\"), m_contactSheetCaptureStartFrame );")));
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"span_end\"), m_contactSheetCaptureEndFrame );")));
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"span_wrapped\"), m_contactSheetCaptureWrapped );")));
+
+    // The seek-mode branch (runs inline inside runGuiPlaybackSmoke, not through the hook above)
+    // stamps the same three fields from its own local sheetStartFrame/sheetEndFrame/
+    // contactSheetSpanWrapped -- a reader must see the same span regardless of which mode wrote
+    // a given sidecar.
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+    const QString seekBranch = sliceBetween(smokeBody,
+        QStringLiteral("if( options.contactSheetSeekMode )"),
+        QStringLiteral("m_contactSheetCaptureDir = options.contactSheetDir;"));
+    ASSERT_FALSE(seekBranch.isEmpty());
+    ASSERT_TRUE(seekBranch.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"span_start\"), sheetStartFrame );")));
+    ASSERT_TRUE(seekBranch.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"span_end\"), sheetEndFrame );")));
+    ASSERT_TRUE(seekBranch.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"span_wrapped\"), contactSheetSpanWrapped );")));
+
+    // The else-branch (playback mode setup) must hand the same span down to the member fields
+    // the hook above reads, so both modes really do agree.
+    ASSERT_TRUE(smokeBody.contains(QStringLiteral("m_contactSheetCaptureEndFrame = sheetEndFrame;")));
+    ASSERT_TRUE(smokeBody.contains(QStringLiteral("m_contactSheetCaptureWrapped = contactSheetSpanWrapped;")));
+
+    // The job-level DONE line (gui_smoke.contact_sheet) also carries the wrapped flag, so a
+    // reader who only has the raw log (not the per-frame sidecars) can still see it.
+    ASSERT_TRUE(smokeBody.contains(QStringLiteral("start_frame=%4 end_frame=%5 wrapped=%6")));
+    ASSERT_TRUE(smokeBody.contains(QStringLiteral(".arg( bool01( contactSheetSpanWrapped ) )")));
 }

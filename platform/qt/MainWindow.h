@@ -1006,12 +1006,11 @@ private:
     bool m_playbackSmokeFrameTelemetry = false;
     bool m_playbackSmokeTimelineTelemetry = false;
     uint64_t m_playbackSmokeSessionId = 0;
-    // CUDA-PLAYBACK-CONTACT-SHEET-1 r1d (sol HARDENING): set once finishPlaybackSmokeTelemetry
-    // has logged the explicit playback_smoke.measured_session marker for the FIRST "play-stop"
-    // close of the process's lifetime, so a Bachelor job's parser can bind to that id instead of
-    // assuming the first playback_smoke.summary line is always the measured one. Never reset --
-    // each Bachelor job launches a fresh MLVApp.exe process, so "once" here already means "once
-    // per run".
+    // CUDA-PLAYBACK-CONTACT-SHEET-2 (HARDENING): set once runGuiPlaybackSmoke() has logged the
+    // explicit playback_smoke.measured_session marker for the session opened by ITS OWN measured
+    // play trigger, so a Bachelor job's parser can bind to that id instead of assuming the first
+    // playback_smoke.summary line is always the measured one. Never reset -- each Bachelor job
+    // launches a fresh MLVApp.exe process, so "once" here already means "once per run".
     bool m_playbackSmokeMeasuredSessionLogged = false;
     // Foreground-state telemetry (CUDA-PERF-PLAYBACK-FOREGROUND-1): gated on the same
     // MLVAPP_PLAYBACK_SMOKE_TELEMETRY env var as the swap telemetry above, not a new flag
@@ -1032,6 +1031,14 @@ private:
     int m_playbackSmokeTargetPresentedFrames = 0;
     int m_playbackSmokeFirstPresentedFrame = -1;
     int m_playbackSmokeLastPresentedFrame = -1;
+    // CUDA-PLAYBACK-CONTACT-SHEET-2 (BLOCKER fix): set when a presented display_frame goes
+    // backwards during the measured session -- the only way that happens is a Loop wrap
+    // (cutOut back to cutIn), since playback otherwise only advances. Reset per session in
+    // beginPlaybackSmokeTelemetry(). Once true, the measured span for the contact sheet must
+    // be the whole loop range (cutIn..cutOut), not first..lastPresentedFrame, or a short clip
+    // that wraps mid-measurement would sample only whatever arbitrary sub-range it happened to
+    // land on at the end -- different on every host. See runGuiPlaybackSmoke's span snapshot.
+    bool m_playbackSmokeWrapped = false;
     // Contact-sheet capture-during-playback (CUDA-PLAYBACK-CONTACT-SHEET-1 r1b): an un-timed
     // SECOND playback pass, run after the measured interval closes and playback_smoke telemetry
     // has finished, so every grab below is of a genuinely presented playback frame -- never a
@@ -1039,10 +1046,24 @@ private:
     // purpose: this must keep working (and keep counting) even though the measured-interval
     // telemetry session it runs after is already closed. See noteContactSheetPresentedFrame().
     bool m_contactSheetCaptureActive = false;
+    // CUDA-PLAYBACK-CONTACT-SHEET-2 (HARDENING, default-off): true only while a
+    // --contact-sheet-dir/--contact-sheet-frames capture pass is actually running for this
+    // process. finishPresentedFrame() gates its noteContactSheetPresentedFrame() call on this
+    // member directly, so a smoke run with the options off never even makes that call on the
+    // measured-frame hot path (m_contactSheetCaptureActive alone would still cost a call +
+    // early-return on every presented frame). Never true outside runGuiPlaybackSmoke's own
+    // contact-sheet block.
+    bool m_contactSheetOptionsPresent = false;
     QString m_contactSheetCaptureDir;
     QVector<int> m_contactSheetCaptureTargetFrames;
     int m_contactSheetCaptureNextTargetIndex = 0;
     int m_contactSheetCaptureStartFrame = 0;
+    // CUDA-PLAYBACK-CONTACT-SHEET-2: the measured span's end frame and whether that span was
+    // derived from a wrapped (looping) run -- recorded here purely so noteContactSheetPresentedFrame(),
+    // which only sees one presented frame at a time, can stamp each sidecar with the SAME
+    // span_start/span_end/span_wrapped values runGuiPlaybackSmoke computed once up front.
+    int m_contactSheetCaptureEndFrame = 0;
+    bool m_contactSheetCaptureWrapped = false;
     double m_contactSheetCaptureFps = 0.0;
     int m_contactSheetCaptureFramesWritten = 0;
     QString m_contactSheetCaptureError;

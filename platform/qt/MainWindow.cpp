@@ -8878,6 +8878,23 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         return 7;
     }
 
+    // HARDENING (CUDA-PLAYBACK-CONTACT-SHEET-2): bind the explicit measured-session marker to
+    // THIS trigger -- the one that starts the measured timed loop -- rather than to whichever
+    // playback session happens to close first via a "play-stop". beginPlaybackSmokeTelemetry()
+    // (invoked synchronously by the trigger() above, through on_actionPlay_toggled) has already
+    // assigned m_playbackSmokeSessionId for the session this call just opened, so it is safe to
+    // log it right here. Previously this was logged from finishPlaybackSmokeTelemetry() on the
+    // first "play-stop" of the process's lifetime, which a warmup settle (see the Look Assist
+    // Auto-warmup block above) or clip-lifecycle stress (which toggles Play inside the measured
+    // loop below) could reach first, mislabelling a session fragment as the measured session.
+    if( !m_playbackSmokeMeasuredSessionLogged )
+    {
+        m_playbackSmokeMeasuredSessionLogged = true;
+        qInfo().noquote()
+            << QStringLiteral( "playback_smoke.measured_session id=%1" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) );
+    }
+
     /* The play transition is where the normal GUI turns the policy on for
      * real, so reapply once the action is live to avoid a stale receipt-path
      * frame sneaking into the measured window. */
@@ -9190,11 +9207,33 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
     // screenshots, stopping playback) can move the timeline: the un-timed contact-sheet
     // pass below replays evenly spaced points across exactly this span, after playback
     // has stopped and playback_smoke/swap telemetry has closed (see its capture block).
+    //
+    // BLOCKER fix (CUDA-PLAYBACK-CONTACT-SHEET-2): first..lastPresentedFrame is only the
+    // content actually covered when the measured run never wrapped. A looping run on a clip
+    // shorter than the measured duration wraps the timeline back to cutIn one or more times,
+    // and the LAST presented frame is then just wherever the final wrap happened to be sitting
+    // when the timer ran out -- an artifact of timing, not of what was shown. Once
+    // m_playbackSmokeWrapped is set (notePlaybackSmokePresentedFrame saw the timeline go
+    // backwards at least once), the run is known to have covered the WHOLE loop range at least
+    // once, so the span becomes cutIn..cutOut: the same two settings values on every host,
+    // never a presented-frame artifact that can differ run to run.
     const qint64 contactSheetMeasuredElapsedMs = playbackClock.elapsed();
-    const int contactSheetStartFrame = options.startFrame;
-    const int contactSheetEndFrame = m_playbackSmokeLastPresentedFrame >= 0
+    const bool contactSheetSpanWrapped = m_playbackSmokeWrapped;
+    int contactSheetStartFrame = options.startFrame;
+    int contactSheetEndFrame = m_playbackSmokeLastPresentedFrame >= 0
         ? m_playbackSmokeLastPresentedFrame
         : ui->horizontalSliderPosition->value();
+    if( contactSheetSpanWrapped )
+    {
+        const int contactSheetSpanTotalFrames = getMlvFrames( m_pMlvObject );
+        const int contactSheetLoopCutInFrame = qBound(
+            0, ui->spinBoxCutIn->value() - 1, qMax( 0, contactSheetSpanTotalFrames - 1 ) );
+        const int contactSheetLoopCutOutFrame = qBound(
+            contactSheetLoopCutInFrame, ui->spinBoxCutOut->value() - 1,
+            qMax( 0, contactSheetSpanTotalFrames - 1 ) );
+        contactSheetStartFrame = contactSheetLoopCutInFrame;
+        contactSheetEndFrame = contactSheetLoopCutOutFrame;
+    }
 
     if( m_playbackSmokeTargetPresentedFrames > 0
      && m_playbackSmokePresentedFrames != m_playbackSmokeTargetPresentedFrames )
@@ -9473,6 +9512,11 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
     QString contactSheetError;
     if( !options.contactSheetDir.isEmpty() && options.contactSheetFrames > 0 )
     {
+        // HARDENING (default-off): flips the cheap gate finishPresentedFrame() checks before
+        // calling noteContactSheetPresentedFrame() at all. Only ever true inside this block,
+        // so a smoke run with the options off makes zero contact-sheet calls per presented
+        // frame, not just an early-returning one.
+        m_contactSheetOptionsPresent = true;
         const QDir contactSheetDirInfo( options.contactSheetDir );
         if( !contactSheetDirInfo.exists() && !QDir().mkpath( options.contactSheetDir ) )
         {
@@ -9591,6 +9635,9 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                 frameJson.insert( QStringLiteral("render_path"), contactFrameRenderPath );
                 frameJson.insert( QStringLiteral("playback_path"), false );
                 frameJson.insert( QStringLiteral("path"), pngRelativeName );
+                frameJson.insert( QStringLiteral("span_start"), sheetStartFrame );
+                frameJson.insert( QStringLiteral("span_end"), sheetEndFrame );
+                frameJson.insert( QStringLiteral("span_wrapped"), contactSheetSpanWrapped );
                 frameJson.insert( QStringLiteral("look_assist_enabled"),
                     ui->checkBoxLookAssistEnable->isChecked() );
                 frameJson.insert( QStringLiteral("look_assist_scene"),
@@ -9643,6 +9690,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             m_contactSheetCaptureTargetFrames = contactSheetTargetFrames;
             m_contactSheetCaptureNextTargetIndex = 0;
             m_contactSheetCaptureStartFrame = sheetStartFrame;
+            m_contactSheetCaptureEndFrame = sheetEndFrame;
+            m_contactSheetCaptureWrapped = contactSheetSpanWrapped;
             m_contactSheetCaptureFps = contactSheetFps;
             m_contactSheetCaptureFramesWritten = 0;
             m_contactSheetCaptureError.clear();
@@ -9717,12 +9766,13 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         logInteractionEvent(
             QStringLiteral("gui_smoke.contact_sheet"),
             QStringLiteral("dir=\"%1\" requested_frames=%2 written_frames=%3 "
-                            "start_frame=%4 end_frame=%5 measured_elapsed_ms=%6 mode=%7 error=\"%8\"")
+                            "start_frame=%4 end_frame=%5 wrapped=%6 measured_elapsed_ms=%7 mode=%8 error=\"%9\"")
                 .arg( options.contactSheetDir )
                 .arg( options.contactSheetFrames )
                 .arg( contactSheetFramesWritten )
                 .arg( sheetStartFrame )
                 .arg( sheetEndFrame )
+                .arg( bool01( contactSheetSpanWrapped ) )
                 .arg( contactSheetMeasuredElapsedMs )
                 .arg( options.contactSheetSeekMode
                           ? QStringLiteral("seek")
@@ -22893,6 +22943,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeParityMatchCount = 0;
     m_playbackSmokeFirstPresentedFrame = -1;
     m_playbackSmokeLastPresentedFrame = -1;
+    m_playbackSmokeWrapped = false;
     m_playbackSmokeStartRequestSerial = m_nextRenderRequestSerial;
     m_playbackSmokeStartDecodeRequestsIssued =
         m_pRenderThread ? m_pRenderThread->decodeRequestsIssuedCount() : 0;
@@ -23204,6 +23255,16 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     {
         m_playbackSmokeFirstPresentMs = elapsedMs;
         m_playbackSmokeFirstPresentedFrame = static_cast<int>( displayFrame );
+    }
+
+    // BLOCKER fix (CUDA-PLAYBACK-CONTACT-SHEET-2): a presented frame lower than the previous
+    // one can only mean the Loop action wrapped (cutOut back to cutIn) -- playback otherwise
+    // only advances the timeline. Checked against the frame this call is about to overwrite,
+    // so it fires exactly once per wrap, however many wraps a short looping clip goes through.
+    if( m_playbackSmokePresentedFrames > 0
+     && static_cast<int>( displayFrame ) < m_playbackSmokeLastPresentedFrame )
+    {
+        m_playbackSmokeWrapped = true;
     }
 
     m_playbackSmokeLastPresentedTime = now;
@@ -25527,6 +25588,9 @@ void MainWindow::noteContactSheetPresentedFrame(
     frameJson.insert( QStringLiteral("render_path"), contactFrameRenderPath );
     frameJson.insert( QStringLiteral("playback_path"), true );
     frameJson.insert( QStringLiteral("path"), pngRelativeName );
+    frameJson.insert( QStringLiteral("span_start"), m_contactSheetCaptureStartFrame );
+    frameJson.insert( QStringLiteral("span_end"), m_contactSheetCaptureEndFrame );
+    frameJson.insert( QStringLiteral("span_wrapped"), m_contactSheetCaptureWrapped );
     frameJson.insert( QStringLiteral("look_assist_enabled"),
         ui->checkBoxLookAssistEnable->isChecked() );
     frameJson.insert( QStringLiteral("look_assist_scene"),
@@ -25684,18 +25748,11 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
 
     m_playbackSmokeActive = false;
 
-    // CUDA-PLAYBACK-CONTACT-SHEET-1 r1d (sol HARDENING): an explicit, one-shot marker for
-    // which session is the MEASURED one -- the first genuine "play-stop" close of the
-    // process's lifetime (never a "play-restart", which is an internal re-open, not the
-    // deliberate end of a timed measurement) -- so a Bachelor job's parser can bind to this
-    // id directly instead of assuming the first playback_smoke.summary line is always it.
-    if( !m_playbackSmokeMeasuredSessionLogged && qstrcmp( reason, "play-stop" ) == 0 )
-    {
-        m_playbackSmokeMeasuredSessionLogged = true;
-        qInfo().noquote()
-            << QStringLiteral( "playback_smoke.measured_session id=%1" )
-                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) );
-    }
+    // CUDA-PLAYBACK-CONTACT-SHEET-2 (HARDENING): the "playback_smoke.measured_session id=N"
+    // marker is now logged from runGuiPlaybackSmoke() itself, right after the measured play
+    // trigger that opens this very session -- see the comment there. Binding it to the first
+    // "play-stop" (as this function used to do) let a warmup settle or an in-loop lifecycle
+    // stress toggle claim the marker before the run's real measured interval ever closed.
 
     qInfo().noquote()
         << QStringLiteral(
@@ -28309,7 +28366,12 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
             : 0.0 );
     m_lastPresentedStageTimingTelemetry = readyFrame.stageTimingTelemetry;
     notePlaybackSmokePresentedFrame( displayFrame, readyFrame, requestContext );
-    noteContactSheetPresentedFrame( displayFrame, readyFrame, requestContext );
+    // HARDENING (default-off): m_contactSheetOptionsPresent is only ever true inside
+    // runGuiPlaybackSmoke's own --contact-sheet-dir/--contact-sheet-frames block, so this call
+    // does not happen at all -- not even as an early return -- on the measured-frame hot path
+    // when the options are off.
+    if( m_contactSheetOptionsPresent )
+        noteContactSheetPresentedFrame( displayFrame, readyFrame, requestContext );
     if( dualIsoWarmupInstrumentationEnabled() )
         ++m_dualIsoWarmupTelemetryPresentedFrames;
     if( interactiveTraceEnabled() )
