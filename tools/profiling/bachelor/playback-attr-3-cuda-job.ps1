@@ -1511,23 +1511,63 @@ $pmStats = Get-Stats @($pmIntervalRows | ForEach-Object { [double]$_.msBetweenDi
 # -gt 0) was itself too weak -- a SINGLE positive interval still read fully 'ok', so a leg that
 # could not establish cadence over the whole 25-40s playback (the disclosed full-screen leg had
 # presentedCount=1) still read as display-cadence corroborated, and the histogram consumer turned
-# that one interval into a 100% one-refresh bucket. 'ok' now requires BOTH a minimum absolute count
-# of positive-interval samples AND a minimum coverage fraction of them relative to how many times
-# MLVApp itself swapped in the window ($displayReport.selectedChain.presentedCount -- every
-# app-side present a display-change interval could in principle have been measured against, i.e.
-# the leg's "app swaps"). Thresholds are set an order of magnitude below the low end of the real
-# windowed range on record (~150-240 displayed rows over 25-40s) so a genuinely thin/full-screen-
-# style leg (0-2 samples) still reads degraded, while a healthy leg clears both with wide margin.
+# that one interval into a 100% one-refresh bucket. 'ok' requires a minimum absolute COUNT of
+# positive-interval samples (below) -- an order of magnitude below the low end of the real windowed
+# range on record (~150-240 displayed rows over 25-40s), so a genuinely thin/full-screen-style leg
+# (0-2 samples) still reads degraded while a healthy leg clears it with wide margin.
+#
+# PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): r1's coverage arm divided
+# positiveSamples by $displayReport.selectedChain.presentedCount -- both numerator and denominator
+# came from the SAME PresentMon csv, so a capture that lost the tail of a 25-40s leg after a short
+# healthy prefix still read coverage=1.0 over its own truncated rows. 'ok' now requires THREE
+# independent arms, cleared together, each named in the reason on failure:
+#   (1) COUNT: unchanged from r1, above.
+#   (2) APP-SWAP COVERAGE: positiveSamples over an app-side swap count PresentMon never produced --
+#       Get-AttrCudaAppSwapTelemetry reads the MLVApp log's own swap/frame telemetry (never this
+#       csv). A log carrying neither line leaves coverage unavailable, which fails this arm rather
+#       than dividing by zero or by a PresentMon-derived count again.
+#   (3) TEMPORAL: no gap between positive-interval rows -- including the head/tail gaps to the
+#       playback window's own bounds -- exceeds $presentMonSufficiencyMaxGapMs. (1) and (2) alone
+#       cannot catch a captured PREFIX followed by silence: a leg that captures
+#       >= $presentMonSufficiencyMinIntervalCount rows in the first couple of seconds of a 25-40s
+#       leg then loses the rest can still clear a count floor and a swap-count-based coverage ratio
+#       while having measured almost none of the actual leg. maxGapMs is an order of magnitude
+#       above the real windowed range's typical inter-sample spacing (~150-240 rows over 25-40s).
 $presentMonSufficiencyMinIntervalCount = 30
 $presentMonSufficiencyMinCoverageFraction = 0.5
+$presentMonSufficiencyMaxGapMs = 5000.0
 $presentMonPresentedCount = [int]$displayReport.selectedChain.presentedCount
-$presentMonCoverageFraction = if ($presentMonPresentedCount -gt 0) { $pmIntervalRows.Count / [double]$presentMonPresentedCount } else { 0.0 }
-$presentMonSufficient = ($pmIntervalRows.Count -ge $presentMonSufficiencyMinIntervalCount) -and ($presentMonCoverageFraction -ge $presentMonSufficiencyMinCoverageFraction)
+$appSwapTelemetry = Get-AttrCudaAppSwapTelemetry -LogText $rawLog
+$presentMonAppSwapCount = $appSwapTelemetry.swapCount
+$presentMonAppSwapSource = $appSwapTelemetry.source
+$presentMonCoverageAvailable = ($null -ne $presentMonAppSwapCount) -and ($presentMonAppSwapCount -gt 0)
+$presentMonCoverageFraction = if ($presentMonCoverageAvailable) { $pmIntervalRows.Count / [double]$presentMonAppSwapCount } else { 0.0 }
+$presentMonTemporal = Get-AttrCudaTemporalCoverage -TimeInMsValues @($pmIntervalRows | ForEach-Object { [double]$_.timeInMs }) -WindowStartMs $displayReport.windowStartMs -WindowEndMs $displayReport.windowEndMs -MaxGapMs $presentMonSufficiencyMaxGapMs
+$presentMonCountSufficient = ($pmIntervalRows.Count -ge $presentMonSufficiencyMinIntervalCount)
+$presentMonCoverageSufficient = ($presentMonCoverageAvailable -and ($presentMonCoverageFraction -ge $presentMonSufficiencyMinCoverageFraction))
+$presentMonTemporalSufficient = [bool]$presentMonTemporal.sufficient
+$presentMonSufficient = $presentMonCountSufficient -and $presentMonCoverageSufficient -and $presentMonTemporalSufficient
 $presentMonStatus = if ($presentMonSufficient) { 'ok' } else { 'degraded' }
-$presentMonStatusReason = if ($presentMonSufficient) { $null } elseif ($pmIntervalRows.Count -eq 0) {
+$presentMonStatusReason = if ($presentMonSufficient) {
+    $null
+} elseif ($pmIntervalRows.Count -eq 0) {
     "PresentMon confirmed $($pmRows.Count) displayed MLVApp row(s) in the playback window, but none carried a positive MsBetweenDisplayChange interval -- every displayed sample came from MsUntilDisplayed on what PresentMon reports as an NA-first-present row, so presentMonStats has no interval to compute cadence from; display itself is still confirmed, cadence is not"
 } else {
-    "PresentMon confirmed only $($pmIntervalRows.Count) positive-interval row(s) out of $presentMonPresentedCount MLVApp-presented row(s) in the playback window (coverage $([math]::Round($presentMonCoverageFraction * 100, 1))%), below the sufficiency gate of >= $presentMonSufficiencyMinIntervalCount positive intervals AND >= $([math]::Round($presentMonSufficiencyMinCoverageFraction * 100, 1))% coverage -- cadence rests on too few or too sparse samples to corroborate as display-verified; display itself is still confirmed, cadence is not"
+    $presentMonFailedArms = @()
+    if (-not $presentMonCountSufficient) {
+        $presentMonFailedArms += "count: only $($pmIntervalRows.Count) positive-interval row(s), below the minimum of $presentMonSufficiencyMinIntervalCount"
+    }
+    if (-not $presentMonCoverageSufficient) {
+        if ($presentMonCoverageAvailable) {
+            $presentMonFailedArms += "app-swap coverage: only $($pmIntervalRows.Count) positive-interval row(s) out of $presentMonAppSwapCount app-side $presentMonAppSwapSource ($([math]::Round($presentMonCoverageFraction * 100, 1))%), below the minimum of $([math]::Round($presentMonSufficiencyMinCoverageFraction * 100, 1))%"
+        } else {
+            $presentMonFailedArms += 'app-swap coverage: no independent app-side swap or frame telemetry found in the run log (neither playback_smoke.gpu_window_swaps nor playback_smoke.gate)'
+        }
+    }
+    if (-not $presentMonTemporalSufficient) {
+        $presentMonFailedArms += "temporal: a $([math]::Round($presentMonTemporal.maxGapMs / 1000.0, 1))s $($presentMonTemporal.gapKind) gap between positive-interval rows exceeds the $([math]::Round($presentMonSufficiencyMaxGapMs / 1000.0, 1))s ceiling"
+    }
+    "PresentMon's display-cadence evidence is too thin to corroborate as measured -- $($presentMonFailedArms -join '; ') -- display itself is still confirmed, cadence is not"
 }
 
 $dllSha256Lower = (Get-Sha $reconDll).ToLowerInvariant()
@@ -1565,21 +1605,19 @@ $manifest = [ordered]@{
     reconDll = [ordered]@{ name=$ReconName; sha256=(Get-Sha $reconDll) }
     presentMon = [ordered]@{
         name=$PresentMonName; sha256=$PresentMonSha; launch='direct-child-inherits-job-temp'
-        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1: display rates are reported for the MLVApp preview
-        # chain only -- selectedChain names which (ProcessID, SwapChainAddress) that is; chains
-        # lists every group PresentMon reported inside the playback window, for audit.
         chains=$displayReport.chains
         selectedChain=$displayReport.selectedChain
-        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol BLOCKER): this is the count of rows that fed
-        # presentMonStats below -- i.e. rows with a positive msBetweenDisplayChange interval, the
-        # same population as $pmIntervalRows -- not $pmRows.Count (every displayed row, including
-        # the interval-less NA-first-present one), which the name previously read from and which
-        # inflated this above the sample size the statistics below were actually computed on.
+        # positiveSamples: positive-interval rows (presentMonStats' own population); presentedCount
+        # is PresentMon's own count, audit only -- coverage below divides by appSwapCount instead.
         positiveSamples=$pmIntervalRows.Count
         presentedCount=$presentMonPresentedCount
+        appSwapCount=$presentMonAppSwapCount
+        appSwapSource=$presentMonAppSwapSource
         coverageFraction=$presentMonCoverageFraction
+        temporalMaxGapMs=$presentMonTemporal.maxGapMs
+        temporalGapKind=$presentMonTemporal.gapKind
         clockBracket=$displayReport.clockBracket
-        sufficiency=[ordered]@{ minIntervalCount=$presentMonSufficiencyMinIntervalCount; minCoverageFraction=$presentMonSufficiencyMinCoverageFraction; sufficient=$presentMonSufficient }
+        sufficiency=[ordered]@{ minIntervalCount=$presentMonSufficiencyMinIntervalCount; minCoverageFraction=$presentMonSufficiencyMinCoverageFraction; maxGapMs=$presentMonSufficiencyMaxGapMs; countSufficient=$presentMonCountSufficient; coverageSufficient=$presentMonCoverageSufficient; temporalSufficient=$presentMonTemporalSufficient; sufficient=$presentMonSufficient }
         status=$presentMonStatus
         statusReason=$presentMonStatusReason
     }
@@ -1617,10 +1655,18 @@ Save-Json ([ordered]@{
     # first file a reader opens -- see the manifest's own comment for the rule.
     presentMonPositiveSamples = $pmIntervalRows.Count
     presentMonPresentedCount = $presentMonPresentedCount
+    presentMonAppSwapCount = $presentMonAppSwapCount
+    presentMonAppSwapSource = $presentMonAppSwapSource
     presentMonCoverageFraction = $presentMonCoverageFraction
+    presentMonTemporalMaxGapMs = $presentMonTemporal.maxGapMs
+    presentMonTemporalGapKind = $presentMonTemporal.gapKind
     presentMonSufficiency = [ordered]@{
         minIntervalCount=$presentMonSufficiencyMinIntervalCount
         minCoverageFraction=$presentMonSufficiencyMinCoverageFraction
+        maxGapMs=$presentMonSufficiencyMaxGapMs
+        countSufficient=$presentMonCountSufficient
+        coverageSufficient=$presentMonCoverageSufficient
+        temporalSufficient=$presentMonTemporalSufficient
         sufficient=$presentMonSufficient
     }
     clockBracket = $displayReport.clockBracket

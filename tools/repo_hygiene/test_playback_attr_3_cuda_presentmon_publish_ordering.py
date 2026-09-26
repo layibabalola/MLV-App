@@ -332,28 +332,53 @@ class TemplateOrderingTests(unittest.TestCase):
     def test_the_success_path_derives_ok_or_degraded_from_a_sufficiency_gate(self) -> None:
         # PRESENTMON-HARNESS-ROBUSTNESS-2 (sol BLOCKER, PR #174 r1): the round-1 rule
         # ($pmIntervalRows.Count -gt 0) was itself too weak -- a single positive interval still
-        # read fully 'ok'. 'ok' now requires BOTH a minimum absolute count of positive-interval
-        # samples AND a minimum coverage fraction of them relative to how many times MLVApp itself
-        # swapped in the window ($displayReport.selectedChain.presentedCount) -- never a bare
-        # count-only or coverage-only check, and never re-spelled as $pmRows.Count (which
-        # over-counts by including the interval-less NA-first-present row).
+        # read fully 'ok'.
+        #
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): r1's own coverage arm
+        # divided by $displayReport.selectedChain.presentedCount -- PresentMon's own count, from
+        # the same csv as the numerator, so a truncated capture could read 100% coverage of its own
+        # truncated rows. 'ok' now requires THREE independent arms together: count, app-swap
+        # coverage (against Get-AttrCudaAppSwapTelemetry's independent app-side count, never
+        # presentedCount), and temporal (no gap between positive-interval rows, including the
+        # window's own head/tail bounds, exceeds a stated ceiling) -- never a bare count-only or
+        # coverage-only check, and never re-spelled as $pmRows.Count (which over-counts by
+        # including the interval-less NA-first-present row).
         self.assertIn("$presentMonSufficiencyMinIntervalCount = 30", self.template)
         self.assertIn("$presentMonSufficiencyMinCoverageFraction = 0.5", self.template)
+        self.assertIn("$presentMonSufficiencyMaxGapMs = 5000.0", self.template)
         self.assertIn(
             "$presentMonPresentedCount = [int]$displayReport.selectedChain.presentedCount",
             self.template,
         )
+        self.assertIn("$appSwapTelemetry = Get-AttrCudaAppSwapTelemetry -LogText $rawLog", self.template)
         self.assertIn(
-            "$presentMonSufficient = ($pmIntervalRows.Count -ge $presentMonSufficiencyMinIntervalCount) "
-            "-and ($presentMonCoverageFraction -ge $presentMonSufficiencyMinCoverageFraction)",
+            "$presentMonTemporal = Get-AttrCudaTemporalCoverage -TimeInMsValues "
+            "@($pmIntervalRows | ForEach-Object { [double]$_.timeInMs }) -WindowStartMs "
+            "$displayReport.windowStartMs -WindowEndMs $displayReport.windowEndMs -MaxGapMs "
+            "$presentMonSufficiencyMaxGapMs",
+            self.template,
+        )
+        self.assertIn(
+            "$presentMonCountSufficient = ($pmIntervalRows.Count -ge $presentMonSufficiencyMinIntervalCount)",
+            self.template,
+        )
+        self.assertIn(
+            "$presentMonCoverageSufficient = ($presentMonCoverageAvailable -and "
+            "($presentMonCoverageFraction -ge $presentMonSufficiencyMinCoverageFraction))",
+            self.template,
+        )
+        self.assertIn("$presentMonTemporalSufficient = [bool]$presentMonTemporal.sufficient", self.template)
+        self.assertIn(
+            "$presentMonSufficient = $presentMonCountSufficient -and $presentMonCoverageSufficient "
+            "-and $presentMonTemporalSufficient",
             self.template,
         )
         self.assertIn(
             "$presentMonStatus = if ($presentMonSufficient) { 'ok' } else { 'degraded' }",
             self.template,
         )
-        # The old blocker rule (bare "any positive sample" gate) must be gone, not merely
-        # superseded elsewhere in the file.
+        # The old blocker rules (bare "any positive sample" gate, and r1's circular
+        # presentedCount-based coverage-only gate) must be gone, not merely superseded elsewhere.
         self.assertNotIn(
             "$presentMonStatus = if ($pmIntervalRows.Count -gt 0) { 'ok' } else { 'degraded' }",
             self.template,
@@ -362,27 +387,41 @@ class TemplateOrderingTests(unittest.TestCase):
             "$presentMonStatus = if ($pmRows.Count -gt 0) { 'ok' } else { 'degraded' }",
             self.template,
         )
+        self.assertNotIn(
+            "$presentMonCoverageFraction = if ($presentMonPresentedCount -gt 0) "
+            "{ $pmIntervalRows.Count / [double]$presentMonPresentedCount } else { 0.0 }",
+            self.template,
+        )
         pm_rows_built = self.template.index("$pmRows = @($displayReport.selectedChainRows)")
         coverage_computed = self.template.index("$presentMonCoverageFraction = if (")
+        temporal_computed = self.template.index("$presentMonTemporal = Get-AttrCudaTemporalCoverage")
         status_assigned = self.template.index("$presentMonStatus = if ($presentMonSufficient)")
         self.assertLess(pm_rows_built, coverage_computed)
-        self.assertLess(coverage_computed, status_assigned)
+        self.assertLess(coverage_computed, temporal_computed)
+        self.assertLess(temporal_computed, status_assigned)
 
     def test_the_sufficiency_rule_and_computed_coverage_are_published(self) -> None:
-        # PRESENTMON-HARNESS-ROBUSTNESS-2 (round 1 requirement): the rule, its thresholds, and the
-        # computed coverage are all persisted -- in evidence-manifest.json's presentMon block, at
-        # summary.json's top level, and in the RESULT= stdout line -- so a reader never has to
-        # reverse-engineer the threshold from positiveSamples alone.
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 (round 1 requirement, extended r1b): the rule, its
+        # thresholds, and the computed coverage/temporal figures are all persisted -- in
+        # evidence-manifest.json's presentMon block, at summary.json's top level, and in the
+        # RESULT= stdout line -- so a reader never has to reverse-engineer the threshold from
+        # positiveSamples alone.
         self.assertIn("presentedCount=$presentMonPresentedCount", self.template)
+        self.assertIn("appSwapCount=$presentMonAppSwapCount", self.template)
+        self.assertIn("appSwapSource=$presentMonAppSwapSource", self.template)
         self.assertIn("coverageFraction=$presentMonCoverageFraction", self.template)
+        self.assertIn("temporalMaxGapMs=$presentMonTemporal.maxGapMs", self.template)
         self.assertIn(
             "sufficiency=[ordered]@{ minIntervalCount=$presentMonSufficiencyMinIntervalCount; "
             "minCoverageFraction=$presentMonSufficiencyMinCoverageFraction; "
-            "sufficient=$presentMonSufficient }",
+            "maxGapMs=$presentMonSufficiencyMaxGapMs; countSufficient=$presentMonCountSufficient; "
+            "coverageSufficient=$presentMonCoverageSufficient; "
+            "temporalSufficient=$presentMonTemporalSufficient; sufficient=$presentMonSufficient }",
             self.template,
         )
         self.assertIn("presentMonPositiveSamples = $pmIntervalRows.Count", self.template)
         self.assertIn("presentMonPresentedCount = $presentMonPresentedCount", self.template)
+        self.assertIn("presentMonAppSwapCount = $presentMonAppSwapCount", self.template)
         self.assertIn("presentMonCoverageFraction = $presentMonCoverageFraction", self.template)
         self.assertIn(
             "PRESENTMON_COVERAGE=$([math]::Round($presentMonCoverageFraction, 3))",

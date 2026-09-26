@@ -705,13 +705,14 @@ class PresentModeBreakdownFixtureTests(_ReportCase):
 
 @requires_pwsh
 class PresentMonStatusFixtureTests(_ReportCase):
-    """PRESENTMON-HARNESS-ROBUSTNESS-1/2: the job's own presentMonStatus/-Reason assignment,
-    EXECUTED verbatim from playback-attr-3-cuda-job.ps1 (never hand-reimplemented) against the
-    module's real output. Must read 'degraded' -- never silently 'ok' -- both when
-    $pmIntervalRows is empty despite a genuinely displayed row (the exact "very thin
-    admitted-row count" full-screen gap round 1 closed) AND when it is merely thin (round 2's
-    sufficiency gate: a nonzero-but-below-threshold count or coverage fraction), and 'ok' only
-    once BOTH the minimum count and minimum coverage thresholds are cleared."""
+    """PRESENTMON-HARNESS-ROBUSTNESS-1/2(r1)/2(r1b): the job's own presentMonStatus/-Reason
+    assignment, EXECUTED verbatim from playback-attr-3-cuda-job.ps1 (never hand-reimplemented)
+    against the module's real output. 'ok' requires THREE independent arms together: count,
+    app-swap coverage (against an app-side swap/frame count read from the run log --
+    Get-AttrCudaAppSwapTelemetry -- never PresentMon's own presentedCount), and temporal (no gap
+    between positive-interval rows, including the window's own head/tail bounds, exceeds a stated
+    ceiling). Each arm is isolated in its own fixture below, alongside round 1's pre-existing
+    zero-interval and thin-count cases."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -722,10 +723,42 @@ class PresentMonStatusFixtureTests(_ReportCase):
         assert "'degraded'" in cls.status_source, cls.status_source
         assert "'ok'" in cls.status_source, cls.status_source
 
-    def _run_status(self, csv_path: Path, result_json: dict) -> dict:
+    @staticmethod
+    def _gpu_window_swaps_line(swaps: int) -> str:
+        # platform/qt/MainWindow.cpp's real field set (GpuDisplayWindow::swapTelemetrySnapshot) --
+        # only telemetry_enabled/window_active/swaps are read by Get-AttrCudaAppSwapTelemetry, but
+        # every field is included for realism.
+        return (
+            "playback_smoke.gpu_window_swaps session=1 window_active=1 telemetry_enabled=1 "
+            f"swaps={swaps} swap_fps=1.0 max_gap_ms=1.0 max_gap_before_serial=1 "
+            f"max_gap_after_serial=2 frames_presented={swaps} swaps_minus_frames_presented=0 "
+            "head_gap_ms=1.0 tail_gap_ms=1.0 first_swap_utc=2026-01-01T00:00:02.0000000Z "
+            "last_swap_utc=2026-01-01T00:00:42.0000000Z"
+        )
+
+    @staticmethod
+    def _gate_line(frames_presented: int) -> str:
+        return (
+            "playback_smoke.gate session=1 verdict=0 "
+            f"frames_presented={frames_presented} decode_requests_issued={frames_presented} "
+            f"parity_match_count={frames_presented} frames_expected={frames_presented}"
+        )
+
+    @staticmethod
+    def _evenly_spaced_times(count: int, *, start_ms: float = 2000.0, end_ms: float = 42000.0) -> list[float]:
+        # Spans the whole [start_ms, end_ms] window (WINDOW_START_UTC/WINDOW_END_UTC below), so
+        # every internal AND head/tail gap is span / (count - 1) -- comfortably under the 5000ms
+        # temporal ceiling for any count used in this class's "clears everything but coverage/
+        # count" fixtures.
+        step = (end_ms - start_ms) / (count - 1)
+        return [start_ms + i * step for i in range(count)]
+
+    def _run_status(self, csv_path: Path, result_json: dict, *, raw_log: str = "") -> dict:
         out_path = self.tmp / "status-out.json"
         result_json_path = self.tmp / "result.json"
         result_json_path.write_text(json.dumps(result_json), encoding="utf-8")
+        log_path = self.tmp / "raw.log"
+        log_path.write_text(raw_log, encoding="utf-8")
         script = self.tmp / "probe.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
@@ -734,6 +767,12 @@ class PresentMonStatusFixtureTests(_ReportCase):
             "[Globalization.DateTimeStyles]::RoundtripKind)\n"
             f"$csvPath = '{csv_path}'\n"
             f"$resultJson = (Get-Content -LiteralPath '{result_json_path}' -Raw | ConvertFrom-Json)\n"
+            # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b: the status_source below now also reads $rawLog
+            # (Get-AttrCudaAppSwapTelemetry) and $displayReport.windowStartMs/windowEndMs (Get-
+            # AttrCudaTemporalCoverage) -- Get-Content -Raw on an empty file returns $null, so an
+            # empty-string fixture is normalized back to '' rather than letting $rawLog go null.
+            f"$rawLog = Get-Content -LiteralPath '{log_path}' -Raw\n"
+            "if ($null -eq $rawLog) { $rawLog = '' }\n"
             # Named $displayReport, matching the real job's own variable name -- the extracted
             # status_source below (PRESENTMON-HARNESS-ROBUSTNESS-2) dot-accesses
             # $displayReport.selectedChain.presentedCount, so this probe must use the same name,
@@ -782,7 +821,8 @@ class PresentMonStatusFixtureTests(_ReportCase):
         # PRESENTMON-HARNESS-ROBUSTNESS-2 (sol BLOCKER, PR #174 r1): this is exactly the
         # round-1 fixture that used to read 'ok' -- a single positive interval over a whole leg
         # cannot establish cadence, and must now read 'degraded' under the sufficiency gate
-        # (1 positive-interval row is far below the >= 30 minimum count).
+        # (1 positive-interval row is far below the >= 30 minimum count). No raw log is supplied,
+        # so the app-swap coverage arm fails too (no independent telemetry) -- both arms are named.
         rows = [
             _real_csv_row(time_in_ms=5000, between_display_change="NA", until_displayed="8.3"),
             _real_csv_row(time_in_ms=5017, between_display_change="16.6", until_displayed="16.6"),
@@ -793,8 +833,7 @@ class PresentMonStatusFixtureTests(_ReportCase):
 
         self.assertEqual(result["presentMonStatus"], "degraded", result)
         self.assertIsNotNone(result["presentMonStatusReason"])
-        self.assertIn("only 1 positive-interval row(s)", result["presentMonStatusReason"])
-        self.assertIn("below the sufficiency gate", result["presentMonStatusReason"])
+        self.assertIn("count: only 1 positive-interval row(s), below the minimum of 30", result["presentMonStatusReason"])
 
     def test_degraded_when_a_handful_of_displayed_rows_all_carry_real_intervals(self) -> None:
         # Every displayed row here DOES carry a genuine interval (unlike the two tests above) --
@@ -806,39 +845,98 @@ class PresentMonStatusFixtureTests(_ReportCase):
         result = self._run_status(path, _result_json())
 
         self.assertEqual(result["presentMonStatus"], "degraded", result)
-        self.assertIn("only 5 positive-interval row(s)", result["presentMonStatusReason"])
+        self.assertIn("count: only 5 positive-interval row(s), below the minimum of 30", result["presentMonStatusReason"])
 
-    def test_ok_once_the_sufficiency_gate_is_cleared(self) -> None:
-        # Clears BOTH thresholds: >= 30 positive-interval rows, and coverage
-        # (positiveIntervalCount / presentedCount) >= 0.5 -- every row here is both presented and
-        # displayed with a real interval, so coverage is 1.0.
-        rows = [_csv_row(time_in_ms=3000 + i * 500) for i in range(35)]
+    def test_ok_once_all_three_sufficiency_arms_are_cleared(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b: a healthy windowed leg shape -- 40 positive-interval
+        # rows (well above the count floor) spread evenly across the whole 40s window (so every
+        # gap, including head/tail, is far under the 5000ms temporal ceiling) with an app-side
+        # swap count (42) close enough to clear the 50% coverage floor (40/42 ~= 95.2%).
+        times = self._evenly_spaced_times(40)
+        rows = [_csv_row(time_in_ms=t) for t in times]
         path = self._write_csv(rows)
+        raw_log = self._gpu_window_swaps_line(42)
 
-        result = self._run_status(path, _result_json())
+        result = self._run_status(path, _result_json(), raw_log=raw_log)
 
         self.assertEqual(result["presentMonStatus"], "ok", result)
         self.assertIsNone(result["presentMonStatusReason"])
 
-    def test_degraded_when_count_clears_the_threshold_but_coverage_does_not(self) -> None:
-        # 35 displayed rows with a real positive interval (count clears >= 30) interleaved with 40
-        # MORE MLVApp rows that presented and were never displayed (MsBetweenDisplayChange and
-        # MsUntilDisplayed both 0 -- displayed=False) -- presentedCount rises to 75, so coverage =
-        # 35/75 ~= 0.467, below the 0.5 gate. Isolates the coverage-fraction arm of the gate
-        # independently of the count arm (the exact "high count, most presents never reach the
-        # screen" shape a full-screen/occluded leg could still exhibit).
-        displayed_rows = [_csv_row(time_in_ms=3000 + i * 500) for i in range(35)]
-        undisplayed_rows = [
-            _csv_row(between_display_change="0", until_displayed="0", time_in_ms=3250 + i * 500)
-            for i in range(40)
-        ]
-        path = self._write_csv(displayed_rows + undisplayed_rows)
+    def test_degraded_when_a_captured_prefix_is_followed_by_silence(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): count and app-swap
+        # coverage alone cannot catch this shape -- 30 rows (clears the count floor) captured in
+        # the first ~1.45s of a 40s window, matched exactly by an app-side swap count of 30
+        # (coverage = 30/30 = 100%, clearing that floor too), then silence for the remaining ~38.5s
+        # of the leg. Only the temporal arm fails, and it is named alone.
+        times = [2000.0 + i * 50.0 for i in range(30)]
+        rows = [_csv_row(time_in_ms=t) for t in times]
+        path = self._write_csv(rows)
+        raw_log = self._gpu_window_swaps_line(30)
 
-        result = self._run_status(path, _result_json())
+        result = self._run_status(path, _result_json(), raw_log=raw_log)
 
         self.assertEqual(result["presentMonStatus"], "degraded", result)
-        self.assertIn("only 35 positive-interval row(s) out of 75 MLVApp-presented row(s)", result["presentMonStatusReason"])
-        self.assertIn("coverage 46.7%", result["presentMonStatusReason"])
+        reason = result["presentMonStatusReason"]
+        self.assertIn("temporal:", reason)
+        self.assertIn("s tail gap between positive-interval rows exceeds the 5s ceiling", reason)
+        self.assertNotIn("count:", reason)
+        self.assertNotIn("app-swap coverage:", reason)
+
+    def test_degraded_when_count_and_temporal_clear_but_app_swap_coverage_does_not(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): 35 positive-interval rows
+        # (clears count) spread evenly across the whole window (clears temporal) against an
+        # app-side swap count of 200 -- far more real on-screen swaps than PresentMon captured
+        # (coverage = 35/200 = 17.5%, below the 50% floor). Only the coverage arm fails.
+        times = self._evenly_spaced_times(35)
+        rows = [_csv_row(time_in_ms=t) for t in times]
+        path = self._write_csv(rows)
+        raw_log = self._gpu_window_swaps_line(200)
+
+        result = self._run_status(path, _result_json(), raw_log=raw_log)
+
+        self.assertEqual(result["presentMonStatus"], "degraded", result)
+        reason = result["presentMonStatusReason"]
+        self.assertIn(
+            "app-swap coverage: only 35 positive-interval row(s) out of 200 app-side gpu_window_swaps (17.5%)",
+            reason,
+        )
+        self.assertNotIn("count:", reason)
+        self.assertNotIn("temporal:", reason)
+
+    def test_degraded_when_no_app_side_telemetry_is_in_the_log_at_all(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b: count and temporal both clear, but the log carries
+        # NEITHER playback_smoke.gpu_window_swaps NOR playback_smoke.gate -- coverage is
+        # unmeasurable, which fails the gate rather than being treated as 0% or 100% coverage.
+        times = self._evenly_spaced_times(40)
+        rows = [_csv_row(time_in_ms=t) for t in times]
+        path = self._write_csv(rows)
+
+        result = self._run_status(path, _result_json(), raw_log="")
+
+        self.assertEqual(result["presentMonStatus"], "degraded", result)
+        reason = result["presentMonStatusReason"]
+        self.assertIn(
+            "app-swap coverage: no independent app-side swap or frame telemetry found in the run log "
+            "(neither playback_smoke.gpu_window_swaps nor playback_smoke.gate)",
+            reason,
+        )
+        self.assertNotIn("count:", reason)
+        self.assertNotIn("temporal:", reason)
+
+    def test_ok_via_the_gate_frames_presented_fallback_when_swap_telemetry_is_absent(self) -> None:
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b: no playback_smoke.gpu_window_swaps line at all
+        # (swap telemetry off/unavailable) but playback_smoke.gate's frames_presented (always
+        # logged, LIGHT arm included) is -- Get-AttrCudaAppSwapTelemetry falls back to it, and a
+        # leg that otherwise clears count/temporal can still read 'ok' through that fallback.
+        times = self._evenly_spaced_times(40)
+        rows = [_csv_row(time_in_ms=t) for t in times]
+        path = self._write_csv(rows)
+        raw_log = self._gate_line(42)
+
+        result = self._run_status(path, _result_json(), raw_log=raw_log)
+
+        self.assertEqual(result["presentMonStatus"], "ok", result)
+        self.assertIsNone(result["presentMonStatusReason"])
 
 
 @requires_pwsh
