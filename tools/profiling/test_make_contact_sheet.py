@@ -37,7 +37,10 @@ class Args:
         self.scale = scale
 
 
-def _write_frame(frames_dir, index, color, look_assist_enabled=True, saved=True, w=64, h=36):
+def _write_frame(
+    frames_dir, index, color, look_assist_enabled=True, saved=True, w=64, h=36,
+    render_path="gpu_texture_no_readback", playback_path=True,
+):
     arr = np.zeros((h, w, 3), dtype=np.uint8)
     arr[:, :, 0] = color[0]
     arr[:, :, 1] = color[1]
@@ -51,6 +54,8 @@ def _write_frame(frames_dir, index, color, look_assist_enabled=True, saved=True,
         "display_frame": index,
         "elapsed_ms": float(index * 250),
         "texture_source": "gl_window_framebuffer_readback",
+        "render_path": render_path,
+        "playback_path": playback_path,
         "path": png_path,
         "look_assist_enabled": look_assist_enabled,
         "look_assist_scene": "outdoor",
@@ -137,6 +142,64 @@ def test_header_reports_look_assist_and_clip_id_never_a_path():
 
     source = inspect.getsource(mcs.build_header)
     assert "sidecar" not in source and "['path']" not in source and '["path"]' not in source
+
+
+def test_header_lines_include_all_applied_look_assist_values():
+    from pathlib import Path
+
+    d = Path(_make_frames_dir(n=2))
+    frames = mcs.load_frames(d)
+    lines = mcs.build_header_lines(Args(), frames)
+    look_assist_line = next(line for line in lines if line.startswith("look_assist:"))
+    # Hub finding (r1b): the demo header showed only 4 values (exposure, contrast,
+    # temperature, tint). All eight applied values must be present.
+    for token in (
+        "exposure=5", "contrast=10", "pivot=75", "shadows=0", "highlights=0",
+        "vibrance=0", "temperature=-3", "tint=1",
+    ):
+        assert token in look_assist_line, f"expected {token!r} in {look_assist_line!r}"
+
+
+def test_header_reports_majority_render_path():
+    from pathlib import Path
+
+    d = tempfile.mkdtemp()
+    _write_frame(d, 0, (50, 50, 50), render_path="gpu_texture_no_readback")
+    _write_frame(d, 1, (80, 80, 80), render_path="gpu_texture_no_readback")
+    _write_frame(d, 2, (110, 110, 110), render_path="cpu_amaze")
+    frames = mcs.load_frames(Path(d))
+    lines = mcs.build_header_lines(Args(), frames)
+    assert any("render_path(majority)=gpu_texture_no_readback" in line for line in lines)
+
+
+def test_header_reports_unknown_majority_render_path_when_none_present():
+    from pathlib import Path
+
+    d = tempfile.mkdtemp()
+    _write_frame(d, 0, (50, 50, 50), render_path="")
+    frames = mcs.load_frames(Path(d))
+    lines = mcs.build_header_lines(Args(), frames)
+    assert any("render_path(majority)=unknown" in line for line in lines)
+
+
+def test_header_flags_frames_not_captured_via_the_playback_path():
+    from pathlib import Path
+
+    d = tempfile.mkdtemp()
+    _write_frame(d, 0, (50, 50, 50), playback_path=True)
+    _write_frame(d, 1, (80, 80, 80), playback_path=False)
+    frames = mcs.load_frames(Path(d))
+    lines = mcs.build_header_lines(Args(), frames)
+    assert any("WARNING" in line and "1/2" in line for line in lines)
+
+
+def test_header_has_no_warning_line_when_every_frame_is_playback_path():
+    from pathlib import Path
+
+    d = Path(_make_frames_dir(n=3))  # _write_frame defaults playback_path=True
+    frames = mcs.load_frames(d)
+    lines = mcs.build_header_lines(Args(), frames)
+    assert not any("WARNING" in line for line in lines)
 
 
 def test_stats_on_synthetic_gradient_are_monotonic_and_bounded():

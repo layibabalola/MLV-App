@@ -13,16 +13,20 @@ WHY THIS EXISTS (CUDA-PLAYBACK-CONTACT-SHEET-1)
 INPUT
     A directory containing frame-NN.png + frame-NN.json pairs, written by the app's
     contact-sheet capture pass. Each sidecar carries (at least): index, captured_utc,
-    serial, display_frame, elapsed_ms, texture_source, path, look_assist_enabled,
-    look_assist_scene, look_assist_exposure/contrast/pivot/temperature/tint/vibrance/
-    shadows/highlights, settled, saved. Frames with saved=false are skipped (a tile that
-    failed to capture must never render as if it succeeded).
+    serial, display_frame, elapsed_ms, texture_source, render_path, playback_path, path,
+    look_assist_enabled, look_assist_scene, look_assist_exposure/contrast/pivot/
+    temperature/tint/vibrance/shadows/highlights, settled, saved. Frames with saved=false
+    are skipped (a tile that failed to capture must never render as if it succeeded).
+    playback_path=false marks a frame captured by the seek-based alternative mode (never
+    the default) -- rendered by a different, non-playback path than the one being audited.
 
 OUTPUT
     --sheet-out: one grid PNG (default 4 columns) with a header strip (host, GPU, build
-    sha, backend, scale, Look Assist on/off + scene + key values, clip id -- id only,
-    never a path -- and capture time) and a per-tile label (frame index + elapsed_ms).
-    Downscaled, and re-downscaled if needed, to stay under --max-bytes (default 4 MB).
+    sha, backend, scale, Look Assist on/off + scene + ALL applied values, the majority
+    render path across the sheet's tiles, clip id -- id only, never a path -- and capture
+    time), a WARNING line if any tile's playback_path is false, and a per-tile label
+    (frame index + elapsed_ms). Downscaled, and re-downscaled if needed, to stay under
+    --max-bytes (default 4 MB).
     --stats-out: a JSON sidecar with per-tile luma p1/p50/p99, mean saturation, clipped-
     highlight % and crushed-black % -- computed on the FULL-resolution source PNG, before
     the sheet's own thumbnail downscale, so the numbers describe the captured frame, not
@@ -41,6 +45,7 @@ USAGE
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -48,7 +53,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 SCHEMA_STATS = "contact-sheet-stats.v1"
 
-HEADER_HEIGHT = 110
+HEADER_HEIGHT = 150
 TILE_LABEL_HEIGHT = 22
 TILE_PADDING = 6
 TILE_TARGET_WIDTH = 480
@@ -144,11 +149,17 @@ def build_tile(image, sidecar, tile_size, font):
     return tile
 
 
-def build_header(width, args, frames):
-    header = Image.new("RGB", (width, HEADER_HEIGHT), (16, 16, 16))
-    draw = ImageDraw.Draw(header)
-    font = _load_font(14)
+def _majority_render_path(frames):
+    """The render_path value shared by the most tiles, or "unknown" if none report one."""
+    counts = Counter(f.get("render_path") for f in frames if f.get("render_path"))
+    if not counts:
+        return "unknown"
+    return counts.most_common(1)[0][0]
 
+
+def build_header_lines(args, frames):
+    """Pure text form of the header strip -- kept separate from build_header (which only
+    draws it) so its content is assertable without rendering an image."""
     look_assist_on = any(f.get("look_assist_enabled") for f in frames)
     scene = next((f.get("look_assist_scene") for f in frames if f.get("look_assist_scene")), "")
     capture_times = sorted(f.get("captured_utc", "") for f in frames if f.get("captured_utc"))
@@ -158,15 +169,22 @@ def build_header(width, args, frames):
     look_assist_summary = "off"
     if look_assist_on:
         look_assist_summary = (
-            "on scene={scene} exposure={exposure} contrast={contrast} "
+            "on scene={scene} exposure={exposure} contrast={contrast} pivot={pivot} "
+            "shadows={shadows} highlights={highlights} vibrance={vibrance} "
             "temperature={temperature} tint={tint}"
         ).format(
             scene=scene or "unknown",
             exposure=sample.get("look_assist_exposure", "?"),
             contrast=sample.get("look_assist_contrast", "?"),
+            pivot=sample.get("look_assist_pivot", "?"),
+            shadows=sample.get("look_assist_shadows", "?"),
+            highlights=sample.get("look_assist_highlights", "?"),
+            vibrance=sample.get("look_assist_vibrance", "?"),
             temperature=sample.get("look_assist_temperature", "?"),
             tint=sample.get("look_assist_tint", "?"),
         )
+
+    non_playback_count = sum(1 for f in frames if f.get("playback_path") is False)
 
     lines = [
         "clip={clip_id}  host={host}  gpu={gpu}  build={build_sha}  backend={backend}  scale={scale}".format(
@@ -178,10 +196,25 @@ def build_header(width, args, frames):
             scale=args.scale or "unknown",
         ),
         f"look_assist: {look_assist_summary}",
+        f"render_path(majority)={_majority_render_path(frames)}",
         f"captured_utc={capture_time}  frames={len(frames)}",
     ]
+    if non_playback_count:
+        # Finding #1 (hub, r1b): a grabbed frame that did NOT come from the playback path
+        # must be flagged on the sheet, never silently blended in with genuine playback
+        # captures -- it may show a different look than the one being audited.
+        lines.append(
+            f"WARNING: {non_playback_count}/{len(frames)} frame(s) NOT captured via the playback path"
+        )
+    return lines
+
+
+def build_header(width, args, frames):
+    header = Image.new("RGB", (width, HEADER_HEIGHT), (16, 16, 16))
+    draw = ImageDraw.Draw(header)
+    font = _load_font(14)
     y = 8
-    for line in lines:
+    for line in build_header_lines(args, frames):
         draw.text((10, y), line, fill=(255, 255, 255), font=font)
         y += 28
     return header
