@@ -440,10 +440,20 @@ def main(argv: Iterable[str] | None = None) -> int:
                 presentmon_csv = os.path.join(args.artifacts_dir, DEFAULT_PRESENTMON_CSV_NAME)
             if frame_log is None:
                 frame_log = os.path.join(args.artifacts_dir, DEFAULT_FRAME_LOG_RELATIVE_PATH)
-            if presentmon_status is None:
-                presentmon_status, derived_reason = resolve_presentmon_status_from_artifacts(args.artifacts_dir)
-                if presentmon_status_reason is None:
-                    presentmon_status_reason = derived_reason
+            # PRESENTMON-HARNESS-ROBUSTNESS-3 (sol BLOCKER on #178): the leg's OWN published status is
+            # authoritative whenever its artifacts are given. An explicit --presentmon-status may only
+            # agree with it; a contradicting value (e.g. 'ok' over a producer-degraded leg) is refused,
+            # never allowed to turn a degraded leg into a measured-looking histogram.
+            derived_status, derived_reason = resolve_presentmon_status_from_artifacts(args.artifacts_dir)
+            if presentmon_status is not None and presentmon_status != derived_status:
+                raise RefreshHistogramError(
+                    f"--presentmon-status {presentmon_status!r} contradicts the leg's own published "
+                    f"presentMonStatus {derived_status!r} in {args.artifacts_dir}; the leg's status is "
+                    "authoritative -- refusing"
+                )
+            presentmon_status = derived_status
+            if presentmon_status_reason is None:
+                presentmon_status_reason = derived_reason
 
         # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): the CLI -- the tool anyone
         # actually runs, and the one the runbook documents -- must not be able to reach build_report
@@ -474,6 +484,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     except RefreshHistogramError as exc:
         print(f"refresh_period_histogram: FAIL: {exc}", file=sys.stderr)
         return 1
+
+    # The emitted report always states the status it was built under (sol, #178: a measured-looking
+    # histogram must never be separable from the evidence status that permitted it).
+    report["presentMonStatus"] = presentmon_status
+    report["presentMonStatusReason"] = presentmon_status_reason
 
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.out:

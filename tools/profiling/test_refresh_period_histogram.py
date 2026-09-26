@@ -448,16 +448,45 @@ def test_cli_with_artifacts_dir_and_neither_file_present_fails_closed(tmp_path, 
     assert "could not find presentMonStatus" in capsys.readouterr().err
 
 
-def test_cli_explicit_status_overrides_artifacts_dir_derivation(tmp_path):
-    # An explicit --presentmon-status always wins over whatever the artifacts dir would derive --
-    # useful for a caller re-checking a leg under a hypothetical status.
+def test_cli_explicit_status_contradicting_the_leg_is_refused(tmp_path, capsys):
+    # PRESENTMON-HARNESS-ROBUSTNESS-3 (sol BLOCKER on #178): with --artifacts-dir, the leg's own
+    # published status is authoritative; an explicit 'ok' over a producer-degraded leg must NOT
+    # produce a measured-looking histogram.
     artifacts_dir = _write_artifacts_dir(tmp_path, summary={"presentMonStatus": "degraded"})
     out_path = tmp_path / "out.json"
 
     rc = main(["--artifacts-dir", str(artifacts_dir), "--presentmon-status", "ok", "--out", str(out_path)])
 
+    assert rc == 1
+    assert not out_path.exists()
+    err = capsys.readouterr().err
+    assert "contradicts" in err and "degraded" in err
+
+
+def test_cli_explicit_status_agreeing_with_the_leg_builds(tmp_path):
+    artifacts_dir = _write_artifacts_dir(tmp_path, summary={"presentMonStatus": "ok"})
+    out_path = tmp_path / "out.json"
+
+    rc = main(["--artifacts-dir", str(artifacts_dir), "--presentmon-status", "ok", "--out", str(out_path)])
+
     assert rc == 0
-    assert json.loads(out_path.read_text(encoding="utf-8"))["presentMon"]["sampleCount"] == 20
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["presentMon"]["sampleCount"] == 20
+    assert report["presentMonStatus"] == "ok"
+
+
+def test_cli_report_always_carries_the_status_it_was_built_under(tmp_path):
+    artifacts_dir = _write_artifacts_dir(
+        tmp_path, summary={"presentMonStatus": "ok", "presentMonStatusReason": "all arms passed"}
+    )
+    out_path = tmp_path / "out.json"
+
+    rc = main(["--artifacts-dir", str(artifacts_dir), "--out", str(out_path)])
+
+    assert rc == 0
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["presentMonStatus"] == "ok"
+    assert report["presentMonStatusReason"] == "all arms passed"
 
 
 # --- resolve_presentmon_status_from_artifacts ---------------------------------------------------
