@@ -482,7 +482,17 @@ $embeddedFunctions = Get-AttrCudaEmbeddedFunctionSource -Name @(
     # parses, clips to the playback window, groups by (ProcessID, SwapChainAddress), and returns a
     # typed PRESENTMON_UNAVAILABLE/DISPLAY_ASLEEP refusal instead of an uncaught throw. See its own
     # header in AttrCudaArtifacts.psm1.
-    'Get-AttrCudaPresentMonDisplayReport'
+    'Get-AttrCudaPresentMonDisplayReport',
+    # PRESENTMON-HARNESS-ROBUSTNESS-2: sanitizes free-form reason text before it is embedded in a
+    # RESULT= stdout line's quoted REASON="..." field -- see its own header in AttrCudaArtifacts.psm1.
+    'ConvertTo-AttrCudaResultLineSafeText',
+    # PRESENTMON-HARNESS-ROBUSTNESS-2 r1c (sol PRE-REVIEW #2 BLOCKER): the sufficiency gate's two
+    # coverage-arm helpers, called by the emitted template's PresentMon status block below but
+    # missing from this list -- every otherwise-successful leg hit CommandNotFoundException on a
+    # host with no checkout/Import-Module before publishing presentMonStatus. Both are self-
+    # contained (no calls to other AttrCuda functions), so no further names are needed.
+    'Get-AttrCudaAppSwapTelemetry',
+    'Get-AttrCudaTemporalCoverage'
 )
 # ATTR3-FOOTAGE-BIND-1 PR-B round 4b: the private verified-part directory (one hard link per
 # verified part, under a neutral name derived from its index, so nothing downstream -- the smoke
@@ -1268,7 +1278,33 @@ if ($ContactSheetEnabled) {
 # parsing, so a consumer needing a tighter join than this one can see exactly how much slack to
 # allow rather than trusting a single unbracketed stamp.
 $presentMonPreSpawnUtc = (Get-Date).ToUniversalTime()
-$presentMonProc = Start-PresentMonCapture $presentMonPath
+# PRESENTMON-HARNESS-ROBUSTNESS-1: Start-PresentMonCapture throws -- a pre-existing output file,
+# or a PresentMon process that exited nonzero within its own 3s startup check (rc=6 is ETW access
+# denied) -- and this call site sat inside the outer try/finally with NO catch of its own, so
+# either throw would terminate the whole job with a raw PowerShell error and publish nothing, one
+# step before the smoke run (and therefore any app-side measurement) had even started. Typed the
+# same way every other PresentMon failure already is: PRESENTMON_UNAVAILABLE, exit 23.
+$presentMonSpawnError = $null
+try {
+    $presentMonProc = Start-PresentMonCapture $presentMonPath
+} catch {
+    $presentMonSpawnError = $_.Exception.Message
+}
+if ($null -ne $presentMonSpawnError) {
+    $displayFailure = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v1'; result='PRESENTMON_UNAVAILABLE'
+        fixtureRehearsal=$FixtureRehearsal
+        reason="PresentMon failed to start: $presentMonSpawnError"
+        presentMonStatus='unavailable'
+        chains=@()
+        sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
+    }
+    Save-Json $displayFailure (Join-Path $Pub 'summary.json')
+    # PRESENTMON-HARNESS-ROBUSTNESS-2 (fable note): the raw exception message could itself contain
+    # a '"', which would garble a naive parser reading this stdout line's quoted REASON="..." field.
+    Write-Output "RESULT=PRESENTMON_UNAVAILABLE REASON=`"PresentMon failed to start: $(ConvertTo-AttrCudaResultLineSafeText $presentMonSpawnError)`" ARTIFACTS=$Pub"
+    exit 23
+}
 $presentMonPostSpawnUtc = (Get-Date).ToUniversalTime()
 $presentMonProcessStartUtc = $null
 try { $presentMonProcessStartUtc = $presentMonProc.StartTime.ToUniversalTime() } catch { $presentMonProcessStartUtc = $null }
@@ -1452,12 +1488,21 @@ if ($null -ne $presentMonWaitError) {
         schema='playback-attr-3-cuda-venue.v1'; result='PRESENTMON_UNAVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
         reason=$presentMonWaitError
+        presentMonStatus='unavailable'
         chains=@()
         presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')
+        # PRESENTMON-HARNESS-ROBUSTNESS-1: the smoke run's own frame rows are already parsed and
+        # published (above, before PresentMon was ever waited on) by the time a wait failure can
+        # happen here -- carried into this typed refusal too, so a reader is not left guessing
+        # whether the app-side run produced any frame telemetry at all.
+        frameRows=$rows.Count
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $displayFailure (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=PRESENTMON_UNAVAILABLE REASON=`"$presentMonWaitError`" ARTIFACTS=$Pub"
+    # PRESENTMON-HARNESS-ROBUSTNESS-2 (fable note, applied here too -- identical convention to the
+    # spawn-guard branch above): sanitized so an exception message containing a '"' cannot garble a
+    # naive parser reading this stdout line's quoted REASON="..." field.
+    Write-Output "RESULT=PRESENTMON_UNAVAILABLE REASON=`"$(ConvertTo-AttrCudaResultLineSafeText $presentMonWaitError)`" FRAME_ROWS=$($rows.Count) ARTIFACTS=$Pub"
     exit 23
 }
 
@@ -1561,17 +1606,37 @@ Save-Json ([ordered]@{
 # take the headline number's clock origin on faith.
 $displayReport = Get-AttrCudaPresentMonDisplayReport -CsvPath $presentMonPath -ResultJson $resultJson -EarliestCaptureStartUtc $presentMonCaptureStartUtc -LatestCaptureStartUtc $presentMonPostSpawnUtc
 if ($displayReport.status -ne 'OK') {
+    # PRESENTMON-HARNESS-ROBUSTNESS-1: the backend-eligibility gate, the GPU-frames gate and the
+    # region timing stats above have ALL already run and already succeeded by this point in the
+    # script -- $diagnostics/$gpuSummary/$gpuFramesTotal/$stats/$rows are real, computed evidence
+    # that this leg's own app-side measurement worked, not placeholders. Discarding them here,
+    # only because PresentMon itself could not verify the display side, used to throw away a leg
+    # whose measurement was fine; they are published alongside the typed refusal now, tagged with
+    # presentMonStatus so nothing downstream mistakes this for a display-verified result.
+    # PRESENTMON-HARNESS-ROBUSTNESS-2 (fable note): DISPLAY_ASLEEP is PresentMon AFFIRMATIVELY
+    # measuring zero displayed frames -- a verified negative -- not PresentMon being unable to
+    # measure at all (PRESENTMON_UNAVAILABLE). The old blanket 'unavailable' under-described the
+    # DISPLAY_ASLEEP case; tagged distinctly here so a coarse-field reader is not told PresentMon
+    # had nothing to say when it actually said "zero, confirmed". $displayReport.status itself
+    # (and the typed `result`/exit code above/below) stays authoritative either way.
+    $displayFailurePresentMonStatus = if ($displayReport.status -eq 'DISPLAY_ASLEEP') { 'verified_zero_displayed' } else { 'unavailable' }
     $displayFailure = [ordered]@{
         schema='playback-attr-3-cuda-venue.v1'; result=$displayReport.status
         fixtureRehearsal=$FixtureRehearsal
         reason=$displayReport.reason
+        presentMonStatus=$displayFailurePresentMonStatus
         chains=$displayReport.chains
         presentMonCaptureStartUtc=$presentMonCaptureStartUtc.ToString('o')
         clockBracket=$displayReport.clockBracket
+        diagnostics=$diagnostics
+        gpuSummary=$gpuSummary
+        gpuFramesTotal=$gpuFramesTotal
+        frameRows=$rows.Count
+        regions=$stats
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $displayFailure (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=$($displayReport.status) REASON=`"$($displayReport.reason)`" ARTIFACTS=$Pub"
+    Write-Output "RESULT=$($displayReport.status) REASON=`"$(ConvertTo-AttrCudaResultLineSafeText $displayReport.reason)`" FRAME_ROWS=$($rows.Count) GPU_FRAMES=$gpuFramesTotal ARTIFACTS=$Pub"
     $displayExitCode = if ($displayReport.status -eq 'DISPLAY_ASLEEP') { 24 } else { 23 }
     exit $displayExitCode
 }
@@ -1591,6 +1656,79 @@ $pmRows | Export-Csv -LiteralPath (Join-Path $legOut 'presentmon-series.csv') -N
 # and non-positive msBetweenDisplayChange cells reading the csv this exports).
 $pmIntervalRows = @($pmRows | Where-Object { $null -ne $_.msBetweenDisplayChange -and $_.msBetweenDisplayChange -gt 0 })
 $pmStats = Get-Stats @($pmIntervalRows | ForEach-Object { [double]$_.msBetweenDisplayChange })
+# PRESENTMON-HARNESS-ROBUSTNESS-1: $displayReport.status is 'OK' here (the typed refusal above
+# already returned on anything else), meaning PresentMon confirmed at least one genuine display
+# change for MLVApp -- but that alone does not mean presentMonStats above is a real cadence
+# measurement. A leg admitting only NA-first-present row(s) (displayed via MsUntilDisplayed, no
+# prior display change to diff against) has $pmIntervalRows.Count -eq 0: pmStats.count reads 0
+# and every stat reads $null, silently, while the rest of this leg still reports
+# RESULT=MEASUREMENT_CAPTURED as if PresentMon had fully corroborated it -- exactly the "very
+# thin admitted-row count" gap disclosed on CUDA-PLAYBACK-FULLSCREEN-UI-1 r2b (a real full-screen
+# leg with presentedCount=1 displayedCount=1). Typed here as 'degraded': display is genuinely
+# confirmed, but cadence cannot be, and the reason says why -- never silent.
+#
+# PRESENTMON-HARNESS-ROBUSTNESS-2 (sol BLOCKER, PR #174 r1): the check above ($pmIntervalRows.Count
+# -gt 0) was itself too weak -- a SINGLE positive interval still read fully 'ok', so a leg that
+# could not establish cadence over the whole 25-40s playback (the disclosed full-screen leg had
+# presentedCount=1) still read as display-cadence corroborated, and the histogram consumer turned
+# that one interval into a 100% one-refresh bucket. 'ok' requires a minimum absolute COUNT of
+# positive-interval samples (below) -- an order of magnitude below the low end of the real windowed
+# range on record (~150-240 displayed rows over 25-40s), so a genuinely thin/full-screen-style leg
+# (0-2 samples) still reads degraded while a healthy leg clears it with wide margin.
+#
+# PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): r1's coverage arm divided
+# positiveSamples by $displayReport.selectedChain.presentedCount -- both numerator and denominator
+# came from the SAME PresentMon csv, so a capture that lost the tail of a 25-40s leg after a short
+# healthy prefix still read coverage=1.0 over its own truncated rows. 'ok' now requires THREE
+# independent arms, cleared together, each named in the reason on failure:
+#   (1) COUNT: unchanged from r1, above.
+#   (2) APP-SWAP COVERAGE: positiveSamples over an app-side swap count PresentMon never produced --
+#       Get-AttrCudaAppSwapTelemetry reads the MLVApp log's own swap/frame telemetry (never this
+#       csv). A log carrying neither line leaves coverage unavailable, which fails this arm rather
+#       than dividing by zero or by a PresentMon-derived count again.
+#   (3) TEMPORAL: no gap between positive-interval rows -- including the head/tail gaps to the
+#       playback window's own bounds -- exceeds $presentMonSufficiencyMaxGapMs. (1) and (2) alone
+#       cannot catch a captured PREFIX followed by silence: a leg that captures
+#       >= $presentMonSufficiencyMinIntervalCount rows in the first couple of seconds of a 25-40s
+#       leg then loses the rest can still clear a count floor and a swap-count-based coverage ratio
+#       while having measured almost none of the actual leg. maxGapMs is an order of magnitude
+#       above the real windowed range's typical inter-sample spacing (~150-240 rows over 25-40s).
+$presentMonSufficiencyMinIntervalCount = 30
+$presentMonSufficiencyMinCoverageFraction = 0.5
+$presentMonSufficiencyMaxGapMs = 5000.0
+$presentMonPresentedCount = [int]$displayReport.selectedChain.presentedCount
+$appSwapTelemetry = Get-AttrCudaAppSwapTelemetry -LogText $rawLog
+$presentMonAppSwapCount = $appSwapTelemetry.swapCount
+$presentMonAppSwapSource = $appSwapTelemetry.source
+$presentMonCoverageAvailable = ($null -ne $presentMonAppSwapCount) -and ($presentMonAppSwapCount -gt 0)
+$presentMonCoverageFraction = if ($presentMonCoverageAvailable) { $pmIntervalRows.Count / [double]$presentMonAppSwapCount } else { 0.0 }
+$presentMonTemporal = Get-AttrCudaTemporalCoverage -TimeInMsValues @($pmIntervalRows | ForEach-Object { [double]$_.timeInMs }) -WindowStartMs $displayReport.windowStartMs -WindowEndMs $displayReport.windowEndMs -MaxGapMs $presentMonSufficiencyMaxGapMs
+$presentMonCountSufficient = ($pmIntervalRows.Count -ge $presentMonSufficiencyMinIntervalCount)
+$presentMonCoverageSufficient = ($presentMonCoverageAvailable -and ($presentMonCoverageFraction -ge $presentMonSufficiencyMinCoverageFraction))
+$presentMonTemporalSufficient = [bool]$presentMonTemporal.sufficient
+$presentMonSufficient = $presentMonCountSufficient -and $presentMonCoverageSufficient -and $presentMonTemporalSufficient
+$presentMonStatus = if ($presentMonSufficient) { 'ok' } else { 'degraded' }
+$presentMonStatusReason = if ($presentMonSufficient) {
+    $null
+} elseif ($pmIntervalRows.Count -eq 0) {
+    "PresentMon confirmed $($pmRows.Count) displayed MLVApp row(s) in the playback window, but none carried a positive MsBetweenDisplayChange interval -- every displayed sample came from MsUntilDisplayed on what PresentMon reports as an NA-first-present row, so presentMonStats has no interval to compute cadence from; display itself is still confirmed, cadence is not"
+} else {
+    $presentMonFailedArms = @()
+    if (-not $presentMonCountSufficient) {
+        $presentMonFailedArms += "count: only $($pmIntervalRows.Count) positive-interval row(s), below the minimum of $presentMonSufficiencyMinIntervalCount"
+    }
+    if (-not $presentMonCoverageSufficient) {
+        if ($presentMonCoverageAvailable) {
+            $presentMonFailedArms += "app-swap coverage: only $($pmIntervalRows.Count) positive-interval row(s) out of $presentMonAppSwapCount app-side $presentMonAppSwapSource ($([math]::Round($presentMonCoverageFraction * 100, 1))%), below the minimum of $([math]::Round($presentMonSufficiencyMinCoverageFraction * 100, 1))%"
+        } else {
+            $presentMonFailedArms += 'app-swap coverage: no independent app-side swap or frame telemetry found in the run log (neither playback_smoke.gpu_window_swaps nor playback_smoke.gate)'
+        }
+    }
+    if (-not $presentMonTemporalSufficient) {
+        $presentMonFailedArms += "temporal: a $([math]::Round($presentMonTemporal.maxGapMs / 1000.0, 1))s $($presentMonTemporal.gapKind) gap between positive-interval rows exceeds the $([math]::Round($presentMonSufficiencyMaxGapMs / 1000.0, 1))s ceiling"
+    }
+    "PresentMon's display-cadence evidence is too thin to corroborate as measured -- $($presentMonFailedArms -join '; ') -- display itself is still confirmed, cadence is not"
+}
 
 $dllSha256Lower = (Get-Sha $reconDll).ToLowerInvariant()
 # $pendingSymbolPresence came from the build manifest above, whose dll.sha256 was verified
@@ -1627,18 +1765,21 @@ $manifest = [ordered]@{
     reconDll = [ordered]@{ name=$ReconName; sha256=(Get-Sha $reconDll) }
     presentMon = [ordered]@{
         name=$PresentMonName; sha256=$PresentMonSha; launch='direct-child-inherits-job-temp'
-        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-1: display rates are reported for the MLVApp preview
-        # chain only -- selectedChain names which (ProcessID, SwapChainAddress) that is; chains
-        # lists every group PresentMon reported inside the playback window, for audit.
         chains=$displayReport.chains
         selectedChain=$displayReport.selectedChain
-        # CUDA-PERF-DISPLAY-IDENTITY-HARNESS-3 (sol BLOCKER): this is the count of rows that fed
-        # presentMonStats below -- i.e. rows with a positive msBetweenDisplayChange interval, the
-        # same population as $pmIntervalRows -- not $pmRows.Count (every displayed row, including
-        # the interval-less NA-first-present one), which the name previously read from and which
-        # inflated this above the sample size the statistics below were actually computed on.
+        # positiveSamples: positive-interval rows (presentMonStats' own population); presentedCount
+        # is PresentMon's own count, audit only -- coverage below divides by appSwapCount instead.
         positiveSamples=$pmIntervalRows.Count
+        presentedCount=$presentMonPresentedCount
+        appSwapCount=$presentMonAppSwapCount
+        appSwapSource=$presentMonAppSwapSource
+        coverageFraction=$presentMonCoverageFraction
+        temporalMaxGapMs=$presentMonTemporal.maxGapMs
+        temporalGapKind=$presentMonTemporal.gapKind
         clockBracket=$displayReport.clockBracket
+        sufficiency=[ordered]@{ minIntervalCount=$presentMonSufficiencyMinIntervalCount; minCoverageFraction=$presentMonSufficiencyMinCoverageFraction; maxGapMs=$presentMonSufficiencyMaxGapMs; countSufficient=$presentMonCountSufficient; coverageSufficient=$presentMonCoverageSufficient; temporalSufficient=$presentMonTemporalSufficient; sufficient=$presentMonSufficient }
+        status=$presentMonStatus
+        statusReason=$presentMonStatusReason
     }
     environmentBoundary = [ordered]@{ jobTempDir=$Scratch; allChildrenInheritJobTemp=$true }
     cpuQuiescence = [ordered]@{ samples=$loads; meanPercent=$avgLoad; thresholdPercent=20.0; pass=($avgLoad -le 20.0) }
@@ -1667,6 +1808,27 @@ Save-Json ([ordered]@{
     cpuFrames = $gpuSummary.cpuFrames
     presentMonSamples = $pmRows.Count
     presentMonSelectedChain = $displayReport.selectedChain
+    presentMonStatus = $presentMonStatus
+    presentMonStatusReason = $presentMonStatusReason
+    # PRESENTMON-HARNESS-ROBUSTNESS-2: the sufficiency gate's inputs and verdict, at top level
+    # (not only nested under evidence-manifest.json's presentMon block) since summary.json is the
+    # first file a reader opens -- see the manifest's own comment for the rule.
+    presentMonPositiveSamples = $pmIntervalRows.Count
+    presentMonPresentedCount = $presentMonPresentedCount
+    presentMonAppSwapCount = $presentMonAppSwapCount
+    presentMonAppSwapSource = $presentMonAppSwapSource
+    presentMonCoverageFraction = $presentMonCoverageFraction
+    presentMonTemporalMaxGapMs = $presentMonTemporal.maxGapMs
+    presentMonTemporalGapKind = $presentMonTemporal.gapKind
+    presentMonSufficiency = [ordered]@{
+        minIntervalCount=$presentMonSufficiencyMinIntervalCount
+        minCoverageFraction=$presentMonSufficiencyMinCoverageFraction
+        maxGapMs=$presentMonSufficiencyMaxGapMs
+        countSufficient=$presentMonCountSufficient
+        coverageSufficient=$presentMonCoverageSufficient
+        temporalSufficient=$presentMonTemporalSufficient
+        sufficient=$presentMonSufficient
+    }
     clockBracket = $displayReport.clockBracket
     diagnostics = $diagnostics
     artifactRoot = $Pub
@@ -1801,7 +1963,7 @@ Save-Json ([ordered]@{ schema='playback-attr-3-cuda-artifact-index.v1'; artifact
 # outbox result.json carries stdout and nothing else, so a reader who never opens an artifact
 # still cannot mistake a rehearsal for a measurement.
 $resultVerb = if ($FixtureRehearsal) { 'FIXTURE_REHEARSAL_CAPTURED' } else { 'MEASUREMENT_CAPTURED' }
-Write-Output "RESULT=$resultVerb FIXTURE_REHEARSAL=$FixtureRehearsal SOURCE=$SourceCommit CLIP=$ClipId ROWS=$($rows.Count) GPU_FRAMES=$gpuFramesTotal CPU_FRAMES=$($gpuSummary.cpuFrames) PRESENTMON_SAMPLES=$($pmRows.Count) ARTIFACTS=$Pub"
+Write-Output "RESULT=$resultVerb FIXTURE_REHEARSAL=$FixtureRehearsal SOURCE=$SourceCommit CLIP=$ClipId ROWS=$($rows.Count) GPU_FRAMES=$gpuFramesTotal CPU_FRAMES=$($gpuSummary.cpuFrames) PRESENTMON_SAMPLES=$($pmRows.Count) PRESENTMON_STATUS=$presentMonStatus PRESENTMON_COVERAGE=$([math]::Round($presentMonCoverageFraction, 3)) ARTIFACTS=$Pub"
 exit 0
 } finally {
     if ($OwnerClipDir) {

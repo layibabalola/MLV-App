@@ -2004,7 +2004,12 @@ function Get-AttrCudaPresentMonDisplayReport {
     Returns .status one of 'OK' | 'PRESENTMON_UNAVAILABLE' | 'DISPLAY_ASLEEP'; .reason is $null
     only for 'OK'. On 'OK', .chains lists every (ProcessID, SwapChainAddress) group observed in
     the window, for audit; .selectedChain is the PID-level aggregate (its swapChainAddresses lists
-    every address summed into it); .selectedChainRows carries only its positive-display rows,
+    every address summed into it). Both carry .presentModes -- every distinct PresentMode string
+    observed in that chain's rows, with its own row count (PRESENTMON-HARNESS-ROBUSTNESS-1) -- so
+    a leg admitting only a handful of rows (e.g. a full-screen leg that lost most of its samples)
+    can be diagnosed from evidence alone: an exclusive/hardware mode dropping to a composed one
+    mid-capture is a real signal PresentMon itself reports, not something counts alone can show.
+    .selectedChainRows carries only its positive-display rows,
     shaped exactly like this job's historical pmRows
     (ordinal/timeInMs/msBetweenDisplayChange/displayFpsEquivalent/presentMode), for
     presentmon-series.csv -- tools/profiling/refresh_period_histogram.py depends on that exact
@@ -2172,6 +2177,18 @@ function Get-AttrCudaPresentMonDisplayReport {
                 presentedFps = if ($windowSeconds -gt 0) { $groupRows.Count / $windowSeconds } else { $null }
                 displayedFps = if ($windowSeconds -gt 0) { $displayedRows.Count / $windowSeconds } else { $null }
                 isMlvAppChain = ($groupRows[0].processId -eq $targetPid)
+                # PRESENTMON-HARNESS-ROBUSTNESS-1: a thin/full-screen-style sample loss (e.g. a
+                # leg admitting only 1 presented/displayed row) cannot be diagnosed from counts
+                # alone -- PresentMode ("Hardware: Independent Flip" vs "Composed: Flip" vs a
+                # borderless/exclusive-fullscreen variant) is the field that actually explains
+                # WHY PresentMon lost samples on a given chain. Recorded per chain, every mode
+                # actually observed, so a future full-screen leg's evidence answers the question
+                # on its own instead of needing a live repro to diagnose.
+                presentModes = @(
+                    $groupRows | Group-Object -Property presentMode | ForEach-Object {
+                        [pscustomobject]@{ presentMode = $_.Name; count = $_.Count }
+                    }
+                )
             })
         }
         $mlvAppChains = @($chains | Where-Object { $_.isMlvAppChain } | Sort-Object -Property presentedCount -Descending)
@@ -2198,6 +2215,14 @@ function Get-AttrCudaPresentMonDisplayReport {
             presentedFps = if ($windowSeconds -gt 0) { $mlvAppRows.Count / $windowSeconds } else { $null }
             displayedFps = if ($windowSeconds -gt 0) { $mlvAppDisplayedRows.Count / $windowSeconds } else { $null }
             isMlvAppChain = $true
+            # PRESENTMON-HARNESS-ROBUSTNESS-1: summed across every swap chain address this PID
+            # used in the window, mirroring $chains' per-chain presentModes above -- see that
+            # comment for why this field exists.
+            presentModes = @(
+                $mlvAppRows | Group-Object -Property presentMode | ForEach-Object {
+                    [pscustomobject]@{ presentMode = $_.Name; count = $_.Count }
+                }
+            )
         }
         $selectedChainRows = @(
             $mlvAppDisplayedRows |
@@ -2214,6 +2239,12 @@ function Get-AttrCudaPresentMonDisplayReport {
 
         [pscustomobject]@{
             windowSeconds = $windowSeconds
+            # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b: the job's temporal-coverage arm needs the
+            # window's own bounds (relative to this same anchor as every row's timeInMs) to measure
+            # head/tail gaps against -- not just windowSeconds (the span), which cannot say WHERE
+            # inside the window a run of positive-interval rows sits.
+            windowStartMs = $windowStartMs
+            windowEndMs = $windowEndMs
             windowedRows = $windowedRows
             chains = @($chains)
             # Named targetChains, not the more obvious name built from "MLVApp" + "Chains", purely
@@ -2298,7 +2329,153 @@ function Get-AttrCudaPresentMonDisplayReport {
         selectedChain = $headlineBuild.selected
         selectedChainRows = $headlineBuild.selectedChainRows
         clockBracket = $clockBracket
+        # PRESENTMON-HARNESS-ROBUSTNESS-2 r1b: the headline endpoint's own window bounds, on the
+        # same anchor as selectedChainRows' timeInMs -- see the buildWindow comment above.
+        windowStartMs = $headlineBuild.windowStartMs
+        windowEndMs = $headlineBuild.windowEndMs
     }
+}
+
+function Get-AttrCudaAppSwapTelemetry {
+    <#
+    .SYNOPSIS
+    An app-side count of on-screen swaps for the measured leg, independent of PresentMon.
+    .DESCRIPTION
+    PRESENTMON-HARNESS-ROBUSTNESS-2 r1b (sol BLOCKER, pre-review): the sufficiency gate's coverage
+    arm must not divide PresentMon's own positive-interval rows by a count PresentMon itself also
+    produced -- that is circular, and a capture that lost the tail of a leg after a short healthy
+    prefix still reads 100% coverage of its own truncated rows. The MLVApp log's own
+    playback_smoke.gpu_window_swaps line (platform/qt/GpuDisplayWindow.cpp,
+    swapTelemetrySnapshot -- real confirmed on-screen swaps) is the preferred, more precise source,
+    used only when it reports both telemetry_enabled=1 and window_active=1. playback_smoke.gate's
+    frames_presented (frame SUBMISSIONS, unconditionally logged every run, LIGHT arm included) is
+    the fallback when swap telemetry itself is unavailable -- still an app-side signal PresentMon
+    never touches, just coarser than a confirmed on-screen swap count.
+    Returns swapCount=$null (source=$null) only when NEITHER line is present/usable in the log --
+    the caller must treat that as coverage being unmeasurable, never as coverage=0 or coverage=1.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$LogText
+    )
+
+    function Get-AttrCudaLastKeyValueLine([string]$Text, [string]$LinePrefixPattern) {
+        $last = $null
+        foreach ($line in ($Text -split "`r?`n")) {
+            if ($line -notmatch $LinePrefixPattern) { continue }
+            $values = @{}
+            foreach ($match in [regex]::Matches($line, '(?<key>[A-Za-z0-9_]+)=(?<value>[^\s]+)')) {
+                $values[$match.Groups['key'].Value] = $match.Groups['value'].Value
+            }
+            $last = $values
+        }
+        $last
+    }
+
+    $swapsValues = Get-AttrCudaLastKeyValueLine $LogText 'playback_smoke\.gpu_window_swaps '
+    [int]$swaps = 0
+    $swapsUsable = ($null -ne $swapsValues) -and
+        $swapsValues.ContainsKey('telemetry_enabled') -and $swapsValues['telemetry_enabled'] -eq '1' -and
+        $swapsValues.ContainsKey('window_active') -and $swapsValues['window_active'] -eq '1' -and
+        $swapsValues.ContainsKey('swaps') -and [int]::TryParse([string]$swapsValues['swaps'], [ref]$swaps)
+    if ($swapsUsable) {
+        return [pscustomobject]@{ source = 'gpu_window_swaps'; swapCount = $swaps }
+    }
+
+    $gateValues = Get-AttrCudaLastKeyValueLine $LogText 'playback_smoke\.gate '
+    [int]$framesPresented = 0
+    $gateUsable = ($null -ne $gateValues) -and $gateValues.ContainsKey('frames_presented') -and
+        [int]::TryParse([string]$gateValues['frames_presented'], [ref]$framesPresented)
+    if ($gateUsable) {
+        return [pscustomobject]@{ source = 'gate_frames_presented'; swapCount = $framesPresented }
+    }
+
+    [pscustomobject]@{ source = $null; swapCount = $null }
+}
+
+function Get-AttrCudaTemporalCoverage {
+    <#
+    .SYNOPSIS
+    Whether positive-interval rows span the measured window without a silent gap.
+    .DESCRIPTION
+    PRESENTMON-HARNESS-ROBUSTNESS-2 r1b: count and app-swap coverage alone cannot catch a captured
+    PREFIX followed by silence -- a leg that captures its minimum row count in the first couple of
+    seconds of a 25-40s window, then loses the rest, can clear both a count floor and a swap-count
+    ratio while having actually measured almost none of the leg. This checks the head gap (first
+    row after WindowStartMs), every internal gap between consecutive rows, and the tail gap
+    (WindowEndMs after the last row); 'sufficient' requires every one of them to be <= MaxGapMs.
+    Zero rows is always insufficient -- with no rows the whole window is one gap, start to end.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [double[]]$TimeInMsValues,
+
+        [Parameter(Mandatory = $true)]
+        [double]$WindowStartMs,
+
+        [Parameter(Mandatory = $true)]
+        [double]$WindowEndMs,
+
+        [Parameter(Mandatory = $true)]
+        [double]$MaxGapMs
+    )
+
+    $sorted = @($TimeInMsValues | Sort-Object)
+    if ($sorted.Count -eq 0) {
+        return [pscustomobject]@{
+            sufficient = $false
+            maxGapMs = ($WindowEndMs - $WindowStartMs)
+            gapKind = 'no-positive-interval-rows'
+        }
+    }
+
+    # PowerShell variable names are case-insensitive -- an "$maxGapMs" LOCAL accumulator would be
+    # the SAME variable slot as the "$MaxGapMs" PARAMETER above, silently overwriting the caller's
+    # ceiling with the observed value and making "-le $MaxGapMs" compare the accumulator to itself
+    # (always true). Named "$observedGapMs" specifically to avoid that collision.
+    $observedGapMs = [double]($sorted[0] - $WindowStartMs)
+    $gapKind = 'head'
+    for ($i = 1; $i -lt $sorted.Count; $i++) {
+        $gap = $sorted[$i] - $sorted[$i - 1]
+        if ($gap -gt $observedGapMs) { $observedGapMs = $gap; $gapKind = 'internal' }
+    }
+    $tailGap = $WindowEndMs - $sorted[$sorted.Count - 1]
+    if ($tailGap -gt $observedGapMs) { $observedGapMs = $tailGap; $gapKind = 'tail' }
+
+    [pscustomobject]@{
+        sufficient = ($observedGapMs -le $MaxGapMs)
+        maxGapMs = $observedGapMs
+        gapKind = $gapKind
+    }
+}
+
+function ConvertTo-AttrCudaResultLineSafeText {
+    <#
+    .SYNOPSIS
+    Sanitize free-form text (an exception message, a typed reason) for embedding inside a
+    RESULT= stdout line's quoted REASON="..." field.
+    .DESCRIPTION
+    PRESENTMON-HARNESS-ROBUSTNESS-2 (fable note): the RESULT line is read by naive downstream
+    parsing (a regex over stdout text), never real shell quoting -- a literal '"' inside the
+    embedded text (e.g. an exception message containing a quoted path or argument) would
+    terminate that field early for such a parser. Quotes are substituted with a visually adjacent
+    apostrophe rather than backslash-escaped, since nothing downstream unescapes backslashes.
+    $null passes through unchanged, so callers do not need their own null guard first.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+    if ($null -eq $Text) { return $Text }
+    $Text.Replace('"', "'")
 }
 
 Export-ModuleMember -Function `
@@ -2341,4 +2518,7 @@ Export-ModuleMember -Function `
     Get-AttrCudaLastEligibilityLine, `
     Get-AttrCudaEligibilityVerdict, `
     ConvertTo-AttrCudaQuotedProcessArgument, `
-    Get-AttrCudaPresentMonDisplayReport
+    Get-AttrCudaPresentMonDisplayReport, `
+    Get-AttrCudaAppSwapTelemetry, `
+    Get-AttrCudaTemporalCoverage, `
+    ConvertTo-AttrCudaResultLineSafeText
