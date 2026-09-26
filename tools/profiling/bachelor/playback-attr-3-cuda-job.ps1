@@ -99,6 +99,23 @@
 #
 # -BuildManifestSha256 is the sha the assembler printed (MANIFEST_SHA256= on its RESULT line)
 # and the staging generator echoed as buildManifestSha256; see docs/playback-attr-3-cuda.md.
+#
+# VENUE (UM-CUDA-BENCH-VENUE-1). -Venue bachelor|ultra-magnus selects which measurement host this
+# job is authored for -- default 'bachelor', byte-for-byte the same behavior this job always had.
+# 'ultra-magnus' switches the agent-root default (G:\Temp\mlv-gpu-profile\agent, matching
+# tools/profiling/ultramagnus/playback-attr-3-cuda-dll-job.ps1's own default -- everything under
+# it, cache/staging/footage-workspace/PresentMon location, follows for free) and the job's own
+# scratch-root safety floor (G:\Temp\mlv-gpu-profile instead of C:\mlvtmp; still a hard floor
+# independent of -AgentRoot, just keyed on -Venue now instead of a single shared constant).
+# venue/host/GPU-name are RECORDED in every summary.json/evidence-manifest.json/RESULT line this
+# job writes -- never GATED on ($env:COMPUTERNAME is compared to the venue's expected host and the
+# comparison is recorded as hostMatchesVenue, informational only, so a fixture rehearsal stays
+# portable to any dev/CI host). Submitting to the right host at all is the caller's job (e.g.
+# tools/profiling/um-run.ps1 -AgentShare pointed at the matching share); this generator does not
+# submit anything itself. Usage (Ultra-Magnus, owner clip):
+#   pwsh -NoProfile -File tools\profiling\bachelor\playback-attr-3-cuda-job.ps1 `
+#       -Venue ultra-magnus -SourceCommit <40-hex> -BuildManifestSha256 <64-lowercase-hex> `
+#       -ClipId M16-1243 -OutFile <path>\<jobId>.job.ps1
 
 [CmdletBinding()]
 param(
@@ -173,14 +190,33 @@ param(
     # rejected one discloses nothing.
     [string]$RepoRoot = '',
 
+    # UM-CUDA-BENCH-VENUE-1: which measurement host this job is authored for. Selects the
+    # per-venue defaults below (agent root, and the job's own scratch-root safety floor a few
+    # hundred lines down) by a FIXED literal keyed on this flag alone -- never derived from
+    # -AgentRoot, so overriding -AgentRoot for a test does not also relax the scratch-root floor
+    # (same independence the floor already had from -AgentRoot before this card; see the "TEMP
+    # boundary" comment in the template below). 'bachelor' is the default and keeps every one of
+    # those byte-for-byte what it already was; 'ultra-magnus' switches them to Ultra-Magnus's own
+    # agent share (G:\Temp\mlv-gpu-profile\agent, matching
+    # tools/profiling/ultramagnus/playback-attr-3-cuda-dll-job.ps1's own -AgentRoot default) with
+    # no other change to the leg. The venue is never used to gate anything at runtime (a fixture
+    # rehearsal must stay portable to any dev/CI host, whatever $env:COMPUTERNAME it has) -- only
+    # to select defaults and to RECORD an informational host/venue consistency flag in every
+    # summary.json/evidence-manifest.json/RESULT line, so bachelor and Ultra-Magnus numbers are
+    # never read as interchangeable.
+    [ValidateSet('bachelor', 'ultra-magnus')]
+    [string]$Venue = 'bachelor',
+
     # The ONE definition of the agent root, for both the template's own $Root (substituted via
     # __AGENT_ROOT__ below) and this generator's own fixture -ClipPath derivation -- so the two
     # can never drift apart. Overridable only so a test can point the emitted job at a temporary
-    # directory instead of the real measurement host's C:\mlvtmp\mlv-agent; production never
-    # passes this.
+    # directory instead of the real measurement host's C:\mlvtmp\mlv-agent (bachelor) or
+    # G:\Temp\mlv-gpu-profile\agent (ultra-magnus); production never passes this.
     # NO ValidatePattern (round 4, see the comment above -RepoRoot): validated in the body
-    # instead, without echoing the value.
-    [string]$AgentRoot = 'C:\mlvtmp\mlv-agent',
+    # instead, without echoing the value. The default expression is pure venue-keyed literal
+    # selection (no I/O), the same shape -BasePackageZip's own computed default already uses
+    # below, so it adds nothing to the set of I/O-bearing defaults round 4 was concerned with.
+    [string]$AgentRoot = $(if ($Venue -eq 'ultra-magnus') { 'G:\Temp\mlv-gpu-profile\agent' } else { 'C:\mlvtmp\mlv-agent' }),
 
     # Derived from -SourceCommit, not pinned to an old package: matches the package
     # tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1 builds on the board host and
@@ -203,6 +239,13 @@ param(
     [ValidatePattern('^[A-Za-z0-9._-]+\.exe\z')]
     [string]$PresentMonName = 'PresentMon-2.5.1-x64.exe',
     [string]$PresentMonSha256 = '9BEC3083069F58F911E6A512F4806DB51A27BD096103087BC1D05EF54C80A191',
+
+    # UM-CUDA-BENCH-VENUE-1: the CPU-quiescence bar the leg samples against before it will spend
+    # any of its own budget on a run. Named and overridable (was an inline 20.0 literal, used in
+    # two places that had to be kept in sync by hand) so the two venues CAN diverge here later
+    # without another round of literal-hunting; today both default to the same bar -- no evidence
+    # yet justifies a different one for Ultra-Magnus, and this card does not invent one.
+    [double]$CpuQuiescenceThresholdPercent = 20.0,
 
     # Owner consent for clip M16-1243 on this card; cited (never resolved to a path
     # here) in the evidence manifest for audit trail.
@@ -363,7 +406,13 @@ if ($isFixtureRehearsal) {
         throw "PLAYBACK_ATTR3_FIXTURE_SHA_REQUIRED -FixtureSha256 must be 64 lowercase hex for a fixture id ('$ClipId'); got '$FixtureSha256'"
     }
     if ([string]::IsNullOrWhiteSpace($ClipPath)) {
-        $ClipPath = Join-Path (Join-Path $AgentRoot 'cache') ($ClipId + $FixtureClipExtension)
+        # UM-CUDA-BENCH-VENUE-1: plain string composition, never Join-Path -- Join-Path is
+        # provider-aware and throws "Cannot find drive" for a drive that does not exist on THIS
+        # generator host (e.g. Ultra-Magnus's own G:\ default, generated from a machine with no
+        # G: drive at all), even though this is pure path-string derivation with no filesystem
+        # access. TrimEnd('\') so a caller-supplied -AgentRoot ending in a backslash (the shape
+        # check above allows it) does not double one up here.
+        $ClipPath = $AgentRoot.TrimEnd('\') + '\cache\' + $ClipId + $FixtureClipExtension
     }
     if ($ClipPath -notmatch '^[A-Za-z]:\\[A-Za-z0-9 _.\\-]+$') {
         throw "PLAYBACK_ATTR3_CLIPPATH_INVALID -ClipPath contains characters outside the allowlist: '$ClipPath'"
@@ -559,6 +608,13 @@ $shortSha = $SourceCommit.Substring(0, 12)
 $exeName = "MLVApp-playback-attr-3-cuda-$shortSha.exe"
 $reconName = "igpu_recon_cuda-playback-attr-3-cuda-$shortSha.dll"
 
+# UM-CUDA-BENCH-VENUE-1: the job's own scratch-root safety floor (Assert-UnderScratchRoot in the
+# template below) and the host identity it RECORDS (never gates on -- see -Venue's own header
+# comment) -- both fixed per-venue literals, independent of -AgentRoot the same way the old
+# C:\mlvtmp floor always was.
+$scratchRootForVenue = if ($Venue -eq 'ultra-magnus') { 'G:\Temp\mlv-gpu-profile' } else { 'C:\mlvtmp' }
+$expectedComputerNameForVenue = if ($Venue -eq 'ultra-magnus') { 'ULTRA-MAGNUS' } else { 'BACHELOR' }
+
 # --- job body template (placeholders are substituted below; the body itself never
 #     touches this generator's variables directly, so there is no accidental capture
 #     of this machine's environment into the emitted script) ----------------------
@@ -583,11 +639,15 @@ $SmokeRunnerName = '__SMOKE_RUNNER_NAME__'
 $ConsentReceiptFileName = '__CONSENT_RECEIPT__'
 $FixtureRehearsal = __FIXTURE_REHEARSAL__
 $FixtureSha256 = '__FIXTURE_SHA256__'
+$Venue = '__VENUE__'
+$ScratchRootFloor = '__SCRATCH_ROOT__'
+$ExpectedComputerName = '__EXPECTED_COMPUTERNAME__'
+$CpuQuiescenceThresholdPercent = __CPU_QUIESCENCE_THRESHOLD_PERCENT__
 $Root = '__AGENT_ROOT__'
 $Cache = Join-Path $Root 'cache'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $JobId = "playback-attr-3-cuda-$($SourceCommit.Substring(0,12))-$ClipId-$Stamp"
-$Work = Join-Path 'C:\mlvtmp' $JobId
+$Work = Join-Path $ScratchRootFloor $JobId
 $Pub = Join-Path $Root "outbox\$JobId.artifacts"
 $PresentMonTimedSeconds = 55
 # ATTR3-FOOTAGE-BIND-1 PR-B round 4: set by the owner branch below; stays $null/empty for a
@@ -623,26 +683,30 @@ $displayWake['keepAliveIntervalSeconds'] = $displayWakeKeepAlive.intervalSeconds
 $displayWake['keepAliveStartedUtc'] = $displayWakeKeepAlive.startedUtc
 $displayWake['keepAliveNudgeState'] = $displayWakeKeepAlive.nudgeState
 
-# TEMP boundary (BLOCKER fix): job-owned scratch dir under this job's own C:\mlvtmp
+# TEMP boundary (BLOCKER fix): job-owned scratch dir under this job's own scratch-root floor
 # work dir, set as TEMP/TMP at the very start -- before any child process (reg.exe,
 # the pwsh that runs run-release-gui-smoke.ps1/MLVApp.exe, PresentMon) -- so every one
 # of them inherits it instead of the ambient (unconstrained) machine TEMP.
 # Mirrors tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1's $Scratch
 # pattern. $Work is created here (not later) precisely so the scratch dir it hosts is
 # never wiped out from under a live $env:TEMP by a later "recreate $Work" step.
-function Assert-UnderMlvTmp([string]$Path, [string]$Label) {
+# UM-CUDA-BENCH-VENUE-1: the floor itself ($ScratchRootFloor) is a fixed per-venue literal (was
+# the single hardcoded 'C:\mlvtmp' this job always ran on Bachelor) -- still a deliberate hard
+# floor independent of -AgentRoot, exactly as before this card; only the literal it is compared
+# against now depends on -Venue instead of being the one constant every venue had to share.
+function Assert-UnderScratchRoot([string]$Path, [string]$Label) {
     $full = [IO.Path]::GetFullPath($Path)
-    if ($full -ne 'C:\mlvtmp' -and $full -notlike 'C:\mlvtmp\*') {
-        throw "job-owned path '$Label' resolves outside C:\mlvtmp: $full"
+    if ($full -ne $ScratchRootFloor -and $full -notlike "$ScratchRootFloor\*") {
+        throw "job-owned path '$Label' resolves outside $ScratchRootFloor (venue=$Venue): $full"
     }
 }
 foreach ($check in @(
     @{ path = $Root; label = 'Root' },
     @{ path = $Work; label = 'Work' },
     @{ path = $Pub; label = 'Pub' }
-)) { Assert-UnderMlvTmp $check.path $check.label }
+)) { Assert-UnderScratchRoot $check.path $check.label }
 
-Remove-AttrCudaTree -TrustedRoot 'C:\mlvtmp' -Path $Work
+Remove-AttrCudaTree -TrustedRoot $ScratchRootFloor -Path $Work
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 $Scratch = Join-Path $Work '.job-tmp'
 New-Item -ItemType Directory -Path $Scratch -Force | Out-Null
@@ -650,11 +714,32 @@ $env:TEMP = $Scratch
 $env:TMP = $Scratch
 
 # PresentMon runs as a DIRECT child of this job (sol PR #131 r3): it inherits the job-owned
-# TEMP/TMP above, so every child tool is confined to C:\mlvtmp. The elevated scheduled task
-# MLV\PresentMonSidecar is NOT used: the agent account was granted ETW trace rights through
-# 'Performance Log Users' (Bachelor fix-presentmon-privilege.ps1, 2026-07-28). If that grant is
-# missing, PresentMon exits 6 (access denied) and this job fails closed; it never falls back to
-# the task.
+# TEMP/TMP above, so every child tool is confined to $ScratchRootFloor. The elevated scheduled
+# task MLV\PresentMonSidecar is NOT used: the agent account was granted ETW trace rights through
+# 'Performance Log Users' (Bachelor fix-presentmon-privilege.ps1, 2026-07-28; mirrored on
+# Ultra-Magnus by its own agent-account grant). If that grant is missing, PresentMon exits 6
+# (access denied) and this job fails closed; it never falls back to the task.
+
+# UM-CUDA-BENCH-VENUE-1: RECORDED, never gated on (a fixture rehearsal must stay portable to any
+# dev/CI host, whatever $env:COMPUTERNAME it has) -- folded into every reader-facing artifact this
+# job writes from here on (its summary, its evidence manifest), and into every RESULT line, so
+# bachelor and Ultra-Magnus numbers are never read as interchangeable.
+$actualComputerName = $env:COMPUTERNAME
+$venueGpuNames = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction SilentlyContinue |
+    ForEach-Object { $_.Name })
+$venueInfo = [ordered]@{
+    venue = $Venue
+    host = $actualComputerName
+    expectedHost = $ExpectedComputerName
+    hostMatchesVenue = ($actualComputerName -ieq $ExpectedComputerName)
+    gpuNames = $venueGpuNames
+    # ATTR3 ROUND-1 SCOPE (UM-CUDA-BENCH-VENUE-1): an ultra-magnus leg's own CPU-quiescence sample
+    # below runs ON Ultra-Magnus and therefore already reads its TOTAL host load, which includes
+    # whatever the VIRTUAL-TEN VM guest (this lane's own worktree host, which Ultra-Magnus also
+    # hosts) is doing at that same moment -- never a separate, additive number this job needs to
+    # account for on top of it.
+    vmGuestLoadIncludedInQuiescence = ($Venue -eq 'ultra-magnus')
+}
 
 function Get-Sha([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
@@ -842,13 +927,13 @@ if ($displayWake.screensaverSecureOwnerOnly) {
     [void](New-AttrCudaDirectory -Path (Join-Path $Root 'outbox'))
     [void](New-AttrCudaDirectory -Path $Pub)
     $secureRefusal = [ordered]@{
-        schema='playback-attr-3-cuda-venue.v1'; result='SCREENSAVER_SECURE_OWNER_ONLY'
+        schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='SCREENSAVER_SECURE_OWNER_ONLY'
         fixtureRehearsal=$FixtureRehearsal
         displayWake=$displayWake
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $secureRefusal (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=SCREENSAVER_SECURE_OWNER_ONLY ARTIFACTS=$Pub"
+    Write-Output "RESULT=SCREENSAVER_SECURE_OWNER_ONLY VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
     exit 25
 }
 
@@ -938,14 +1023,14 @@ if ($FixtureRehearsal) {
     $actualClipSha256 = (Get-FileHash -LiteralPath $clipPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualClipSha256 -ne $FixtureSha256) {
         $mismatch = [ordered]@{
-            schema='playback-attr-3-cuda-venue.v1'; result='FIXTURE_CONTENT_MISMATCH'
+            schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='FIXTURE_CONTENT_MISMATCH'
             fixtureRehearsal=$FixtureRehearsal
             displayWake=$displayWake
             clipPath=$clipPath; expectedSha256=$FixtureSha256; actualSha256=$actualClipSha256
             sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
         }
         Save-Json $mismatch (Join-Path $Pub 'summary.json')
-        Write-Output "RESULT=FIXTURE_CONTENT_MISMATCH EXPECTED=$FixtureSha256 ACTUAL=$actualClipSha256 ARTIFACTS=$Pub"
+        Write-Output "RESULT=FIXTURE_CONTENT_MISMATCH EXPECTED=$FixtureSha256 ACTUAL=$actualClipSha256 VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
         exit 17
     }
 } else {
@@ -971,7 +1056,7 @@ if ($FixtureRehearsal) {
     if ($ownerFailingParts.Count -gt 0) {
         # Per-part index and status only -- never a path -- in every reader-facing output below.
         $notVerified = [ordered]@{
-            schema='playback-attr-3-cuda-venue.v1'; result='OWNER_FOOTAGE_NOT_VERIFIED'
+            schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='OWNER_FOOTAGE_NOT_VERIFIED'
             fixtureRehearsal=$FixtureRehearsal
             displayWake=$displayWake
             parts=@($ownerPartResults)
@@ -979,7 +1064,7 @@ if ($FixtureRehearsal) {
         }
         Save-Json $notVerified (Join-Path $Pub 'summary.json')
         $partsSummary = (($ownerPartResults | ForEach-Object { "$($_.index)=$($_.status)" }) -join ',')
-        Write-Output "RESULT=OWNER_FOOTAGE_NOT_VERIFIED PARTS=$partsSummary ARTIFACTS=$Pub"
+        Write-Output "RESULT=OWNER_FOOTAGE_NOT_VERIFIED PARTS=$partsSummary VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
         exit 19
     }
 
@@ -994,14 +1079,14 @@ if ($FixtureRehearsal) {
         $ownerAssertedParts = Assert-AttrCudaOwnerPartsNaming -Parts $ownerDecodedParts
     } catch {
         $notContiguous = [ordered]@{
-            schema='playback-attr-3-cuda-venue.v1'; result='OWNER_PARTS_NOT_CONTIGUOUS'
+            schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='OWNER_PARTS_NOT_CONTIGUOUS'
             fixtureRehearsal=$FixtureRehearsal
             displayWake=$displayWake
             partCount=$ownerDecodedParts.Count
             sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
         }
         Save-Json $notContiguous (Join-Path $Pub 'summary.json')
-        Write-Output "RESULT=OWNER_PARTS_NOT_CONTIGUOUS ARTIFACTS=$Pub"
+        Write-Output "RESULT=OWNER_PARTS_NOT_CONTIGUOUS VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
         exit 20
     }
 
@@ -1042,14 +1127,14 @@ if ($FixtureRehearsal) {
         $message = $_.Exception.Message
         if ($message -match '^OWNER_FOOTAGE_NOT_VERIFIED status=(\S+)$') {
             $relinkRefusal = [ordered]@{
-                schema='playback-attr-3-cuda-venue.v1'; result='OWNER_FOOTAGE_NOT_VERIFIED'
+                schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='OWNER_FOOTAGE_NOT_VERIFIED'
                 fixtureRehearsal=$FixtureRehearsal
                 displayWake=$displayWake
                 parts=@(@{ index = $part.index; status = $Matches[1] })
                 sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
             }
             Save-Json $relinkRefusal (Join-Path $Pub 'summary.json')
-            Write-Output "RESULT=OWNER_FOOTAGE_NOT_VERIFIED PARTS=$($part.index)=$($Matches[1]) ARTIFACTS=$Pub"
+            Write-Output "RESULT=OWNER_FOOTAGE_NOT_VERIFIED PARTS=$($part.index)=$($Matches[1]) VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
             exit 19
         }
         # Any other failure in this loop -- cross-volume, link/identity creation, or a handle that
@@ -1059,14 +1144,14 @@ if ($FixtureRehearsal) {
         if ($linkToken -ne 'OWNER_FOOTAGE_LINK_CROSS_VOLUME') { $linkToken = 'OWNER_FOOTAGE_LINK_FAILED' }
         $linkExitCode = if ($linkToken -eq 'OWNER_FOOTAGE_LINK_CROSS_VOLUME') { 21 } else { 22 }
         $linkRefusal = [ordered]@{
-            schema='playback-attr-3-cuda-venue.v1'; result=$linkToken
+            schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result=$linkToken
             fixtureRehearsal=$FixtureRehearsal
             displayWake=$displayWake
             partIndex=$part.index
             sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
         }
         Save-Json $linkRefusal (Join-Path $Pub 'summary.json')
-        Write-Output "RESULT=$linkToken PART=$($part.index) ARTIFACTS=$Pub"
+        Write-Output "RESULT=$linkToken PART=$($part.index) VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
         exit $linkExitCode
     }
 }
@@ -1112,22 +1197,26 @@ for ($i = 0; $i -lt 3; $i++) {
     if ($i -lt 2) { Start-Sleep -Seconds 12 }
 }
 $avgLoad = Get-Mean $loads
-if ($avgLoad -gt 20.0) {
-    $venue = [ordered]@{
-        schema='playback-attr-3-cuda-venue.v1'
+if ($avgLoad -gt $CpuQuiescenceThresholdPercent) {
+    # Named venueNotQuiescentSummary, never $venue: PowerShell variable names are
+    # case-insensitive, so a local $venue here would silently alias and overwrite the -Venue
+    # parameter itself (UM-CUDA-BENCH-VENUE-1).
+    $venueNotQuiescentSummary = [ordered]@{
+        schema='playback-attr-3-cuda-venue.v2'
         result='VENUE_NOT_QUIESCENT'
         fixtureRehearsal=$FixtureRehearsal
         displayWake=$displayWake
+        venue=$venueInfo
         cpuSamples=$loads
         cpuMean=$avgLoad
-        cpuThresholdPercent=20.0
+        cpuThresholdPercent=$CpuQuiescenceThresholdPercent
         sourceCommit=$SourceCommit
         clipId=$ClipId
         executableSha256=$cacheExeSha
         artifactRoot=$Pub
     }
-    Save-Json $venue (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=VENUE_NOT_QUIESCENT CPU_MEAN=$avgLoad ARTIFACTS=$Pub"
+    Save-Json $venueNotQuiescentSummary (Join-Path $Pub 'summary.json')
+    Write-Output "RESULT=VENUE_NOT_QUIESCENT CPU_MEAN=$avgLoad VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
     exit 12
 }
 
@@ -1256,7 +1345,7 @@ if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not (Test-Path -Lite
         }
     }
     $smokeFailure = [ordered]@{
-        schema='playback-attr-3-cuda-venue.v1'; result='SMOKE_RUN_FAILED'
+        schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='SMOKE_RUN_FAILED'
         fixtureRehearsal=$FixtureRehearsal
         displayWake=$displayWake
         smokeExitCode=$smokeRc; smokeResultPresent=(Test-Path -LiteralPath $resultPath)
@@ -1269,7 +1358,7 @@ if ($null -ne $smokeLaunchException -or $smokeRc -ne 0 -or -not (Test-Path -Lite
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $smokeFailure (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=SMOKE_RUN_FAILED EXIT=$smokeRc EXCEPTION=$smokeLaunchExceptionType PRESENTMON_EXITED=$($presentMonStop.confirmedExited) ARTIFACTS=$Pub"
+    Write-Output "RESULT=SMOKE_RUN_FAILED EXIT=$smokeRc EXCEPTION=$smokeLaunchExceptionType PRESENTMON_EXITED=$($presentMonStop.confirmedExited) VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
     exit 18
 }
 
@@ -1308,7 +1397,7 @@ try {
     # never left to run out its own --timed budget for a run this job is about to fail anyway.
     $presentMonStop = Stop-PresentMonCapture -Proc $presentMonProc
     $unavailable = [ordered]@{
-        schema='playback-attr-3-cuda-venue.v1'; result='SMOKE_LOG_UNAVAILABLE'
+        schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='SMOKE_LOG_UNAVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
         displayWake=$displayWake
         message=$_.Exception.Message; smokeExitCode=$smokeRc; resultJson=$resultPath
@@ -1318,7 +1407,7 @@ try {
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $unavailable (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=SMOKE_LOG_UNAVAILABLE MESSAGE=`"$($_.Exception.Message)`" ARTIFACTS=$Pub"
+    Write-Output "RESULT=SMOKE_LOG_UNAVAILABLE MESSAGE=`"$($_.Exception.Message)`" VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
     exit 16
 }
 $logPath = $runLog.path
@@ -1376,7 +1465,7 @@ if ($null -ne $presentMonWaitError) {
         captureStartUncertaintyMs=$presentMonCaptureStartUncertaintyMs
     }) (Join-Path $Pub 'presentmon-capture.json')
     $displayFailure = [ordered]@{
-        schema='playback-attr-3-cuda-venue.v1'; result='PRESENTMON_UNAVAILABLE'
+        schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='PRESENTMON_UNAVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
         displayWake=$displayWake
         reason=$presentMonWaitError
@@ -1385,7 +1474,7 @@ if ($null -ne $presentMonWaitError) {
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $displayFailure (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=PRESENTMON_UNAVAILABLE REASON=`"$presentMonWaitError`" ARTIFACTS=$Pub"
+    Write-Output "RESULT=PRESENTMON_UNAVAILABLE REASON=`"$presentMonWaitError`" VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
     exit 23
 }
 
@@ -1410,13 +1499,13 @@ $diagnostics = [ordered]@{
 }
 if (-not $verdict.admitted) {
     $refusal = [ordered]@{
-        schema='playback-attr-3-cuda-venue.v1'; result='BACKEND_NOT_AVAILABLE'
+        schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='BACKEND_NOT_AVAILABLE'
         fixtureRehearsal=$FixtureRehearsal
         displayWake=$displayWake
         diagnostics=$diagnostics; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $refusal (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=BACKEND_NOT_AVAILABLE CUDA_BACKEND_AVAILABLE=$($verdict.cudaBackendAvailable) R16_AVAILABLE=$($verdict.r16Available) R16_REASON=`"$($verdict.r16Reason)`" ARTIFACTS=$Pub"
+    Write-Output "RESULT=BACKEND_NOT_AVAILABLE CUDA_BACKEND_AVAILABLE=$($verdict.cudaBackendAvailable) R16_AVAILABLE=$($verdict.r16Available) R16_REASON=`"$($verdict.r16Reason)`" VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
     exit $verdict.exitCode
 }
 
@@ -1427,24 +1516,24 @@ $gpuSummary = Get-LastGpuSummary $rawLog
 $gpuFramesTotal = $gpuSummary.gpuReconReadbackFrames + $gpuSummary.gpuTextureReadbackFrames + $gpuSummary.gpuTextureNoReadbackFrames
 if ($gpuFramesTotal -le 0) {
     $fallback = [ordered]@{
-        schema='playback-attr-3-cuda-venue.v1'; result='GPU_RECON_FRAMES_ZERO'
+        schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='GPU_RECON_FRAMES_ZERO'
         fixtureRehearsal=$FixtureRehearsal
         displayWake=$displayWake
         gpuSummary=$gpuSummary; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $fallback (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=GPU_RECON_FRAMES_ZERO ARTIFACTS=$Pub"
+    Write-Output "RESULT=GPU_RECON_FRAMES_ZERO VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
     exit 13
 }
 if ($gpuSummary.cpuFrames -gt 0) {
     $fallback = [ordered]@{
-        schema='playback-attr-3-cuda-venue.v1'; result='CPU_FALLBACK_DETECTED'
+        schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result='CPU_FALLBACK_DETECTED'
         fixtureRehearsal=$FixtureRehearsal
         displayWake=$displayWake
         gpuSummary=$gpuSummary; sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $fallback (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=CPU_FALLBACK_DETECTED CPU_FRAMES=$($gpuSummary.cpuFrames) ARTIFACTS=$Pub"
+    Write-Output "RESULT=CPU_FALLBACK_DETECTED CPU_FRAMES=$($gpuSummary.cpuFrames) VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
     exit 14
 }
 
@@ -1487,7 +1576,7 @@ Save-Json ([ordered]@{
 $displayReport = Get-AttrCudaPresentMonDisplayReport -CsvPath $presentMonPath -ResultJson $resultJson -EarliestCaptureStartUtc $presentMonCaptureStartUtc -LatestCaptureStartUtc $presentMonPostSpawnUtc
 if ($displayReport.status -ne 'OK') {
     $displayFailure = [ordered]@{
-        schema='playback-attr-3-cuda-venue.v1'; result=$displayReport.status
+        schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result=$displayReport.status
         fixtureRehearsal=$FixtureRehearsal
         # CUDA-PERF-DISPLAY-WAKE-1: if this leg still ends DISPLAY_ASLEEP, the wake attempt that
         # ran before MLVApp ever launched is right here -- never omitted on this path.
@@ -1499,7 +1588,7 @@ if ($displayReport.status -ne 'OK') {
         sourceCommit=$SourceCommit; clipId=$ClipId; artifactRoot=$Pub
     }
     Save-Json $displayFailure (Join-Path $Pub 'summary.json')
-    Write-Output "RESULT=$($displayReport.status) REASON=`"$($displayReport.reason)`" ARTIFACTS=$Pub"
+    Write-Output "RESULT=$($displayReport.status) REASON=`"$($displayReport.reason)`" VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
     $displayExitCode = if ($displayReport.status -eq 'DISPLAY_ASLEEP') { 24 } else { 23 }
     exit $displayExitCode
 }
@@ -1539,11 +1628,14 @@ Save-Json $provenance (Join-Path $Pub 'provenance.json')
 # presentmon-series.csv were published above too, alongside/after the PresentMon parse itself.
 
 $manifest = [ordered]@{
-    schema = 'playback-attr-3-cuda-evidence-manifest.v1'
+    schema = 'playback-attr-3-cuda-evidence-manifest.v2'
     presentMonCaptureStartUtc = $presentMonCaptureStartUtc.ToString('o')
     sourceCommit = $SourceCommit
     clipId = $ClipId
     fixtureRehearsal = $FixtureRehearsal
+    # UM-CUDA-BENCH-VENUE-1: venue/host/GPU, so bachelor and Ultra-Magnus numbers are never read
+    # as interchangeable.
+    venue = $venueInfo
     # CUDA-PERF-DISPLAY-WAKE-1: the wake attempt made before MLVApp launched for this leg.
     displayWake = $displayWake
     # A rehearsal cites no consent receipt: the fixtures are repository bytes, and recording the
@@ -1571,7 +1663,11 @@ $manifest = [ordered]@{
         clockBracket=$displayReport.clockBracket
     }
     environmentBoundary = [ordered]@{ jobTempDir=$Scratch; allChildrenInheritJobTemp=$true }
-    cpuQuiescence = [ordered]@{ samples=$loads; meanPercent=$avgLoad; thresholdPercent=20.0; pass=($avgLoad -le 20.0) }
+    cpuQuiescence = [ordered]@{
+        samples=$loads; meanPercent=$avgLoad; thresholdPercent=$CpuQuiescenceThresholdPercent
+        pass=($avgLoad -le $CpuQuiescenceThresholdPercent)
+        vmGuestLoadIncluded=$venueInfo.vmGuestLoadIncludedInQuiescence
+    }
     frameRows = $rows.Count
     smokeRunLog = [ordered]@{ path=$runLog.path; sha256=$runLog.sha256; bytes=$runLog.bytes; runNonce=$runLog.runNonce; source=$runLog.source }
     diagnostics = $diagnostics
@@ -1590,6 +1686,7 @@ Save-Json $manifest (Join-Path $Pub 'evidence-manifest.json')
 Save-Json ([ordered]@{
     result = $(if ($FixtureRehearsal) { 'FIXTURE_REHEARSAL_CAPTURED' } else { 'MEASUREMENT_CAPTURED' })
     fixtureRehearsal = $FixtureRehearsal
+    venue = $venueInfo
     displayWake = $displayWake
     sourceCommit = $SourceCommit
     clipId = $ClipId
@@ -1608,7 +1705,7 @@ Save-Json ([ordered]@{ schema='playback-attr-3-cuda-artifact-index.v1'; artifact
 # outbox result.json carries stdout and nothing else, so a reader who never opens an artifact
 # still cannot mistake a rehearsal for a measurement.
 $resultVerb = if ($FixtureRehearsal) { 'FIXTURE_REHEARSAL_CAPTURED' } else { 'MEASUREMENT_CAPTURED' }
-Write-Output "RESULT=$resultVerb FIXTURE_REHEARSAL=$FixtureRehearsal SOURCE=$SourceCommit CLIP=$ClipId ROWS=$($rows.Count) GPU_FRAMES=$gpuFramesTotal CPU_FRAMES=$($gpuSummary.cpuFrames) PRESENTMON_SAMPLES=$($pmRows.Count) ARTIFACTS=$Pub"
+Write-Output "RESULT=$resultVerb FIXTURE_REHEARSAL=$FixtureRehearsal SOURCE=$SourceCommit CLIP=$ClipId ROWS=$($rows.Count) GPU_FRAMES=$gpuFramesTotal CPU_FRAMES=$($gpuSummary.cpuFrames) PRESENTMON_SAMPLES=$($pmRows.Count) VENUE=$Venue HOST=$actualComputerName ARTIFACTS=$Pub"
 exit 0
 } finally {
     if ($OwnerClipDir) {
@@ -1656,6 +1753,13 @@ $text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
     FIXTURE_REHEARSAL = $fixtureRehearsalLiteral
     AGENT_ROOT = $AgentRoot
     FIXTURE_SHA256 = $FixtureSha256
+    # UM-CUDA-BENCH-VENUE-1: -Venue is ValidateSet-gated (no quote/escape characters possible);
+    # the scratch-root floor and expected computer name are this generator's own fixed per-venue
+    # literals, never caller-controlled.
+    VENUE = $Venue
+    SCRATCH_ROOT = $scratchRootForVenue
+    EXPECTED_COMPUTERNAME = $expectedComputerNameForVenue
+    CPU_QUIESCENCE_THRESHOLD_PERCENT = $CpuQuiescenceThresholdPercent.ToString([Globalization.CultureInfo]::InvariantCulture)
     EMBEDDED_FUNCTIONS = $embeddedFunctions
 })
 
@@ -1665,6 +1769,8 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Dir
 
 [pscustomobject]@{
     outFile = $OutFile
+    venue = $Venue
+    agentRoot = $AgentRoot
     sourceCommit = $SourceCommit
     buildManifestSha256 = $BuildManifestSha256.ToLowerInvariant()
     clipId = $ClipId

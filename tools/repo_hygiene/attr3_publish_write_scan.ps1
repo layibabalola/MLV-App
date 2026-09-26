@@ -87,8 +87,11 @@ $allowedStatic = @(
 )
 $allowedInstance = @('Add', 'Contains', 'ContainsKey', 'Kill', 'Replace', 'StartsWith', 'Substring',
     'ToLowerInvariant', 'ToString', 'ToUniversalTime', 'ToUpperInvariant', 'Trim', 'WaitForExit')
-$rootVariables = @('Work', 'Pub', 'Cache', 'AgentRoot', 'Root')
-$canonicalWork = @("Join-Path `$AgentRoot `"work\`$JobId`"", "Join-Path 'C:\mlvtmp' `$JobId")
+$rootVariables = @('Work', 'Pub', 'Cache', 'AgentRoot', 'Root', 'ScratchRootFloor')
+# UM-CUDA-BENCH-VENUE-1: the venue-aware shape (Join-Path $ScratchRootFloor $JobId) joins the old
+# hardcoded 'C:\mlvtmp' shape rather than replacing it -- both are accepted so a generator or test
+# fixture pinned to the literal old shape is not itself broken by this scan.
+$canonicalWork = @("Join-Path `$AgentRoot `"work\`$JobId`"", "Join-Path 'C:\mlvtmp' `$JobId", "Join-Path `$ScratchRootFloor `$JobId")
 $allowedEnv = @('TEMP', 'TMP')
 
 $violations = [System.Collections.Generic.List[object]]::new()
@@ -292,9 +295,15 @@ function Invoke-Scan([string]$Source, [string]$Text, [string[]]$ModuleFunctions)
             $roots = Get-NamedArguments $command @('TrustedRoot')
             $rootOk = $roots.Count -eq 1 -and $null -ne $roots[0] -and (
                 ($roots[0] -is [System.Management.Automation.Language.VariableExpressionAst] -and $roots[0].VariablePath.UserPath -ceq 'AgentRoot') -or
+                # UM-CUDA-BENCH-VENUE-1: the job's own scratch-root safety floor is now a fixed
+                # per-venue literal baked into $ScratchRootFloor at generation time (was the single
+                # hardcoded 'C:\mlvtmp' every venue had to share) -- still a bare variable, still
+                # never a caller-composed expression, so this is the same shape of trust as
+                # $AgentRoot immediately above, not a new one.
+                ($roots[0] -is [System.Management.Automation.Language.VariableExpressionAst] -and $roots[0].VariablePath.UserPath -ceq 'ScratchRootFloor') -or
                 ($roots[0] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and [string]$roots[0].Value -ceq 'C:\mlvtmp'))
             if (-not $rootOk) {
-                Add-Violation $Source $command 'R2' "$name -TrustedRoot must be `$AgentRoot or 'C:\mlvtmp'"
+                Add-Violation $Source $command 'R2' "$name -TrustedRoot must be `$AgentRoot, `$ScratchRootFloor or 'C:\mlvtmp'"
             }
         }
         if ($mutatorParams.ContainsKey($key)) {

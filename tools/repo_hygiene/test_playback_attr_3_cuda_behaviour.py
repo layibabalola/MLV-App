@@ -978,6 +978,104 @@ class AttributionJobOptionalClipPathTests(_PwshCase):
 
 @requires_pwsh
 @requires_git
+class VenueSelectionTests(_PwshCase):
+    """UM-CUDA-BENCH-VENUE-1: -Venue bachelor|ultra-magnus generation-time behaviour -- defaults,
+    ValidateSet, and that every venue-specific default (agent root, the job's own scratch-root
+    safety floor, expected host identity) is keyed on -Venue alone, never derived from -AgentRoot.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.shas = _make_fixture_repo(self.repo)
+        self.staging = self.tmp / "staging"
+        self.staging.mkdir()
+
+    def _generate(self, **overrides):
+        out_file = self.staging / "job.ps1"
+        args = {
+            "SourceCommit": self.shas[1],
+            "BuildManifestSha256": "a" * 64,
+            "ClipId": "tiny_dual_iso",
+            "FixtureSha256": "b" * 64,
+            "OutFile": str(out_file),
+            "RepoRoot": str(self.repo),
+        }
+        args.update(overrides)
+        parts = [f"-{key} '{value}'" for key, value in args.items() if value is not None]
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' " + " ".join(parts) + "\n",
+            encoding="utf-8",
+        )
+        return _run_pwsh_file(script), out_file
+
+    def test_default_venue_is_bachelor_and_every_default_stays_byte_identical(self) -> None:
+        # No -Venue at all: every substituted default must read exactly as it did before this
+        # card, proving the "byte-for-byte" claim in -Venue's own header comment.
+        clip_id = "tiny_dual_iso"
+        extension = "." + "mlv"
+        proc, out_file = self._generate()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        job_text = out_file.read_text(encoding="utf-8")
+        self.assertIn("$Venue = 'bachelor'", job_text)
+        self.assertIn("$ScratchRootFloor = 'C:\\mlvtmp'", job_text)
+        self.assertIn("$ExpectedComputerName = 'BACHELOR'", job_text)
+        self.assertIn("$Root = 'C:\\mlvtmp\\mlv-agent'", job_text)
+        expected_clip_path = "C:\\mlvtmp\\mlv-agent\\cache\\" + clip_id + extension
+        self.assertIn(f"$AuthorizedClipPath = '{expected_clip_path}'", job_text)
+        self.assertIn("$CpuQuiescenceThresholdPercent = 20", job_text)
+
+    def test_ultra_magnus_venue_switches_agent_root_and_scratch_floor(self) -> None:
+        clip_id = "tiny_dual_iso"
+        extension = "." + "mlv"
+        proc, out_file = self._generate(Venue="ultra-magnus")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        job_text = out_file.read_text(encoding="utf-8")
+        self.assertIn("$Venue = 'ultra-magnus'", job_text)
+        self.assertIn("$ScratchRootFloor = 'G:\\Temp\\mlv-gpu-profile'", job_text)
+        self.assertIn("$ExpectedComputerName = 'ULTRA-MAGNUS'", job_text)
+        self.assertIn("$Root = 'G:\\Temp\\mlv-gpu-profile\\agent'", job_text)
+        expected_clip_path = "G:\\Temp\\mlv-gpu-profile\\agent\\cache\\" + clip_id + extension
+        self.assertIn(f"$AuthorizedClipPath = '{expected_clip_path}'", job_text)
+
+    def test_an_unknown_venue_is_refused_by_validateset(self) -> None:
+        proc, out_file = self._generate(Venue="dell-field")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse(out_file.exists())
+
+    def test_agent_root_override_never_relaxes_the_venues_scratch_root_floor(self) -> None:
+        # -AgentRoot stays overridable for test portability (as it always was); the scratch-root
+        # safety floor is a SEPARATE, fixed per-venue literal keyed on -Venue alone -- overriding
+        # one must never move the other, or a test AgentRoot would accidentally widen the floor.
+        override_root = "C:\\mlvtmp\\a-test-agent-root"
+        proc, out_file = self._generate(Venue="bachelor", AgentRoot=override_root)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        job_text = out_file.read_text(encoding="utf-8")
+        self.assertIn(f"$Root = '{override_root}'", job_text)
+        self.assertIn("$ScratchRootFloor = 'C:\\mlvtmp'", job_text)
+
+    def test_generator_result_object_reports_venue_and_agent_root(self) -> None:
+        out_file = self.staging / "job.ps1"
+        script = self.tmp / "generate.ps1"
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"& '{ATTRIBUTION_GENERATOR}' -Venue 'ultra-magnus' -SourceCommit '{self.shas[1]}' "
+            f"-BuildManifestSha256 '{'a' * 64}' -ClipId 'tiny_dual_iso' "
+            f"-FixtureSha256 '{'b' * 64}' -OutFile '{out_file}' -RepoRoot '{self.repo}' "
+            "| ConvertTo-Json -Depth 5\n",
+            encoding="utf-8",
+        )
+        proc = _run_pwsh_file(script)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertEqual(result["venue"], "ultra-magnus")
+        self.assertEqual(result["agentRoot"], "G:\\Temp\\mlv-gpu-profile\\agent")
+
+
+@requires_pwsh
+@requires_git
 class GeneratorBakeTokenInjectionTests(_PwshCase):
     """ATTR3-FOOTAGE-BIND-1 PR-B round 2 (astra BLOCKER): every __TOKEN__ this generator bakes
     into the emitted job's single-quoted template literals must be either strictly validated to
@@ -4524,11 +4622,67 @@ class DisplayWakeJobOrderingTests(unittest.TestCase):
         self.assertIn("exit 25", block)
 
     def test_display_asleep_outcome_specifically_carries_the_wake_evidence(self) -> None:
-        status_at = self.text.index("schema='playback-attr-3-cuda-venue.v1'; result=$displayReport.status")
+        status_at = self.text.index(
+            "schema='playback-attr-3-cuda-venue.v2'; venue=$venueInfo; result=$displayReport.status")
         display_asleep_exit_at = self.text.index(
             "$displayExitCode = if ($displayReport.status -eq 'DISPLAY_ASLEEP') { 24 } else { 23 }")
         block = self.text[status_at:display_asleep_exit_at]
         self.assertIn("displayWake=$displayWake", block)
+
+
+# --------------------------------------------------------------------------------------------
+# UM-CUDA-BENCH-VENUE-1: venue/host/GPU is RECORDED on every reader-facing outcome, mirroring
+# DisplayWakeJobOrderingTests's own "recorded on every outcome" style above for displayWake.
+# --------------------------------------------------------------------------------------------
+
+
+class VenueEvidenceJobOrderingTests(unittest.TestCase):
+    """Static ordering/shape checks on the generator's own template text (no pwsh required)."""
+
+    def setUp(self) -> None:
+        self.text = ATTRIBUTION_GENERATOR.read_text(encoding="utf-8")
+
+    def test_venue_info_is_computed_before_the_earliest_early_exit_that_needs_it(self) -> None:
+        venue_info_at = self.text.index("$venueInfo = [ordered]@{")
+        secure_exit_at = self.text.index("if ($displayWake.screensaverSecureOwnerOnly) {")
+        self.assertLess(venue_info_at, secure_exit_at,
+                         "$venueInfo must be computed before the earliest outcome that records it")
+
+    def test_venue_is_recorded_on_every_outcome_after_it_is_computed(self) -> None:
+        venue_info_at = self.text.index("$venueInfo = [ordered]@{")
+        end_template_at = self.text.index("'@", venue_info_at)
+        body = self.text[venue_info_at:end_template_at]
+        # Mirrors DisplayWakeJobOrderingTests.test_display_wake_evidence_is_recorded_on_every_
+        # outcome_after_the_wake: 15 summary.json write sites (14 failure paths, one success), +1
+        # for evidence-manifest.json on the success path.
+        summary_writes = body.count("(Join-Path $Pub 'summary.json')")
+        venue_fields = body.count("venue=$venueInfo") + body.count("venue = $venueInfo")
+        self.assertEqual(15, summary_writes, "a summary.json write site was added/removed")
+        self.assertEqual(summary_writes + 1, venue_fields,
+                          "every summary.json write plus evidence-manifest.json must carry venue")
+
+    def test_venue_is_never_gated_on_only_recorded(self) -> None:
+        # host identity is RECORDED (hostMatchesVenue), never compared against $ExpectedComputerName
+        # in an `if`/`throw` -- a fixture rehearsal must stay portable to any dev/CI host.
+        self.assertNotIn("if ($actualComputerName", self.text)
+        self.assertNotIn("if ($env:COMPUTERNAME -", self.text)
+        self.assertIn("hostMatchesVenue = ($actualComputerName -ieq $ExpectedComputerName)", self.text)
+
+    def test_result_lines_carry_venue_and_host(self) -> None:
+        # Every `Write-Output "RESULT=...` line in the template body carries VENUE= and HOST=,
+        # so bachelor and Ultra-Magnus numbers are never read as interchangeable even from the
+        # agent's own outbox result.json (which carries only stdout, per this job's own comment).
+        template_at = self.text.index("$template = @'")
+        end_template_at = self.text.index("'@", template_at)
+        body = self.text[template_at:end_template_at]
+        # Line-based, not a regex spanning the whole quoted string: several of these lines embed
+        # backtick-escaped quotes (e.g. REASON=`"...`") that a naive `".*?"` match stops inside.
+        result_lines = [ln for ln in body.splitlines() if 'Write-Output "RESULT=' in ln]
+        self.assertGreater(len(result_lines), 0)
+        for line in result_lines:
+            with self.subTest(line=line.strip()):
+                self.assertIn("VENUE=$Venue", line)
+                self.assertIn("HOST=$actualComputerName", line)
 
 
 # --------------------------------------------------------------------------------------------
