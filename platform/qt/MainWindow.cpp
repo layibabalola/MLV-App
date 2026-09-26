@@ -8974,7 +8974,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
     auto seekAndSettleLoadedClip = [&]( int requestedFrame,
                                         const char *reason,
-                                        int *settledFrameOut ) -> bool
+                                        int *settledFrameOut,
+                                        int timeoutMs = 8000 ) -> bool
     {
         const int frameCount = loadedFrameCount();
         if( frameCount < 2 ) return false;
@@ -8983,7 +8984,7 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         ui->horizontalSliderPosition->setValue( frameIndex );
         m_frameChanged = true;
         qApp->processEvents( QEventLoop::AllEvents );
-        return waitForFrameSettled( frameIndex, reason, 8000 );
+        return waitForFrameSettled( frameIndex, reason, qMax( 1, timeoutMs ) );
     };
 
     auto runClipLifecycleStress = [&]() -> bool
@@ -9562,8 +9563,10 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
                 const QString frameBaseName =
                     QStringLiteral("frame-%1").arg( i, 2, 10, QLatin1Char('0') );
-                const QString pngPath = contactSheetDirInfo.absoluteFilePath(
-                    frameBaseName + QStringLiteral(".png") );
+                // H3: relative, never an absolute local path -- see the playback-mode hook's
+                // matching comment in noteContactSheetPresentedFrame.
+                const QString pngRelativeName = frameBaseName + QStringLiteral(".png");
+                const QString pngPath = contactSheetDirInfo.absoluteFilePath( pngRelativeName );
                 const QString jsonPath = contactSheetDirInfo.absoluteFilePath(
                     frameBaseName + QStringLiteral(".json") );
 
@@ -9587,7 +9590,7 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                 frameJson.insert( QStringLiteral("texture_source"), contactFrameSource );
                 frameJson.insert( QStringLiteral("render_path"), contactFrameRenderPath );
                 frameJson.insert( QStringLiteral("playback_path"), false );
-                frameJson.insert( QStringLiteral("path"), pngPath );
+                frameJson.insert( QStringLiteral("path"), pngRelativeName );
                 frameJson.insert( QStringLiteral("look_assist_enabled"),
                     ui->checkBoxLookAssistEnable->isChecked() );
                 frameJson.insert( QStringLiteral("look_assist_scene"),
@@ -9667,9 +9670,17 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                 {
                     if( ++contactSheetRestarts > contactSheetMaxRestarts ) break;
                     int restartSettledFrame = sheetStartFrame;
+                    // Bounded by what remains of the overall capture-pass deadline (H1), not
+                    // its own fixed 8000ms: a clip that keeps failing to settle can burn at
+                    // most the time this pass has left, never up to 50 * 8000ms regardless of
+                    // contactSheetPlaybackTimeoutMs.
+                    const qint64 restartSeekTimeoutMs = qBound(
+                        qint64( 1 ),
+                        contactSheetPlaybackTimeoutMs - contactSheetPlaybackClock.elapsed(),
+                        qint64( 8000 ) );
                     seekAndSettleLoadedClip(
                         sheetStartFrame, "gui-smoke-contact-sheet-restart",
-                        &restartSettledFrame );
+                        &restartSettledFrame, static_cast<int>( restartSeekTimeoutMs ) );
                     ui->actionPlay->trigger();
                 }
                 qApp->processEvents( QEventLoop::AllEvents );
@@ -9736,9 +9747,12 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         << " settle_cpu_stable_elapsed_ms=" << cpuStableMs
         << " settle_cpu_last_percent=" << QString::number( lastMeasuredCpuPercent, 'f', 3 )
         << " settle_cpu_elapsed_ms=" << settleClock.elapsed()
-        << " diagnostic_log_file=" << CrashForensics::currentLogFilePath()
-        << " contact_sheet_frames_written=" << contactSheetFramesWritten
-        << "\n";
+        << " diagnostic_log_file=" << CrashForensics::currentLogFilePath();
+    // B4: default-off must be byte-identical to a build that never had this option at all --
+    // never append this field unless a contact sheet was actually requested.
+    if( !options.contactSheetDir.isEmpty() && options.contactSheetFrames > 0 )
+        out << " contact_sheet_frames_written=" << contactSheetFramesWritten;
+    out << "\n";
 
     return 0;
 }
@@ -25388,6 +25402,13 @@ void MainWindow::noteContactSheetPresentedFrame(
     const PresentationRequestContext &requestContext )
 {
     if( !m_contactSheetCaptureActive ) return;
+    // B1: this hook fires on EVERY presented frame, seeked or played -- the restart re-cue
+    // (seekAndSettleLoadedClip) runs while m_contactSheetCaptureActive is already true, and its
+    // own settle-wait pumps the event loop, so a seek-presented frame can reach here before
+    // ui->actionPlay->trigger() is ever called. Disarm on any such frame: never save a
+    // seek-presented frame as playback_path=true. Re-arms itself the moment Play is actually
+    // checked and the next genuinely-played frame presents.
+    if( !ui->actionPlay->isChecked() ) return;
     if( m_contactSheetCaptureNextTargetIndex >= m_contactSheetCaptureTargetFrames.size() )
     {
         m_contactSheetCaptureActive = false;
@@ -25416,6 +25437,12 @@ void MainWindow::noteContactSheetPresentedFrame(
     QString contactFrameSource = QStringLiteral("app_internal_viewport_grab");
     QString contactFrameReadbackReason;
     quint64 contactFramePresentedSerial = readyFrame.requestSerial;
+    // H2: when the GPU window is the active presentation path, its readback is the ONLY
+    // source allowed to stand for "the frame the playback path actually presented" -- a
+    // failed grab, or one whose own serial disagrees with the frame this hook was told is
+    // ready, must fail closed for this tile rather than silently substitute a viewport/pixmap
+    // grab (a different, non-GPU-window-proven source) under the same playback_path=true claim.
+    bool gpuWindowGrabFailedClosed = false;
     if( GpuDisplayWindow::isActive() )
     {
         quint64 grabbedSerial = 0;
@@ -25426,6 +25453,17 @@ void MainWindow::noteContactSheetPresentedFrame(
          || contactFrameImage.isNull() )
         {
             contactFrameImage = QImage();
+            gpuWindowGrabFailedClosed = true;
+            if( contactFrameReadbackReason.isEmpty() )
+                contactFrameReadbackReason = QStringLiteral("gpu_window_grab_failed");
+        }
+        else if( grabbedSerialValid && grabbedSerial != readyFrame.requestSerial )
+        {
+            contactFrameImage = QImage();
+            gpuWindowGrabFailedClosed = true;
+            contactFrameReadbackReason = QStringLiteral(
+                "gpu_window_grab_serial_mismatch grabbed=%1 ready=%2" )
+                .arg( grabbedSerial ).arg( readyFrame.requestSerial );
         }
         else
         {
@@ -25433,7 +25471,7 @@ void MainWindow::noteContactSheetPresentedFrame(
             if( grabbedSerialValid ) contactFramePresentedSerial = grabbedSerial;
         }
     }
-    if( contactFrameImage.isNull()
+    if( !gpuWindowGrabFailedClosed && contactFrameImage.isNull()
      && ( GpuDisplayViewport::isTexturePresentationActive( ui->graphicsView )
        || GpuDisplayViewport::hasPresentedGpuReconTexture( ui->graphicsView ) )
      && ui->graphicsView && ui->graphicsView->viewport() )
@@ -25441,12 +25479,13 @@ void MainWindow::noteContactSheetPresentedFrame(
         contactFrameImage = ui->graphicsView->viewport()->grab().toImage();
         contactFrameSource = QStringLiteral("app_internal_gl_viewport_grab");
     }
-    if( contactFrameImage.isNull() && m_pGraphicsItem )
+    if( !gpuWindowGrabFailedClosed && contactFrameImage.isNull() && m_pGraphicsItem )
     {
         contactFrameImage = m_pGraphicsItem->pixmap().toImage();
         contactFrameSource = QStringLiteral("app_internal_presented_pixmap");
     }
-    if( contactFrameImage.isNull() && ui->graphicsView && ui->graphicsView->viewport() )
+    if( !gpuWindowGrabFailedClosed && contactFrameImage.isNull()
+     && ui->graphicsView && ui->graphicsView->viewport() )
     {
         contactFrameImage = ui->graphicsView->viewport()->grab().toImage();
         contactFrameSource = QStringLiteral("app_internal_viewport_grab");
@@ -25455,12 +25494,19 @@ void MainWindow::noteContactSheetPresentedFrame(
     const QDir contactSheetDirInfo( m_contactSheetCaptureDir );
     const QString frameBaseName =
         QStringLiteral("frame-%1").arg( i, 2, 10, QLatin1Char('0') );
-    const QString pngPath = contactSheetDirInfo.absoluteFilePath(
-        frameBaseName + QStringLiteral(".png") );
+    // H3: the sidecar's own "path" field is never an absolute local path -- just the
+    // basename, relative to this capture's own directory. The composer resolves the image
+    // by that basename when it is a file relative to its own working directory, and always
+    // falls back to <frames_dir>/<json stem>.png otherwise (see
+    // _resolve_frame_image_path/make-contact-sheet.py), so publishing this sidecar without
+    // rewriting it never breaks composition.
+    const QString pngRelativeName = frameBaseName + QStringLiteral(".png");
+    const QString pngPath = contactSheetDirInfo.absoluteFilePath( pngRelativeName );
     const QString jsonPath = contactSheetDirInfo.absoluteFilePath(
         frameBaseName + QStringLiteral(".json") );
 
-    bool frameOk = !contactFrameImage.isNull() && contactFrameImage.save( pngPath, "PNG" );
+    bool frameOk = !gpuWindowGrabFailedClosed
+        && !contactFrameImage.isNull() && contactFrameImage.save( pngPath, "PNG" );
 
     const double elapsedMsForFrame = m_contactSheetCaptureFps > 0.0
         ? ( static_cast<double>(
@@ -25479,7 +25525,7 @@ void MainWindow::noteContactSheetPresentedFrame(
     frameJson.insert( QStringLiteral("texture_source"), contactFrameSource );
     frameJson.insert( QStringLiteral("render_path"), contactFrameRenderPath );
     frameJson.insert( QStringLiteral("playback_path"), true );
-    frameJson.insert( QStringLiteral("path"), pngPath );
+    frameJson.insert( QStringLiteral("path"), pngRelativeName );
     frameJson.insert( QStringLiteral("look_assist_enabled"),
         ui->checkBoxLookAssistEnable->isChecked() );
     frameJson.insert( QStringLiteral("look_assist_scene"),
@@ -26504,7 +26550,14 @@ void MainWindow::on_actionPlay_toggled(bool checked)
     if( checked )
     {
         resetPlaybackQualityAutoRunState();
-        beginPlaybackSmokeTelemetry();
+        // B2 (capture-only playback mode): the contact-sheet capture pass restarts Play
+        // itself, potentially many times, strictly AFTER the measured interval's own
+        // beginPlaybackSmokeTelemetry()/finishPlaybackSmokeTelemetry() pair has already
+        // closed. Never re-open a new playback_smoke session (and never reset the GPU
+        // swap-telemetry counters) for one of those restarts: doing so would emit
+        // additional playback_smoke.frame/summary/gpu_summary lines the Bachelor job's
+        // parsers could pick up in place of (or mixed with) the measured session.
+        if( !m_contactSheetCaptureActive ) beginPlaybackSmokeTelemetry();
         beginPlayToFirstFrameMeasurement();
         m_playbackScopeLastUpdateTime = 0.0;
         requestFrameRefresh( true, "play-start" );

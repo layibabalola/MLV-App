@@ -281,3 +281,149 @@ TEST(ContactSheetCaptureWiring, GpuWindowReadbackIsTriedBeforeAnyCpuPathFallback
     ASSERT_TRUE(viewportFallbackAt > gpuReadbackAt);
     ASSERT_TRUE(pixmapFallbackAt > viewportFallbackAt);
 }
+
+// --- r1c pre-review fixes (sol, prereview-cs1-20260926T0315Z) --------------------------------
+
+TEST(ContactSheetCaptureWiring, B1_HookDisarmsOnAnyFrameNotPresentedWhilePlayIsChecked)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString hookBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::noteContactSheetPresentedFrame("),
+        QStringLiteral("void MainWindow::finishPlaybackSmokeTelemetry"));
+    ASSERT_FALSE(hookBody.isEmpty());
+
+    // The restart re-cue's own seek can present a frame while m_contactSheetCaptureActive is
+    // already true (armed before ui->actionPlay->trigger() ever runs) -- the hook must refuse
+    // to capture that frame, strictly BEFORE it ever reaches the save/frameJson logic below.
+    const int activeGuardAt = hookBody.indexOf(QStringLiteral("if( !m_contactSheetCaptureActive ) return;"));
+    const int checkedGuardAt = hookBody.indexOf(QStringLiteral("if( !ui->actionPlay->isChecked() ) return;"));
+    const int saveAt = hookBody.indexOf(QStringLiteral(".save( pngPath, \"PNG\" )"));
+    ASSERT_TRUE(activeGuardAt >= 0);
+    ASSERT_TRUE(checkedGuardAt > activeGuardAt);
+    ASSERT_TRUE(saveAt > checkedGuardAt);
+}
+
+TEST(ContactSheetCaptureWiring, B2_RestartNeverReArmsPlaybackSmokeTelemetryOrSwapCounters)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString togglePlayBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::on_actionPlay_toggled(bool checked)"),
+        QStringLiteral("void MainWindow::on_actionShowZebras_triggered()"));
+    ASSERT_FALSE(togglePlayBody.isEmpty());
+
+    // beginPlaybackSmokeTelemetry() (which also resets the GPU swap-telemetry session) must be
+    // reachable only when a contact-sheet capture pass is NOT the one re-triggering Play --
+    // otherwise every capture restart would open a new session and emit its own
+    // playback_smoke.frame/summary/gpu_summary lines the Bachelor job's parsers could pick up.
+    const int checkedBranchAt = togglePlayBody.indexOf(QStringLiteral("if( checked )"));
+    ASSERT_TRUE(checkedBranchAt >= 0);
+    const int guardAt = togglePlayBody.indexOf(
+        QStringLiteral("if( !m_contactSheetCaptureActive ) beginPlaybackSmokeTelemetry();"), checkedBranchAt);
+    ASSERT_TRUE(guardAt > checkedBranchAt);
+    // An unguarded call must not also remain (which would defeat the guard above).
+    const int bareCallAt = togglePlayBody.indexOf(QStringLiteral("\n        beginPlaybackSmokeTelemetry();\n"));
+    ASSERT_TRUE(bareCallAt < 0);
+}
+
+TEST(ContactSheetCaptureWiring, H1_RestartSeekIsBoundedByTheRemainingOverallDeadline)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    // seekAndSettleLoadedClip gained an optional timeoutMs parameter (default 8000, so every
+    // OTHER call site -- the stress seeks, the seek-mode capture -- is unaffected).
+    const int lambdaAt = smokeBody.indexOf(QStringLiteral("auto seekAndSettleLoadedClip = [&]("));
+    ASSERT_TRUE(lambdaAt >= 0);
+    const QString lambdaHeader = smokeBody.mid(lambdaAt, 400);
+    ASSERT_TRUE(lambdaHeader.contains(QStringLiteral("int timeoutMs = 8000")));
+
+    // The restart call site passes what remains of contactSheetPlaybackTimeoutMs, clamped to
+    // [1, 8000] -- never its own fixed 8000ms regardless of how much of the pass is left.
+    const int restartsAt = smokeBody.indexOf(QStringLiteral("const int contactSheetMaxRestarts = 50;"));
+    ASSERT_TRUE(restartsAt >= 0);
+    const int restartTimeoutAt = smokeBody.indexOf(
+        QStringLiteral("const qint64 restartSeekTimeoutMs = qBound("), restartsAt);
+    ASSERT_TRUE(restartTimeoutAt > restartsAt);
+    const int restartSeekCallAt = smokeBody.indexOf(
+        QStringLiteral("seekAndSettleLoadedClip(\n                        sheetStartFrame, \"gui-smoke-contact-sheet-restart\","),
+        restartTimeoutAt);
+    ASSERT_TRUE(restartSeekCallAt > restartTimeoutAt);
+    ASSERT_TRUE(smokeBody.indexOf(QStringLiteral("restartSeekTimeoutMs"), restartSeekCallAt) > restartSeekCallAt);
+}
+
+TEST(ContactSheetCaptureWiring, H2_GpuWindowGrabFailureOrSerialMismatchFailsClosedRatherThanFallingBack)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString hookBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::noteContactSheetPresentedFrame("),
+        QStringLiteral("void MainWindow::finishPlaybackSmokeTelemetry"));
+    ASSERT_FALSE(hookBody.isEmpty());
+
+    ASSERT_TRUE(hookBody.contains(QStringLiteral("bool gpuWindowGrabFailedClosed = false;")));
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("grabbedSerialValid && grabbedSerial != readyFrame.requestSerial")));
+    // Every fallback below the GPU-window readback must be skipped once that leg has failed
+    // closed -- a failed/mismatched GPU-window grab must never be silently replaced by a
+    // viewport/pixmap grab still labelled playback_path=true.
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("if( !gpuWindowGrabFailedClosed && contactFrameImage.isNull()\n"
+                        "     && ( GpuDisplayViewport::isTexturePresentationActive( ui->graphicsView )")));
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("if( !gpuWindowGrabFailedClosed && contactFrameImage.isNull() && m_pGraphicsItem )")));
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("if( !gpuWindowGrabFailedClosed && contactFrameImage.isNull()\n"
+                        "     && ui->graphicsView && ui->graphicsView->viewport() )")));
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("bool frameOk = !gpuWindowGrabFailedClosed\n")));
+}
+
+TEST(ContactSheetCaptureWiring, H3_SidecarPathFieldIsRelativeNeverAbsolute)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+
+    const QString hookBody = sliceBetween(source,
+        QStringLiteral("void MainWindow::noteContactSheetPresentedFrame("),
+        QStringLiteral("void MainWindow::finishPlaybackSmokeTelemetry"));
+    ASSERT_FALSE(hookBody.isEmpty());
+    ASSERT_TRUE(hookBody.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"path\"), pngRelativeName );")));
+    ASSERT_FALSE(hookBody.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"path\"), pngPath );")));
+
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+    const QString seekBranch = sliceBetween(smokeBody,
+        QStringLiteral("if( options.contactSheetSeekMode )"),
+        QStringLiteral("m_contactSheetCaptureDir = options.contactSheetDir;"));
+    ASSERT_FALSE(seekBranch.isEmpty());
+    ASSERT_TRUE(seekBranch.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"path\"), pngRelativeName );")));
+    ASSERT_FALSE(seekBranch.contains(
+        QStringLiteral("frameJson.insert( QStringLiteral(\"path\"), pngPath );")));
+}
+
+TEST(ContactSheetCaptureWiring, B4_DoneLineOmitsFramesWrittenFieldEntirelyWhenOptionsAreOff)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/MainWindow.cpp"));
+    const QString smokeBody = sliceBetween(source,
+        QStringLiteral("int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)"),
+        QStringLiteral("void MainWindow::importNewMlv(QString fileName)"));
+    ASSERT_FALSE(smokeBody.isEmpty());
+
+    const int doneLineAt = smokeBody.indexOf(QStringLiteral("out << \"[GUI-SMOKE] DONE"));
+    ASSERT_TRUE(doneLineAt >= 0);
+    const int fieldGuardAt = smokeBody.indexOf(
+        QStringLiteral("if( !options.contactSheetDir.isEmpty() && options.contactSheetFrames > 0 )\n"
+                        "        out << \" contact_sheet_frames_written=\" << contactSheetFramesWritten;"),
+        doneLineAt);
+    ASSERT_TRUE(fieldGuardAt > doneLineAt);
+    // The unconditional field append must not also remain right on the DONE out<< chain.
+    ASSERT_FALSE(smokeBody.contains(
+        QStringLiteral("<< \" diagnostic_log_file=\" << CrashForensics::currentLogFilePath()\n"
+                        "        << \" contact_sheet_frames_written=\"")));
+}
