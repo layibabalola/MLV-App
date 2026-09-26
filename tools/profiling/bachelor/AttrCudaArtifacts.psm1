@@ -1421,6 +1421,44 @@ function Publish-AttrCudaFileCopy {
     return $slot
 }
 
+function Publish-AttrCudaContactSheetRawCaptures {
+    <#
+    .SYNOPSIS
+    Publish the app's raw --contact-sheet-dir PNG+JSON pairs under $PubRoot\contact-sheet\raw,
+    a no-op when the option was off or nothing was captured.
+    .DESCRIPTION
+    NOTE fix (fable, CUDA-PLAYBACK-CONTACT-SHEET-2): a leg that refuses at the eligibility gate
+    (BACKEND_NOT_AVAILABLE) or the GPU-frame gate (GPU_RECON_FRAMES_ZERO) used to exit before
+    the main publish step ever ran this copy, leaving that leg's raw captures stranded in
+    $Work with no measurement to compare against AND no evidence of what was captured. Both
+    early-refusal call sites below now call this too, so a refused -ContactSheet leg still
+    publishes its raw frames -- composing them into a labelled sheet stays a main-flow-only
+    step (it needs the run's own eligibility verdict for GPU/scale labels, which a refused run
+    has no reliable measurement behind anyway).
+    CUDA-PLAYBACK-CONTACT-SHEET-2 round 2: moved here from an inline definition inside
+    playback-attr-3-cuda-job.ps1's own $template (both call sites are inside that same
+    template, run on Bachelor) -- test_every_called_attrcuda_command_is_defined_in_the_real_
+    embedded_text (PRESENTMON-HARNESS-ROBUSTNESS-2) requires every -AttrCuda-named function
+    the template calls to come from this module's spliced text, not be defined inline.
+    #>
+    param(
+        [bool]$Enabled,
+        [string]$SourceDir,
+        [string]$PubRoot
+    )
+
+    if (-not $Enabled -or -not $SourceDir -or -not (Test-Path -LiteralPath $SourceDir)) { return $null }
+    # New-AttrCudaDirectory only (never a raw New-Item -Force) -- matches every other $Pub
+    # subdirectory this job creates.
+    [void](New-AttrCudaDirectory -Path (Join-Path $PubRoot 'contact-sheet'))
+    $rawDir = Join-Path $PubRoot 'contact-sheet\raw'
+    [void](New-AttrCudaDirectory -Path $rawDir)
+    Get-ChildItem -LiteralPath $SourceDir -File | ForEach-Object {
+        [void](Publish-AttrCudaFileCopy -Source $_.FullName -Destination (Join-Path $rawDir $_.Name))
+    }
+    return $rawDir
+}
+
 function Publish-AttrCudaFileMove {
     <#
     .SYNOPSIS
@@ -1863,10 +1901,82 @@ function Get-AttrCudaEligibilityVerdict {
         r16Reason = & $read 'r16_reason'
         cudaBackendAttempted = & $read 'cuda_backend_attempted'
         cudaBackendResolved = & $read 'cuda_backend_resolved'
+        # CUDA-PLAYBACK-CONTACT-SHEET-1 r1d: the SAME line already carries the actual GPU
+        # identity ("CUDA / <device name>", from igpu_recon_cuda.cu's cudaGetDeviceProperties
+        # probe) and the actual playback scale factor the run used -- read them here rather
+        # than have a caller re-probe or assume a constant, so a contact sheet composed from
+        # this run can be labelled with the identity the run itself measured.
+        cudaBackendDescription = & $read 'cuda_backend_description'
+        scale = & $read 'scale'
         r16ProbeRan = & $read 'r16_probe_ran'
         admitted = $admitted
         exitCode = $(if ($admitted) { 0 } else { 15 })
     }
+}
+
+function ConvertTo-AttrCudaQuotedProcessArgument {
+    <#
+    .SYNOPSIS
+    Quote one value for a Start-Process -ArgumentList element that may contain a space.
+    .DESCRIPTION
+    Start-Process's -ArgumentList does NOT quote array elements before joining them into the
+    child's command line -- confirmed empirically: an unquoted element containing a space
+    (e.g. a GPU description such as "CUDA / NVIDIA GeForce RTX 4090") silently splits into
+    several argv entries in the child process, the exact class of bug the r1c -c-quoting
+    BLOCKER was about. Wrapping every element in double quotes keeps it as one argv entry
+    regardless of embedded spaces.
+
+    HARDENING (fable NOTE, CUDA-PLAYBACK-CONTACT-SHEET-2): the embedded-quote escaping follows
+    the CommandLineToArgvW/MSVCRT argv-quoting algorithm every value this function quotes is
+    eventually parsed by (Start-Process's child is always a python.exe/py.exe interpreter, or
+    in principle any Windows argv[] consumer): backslashes are literal EXCEPT immediately
+    before a double quote, where each backslash must be doubled and the quote itself escaped
+    as \" -- and a run of backslashes immediately before the CLOSING quote this function adds
+    must also be doubled, since a quote follows them too. A naive doubled-quote ("" instead of
+    \") is a *different* convention (cmd.exe's own), and a value ending in a bare backslash
+    (e.g. a directory path with a trailing separator) would previously reach the parser as an
+    escaped closing quote, corrupting the argument boundary. Every value this helper is
+    actually called with today (hostname, GPU description, scale, build sha, the caller's own
+    footage identifier, frames-dir/sheet-out/stats-out paths without a trailing backslash) contains neither
+    backslashes nor quotes, so this is a correctness hardening with no behaviour change for
+    any current caller.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $pendingBackslashes = 0
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq '\') {
+            $pendingBackslashes++
+            continue
+        }
+        if ($ch -eq '"') {
+            # n backslashes immediately before a quote become 2n backslashes plus one escaped
+            # quote -- each original backslash is preserved AND escaped, then the quote itself.
+            [void]$builder.Append('\' * ($pendingBackslashes * 2))
+            [void]$builder.Append('\"')
+            $pendingBackslashes = 0
+            continue
+        }
+        if ($pendingBackslashes -gt 0) {
+            [void]$builder.Append('\' * $pendingBackslashes)
+            $pendingBackslashes = 0
+        }
+        [void]$builder.Append($ch)
+    }
+    # Trailing backslashes (none seen yet followed by a quote) must be doubled: the closing
+    # quote this function appends next would otherwise escape the last one instead of ending
+    # the argument.
+    if ($pendingBackslashes -gt 0) {
+        [void]$builder.Append('\' * ($pendingBackslashes * 2))
+    }
+    [void]$builder.Append('"')
+    $builder.ToString()
 }
 
 function Get-AttrCudaPresentMonDisplayReport {
@@ -2445,6 +2555,8 @@ Export-ModuleMember -Function `
     Resolve-AttrCudaSmokeRunLog, `
     Get-AttrCudaLastEligibilityLine, `
     Get-AttrCudaEligibilityVerdict, `
+    ConvertTo-AttrCudaQuotedProcessArgument, `
+    Publish-AttrCudaContactSheetRawCaptures, `
     Get-AttrCudaPresentMonDisplayReport, `
     Get-AttrCudaAppSwapTelemetry, `
     Get-AttrCudaTemporalCoverage, `
