@@ -191,10 +191,14 @@ protected:
     // Refuses the screen-saver/monitor-off WM_SYSCOMMAND while playback holds the display
     // required (CUDA-PERF-DISPLAY-WAKE-2) -- see MainWindow.cpp for why
     // SetThreadExecutionState(ES_DISPLAY_REQUIRED) alone is not enough.
+    // CUDA-PERF-DISPLAY-WAKE-3 round 1 (fable note): `override` so a future Qt signature change
+    // fails to COMPILE instead of silently compiling as a new, never-called overload -- which
+    // would stop the screen-saver refusal above from ever engaging without any build error to
+    // catch it.
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    bool nativeEvent( const QByteArray &eventType, void *message, qintptr *result );
+    bool nativeEvent( const QByteArray &eventType, void *message, qintptr *result ) override;
 #else
-    bool nativeEvent( const QByteArray &eventType, void *message, long *result );
+    bool nativeEvent( const QByteArray &eventType, void *message, long *result ) override;
 #endif
 #endif
 

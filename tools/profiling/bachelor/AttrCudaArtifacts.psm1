@@ -2314,6 +2314,17 @@ function Register-AttrCudaDisplayWakeNativeMethods {
 
             [DllImport("user32.dll", SetLastError = true)]
             public static extern bool CloseDesktop(IntPtr hDesktop);
+
+            // CUDA-PERF-DISPLAY-WAKE-3 round 1 (sol hardening): read back the calling thread's
+            // OWN desktop before SetThreadDesktop reassigns it away, so it can be switched back
+            // before CloseDesktop -- Microsoft documents that CloseDesktop fails while any thread
+            // is still using the desktop, and the nudge thread itself is exactly such a thread
+            // until it switches off hDesktop again.
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern IntPtr GetThreadDesktop(uint dwThreadId);
+
+            [DllImport("kernel32.dll")]
+            public static extern uint GetCurrentThreadId();
         }
 
         // CUDA-PERF-DISPLAY-WAKE-2 round 1c. Invoking a PowerShell scriptblock on a raw
@@ -2329,6 +2340,10 @@ function Register-AttrCudaDisplayWakeNativeMethods {
             public string OpenInputDesktopError;
             public string SetThreadDesktopError;
             public string SendInputError;
+            // CUDA-PERF-DISPLAY-WAKE-3 round 1 (sol hardening): CloseDesktop's own Boolean
+            // result, never silently discarded -- $null on success, an error string (with
+            // GetLastWin32Error) otherwise.
+            public string CloseDesktopError;
             public bool ThreadJoined;
         }
 
@@ -2339,16 +2354,29 @@ function Register-AttrCudaDisplayWakeNativeMethods {
                 InputDesktopNudgeResult result = new InputDesktopNudgeResult();
                 System.Threading.Thread thread = new System.Threading.Thread(delegate ()
                 {
-                    // GENERIC_ALL: this thread lives only long enough for one SendInput call, so
-                    // the simplest sufficient access right is used rather than assembling
-                    // individual DESKTOP_* bits.
-                    uint GENERIC_ALL = 0x10000000;
-                    IntPtr hDesktop = NativeMethods.OpenInputDesktop(0, false, GENERIC_ALL);
+                    // CUDA-PERF-DISPLAY-WAKE-3 round 1 (fable note): a minimal DESKTOP_* mask
+                    // instead of GENERIC_ALL -- READOBJECTS/WRITEOBJECTS cover the SendInput
+                    // nudge itself, and SWITCHDESKTOP is what SetThreadDesktop's own contract
+                    // requires of the handle it is given. No fallback to a broader mask: a
+                    // denial here is recorded exactly like any other OpenInputDesktop failure
+                    // (fails closed, never thrown).
+                    uint DESKTOP_READOBJECTS = 0x0001;
+                    uint DESKTOP_WRITEOBJECTS = 0x0080;
+                    uint DESKTOP_SWITCHDESKTOP = 0x0100;
+                    uint desiredAccess = DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP;
+                    IntPtr hDesktop = NativeMethods.OpenInputDesktop(0, false, desiredAccess);
                     if (hDesktop == IntPtr.Zero)
                     {
                         result.OpenInputDesktopError = "OpenInputDesktop failed (lastError=" + Marshal.GetLastWin32Error() + ")";
                         return;
                     }
+                    // CUDA-PERF-DISPLAY-WAKE-3 round 1 (sol hardening): the thread's own desktop
+                    // BEFORE SetThreadDesktop reassigns it -- read while it is still cheap/certain
+                    // to succeed, so there is something to switch back to afterwards. A failure
+                    // here ($null-equivalent IntPtr.Zero) is not fatal to the nudge itself: the
+                    // switch-back below is then simply skipped, and CloseDesktop is attempted
+                    // anyway (recorded either way, never thrown).
+                    IntPtr originalDesktop = NativeMethods.GetThreadDesktop(NativeMethods.GetCurrentThreadId());
                     try
                     {
                         if (!NativeMethods.SetThreadDesktop(hDesktop))
@@ -2370,7 +2398,21 @@ function Register-AttrCudaDisplayWakeNativeMethods {
                     }
                     finally
                     {
-                        NativeMethods.CloseDesktop(hDesktop);
+                        // Switch the thread back to its OWN original desktop first (when that
+                        // read above actually succeeded) so it is no longer "using" hDesktop --
+                        // CloseDesktop is documented to fail while any thread still is. The
+                        // switch-back's own result is not separately recorded: CloseDesktop's
+                        // result below is the one outcome that actually matters (whether the
+                        // handle was released), and a switch-back failure would show up there
+                        // too, since CloseDesktop would then still see this thread attached.
+                        if (originalDesktop != IntPtr.Zero)
+                        {
+                            NativeMethods.SetThreadDesktop(originalDesktop);
+                        }
+                        if (!NativeMethods.CloseDesktop(hDesktop))
+                        {
+                            result.CloseDesktopError = "CloseDesktop failed (lastError=" + Marshal.GetLastWin32Error() + ")";
+                        }
                     }
                 });
                 thread.IsBackground = true;
@@ -2509,8 +2551,9 @@ function Invoke-AttrCudaInputDesktopNudge {
     have no such requirement, so the thread body is C# instead.
     .OUTPUTS
     An ordered hashtable: .attempted, .openInputDesktopError/.setThreadDesktopError/
-    .sendInputError (each $null on success), and .threadJoined (whether the dedicated thread
-    finished within its join timeout -- $false is itself evidence, not a throw).
+    .sendInputError/.closeDesktopError (each $null on success -- CUDA-PERF-DISPLAY-WAKE-3 round 1
+    adds .closeDesktopError, previously discarded), and .threadJoined (whether the dedicated
+    thread finished within its join timeout -- $false is itself evidence, not a throw).
     #>
     [CmdletBinding()]
     param(
@@ -2523,6 +2566,7 @@ function Invoke-AttrCudaInputDesktopNudge {
             openInputDesktopError = 'ATTRCUDA_DISPLAY_WAKE_NATIVE_UNAVAILABLE native P/Invoke type could not be loaded'
             setThreadDesktopError = $null
             sendInputError = $null
+            closeDesktopError = $null
             threadJoined = $false
         }
     }
@@ -2534,6 +2578,7 @@ function Invoke-AttrCudaInputDesktopNudge {
             openInputDesktopError = $result.OpenInputDesktopError
             setThreadDesktopError = $result.SetThreadDesktopError
             sendInputError = $result.SendInputError
+            closeDesktopError = $result.CloseDesktopError
             threadJoined = [bool]$result.ThreadJoined
         }
     } catch {
@@ -2542,6 +2587,7 @@ function Invoke-AttrCudaInputDesktopNudge {
             openInputDesktopError = $_.Exception.Message
             setThreadDesktopError = $null
             sendInputError = $null
+            closeDesktopError = $null
             threadJoined = $false
         }
     }
@@ -2570,11 +2616,16 @@ function Start-AttrCudaDisplayWake {
     Returns .attempted (always $true -- this function ran), .method, .screensaverRunningBefore /
     .screensaverRunningAfter (each $true/$false/$null -- $null only when that probe itself
     failed), .screensaverSecure (SPI_GETSCREENSAVESECURE, read-only, CUDA-PERF-DISPLAY-WAKE-2
-    round 1c), .screensaverSecureOwnerOnly ($true only when the screen saver is BOTH already
-    running AND secure -- the caller's signal to stop the leg with a typed
-    SCREENSAVER_SECURE_OWNER_ONLY result rather than attempting anything: ending a
-    password-protected screen saver is an owner action), .inputDesktopNudge (the nested evidence
-    from Invoke-AttrCudaInputDesktopNudge, or $null when that path was not taken),
+    round 1c: $true/$false/$null -- $null when the probe itself failed), .screensaverSecureOwnerOnly
+    ($true whenever the screen saver is already running AND its secure state is EITHER secure OR
+    UNKNOWN -- CUDA-PERF-DISPLAY-WAKE-3 round 1 fail-closed fix: a probe failure is never treated
+    as "not secure", since that would arm a dismissal attempt against a screen saver this job
+    cannot prove is safe to touch), .screensaverSecureReason ($null, 'secure', or 'unknown' --
+    which of the two conditions set .screensaverSecureOwnerOnly, for evidence/diagnostics), the
+    caller's signal to stop the leg with a typed SCREENSAVER_SECURE_OWNER_ONLY result rather than
+    attempting anything: ending a password-protected (or unprovably-not-password-protected) screen
+    saver is an owner action), .inputDesktopNudge (the nested evidence from
+    Invoke-AttrCudaInputDesktopNudge, or $null when that path was not taken),
     .sendInputError/.executionStateError (each $null on success -- .sendInputError reflects
     whichever nudge path actually ran), .screensaverTimeoutSeconds (SPI_GETSCREENSAVETIMEOUT,
     read-only) and .screensaverActive (SPI_GETSCREENSAVEACTIVE, read-only) -- CUDA-PERF-
@@ -2588,17 +2639,33 @@ function Start-AttrCudaDisplayWake {
     $screensaverActive = Get-AttrCudaScreensaverActive
     $screensaverBefore = Get-AttrCudaScreensaverRunning
     $screensaverSecure = Get-AttrCudaScreensaverSecure
-    $screensaverSecureOwnerOnly = ($screensaverBefore -eq $true) -and ($screensaverSecure -eq $true)
+    # CUDA-PERF-DISPLAY-WAKE-3 round 1 (sol BLOCKER, fail-closed on unknown): only a CONFIRMED
+    # $false reads as "not secure" -- $true and $null (the probe itself failed) both gate the same
+    # way. The prior `-eq $true` here let a probe failure silently fall through to the dismissal
+    # branches below, on a screen saver this job never actually confirmed was safe to touch.
+    $screensaverSecureOwnerOnly = ($screensaverBefore -eq $true) -and ($screensaverSecure -ne $false)
+    $screensaverSecureReason = if (-not $screensaverSecureOwnerOnly) {
+        $null
+    } elseif ($null -eq $screensaverSecure) {
+        'unknown'
+    } else {
+        'secure'
+    }
     $sendInputError = $null
     $executionStateError = $null
     $inputDesktopNudge = $null
     $nativeAvailable = Register-AttrCudaDisplayWakeNativeMethods
 
     if ($screensaverSecureOwnerOnly) {
-        # A password-protected screen saver is a security boundary: no dismiss attempt of any
-        # kind is made, on either path below. The caller (the attribution job) is expected to
-        # stop the leg on this flag before touching footage or the smoke run.
-        $sendInputError = 'ATTRCUDA_SCREENSAVER_SECURE_OWNER_ONLY screen saver is running and secure (password on resume); no dismiss attempted -- ending it is an owner action'
+        # A password-protected (or unprovably-not-password-protected) screen saver is a security
+        # boundary: no dismiss attempt of any kind is made, on either path below. The caller (the
+        # attribution job) is expected to stop the leg on this flag before touching footage or the
+        # smoke run.
+        $sendInputError = if ($screensaverSecureReason -eq 'unknown') {
+            'ATTRCUDA_SCREENSAVER_SECURE_OWNER_ONLY screen saver is running and whether it is secure (password on resume) could not be read; treated as secure -- no dismiss attempted -- ending it is an owner action'
+        } else {
+            'ATTRCUDA_SCREENSAVER_SECURE_OWNER_ONLY screen saver is running and secure (password on resume); no dismiss attempted -- ending it is an owner action'
+        }
     } elseif ($nativeAvailable -and $screensaverBefore -eq $true) {
         $inputDesktopNudge = Invoke-AttrCudaInputDesktopNudge
         $sendInputError = @($inputDesktopNudge.openInputDesktopError, $inputDesktopNudge.setThreadDesktopError, $inputDesktopNudge.sendInputError) |
@@ -2641,7 +2708,7 @@ function Start-AttrCudaDisplayWake {
     $screensaverAfter = Get-AttrCudaScreensaverRunning
 
     $method = if ($screensaverSecureOwnerOnly) {
-        'SecureScreensaverNoDismissAttempted+SetThreadExecutionState(ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED)'
+        "SecureScreensaverNoDismissAttempted(reason=$screensaverSecureReason)+SetThreadExecutionState(ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED)"
     } elseif ($screensaverBefore -eq $true) {
         'OpenInputDesktop+SetThreadDesktop+SendInputPointerNudge(dedicated thread)+SetThreadExecutionState(ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED)'
     } else {
@@ -2655,6 +2722,7 @@ function Start-AttrCudaDisplayWake {
         screensaverRunningAfter = $screensaverAfter
         screensaverSecure = $screensaverSecure
         screensaverSecureOwnerOnly = $screensaverSecureOwnerOnly
+        screensaverSecureReason = $screensaverSecureReason
         inputDesktopNudge = $inputDesktopNudge
         sendInputError = $sendInputError
         executionStateError = $executionStateError
@@ -2712,9 +2780,16 @@ function Start-AttrCudaDisplayWakeKeepAlive {
     .PARAMETER IntervalSeconds
     Nudge period; contract is "periodically (<= every 20 s)", default 15.
     .OUTPUTS
-    A handle for Stop-AttrCudaDisplayWakeKeepAlive; .nudgeState.count is a live, thread-safe
-    counter of nudge attempts (incremented whether or not that attempt's SendInput itself
-    succeeded), readable at any time -- including before Stop -- for evidence/diagnostics.
+    A handle for Stop-AttrCudaDisplayWakeKeepAlive and Get-AttrCudaDisplayWakeKeepAliveHealth.
+    .nudgeState.count is a live, thread-safe counter of nudge attempts (incremented whether or not
+    that attempt's SendInput itself succeeded, for back-compatible readers); CUDA-PERF-
+    DISPLAY-WAKE-3 round 1 adds .nudgeState.successCount/.failureCount/.lastError/
+    .lastFailureUtc, so a caller can tell a healthy tick from a failed one instead of only
+    counting attempts. .setupError is $null when the background pipeline started; non-$null means
+    CreateRunspace/Open/BeginInvoke itself failed (recorded, never thrown -- CUDA-PERF-
+    DISPLAY-WAKE-3 round 1 hardening) and .runspace/.powershell/.asyncResult are all $null, so
+    Stop-AttrCudaDisplayWakeKeepAlive and Get-AttrCudaDisplayWakeKeepAliveHealth both already
+    tolerate that shape.
     #>
     [CmdletBinding()]
     param(
@@ -2727,11 +2802,13 @@ function Start-AttrCudaDisplayWakeKeepAlive {
     # Synchronized wrapper: the loop thread below and this (the caller's) thread both touch the
     # same underlying Hashtable instance -- a plain Hashtable is not safe for that, .Synchronized
     # is.
-    $nudgeState = [System.Collections.Hashtable]::Synchronized(@{ count = 0 })
-    $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-    $runspace.Open()
-    $shell = [System.Management.Automation.PowerShell]::Create()
-    $shell.Runspace = $runspace
+    $nudgeState = [System.Collections.Hashtable]::Synchronized(@{
+        count = 0
+        successCount = 0
+        failureCount = 0
+        lastError = $null
+        lastFailureUtc = $null
+    })
     $loopScript = {
         param($StopEvent, $IntervalSeconds, $NudgeState)
         while (-not $StopEvent.Wait([int]($IntervalSeconds * 1000))) {
@@ -2744,17 +2821,63 @@ function Start-AttrCudaDisplayWakeKeepAlive {
                         [MLVAppAttrCudaDisplayWake.INPUT]@{ type = $INPUT_MOUSE; mi = [MLVAppAttrCudaDisplayWake.MOUSEINPUT]@{ dx = -1; dy = 0; mouseData = 0; dwFlags = $MOUSEEVENTF_MOVE; time = 0; dwExtraInfo = [IntPtr]::Zero } }
                     )
                     $structSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][MLVAppAttrCudaDisplayWake.INPUT])
-                    [void][MLVAppAttrCudaDisplayWake.NativeMethods]::SendInput([uint32]$nudge.Count, $nudge, $structSize)
+                    $sent = [MLVAppAttrCudaDisplayWake.NativeMethods]::SendInput([uint32]$nudge.Count, $nudge, $structSize)
                     $NudgeState.count = [int]$NudgeState.count + 1
+                    # CUDA-PERF-DISPLAY-WAKE-3 round 1 (sol BLOCKER): SendInput's own return is the
+                    # number of events it actually inserted -- Microsoft documents fewer than
+                    # requested as failure. The prior code discarded this and always advanced the
+                    # counter as if the tick had succeeded, so a screen saver re-engaging mid-leg
+                    # (or any other injection failure) went unnoticed here.
+                    if ($sent -ne $nudge.Count) {
+                        $NudgeState.failureCount = [int]$NudgeState.failureCount + 1
+                        $NudgeState.lastError = "SendInput sent $sent of $($nudge.Count) events (lastError=$([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+                        $NudgeState.lastFailureUtc = (Get-Date).ToUniversalTime().ToString('o')
+                    } else {
+                        $NudgeState.successCount = [int]$NudgeState.successCount + 1
+                    }
                 }
             } catch {
                 # Non-throwing by construction: a single nudge failure must never stop the loop or
-                # escape to the caller -- the next tick simply tries again.
+                # escape to the caller -- the next tick simply tries again. Still counted as a
+                # failure, unlike before, so it is visible to Get-AttrCudaDisplayWakeKeepAliveHealth.
+                $NudgeState.failureCount = [int]$NudgeState.failureCount + 1
+                $NudgeState.lastError = $_.Exception.Message
+                $NudgeState.lastFailureUtc = (Get-Date).ToUniversalTime().ToString('o')
             }
         }
     }
-    [void]$shell.AddScript($loopScript).AddArgument($stopEvent).AddArgument($IntervalSeconds).AddArgument($nudgeState)
-    $asyncResult = $shell.BeginInvoke()
+
+    # CUDA-PERF-DISPLAY-WAKE-3 round 1 (fable hardening): CreateRunspace/Open/BeginInvoke are the
+    # one part of this file's "never throws" contract that used to sit OUTSIDE any try/catch --
+    # every other function here records a failure into its returned evidence instead of letting it
+    # propagate. A setup failure (e.g. resource exhaustion) is now recorded the same way: the
+    # caller gets a handle back (never a thrown error) with .setupError set and no live pipeline.
+    $runspace = $null
+    $shell = $null
+    $asyncResult = $null
+    $setupError = $null
+    try {
+        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $runspace.Open()
+        $shell = [System.Management.Automation.PowerShell]::Create()
+        $shell.Runspace = $runspace
+        [void]$shell.AddScript($loopScript).AddArgument($stopEvent).AddArgument($IntervalSeconds).AddArgument($nudgeState)
+        $asyncResult = $shell.BeginInvoke()
+    } catch {
+        $setupError = $_.Exception.Message
+        try { if ($shell) { $shell.Dispose() } } catch {
+        }
+        try {
+            if ($runspace) {
+                $runspace.Close()
+                $runspace.Dispose()
+            }
+        } catch {
+        }
+        $runspace = $null
+        $shell = $null
+        $asyncResult = $null
+    }
 
     [ordered]@{
         stopEvent = $stopEvent
@@ -2763,7 +2886,90 @@ function Start-AttrCudaDisplayWakeKeepAlive {
         asyncResult = $asyncResult
         nudgeState = $nudgeState
         intervalSeconds = $IntervalSeconds
+        setupError = $setupError
         startedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+}
+
+function Get-AttrCudaDisplayWakeKeepAliveHealth {
+    <#
+    .SYNOPSIS
+    Non-throwing point-in-time health read of a Start-AttrCudaDisplayWakeKeepAlive handle -- the
+    caller's "never proceed silently" check, meant to be called at more than one point in a leg
+    (CUDA-PERF-DISPLAY-WAKE-3 round 1: before the smoke launch, and again at the start of the
+    measured interval).
+    .DESCRIPTION
+    .healthy is $false when: the keep-alive never started at all (.setupError, from
+    Start-AttrCudaDisplayWakeKeepAlive's own setup failure), at least one nudge attempt has failed
+    since it started (.failureCount -gt 0, via the loop's own recorded .lastError), or its
+    background pipeline has completed on its own (.asyncResult.IsCompleted) while .stopEvent was
+    never signalled -- the caller never asked it to stop, so a completed pipeline means the loop
+    thread died. Never throws: a read that itself fails folds into .reason as
+    ATTRCUDA_KEEPALIVE_HEALTH_CHECK_FAILED rather than propagating, since a health CHECK failing
+    must never be mistaken for "healthy" by a caller that only checked for a thrown error.
+    .OUTPUTS
+    An ordered hashtable: .healthy, .reason (a typed string prefix, $null when healthy),
+    .failureCount, .lastError, .lastFailureUtc, .setupError, .runspaceStopped.
+    #>
+    [CmdletBinding()]
+    param(
+        $Handle
+    )
+
+    if (-not $Handle) {
+        return [ordered]@{
+            healthy = $false
+            reason = 'ATTRCUDA_KEEPALIVE_MISSING no keep-alive handle was supplied'
+            failureCount = $null
+            lastError = $null
+            lastFailureUtc = $null
+            setupError = $null
+            runspaceStopped = $null
+        }
+    }
+
+    try {
+        $setupError = $Handle.setupError
+        $failureCount = 0
+        $lastError = $null
+        $lastFailureUtc = $null
+        if ($Handle.nudgeState) {
+            $failureCount = [int]$Handle.nudgeState.failureCount
+            $lastError = $Handle.nudgeState.lastError
+            $lastFailureUtc = $Handle.nudgeState.lastFailureUtc
+        }
+        $runspaceStopped = $false
+        if ($Handle.asyncResult -and $Handle.stopEvent -and [bool]$Handle.asyncResult.IsCompleted -and -not [bool]$Handle.stopEvent.IsSet) {
+            $runspaceStopped = $true
+        }
+        $reason = if ($setupError) {
+            "ATTRCUDA_KEEPALIVE_SETUP_FAILED $setupError"
+        } elseif ($runspaceStopped) {
+            'ATTRCUDA_KEEPALIVE_RUNSPACE_STOPPED background pipeline completed without a stop request'
+        } elseif ($failureCount -gt 0) {
+            "ATTRCUDA_KEEPALIVE_NUDGE_FAILED $failureCount failed nudge(s), last: $lastError"
+        } else {
+            $null
+        }
+        [ordered]@{
+            healthy = ($null -eq $reason)
+            reason = $reason
+            failureCount = $failureCount
+            lastError = $lastError
+            lastFailureUtc = $lastFailureUtc
+            setupError = $setupError
+            runspaceStopped = $runspaceStopped
+        }
+    } catch {
+        [ordered]@{
+            healthy = $false
+            reason = "ATTRCUDA_KEEPALIVE_HEALTH_CHECK_FAILED $($_.Exception.Message)"
+            failureCount = $null
+            lastError = $null
+            lastFailureUtc = $null
+            setupError = $null
+            runspaceStopped = $null
+        }
     }
 }
 
@@ -2772,7 +2978,8 @@ function Stop-AttrCudaDisplayWakeKeepAlive {
     .SYNOPSIS
     Stops a keep-alive started by Start-AttrCudaDisplayWakeKeepAlive and releases its Runspace.
     Non-throwing, and safe to call with $null or an already-stopped handle -- a job's `finally`
-    block may reach here even when Start-AttrCudaDisplayWakeKeepAlive was never reached.
+    block may reach here even when Start-AttrCudaDisplayWakeKeepAlive was never reached, or reached
+    only as far as recording a .setupError.
     #>
     [CmdletBinding()]
     param(
@@ -2781,8 +2988,20 @@ function Stop-AttrCudaDisplayWakeKeepAlive {
 
     $stopError = $null
     $nudgeCount = $null
+    $successCount = $null
+    $failureCount = $null
+    $lastError = $null
+    $lastFailureUtc = $null
+    $setupError = $null
     if ($Handle) {
-        if ($Handle.nudgeState) { $nudgeCount = [int]$Handle.nudgeState.count }
+        $setupError = $Handle.setupError
+        if ($Handle.nudgeState) {
+            $nudgeCount = [int]$Handle.nudgeState.count
+            $successCount = [int]$Handle.nudgeState.successCount
+            $failureCount = [int]$Handle.nudgeState.failureCount
+            $lastError = $Handle.nudgeState.lastError
+            $lastFailureUtc = $Handle.nudgeState.lastFailureUtc
+        }
         try {
             if ($Handle.stopEvent) { $Handle.stopEvent.Set() }
             if ($Handle.powershell -and $Handle.asyncResult) {
@@ -2807,6 +3026,11 @@ function Stop-AttrCudaDisplayWakeKeepAlive {
         stopped = ($null -eq $stopError)
         error = $stopError
         nudgeCount = $nudgeCount
+        successCount = $successCount
+        failureCount = $failureCount
+        lastError = $lastError
+        lastFailureUtc = $lastFailureUtc
+        setupError = $setupError
         utc = (Get-Date).ToUniversalTime().ToString('o')
     }
 }
@@ -2860,4 +3084,5 @@ Export-ModuleMember -Function `
     Start-AttrCudaDisplayWake, `
     Stop-AttrCudaDisplayWake, `
     Start-AttrCudaDisplayWakeKeepAlive, `
+    Get-AttrCudaDisplayWakeKeepAliveHealth, `
     Stop-AttrCudaDisplayWakeKeepAlive
