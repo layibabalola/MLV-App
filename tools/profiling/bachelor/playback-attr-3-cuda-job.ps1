@@ -257,6 +257,15 @@ param(
     # package as the "after" leg -- never rebuilt, never a different -SourceCommit.
     [switch]$DisablePaintPerSubmit,
 
+    # PLAYBACK-HFR-CONFORM-DEFAULT-1: the venue gate on Win32_Processor LoadPercentage (total
+    # mean of three samples 12 s apart). 20 stays the default, so every existing caller's
+    # emitted job is unchanged; the hub's 2026-09-28 quiet-window ruling for Bachelor (P-core
+    # threads 0-11 mean <= 35 % AND total <= 55 %, checked externally by the watcher) needs a
+    # leg to be submittable at a total above 20, so a caller may raise it here. The value used
+    # is recorded as cpuThresholdPercent beside cpuMean in a refused leg's summary.json.
+    [ValidateRange(20, 100)]
+    [int]$CpuLoadGatePercent = 20,
+
     # BACHELOR-OWNER-CLIP-STAGE-STALL-1: the cold read rate (MB/s) the leg's timeouts are sized
     # from. 0 (default) uses the rate MEASURED on the measurement host and recorded beside
     # $script:AttrCudaMeasuredColdReadMBps in AttrCudaArtifacts.psm1; pass a fresh measurement
@@ -772,6 +781,7 @@ if ($ContactSheet) {
     $contactSheetComposerSha256ForTemplate = ''
 }
 $disablePaintPerSubmitLiteral = if ($DisablePaintPerSubmit) { '$true' } else { '$false' }
+$cpuLoadGatePercentLiteral = [string][int]$CpuLoadGatePercent
 
 # BACHELOR-OWNER-CLIP-STAGE-STALL-1: timeouts derived from the clip's size and the MEASURED cold
 # read rate, never guessed. run-release-gui-smoke.ps1's own derived process timeout (~75 s) has no
@@ -818,6 +828,7 @@ $ContactSheetComposerPyBase64 = '__CONTACT_SHEET_COMPOSER_PY_BASE64__'
 $ContactSheetComposerSha256 = '__CONTACT_SHEET_COMPOSER_SHA256__'
 $TelemetryArm = '__TELEMETRY_ARM__'
 $DisablePaintPerSubmit = __DISABLE_PAINT_PER_SUBMIT__
+$CpuLoadGatePercent = [double]__CPU_LOAD_GATE_PERCENT__
 $Root = '__AGENT_ROOT__'
 $Cache = Join-Path $Root 'cache'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -1837,7 +1848,9 @@ $avgUtility = Get-Mean ($cpuUtilitySamples | Where-Object { $null -ne $_ })
 # which would silently treat "could not measure" as "measured low".
 $cpuTimeUnknown = $cpuTimeSamples.Count -lt 3
 $avgTime = if ($cpuTimeUnknown) { $null } else { Get-Mean $cpuTimeSamples }
-$cpuThresholdPercent = 20.0
+# PLAYBACK-HFR-CONFORM-DEFAULT-1: the threshold is the -CpuLoadGatePercent parameter (default 20,
+# so every existing caller's gate is unchanged); it now bounds the % Processor Time mean above.
+$cpuThresholdPercent = $CpuLoadGatePercent
 Write-JobTrace "step quiescence-check done cpuTimeMean=$avgTime cpuUtilityMean=$avgUtility cpuTimeUnknown=$cpuTimeUnknown"
 # UM-DISPLAY-SELECT-AND-LOG-1 round 1c (opus design-review hardening item 4): written
 # fail-closed as "-not (<= threshold)", not "-gt threshold" -- a stray NaN that ever reached
@@ -2936,6 +2949,7 @@ $text = Expand-AttrCudaTemplate -Template $template -Tokens ([ordered]@{
     CONTACT_SHEET_COMPOSER_SHA256 = $contactSheetComposerSha256ForTemplate
     TELEMETRY_ARM = $TelemetryArm
     DISABLE_PAINT_PER_SUBMIT = $disablePaintPerSubmitLiteral
+    CPU_LOAD_GATE_PERCENT = $cpuLoadGatePercentLiteral
     SMOKE_PROCESS_TIMEOUT_MS = [string]$timeBudget.smokeProcessTimeoutMs
     RUNNER_ACCEPTS_VERIFIED_CLIP_BINDING = $runnerAcceptsVerifiedClipBindingLiteral
     PRESENTMON_TIMED_SECONDS = $(if ($isFixtureRehearsal) { '55' } else { [string][int][math]::Ceiling($timeBudget.smokeProcessTimeoutMs / 1000.0) })
