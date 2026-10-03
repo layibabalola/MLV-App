@@ -1469,6 +1469,38 @@ TEST(LookAssistScene, EveryConsumerReachesTheRefinementThroughTheOneDecision)
     ASSERT_FALSE( window.mid( worker, workerEnd - worker ).contains( QStringLiteral("lookAssistBalanceRenderer") ) );
 }
 
+// ---- LOOK-ASSIST-DISPLAY-METER-ALL-SCALES-1: one exposure decision at every playback scale ----
+
+TEST(LookAssistDisplayMeterWiring, TheGuiRunsTheMeterAtEveryPlaybackScaleThroughTheSharedFunction)
+{
+    // d34da2b1 ran the display-space meter only at x2 (effectivePlaybackScaleFactorForRequest() == 2), so a
+    // flat-floor dual-ISO clip got the display-metered exposure at x2 and the floor-metered p95 cap (under-
+    // exposed) at x1/x3/x4. The meter reads no playback state, so the gate had nothing to protect: removing it
+    // must not come back. MainWindow.cpp is not linked into console_tests, so this reads the source as text.
+    const QString window = readRepoFile( QStringLiteral("platform/qt/MainWindow.cpp") );
+    ASSERT_FALSE( window.isEmpty() );
+    const int meterAt = window.indexOf( QStringLiteral("LookAssistStats displayStatsUi;") );
+    const int meterEnd = window.indexOf( QStringLiteral("// [WB-TRACE] env-gated"), meterAt );
+    ASSERT_TRUE( meterAt > 0 );
+    ASSERT_TRUE( meterEnd > meterAt );
+    const QString meter = window.mid( meterAt, meterEnd - meterAt );
+    ASSERT_TRUE( meter.contains( QStringLiteral("const bool displayStatsValidUi = ReceiptApplier::lookAssistDisplayMeter(") ) );
+    // the analysis scale is the RAW-size downscale, not anything the viewport plays at
+    ASSERT_TRUE( meter.contains( QStringLiteral("analysisFrame,\n        downscaleFactor,") )
+              || meter.contains( QStringLiteral("analysisFrame,\r\n        downscaleFactor,") ) );
+    // no scale gate of any spelling in front of it
+    ASSERT_FALSE( meter.contains( QStringLiteral("PlaybackScale") ) );
+    ASSERT_FALSE( meter.contains( QStringLiteral("playback_scale") ) );
+    ASSERT_FALSE( meter.contains( QStringLiteral("== 2") ) );
+    ASSERT_FALSE( meter.contains( QStringLiteral("useDisplayMeterExposureUi") ) );
+    ASSERT_FALSE( window.contains( QStringLiteral("useDisplayMeterExposureUi") ) );
+    // both preset consumers (async worker and sync fallback) get the metered stats
+    ASSERT_EQ( 2, window.count( QStringLiteral("displayStatsValidUi ? &displayStatsUi : nullptr") ) );
+    // the colour pictures stay judged at the scene's own lift, not at the metered exposure the daylight patch gates were
+    // never calibrated at (measured: at the metered exposure the tracked daylight clips fell back to the night path)
+    ASSERT_TRUE( window.contains( QStringLiteral("wbRequest.analysisExposure = presetForLookAssistScene( scene, stats ).exposure;") ) );
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // LOOK-ASSIST-DIAG-LOGGING-1: the decisions that change the picture leave their inputs in the log. Observation only.
 // ---------------------------------------------------------------------------------------------------------------
@@ -1584,13 +1616,14 @@ TEST(LookAssistScene, DecisionLogRecordsThePostBalanceWalkAndTheDisplayMeter)
     ASSERT_TRUE( classifyLookAssistScene( night ) == LookAssistScene::Night );
     LookAssistDecisionTrace trace;
     trace.pictureEvidenceAsked = true;
-    trace.playbackScaleFactor = 4;           // the owner legs force scale 4: the display meter does not run there
+    trace.playbackScaleFactor = 4;           // the owner legs force scale 4: the display meter runs there too
+    trace.displayMeterRan = true;
 
     // walk entered, nothing moved
     trace.postWalkRan = true;
     ASSERT_TRUE( lookAssistDecisionLogFields( night, trace )
                  == QStringLiteral("has_ev100=0 ev100=NA daylight_gate=exposure post_walk_ran=1 post_walk_branch=none "
-                                   "post_walk_recovery=NA display_meter_ran=0 playback_scale=4") );
+                                   "post_walk_recovery=NA display_meter_ran=1 playback_scale=4") );
     // the step loop moved it
     trace.postWalkBranch = LookAssistPostWalkBranch::Steps;
     ASSERT_TRUE( lookAssistDecisionLogFields( night, trace ).contains(
@@ -1604,7 +1637,7 @@ TEST(LookAssistScene, DecisionLogRecordsThePostBalanceWalkAndTheDisplayMeter)
     trace.recoveryTemperatureDelta = 250;
     trace.recoveryTintDelta = 22;
     ASSERT_TRUE( lookAssistDecisionLogFields( night, trace ).contains(
-        QStringLiteral("post_walk_ran=1 post_walk_branch=recovery post_walk_recovery=250/22 display_meter_ran=0 playback_scale=4") ) );
+        QStringLiteral("post_walk_ran=1 post_walk_branch=recovery post_walk_recovery=250/22 display_meter_ran=1 playback_scale=4") ) );
     trace.recoveryTemperatureDelta = -500;
     trace.recoveryTintDelta = -35;
     ASSERT_TRUE( lookAssistDecisionLogFields( night, trace ).contains( QStringLiteral("post_walk_recovery=-500/-35 ") ) );
@@ -1618,11 +1651,25 @@ TEST(LookAssistScene, DecisionLogRecordsThePostBalanceWalkAndTheDisplayMeter)
     metered.playbackScaleFactor = 2;
     ASSERT_TRUE( lookAssistDecisionLogFields( night, metered ).endsWith(
         QStringLiteral("display_meter_ran=1 playback_scale=2") ) );
-    // ... and a scale with no meter run, or none known
+    // ... the meter runs at EVERY scale (LOOK-ASSIST-DISPLAY-METER-ALL-SCALES-1): a run at a scale other than 2
+    // reads display_meter_ran=1 and names its own scale, never 0 and never 2
+    for( const int scale : { 1, 3, 4, 8 } )
+    {
+        LookAssistDecisionTrace atScale;
+        atScale.displayMeterRan = true;
+        atScale.playbackScaleFactor = scale;
+        ASSERT_TRUE( lookAssistDecisionLogFields( night, atScale ).endsWith(
+            QStringLiteral("display_meter_ran=1 playback_scale=%1").arg( scale ) ) );
+    }
+    // ... and the flag stays 0 only when the meter produced no samples (or in no-playback batch: scale NA)
     metered.displayMeterRan = false;
     metered.playbackScaleFactor = 1;
     ASSERT_TRUE( lookAssistDecisionLogFields( night, metered ).endsWith(
         QStringLiteral("display_meter_ran=0 playback_scale=1") ) );
+    LookAssistDecisionTrace batch;
+    batch.displayMeterRan = true;
+    ASSERT_TRUE( lookAssistDecisionLogFields( night, batch ).endsWith(
+        QStringLiteral("display_meter_ran=1 playback_scale=NA") ) );
 }
 
 namespace {
@@ -1778,18 +1825,30 @@ TEST(LookAssistScene, BothConsumersAppendTheDecisionFieldsAndChangeNothingElse)
     ASSERT_EQ( 1, applier.count( QStringLiteral("initialPatchBaseChroma=%37 initialPatchFinalChroma=%38 %39\\n\"") ) );
     ASSERT_EQ( 1, applier.count( QStringLiteral("lookAssistDecisionLogFields( stats, decisionTrace )") ) );
     ASSERT_TRUE( applier.contains( QStringLiteral("decisionTrace.pictureEvidenceAsked = !masterScenePass;") ) );
-    // The headless applier has no walk and no display meter: it must not claim either.
+    // The headless applier has no walk and no playback scale: it must not claim either. It does run the display meter
+    // (LOOK-ASSIST-DISPLAY-METER-ALL-SCALES-1), so it records displayMeterRan with the samples, once.
     ASSERT_FALSE( applier.contains( QStringLiteral("decisionTrace.postWalk") ) );
-    ASSERT_FALSE( applier.contains( QStringLiteral("decisionTrace.displayMeterRan") ) );
+    ASSERT_FALSE( applier.contains( QStringLiteral("decisionTrace.playbackScaleFactor") ) );
+    const int headlessMeter = applier.indexOf( QStringLiteral("const bool displayStatsValid = lookAssistDisplayMeter(") );
+    ASSERT_TRUE( headlessMeter > 0 );
+    const int headlessRan = applier.indexOf( QStringLiteral("decisionTrace.displayMeterRan = true;"), headlessMeter );
+    ASSERT_TRUE( headlessRan > headlessMeter && headlessRan - headlessMeter < 400 );
+    ASSERT_EQ( 1, applier.count( QStringLiteral("decisionTrace.displayMeterRan = true;") ) );
 
     // GUI: each input is recorded where it is decided, and only there.
     ASSERT_TRUE( window.contains( QStringLiteral("decisionTrace.pictureEvidenceAsked = !s_lookAssistMasterScenePass;") ) );
-    ASSERT_TRUE( window.contains( QStringLiteral("decisionTrace.playbackScaleFactor = displayMeterPlaybackScaleUi;") ) );
-    ASSERT_TRUE( window.contains( QStringLiteral("const bool useDisplayMeterExposureUi = displayMeterPlaybackScaleUi == 2;") ) );
-    const int meterSamples = window.indexOf( QStringLiteral("displayStatsValidUi = true;") );
-    ASSERT_TRUE( meterSamples > 0 );
-    const int meterRan = window.indexOf( QStringLiteral("decisionTrace.displayMeterRan = true;"), meterSamples );
-    ASSERT_TRUE( meterRan > meterSamples && meterRan - meterSamples < 120 );   // set with the samples, not elsewhere
+    // The meter has no scale gate (LOOK-ASSIST-DISPLAY-METER-ALL-SCALES-1): the trace carries the real effective scale
+    // and display_meter_ran follows the meter's own result, so it reads 1 at every scale the meter produces samples.
+    ASSERT_EQ( 1, window.count( QStringLiteral("decisionTrace.playbackScaleFactor = effectivePlaybackScaleFactorForRequest();") ) );
+    ASSERT_FALSE( window.contains( QStringLiteral("displayMeterPlaybackScaleUi") ) );
+    const int meterCall = window.indexOf( QStringLiteral("const bool displayStatsValidUi = ReceiptApplier::lookAssistDisplayMeter(") );
+    ASSERT_TRUE( meterCall > 0 );
+    const int scaleTrace = window.indexOf( QStringLiteral("decisionTrace.playbackScaleFactor = effectivePlaybackScaleFactorForRequest();") );
+    ASSERT_TRUE( scaleTrace > 0 && scaleTrace < meterCall );
+    const int meterValid = window.indexOf( QStringLiteral("if( displayStatsValidUi )"), meterCall );
+    ASSERT_TRUE( meterValid > meterCall );
+    const int meterRan = window.indexOf( QStringLiteral("decisionTrace.displayMeterRan = true;"), meterValid );
+    ASSERT_TRUE( meterRan > meterValid && meterRan - meterValid < 120 );   // set with the samples, not elsewhere
     ASSERT_EQ( 1, window.count( QStringLiteral("decisionTrace.displayMeterRan = true;") ) );
     const int walk = window.indexOf( QStringLiteral("if( refinePostBalance )") );
     ASSERT_TRUE( walk > 0 );
@@ -1817,4 +1876,28 @@ TEST(LookAssistScene, BothConsumersAppendTheDecisionFieldsAndChangeNothingElse)
     // The walk's own gate and its recovery table are untouched by this card.
     ASSERT_TRUE( window.contains( QStringLiteral("!daylightScene && ( !autoWhiteBalanceValid || useProcessedColorStats )") ) );
     ASSERT_TRUE( window.contains( QStringLiteral("qMakePair( 250, 22 ),") ) );
+}
+
+TEST(LookAssistDisplayMeterWiring, HeadlessRunsTheSameMeterAndThereIsOnlyOneImplementation)
+{
+    const QString applier = readRepoFile( QStringLiteral("src/batch/ReceiptApplier.cpp") );
+    const QString window = readRepoFile( QStringLiteral("platform/qt/MainWindow.cpp") );
+    ASSERT_FALSE( applier.isEmpty() );
+    ASSERT_FALSE( window.isEmpty() );
+    const int headlessAt = applier.indexOf( QStringLiteral("bool ReceiptApplier::applyHeadlessLookAssist(") );
+    ASSERT_TRUE( headlessAt > 0 );
+    const QString headless = applier.mid( headlessAt );
+    ASSERT_TRUE( headless.contains( QStringLiteral("lookAssistDisplayMeter(") ) );
+    ASSERT_TRUE( headless.contains( QStringLiteral("displayStatsValid ? &displayStats : nullptr") ) );
+    ASSERT_TRUE( headless.contains( QStringLiteral("wbRequest.analysisExposure = presetForLookAssistScene( scene, stats ).exposure;") ) );
+    ASSERT_FALSE( headless.contains( QStringLiteral("playback_scale_factor_active") ) );
+    // the meter's sample frames live in exactly one place, so GUI and batch cannot drift apart again
+    ASSERT_EQ( 1, applier.count( QStringLiteral("{ 0.15, 0.5, 0.85 }") ) );
+    ASSERT_EQ( 0, window.count( QStringLiteral("{ 0.15, 0.5, 0.85 }") ) );
+    const int meterAt = applier.indexOf( QStringLiteral("bool ReceiptApplier::lookAssistDisplayMeter(") );
+    const int meterEnd = applier.indexOf( QStringLiteral("bool ReceiptApplier::processedThumbnailAtBalance("), meterAt );
+    ASSERT_TRUE( meterAt > 0 && meterEnd > meterAt );
+    const QString meter = applier.mid( meterAt, meterEnd - meterAt );
+    ASSERT_FALSE( meter.contains( QStringLiteral("playback_scale") ) );
+    ASSERT_FALSE( meter.contains( QStringLiteral("PlaybackPreview") ) );
 }
