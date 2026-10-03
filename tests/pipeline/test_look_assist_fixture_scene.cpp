@@ -915,18 +915,22 @@ TEST(LookAssistFixtureScene, HeadlessAppliedLineSaysWhyItChoseItsScene)
         // (a) tracked daylight: EV100 16, the rendered picture corroborates
         { "tiny-daylight",
           "^has_ev100=1 ev100=16\\.\\d\\d\\d daylight_gate=pass post_walk_ran=0 post_walk_branch=none post_walk_recovery=NA "
-          "display_meter_ran=0 playback_scale=NA$" },
+          "display_meter_ran=0 playback_scale=NA ev100_bound=NA ev100_source=recorded surface_search=not-run "
+          "surface_search_balance=NA$" },
         { "large-daylight",
           "^has_ev100=1 ev100=16\\.\\d\\d\\d daylight_gate=pass post_walk_ran=0 post_walk_branch=none post_walk_recovery=NA "
-          "display_meter_ran=0 playback_scale=NA$" },
+          "display_meter_ran=0 playback_scale=NA ev100_bound=NA ev100_source=recorded surface_search=not-run "
+          "surface_search_balance=NA$" },
         // (b) no metadata: nothing to record, and the first conjunct is what failed
         { "tiny-no-metadata",
           "^has_ev100=0 ev100=NA daylight_gate=exposure post_walk_ran=0 post_walk_branch=none post_walk_recovery=NA "
-          "display_meter_ran=0 playback_scale=NA$" },
+          "display_meter_ran=0 playback_scale=NA ev100_bound=NA ev100_source=none surface_search=not-run "
+          "surface_search_balance=NA$" },
         // (c) a flat-floor NIGHT verdict (ND filter: EV100 8.6 over the same flat floor): metadata present, gate exposure
         { "tiny-nd-filter",
           "^has_ev100=1 ev100=8\\.\\d\\d\\d daylight_gate=exposure post_walk_ran=0 post_walk_branch=none "
-          "post_walk_recovery=NA display_meter_ran=0 playback_scale=NA$" },
+          "post_walk_recovery=NA display_meter_ran=0 playback_scale=NA ev100_bound=NA ev100_source=recorded "
+          "surface_search=not-run surface_search_balance=NA$" },
     };
     const size_t caseCount = sizeof( kIdentityCases ) / sizeof( kIdentityCases[0] );
     ASSERT_EQ( caseCount, sizeof( expected ) / sizeof( expected[0] ) );
@@ -945,10 +949,75 @@ TEST(LookAssistFixtureScene, HeadlessAppliedLineSaysWhyItChoseItsScene)
         ASSERT_TRUE( line.indexOf( QStringLiteral("initialPatchFinalChroma=") ) < line.indexOf( QStringLiteral(" has_ev100=") ) );
     }
 
+    // LOOK-ASSIST-WINDOW-LIT-INTERIOR-1: the two tracked NIGHT states. Without metadata the verdict is a window-lit
+    // candidate, judged and refused (it stays night; its receipt and picture are pinned above); with metadata (ND
+    // filter) it is never a candidate.
+    {
+        IdentityRun noMeta;
+        ASSERT_TRUE( runIdentityCase( kIdentityCases[2], &noMeta ) );
+        ASSERT_TRUE( noMeta.scene == QStringLiteral("night") );
+        const QString log = QString::fromUtf8( noMeta.log );
+        ASSERT_EQ( 1, log.count( QStringLiteral("LOOK_ASSIST window_lit_interior frame=0 wouldReclassify=false reason=") ) );
+        ASSERT_TRUE( log.contains( QStringLiteral(" scene=night ") ) );
+        ASSERT_TRUE( log.contains( QStringLiteral("expoIso=0 expoShutterUs=0 lensApertureX100=0 applied=false exposureBound=false") ) );
+        IdentityRun nd;
+        ASSERT_TRUE( runIdentityCase( kIdentityCases[3], &nd ) );
+        ASSERT_TRUE( nd.scene == QStringLiteral("night") );
+        ASSERT_FALSE( nd.log.contains( "window_lit_interior" ) );
+    }
+
     // The master pass asks for no picture: with every other conjunct holding, the gate is n/a rather than "picture".
     QString receipt;
     QByteArray log;
     ASSERT_TRUE( runHeadlessLookAssist( "tests/fixtures/clips/tiny_dual_iso.mlv", false, &receipt, &log, true, -1, 0, 0, true ) );
     ASSERT_TRUE( log.contains( "masterScenePass=true" ) );
     ASSERT_TRUE( appliedLineDecisionTail( log ).contains( QStringLiteral("daylight_gate=n/a ") ) );
+}
+
+TEST(LookAssistFixtureScene, TheApertureBoundThroughTheRealHeadlessPath)
+{
+    // LOOK-ASSIST-M16-NOT-NIGHT-1, on the tracked fixture with its recorded exposure replaced. The fixture's RAW thumbnail
+    // is the flat floor every night verdict here comes from.
+    // (a) A NIGHT exposure with no aperture (ISO 3200, 1/50 s: bound 0.6): the bound rules nothing out, so receipt,
+    //     verdict and picture are the pinned no-metadata night's, bit for bit; only the log gains the bound.
+    {
+        const IdentityCase c = { "tiny-no-aperture-night", "tests/fixtures/clips/tiny_dual_iso.mlv", true, 3200, 20000, 0, 1 };
+        IdentityRun run;
+        ASSERT_TRUE( runIdentityCase( c, &run ) );
+        std::fprintf( stderr, "APERTURE-BOUND %s | scene=%s | receipt=%s | sha256=%s\n", c.name, qPrintable( run.scene ),
+                      qPrintable( run.receipt ), run.pictureSha256.c_str() );
+        ASSERT_TRUE( run.scene == QString::fromLatin1( kIdentityPins[2].scene ) );
+        ASSERT_TRUE( run.receipt == QString::fromLatin1( kIdentityPins[2].receipt ) );
+        ASSERT_TRUE( run.pictureSha256 == kIdentityPins[2].pictureSha256 );
+        const QString tail = appliedLineDecisionTail( run.log );
+        ASSERT_TRUE( tail.startsWith( QStringLiteral("has_ev100=0 ev100=NA daylight_gate=exposure ") ) );
+        ASSERT_TRUE( tail.endsWith( QStringLiteral(
+            "ev100_bound=0.643 ev100_source=aperture_bound surface_search=not-run surface_search_balance=NA") ) );
+        const QString log = QString::fromUtf8( run.log );
+        ASSERT_TRUE( log.contains( QStringLiteral("LOOK_ASSIST window_lit_interior frame=0 wouldReclassify=") ) );
+        ASSERT_TRUE( log.contains( QStringLiteral(" applied=false exposureBound=false ") ) );
+    }
+    // (b) The M16 exposure with no aperture (ISO 100, 1/1357 s: bound 10.4; the fixture's DISO block decodes to a 1600
+    //     recovery ISO, so 6.4 after the 4-stop credit): night is ruled out by the exposure, but the bound alone never
+    //     changes a verdict. Here the night path's processed picture yields no patch to verify (not-processed-solve), so
+    //     the receipt and picture are the pinned night's, bit for bit.
+    {
+        const IdentityCase c = { "tiny-no-aperture-m16", "tests/fixtures/clips/tiny_dual_iso.mlv", true, 100, 737, 0, 1 };
+        IdentityRun run;
+        ASSERT_TRUE( runIdentityCase( c, &run ) );
+        std::fprintf( stderr, "APERTURE-BOUND %s | scene=%s | receipt=%s | sha256=%s\n", c.name, qPrintable( run.scene ),
+                      qPrintable( run.receipt ), run.pictureSha256.c_str() );
+        for( const QByteArray &line : run.log.split( '\n' ) )
+            if( line.contains( "window_lit_interior" ) || line.contains( "LOOK_ASSIST applied" ) )
+                std::fprintf( stderr, "APERTURE-BOUND %s\n", line.constData() );
+        const QString tail = appliedLineDecisionTail( run.log );
+        ASSERT_TRUE( tail.endsWith( QStringLiteral(
+            "ev100_bound=10.406 ev100_source=aperture_bound surface_search=not-run surface_search_balance=NA") ) );
+        const QString log = QString::fromUtf8( run.log );
+        ASSERT_TRUE( log.contains( QStringLiteral("wouldReclassify=false reason=not-processed-solve ") ) );
+        ASSERT_TRUE( log.contains( QStringLiteral(" applied=false exposureBound=true recoveryIso=1600 ") ) );
+        ASSERT_TRUE( run.scene == QString::fromLatin1( kIdentityPins[2].scene ) );
+        ASSERT_TRUE( run.receipt == QString::fromLatin1( kIdentityPins[2].receipt ) );
+        ASSERT_TRUE( run.pictureSha256 == kIdentityPins[2].pictureSha256 );
+    }
 }
