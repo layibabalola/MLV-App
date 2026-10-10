@@ -5127,6 +5127,9 @@ class LegSpecSchemaTests(unittest.TestCase):
             if spec["card"] == "DUAL-VENUE-DISPLAY-MATRIX-1":   # the display-matrix legs are cinematic look legs named by their cell (display mode and scale)
                 self.assertEqual(spec["legId"], path.stem, path.name)
                 self.assertRegex(spec["legId"], r"^m16-1243-display-(fullscreen|windowed)-s[124]$", path.name)
+            elif spec["card"] == "PLAYBACK-VSYNC-DEFAULT-1":   # the swap-interval-1 twins of the display-matrix legs, named by their cell
+                self.assertEqual(spec["legId"], path.stem, path.name)
+                self.assertRegex(spec["legId"], r"^m16-1243-display-(fullscreen|windowed)-s[124]-vsync1$", path.name)
             elif spec["card"] == "PLAYBACK-BACHELOR-PRESENT-JITTER-1":   # the capture-free pace legs, named by flavor and cell
                 self.assertEqual(spec["legId"], path.stem, path.name)
                 self.assertRegex(spec["legId"], rf"^m16-1243-pace-{flavor}-(fullscreen|windowed)-s[124](-la[0-3]|-heavy)?$", path.name)
