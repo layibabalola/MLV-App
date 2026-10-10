@@ -688,6 +688,10 @@ TEST(GpuPresentSetupStall, SteadyStateBlurUploadTakesNoGlGetErrorButTheAllocatio
     const QString glGetErrorCall = QStringLiteral("gl->glGetError()");
     const QString upload = QStringLiteral(
         "set.shadowsHighlightsBlur->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packed.constData());");
+    // PLAYBACK-GL-PRESENT-BACKLOG-2 (row X1): the steady upload now writes the ping-pong spare
+    // (pinned in GpuPresentBacklog.SteadyBlurUploadWritesTheSpareThenSwapsItToTheBoundSlot).
+    const QString steadyUpload = QStringLiteral(
+        "set.shadowsHighlightsBlurSpare->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packed.constData());");
 
     // A (re)allocation marks the call; the steady-state branch follows it and returns on its own.
     const int allocatedAt = body.indexOf(QStringLiteral("allocatedThisCall = true;"));
@@ -697,7 +701,7 @@ TEST(GpuPresentSetupStall, SteadyStateBlurUploadTakesNoGlGetErrorButTheAllocatio
     const int steadyReturnAt = body.indexOf(QStringLiteral("return true;"), steadyAt);
     ASSERT_TRUE(steadyReturnAt > steadyAt);
     const QString steady = body.mid(steadyAt, steadyReturnAt - steadyAt);
-    ASSERT_EQ(1, countOccurrences(steady, upload));
+    ASSERT_EQ(1, countOccurrences(steady, steadyUpload));
     ASSERT_TRUE(steady.contains(QStringLiteral("set.shadowsHighlightsBlurReady = true;")));
     ASSERT_EQ(0, countOccurrences(steady, glGetErrorCall));
     ASSERT_EQ(0, countOccurrences(steady, QStringLiteral("glGetError(")));
@@ -715,4 +719,119 @@ TEST(GpuPresentSetupStall, SteadyStateBlurUploadTakesNoGlGetErrorButTheAllocatio
     ASSERT_TRUE(allocationUploadAt > drainAt);
     ASSERT_TRUE(checkAt > allocationUploadAt);
     ASSERT_TRUE(allocation.mid(checkAt).contains(QStringLiteral("return failClosed();")));
+}
+
+// PLAYBACK-GL-PRESENT-BACKLOG-2 (row X1, T6): F-c1 moved the present wait into the steady blur upload
+// (glTexSubImage2D into the one texture the previous, possibly still queued, paint samples). The fix
+// ping-pongs a pair: the allocation creates both, the steady upload writes the spare and only then swaps
+// it into the bound slot, and every path that frees the blur frees the spare with it.
+TEST(GpuPresentBacklog, SteadyBlurUploadWritesTheSpareThenSwapsItToTheBoundSlot)
+{
+    const QString source = readRepoFile(QStringLiteral("platform/qt/GpuPreviewProcessing.cpp"));
+    const QString body = functionBody(source,
+        QStringLiteral("bool gpuPreviewProcessingUpdateShadowsHighlightsBlurTexture("),
+        QStringLiteral("void gpuPreviewProcessingBindDisplayUniformsAndTextures("));
+    ASSERT_FALSE(body.isEmpty());
+    const QString boundUpload = QStringLiteral(
+        "set.shadowsHighlightsBlur->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packed.constData());");
+    const QString spareUpload = QStringLiteral(
+        "set.shadowsHighlightsBlurSpare->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packed.constData());");
+    const QString swapPair = QStringLiteral("std::swap(set.shadowsHighlightsBlur, set.shadowsHighlightsBlurSpare);");
+
+    // The allocation creates the pair together, and a missing spare forces it.
+    const int allocatedAt = body.indexOf(QStringLiteral("allocatedThisCall = true;"));
+    ASSERT_TRUE(allocatedAt >= 0);
+    ASSERT_TRUE(body.left(allocatedAt).contains(QStringLiteral("|| !set.shadowsHighlightsBlurSpare\n")));
+    const int steadyAt = body.indexOf(QStringLiteral("if ( !allocatedThisCall )"));
+    ASSERT_TRUE(steadyAt > allocatedAt);
+    const QString allocationBlock = body.mid(allocatedAt, steadyAt - allocatedAt);
+    ASSERT_TRUE(allocationBlock.contains(
+        QStringLiteral("set.shadowsHighlightsBlur = createFrameTexture(blurWidth, blurHeight);")));
+    ASSERT_TRUE(allocationBlock.contains(
+        QStringLiteral("set.shadowsHighlightsBlurSpare = createFrameTexture(blurWidth, blurHeight);")));
+    ASSERT_TRUE(allocationBlock.contains(QStringLiteral("delete set.shadowsHighlightsBlurSpare;")));
+
+    // Steady: upload into the spare (never the bound texture), THEN swap, exactly once each.
+    const int steadyReturnAt = body.indexOf(QStringLiteral("return true;"), steadyAt);
+    ASSERT_TRUE(steadyReturnAt > steadyAt);
+    const QString steady = body.mid(steadyAt, steadyReturnAt - steadyAt);
+    ASSERT_EQ(0, countOccurrences(steady, boundUpload));
+    ASSERT_EQ(1, countOccurrences(steady, spareUpload));
+    ASSERT_EQ(1, countOccurrences(steady, swapPair));
+    ASSERT_TRUE(steady.indexOf(swapPair) > steady.indexOf(spareUpload));
+    // Only the steady branch swaps; the allocation upload fills the bound texture itself.
+    ASSERT_EQ(1, countOccurrences(body, swapPair));
+    ASSERT_EQ(1, countOccurrences(body.mid(steadyReturnAt), boundUpload));
+
+    // failClosed and the set's destroy free the spare too.
+    const int failClosedAt = body.indexOf(QStringLiteral("auto failClosed = [&]() -> bool"));
+    ASSERT_TRUE(failClosedAt >= 0);
+    ASSERT_TRUE(body.mid(failClosedAt, 500).contains(QStringLiteral("delete set.shadowsHighlightsBlurSpare;")));
+    const QString destroyBody = functionBody(source,
+        QStringLiteral("void gpuPreviewProcessingDestroyLutTextureSet("),
+        QStringLiteral("void gpuPreviewProcessingMarkShadowsHighlightsBlurStale("));
+    ASSERT_FALSE(destroyBody.isEmpty());
+    ASSERT_TRUE(destroyBody.contains(QStringLiteral("delete set.shadowsHighlightsBlurSpare;")));
+    ASSERT_TRUE(destroyBody.contains(QStringLiteral("set.shadowsHighlightsBlurSpare = nullptr;")));
+}
+
+// PLAYBACK-GL-PRESENT-BACKLOG-2 (row X2a, T7 source half): the next sink after the blur upload is the
+// CUDA-GL map of m_texture. The window ping-pongs the recon output texture: both are created together, the
+// pair is swapped BEFORE the recon writes m_texture (so the write lands in the texture the previous paint
+// did not sample and paintGL draws the fresh one), and destroyTexture frees both. The CUDA backend keeps one
+// cached registration per output texture, so the alternating id never re-registers per frame.
+TEST(GpuPresentBacklog, WindowReconTexturePingPongsAndCudaCachesOneRegistrationPerTexture)
+{
+    const QString window = readRepoFile(QStringLiteral("platform/qt/GpuDisplayWindow.cpp"));
+    const QString body = reconSubmitBody(window);
+    ASSERT_FALSE(body.isEmpty());
+    const QString swapPair = QStringLiteral("std::swap(m_texture, m_textureSpare);");
+    ASSERT_EQ(1, countOccurrences(body, swapPair));
+    const int swapAt = body.indexOf(swapPair);
+
+    const int reallocAt = body.indexOf(QStringLiteral("gpuPresentEventNoteTextureRealloc(\"window_rgba16_texture_realloc\""));
+    ASSERT_TRUE(reallocAt >= 0);
+    ASSERT_TRUE(swapAt > reallocAt);
+    ASSERT_TRUE(body.left(reallocAt).contains(QStringLiteral("|| !m_textureSpare\n")));
+    ASSERT_TRUE(body.left(reallocAt).contains(QStringLiteral("m_texture = createReconTexture();")));
+    ASSERT_TRUE(body.left(reallocAt).contains(QStringLiteral("m_textureSpare = createReconTexture();")));
+
+    // Every recon write into the output texture comes after the swap.
+    const QString outputId = QStringLiteral("m_texture->textureId()");
+    ASSERT_EQ(2, countOccurrences(body, outputId));
+    ASSERT_TRUE(body.indexOf(outputId) > swapAt);
+    // The sampling filter is set on the texture paintGL will draw (after the swap).
+    ASSERT_TRUE(body.indexOf(QStringLiteral("applySamplingMode(options.samplingMode);")) > swapAt);
+    // paintGL draws m_texture, never the spare.
+    ASSERT_EQ(0, countOccurrences(paintGlBody(window), QStringLiteral("m_textureSpare")));
+
+    const QString destroyBody = functionBody(window,
+        QStringLiteral("void GpuDisplayWindow::destroyTexture()"),
+        QStringLiteral("void GpuDisplayWindow::cleanupGLResources()"));
+    ASSERT_FALSE(destroyBody.isEmpty());
+    ASSERT_TRUE(destroyBody.contains(QStringLiteral("delete m_textureSpare;")));
+    ASSERT_TRUE(destroyBody.contains(QStringLiteral("m_textureSpare = nullptr;")));
+    ASSERT_TRUE(destroyBody.contains(QStringLiteral("if ( m_texture || m_textureSpare || m_gpuReconSourceTexture )")));
+
+    const QString cuda = readRepoFile(QStringLiteral("tools/gpu/backend/igpu_amaze_debayer_cuda.cu"));
+    ASSERT_FALSE(cuda.isEmpty());
+    // Both live entry points pick their slot per texture, and no live call site passes a slot directly.
+    ASSERT_EQ(2, countOccurrences(cuda, QStringLiteral(
+        "CachedGlImageResource * outputResource = live_output_resource_for(backend, out_rgba16_gl_texture);")));
+    ASSERT_EQ(0, countOccurrences(cuda, QStringLiteral("&backend->liveOutputRgba16Resource)")));
+    ASSERT_EQ(0, countOccurrences(cuda, QStringLiteral("&backend->liveOutputRgba16Resource);")));
+    // The selector reuses a slot already registered for the texture, else hands over the one not used last.
+    const QString selector = functionBody(cuda,
+        QStringLiteral("CachedGlImageResource * live_output_resource_for("),
+        QStringLiteral("__global__ void k_tile_load_float("));
+    ASSERT_FALSE(selector.isEmpty());
+    ASSERT_TRUE(selector.contains(QStringLiteral("int slot = 1 - backend->liveOutputRgba16LastSlot;")));
+    ASSERT_TRUE(selector.contains(QStringLiteral("slots[index]->resource && slots[index]->texture == glTexture")));
+    ASSERT_TRUE(selector.contains(QStringLiteral("backend->liveOutputRgba16LastSlot = slot;")));
+    // A reset (destroyTexture -> reset_live_gl_texture_resources) clears both slots.
+    const QString reset = functionBody(cuda,
+        QStringLiteral("void reset_live_gl_resources("),
+        QStringLiteral("CachedGlImageResource * live_output_resource_for("));
+    ASSERT_TRUE(reset.contains(QStringLiteral("reset_cached_gl_resource(&backend->liveOutputRgba16Resource, true);")));
+    ASSERT_TRUE(reset.contains(QStringLiteral("reset_cached_gl_resource(&backend->liveOutputRgba16ResourceAlt, true);")));
 }

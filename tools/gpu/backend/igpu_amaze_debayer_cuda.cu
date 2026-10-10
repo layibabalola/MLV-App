@@ -60,7 +60,11 @@ struct igpu_amaze_debayer_backend
     std::vector<DeviceBuffers> liveTileDeviceBuffers;
     std::vector<cudaStream_t> liveTileStreams;
     CachedGlImageResource liveInputR16Resource;
+    /* PLAYBACK-GL-PRESENT-BACKLOG-2 (row X2a): the window ping-pongs its output texture, so
+     * the live output keeps one cached registration per texture (live_output_resource_for). */
     CachedGlImageResource liveOutputRgba16Resource;
+    CachedGlImageResource liveOutputRgba16ResourceAlt;
+    int liveOutputRgba16LastSlot = 0;
     std::size_t livePixelCount = 0;
     int liveWidth = 0;
     int liveHeight = 0;
@@ -161,6 +165,30 @@ void reset_live_gl_resources(igpu_amaze_debayer_backend * backend)
     if (!backend) return;
     reset_cached_gl_resource(&backend->liveInputR16Resource, true);
     reset_cached_gl_resource(&backend->liveOutputRgba16Resource, true);
+    reset_cached_gl_resource(&backend->liveOutputRgba16ResourceAlt, true);
+    backend->liveOutputRgba16LastSlot = 0;
+}
+
+/* PLAYBACK-GL-PRESENT-BACKLOG-2 (row X2a): the cache slot for this output texture. A slot
+ * already registered for it wins; otherwise the slot NOT used last is handed over (and
+ * re-registered by ensure_cached_gl_resource), so the other ping-pong texture keeps its
+ * registration. A single slot would re-register on every frame once the ids alternate. */
+CachedGlImageResource * live_output_resource_for(igpu_amaze_debayer_backend * backend,
+                                                 unsigned int glTexture)
+{
+    CachedGlImageResource * slots[2] = { &backend->liveOutputRgba16Resource,
+                                         &backend->liveOutputRgba16ResourceAlt };
+    int slot = 1 - backend->liveOutputRgba16LastSlot;
+    for (int index = 0; index < 2; ++index)
+    {
+        if (slots[index]->resource && slots[index]->texture == glTexture)
+        {
+            slot = index;
+            break;
+        }
+    }
+    backend->liveOutputRgba16LastSlot = slot;
+    return slots[slot];
 }
 
 int ensure_cached_gl_resource(CachedGlImageResource * cache,
@@ -1767,6 +1795,7 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
         backend->lastTiming.kernel_ms = now_ms() - kernelStart;
 
         const double handoffStart = now_ms();
+        CachedGlImageResource * outputResource = live_output_resource_for(backend, out_rgba16_gl_texture);
         const int rc =
             directRgbaStore
                 ? copy_rgba16_to_gl_rgba16_texture(
@@ -1774,7 +1803,7 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
                     width,
                     height,
                     out_rgba16_gl_texture,
-                    &backend->liveOutputRgba16Resource)
+                    outputResource)
                 : copy_rgb16_to_gl_rgba16_texture_post_wb_undo(
                     packRgb16,
                     width,
@@ -1785,7 +1814,7 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
                     wb_multiplier_g,
                     wb_multiplier_b,
                     backend->liveRgba16,
-                    &backend->liveOutputRgba16Resource);
+                    outputResource);
         backend->lastTiming.download_ms = now_ms() - handoffStart;
         backend->lastTiming.total_ms = now_ms() - totalStart;
         return rc;
@@ -1857,6 +1886,7 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_device_bayer16(
         backend->lastTiming.kernel_ms = now_ms() - kernelStart;
 
         const double handoffStart = now_ms();
+        CachedGlImageResource * outputResource = live_output_resource_for(backend, out_rgba16_gl_texture);
         const int rc =
             directRgbaStore
                 ? copy_rgba16_to_gl_rgba16_texture(
@@ -1864,7 +1894,7 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_device_bayer16(
                     width,
                     height,
                     out_rgba16_gl_texture,
-                    &backend->liveOutputRgba16Resource)
+                    outputResource)
                 : copy_rgb16_to_gl_rgba16_texture_post_wb_undo(
                     packRgb16,
                     width,
@@ -1875,7 +1905,7 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_device_bayer16(
                     wb_multiplier_g,
                     wb_multiplier_b,
                     backend->liveRgba16,
-                    &backend->liveOutputRgba16Resource);
+                    outputResource);
         backend->lastTiming.download_ms = now_ms() - handoffStart;
         backend->lastTiming.total_ms = now_ms() - totalStart;
         return rc;

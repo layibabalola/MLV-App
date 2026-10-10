@@ -386,6 +386,7 @@ TEST(GpuPreviewProcessing, ShadowsHighlightsBlurTextureUpdateReportsDropWhenFram
     ASSERT_TRUE(!updated);
     ASSERT_TRUE(!lutSet.shadowsHighlightsBlurReady);
     ASSERT_TRUE(lutSet.shadowsHighlightsBlur == nullptr);
+    ASSERT_TRUE(lutSet.shadowsHighlightsBlurSpare == nullptr);
 
     gpuPreviewProcessingDestroyLutTextureSet(lutSet);
 }

@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace
 {
@@ -528,6 +529,7 @@ GpuDisplayWindow::GpuDisplayWindow(QWindow *parent)
     , m_program(nullptr)
     , m_previewProcessingProgram(nullptr)
     , m_texture(nullptr)
+    , m_textureSpare(nullptr)
     , m_gpuReconSourceTexture(nullptr)
     , m_pendingTextureWidth(0)
     , m_pendingTextureHeight(0)
@@ -806,19 +808,33 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
 
     partStartMs = elapsedMs();
     if ( !m_texture
+      || !m_textureSpare
       || m_texture->width() != texWidth
       || m_texture->height() != texHeight
       || !m_textureFromGpuRecon )
     {
         destroyTexture();
-        m_texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
-        m_texture->setFormat(QOpenGLTexture::RGBA16_UNorm);
-        m_texture->setSize(texWidth, texHeight);
-        m_texture->setMipLevels(1);
-        m_texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16);
-        m_texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+        auto createReconTexture = [texWidth, texHeight]() -> QOpenGLTexture *
+        {
+            QOpenGLTexture *texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+            texture->setFormat(QOpenGLTexture::RGBA16_UNorm);
+            texture->setSize(texWidth, texHeight);
+            texture->setMipLevels(1);
+            texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16);
+            texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+            return texture;
+        };
+        m_texture = createReconTexture();
+        m_textureSpare = createReconTexture();
         gpuPresentEventNoteTextureRealloc("window_rgba16_texture_realloc", texWidth, texHeight);
     }
+    // PLAYBACK-GL-PRESENT-BACKLOG-2 (row X2a, F-A2): with swap interval 0 the previous paint
+    // may still be queued on the GPU when this submit maps m_texture for the CUDA write, and
+    // the map waits for it. Swapping the pair first means the recon below writes the texture
+    // the previous paint did not sample; paintGL() then draws it as m_texture. The CUDA side
+    // keeps one cached interop registration per texture, so the alternating id never
+    // re-registers.
+    std::swap(m_texture, m_textureSpare);
     m_textureFromGpuRecon = true;
     if ( !m_gpuReconSourceTexture
       || m_gpuReconSourceTexture->width() != texWidth
@@ -1334,7 +1350,7 @@ void GpuDisplayWindow::ensurePreviewProcessingProgram()
 
 void GpuDisplayWindow::destroyTexture()
 {
-    if ( m_texture || m_gpuReconSourceTexture )
+    if ( m_texture || m_textureSpare || m_gpuReconSourceTexture )
     {
         gpuAmazeDebayerResetR16TextureBackendResources();
         llrpGpuPlaybackReconResetGlTextureResources();
@@ -1343,6 +1359,11 @@ void GpuDisplayWindow::destroyTexture()
     {
         delete m_texture;
         m_texture = nullptr;
+    }
+    if ( m_textureSpare )
+    {
+        delete m_textureSpare;
+        m_textureSpare = nullptr;
     }
     if ( m_gpuReconSourceTexture )
     {

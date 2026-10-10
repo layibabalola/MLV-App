@@ -395,6 +395,11 @@ struct GpuPreviewProcessingLutTextureSet
      * gpuPreviewProcessingUpdateShadowsHighlightsBlurTexture -- never gated by
      * `signature`/`signatureValid` above. */
     QOpenGLTexture * shadowsHighlightsBlur = nullptr;
+    /* PLAYBACK-GL-PRESENT-BACKLOG-2 (row X1): the ping-pong partner of shadowsHighlightsBlur,
+     * same size and format, created and destroyed with it. A steady-state upload writes this
+     * one (the texture the last paint did NOT sample) and then swaps the two pointers, so
+     * shadowsHighlightsBlur is always the texture to bind. */
+    QOpenGLTexture * shadowsHighlightsBlurSpare = nullptr;
     int shadowsHighlightsBlurWidth = 0;
     int shadowsHighlightsBlurHeight = 0;
     bool shadowsHighlightsBlurReady = false;

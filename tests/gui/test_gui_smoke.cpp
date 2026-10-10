@@ -2731,22 +2731,34 @@ void GuiSmokeTest::gpuPreviewProcessingLutSetReportsRebuildsAndBlurUploadsKeepTh
     blurConfig.shadowsHighlightsFrameHeight = height;
     // gpuPreviewProcessingHasShadowsHighlightsFrameState also requires the full S/H curve.
     blurConfig.shadowsHighlightsCurve = QByteArray(static_cast<int>(65536u * sizeof(float)), '\0');
-    const uint16_t seeds[3] = { 11, 4099, 30001 };
+    // PLAYBACK-GL-PRESENT-BACKLOG-2 (row X1, T5): the steady uploads ping-pong. Each one fills
+    // the texture the previous bind did not use and makes it the bound one, so the bound id
+    // alternates between the two allocated textures and always holds this frame's bytes.
+    const uint16_t seeds[4] = { 11, 4099, 30001, 517 };
     GLuint allocatedId = 0;
-    for (int round = 0; round < 3; ++round) {
+    GLuint spareId = 0;
+    GLuint previousId = 0;
+    for (int round = 0; round < 4; ++round) {
         blurConfig.shadowsHighlightsBlur = make_rgb16_blur_bytes(width, height, seeds[round]);
         GpuPresentSetupTiming timing;
         QVERIFY(gpuPreviewProcessingUpdateShadowsHighlightsBlurTexture(set, blurConfig, width, height, &timing));
         QVERIFY(set.shadowsHighlightsBlurReady);
         QVERIFY(set.shadowsHighlightsBlur != nullptr);
+        QVERIFY(set.shadowsHighlightsBlurSpare != nullptr);
+        QVERIFY(set.shadowsHighlightsBlur->textureId() != set.shadowsHighlightsBlurSpare->textureId());
         if (round == 0) {
             allocatedId = set.shadowsHighlightsBlur->textureId();
+            spareId = set.shadowsHighlightsBlurSpare->textureId();
         } else {
-            // Steady state: the same texture, no drain, no check.
-            QCOMPARE(set.shadowsHighlightsBlur->textureId(), allocatedId);
+            // Steady state: the other texture of the same pair, no drain, no check.
+            QVERIFY(set.shadowsHighlightsBlur->textureId() != previousId);
+            QVERIFY(set.shadowsHighlightsBlur->textureId() == allocatedId
+                    || set.shadowsHighlightsBlur->textureId() == spareId);
+            QCOMPARE(set.shadowsHighlightsBlurSpare->textureId(), previousId);
             QCOMPARE(timing.blur_drain_ms, 0.0);
             QCOMPARE(timing.blur_check_ms, 0.0);
         }
+        previousId = set.shadowsHighlightsBlur->textureId();
         const QByteArray readback = read_rgba16_texture(gl, set.shadowsHighlightsBlur->textureId(), width, height);
         if (readback.isEmpty()) {
             MLV_SKIP_OR_FAIL_IF_READBACK_FAILED("RGBA16 framebuffer attachment readback is not supported here");
@@ -2756,6 +2768,18 @@ void GuiSmokeTest::gpuPreviewProcessingLutSetReportsRebuildsAndBlurUploadsKeepTh
     QCOMPARE(gl->glGetError(), static_cast<GLenum>(GL_NO_ERROR));
 
     gpuPreviewProcessingDestroyLutTextureSet(set);
+    QVERIFY(set.shadowsHighlightsBlur == nullptr);
+    QVERIFY(set.shadowsHighlightsBlurSpare == nullptr);
+
+    // S/H off: the function returns before any texture work, so neither texture of the pair
+    // is created and Look-Assist-off presents stay exactly as they were.
+    GpuPreviewProcessingLutTextureSet offSet;
+    GpuPreviewProcessingConfig offConfig = blurConfig;
+    offConfig.applyShadowsHighlights = false;
+    QVERIFY(!gpuPreviewProcessingUpdateShadowsHighlightsBlurTexture(offSet, offConfig, width, height));
+    QVERIFY(offSet.shadowsHighlightsBlur == nullptr);
+    QVERIFY(offSet.shadowsHighlightsBlurSpare == nullptr);
+    QVERIFY(!offSet.shadowsHighlightsBlurReady);
     context.doneCurrent();
 }
 

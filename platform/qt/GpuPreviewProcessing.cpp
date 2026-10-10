@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <utility>
 #include <vector>
 #include <omp.h>
 
@@ -2693,6 +2694,8 @@ void gpuPreviewProcessingDestroyLutTextureSet(GpuPreviewProcessingLutTextureSet 
      * context ownership) is going away. */
     delete set.shadowsHighlightsBlur;
     set.shadowsHighlightsBlur = nullptr;
+    delete set.shadowsHighlightsBlurSpare;
+    set.shadowsHighlightsBlurSpare = nullptr;
     set.shadowsHighlightsBlurWidth = 0;
     set.shadowsHighlightsBlurHeight = 0;
     set.shadowsHighlightsBlurReady = false;
@@ -2981,6 +2984,8 @@ bool gpuPreviewProcessingUpdateShadowsHighlightsBlurTexture(
     {
         delete set.shadowsHighlightsBlur;
         set.shadowsHighlightsBlur = nullptr;
+        delete set.shadowsHighlightsBlurSpare;
+        set.shadowsHighlightsBlurSpare = nullptr;
         set.shadowsHighlightsBlurWidth = 0;
         set.shadowsHighlightsBlurHeight = 0;
         set.shadowsHighlightsBlurReady = false;
@@ -2995,20 +3000,25 @@ bool gpuPreviewProcessingUpdateShadowsHighlightsBlurTexture(
     bool allocatedThisCall = false;
     if ( !set.shadowsHighlightsBlur
       || !set.shadowsHighlightsBlur->isCreated()
+      || !set.shadowsHighlightsBlurSpare
+      || !set.shadowsHighlightsBlurSpare->isCreated()
       || set.shadowsHighlightsBlurWidth != blurWidth
       || set.shadowsHighlightsBlurHeight != blurHeight )
     {
         allocatedThisCall = true;
         const double reallocStartMs = spanMs();
         delete set.shadowsHighlightsBlur;
+        delete set.shadowsHighlightsBlurSpare;
         set.shadowsHighlightsBlur = createFrameTexture(blurWidth, blurHeight);
+        set.shadowsHighlightsBlurSpare = createFrameTexture(blurWidth, blurHeight);
         set.shadowsHighlightsBlurWidth = blurWidth;
         set.shadowsHighlightsBlurHeight = blurHeight;
         gpuPresentEventNoteTextureRealloc("sh_blur_texture_realloc", blurWidth, blurHeight);
         if ( setupTiming ) setupTiming->realloc_ms += spanMs() - reallocStartMs;
     }
     set.shadowsHighlightsBlurQuarter = config.shadowsHighlightsBlurQuarter;
-    if ( !previewProcessingTextureIsReady(set.shadowsHighlightsBlur) )
+    if ( !previewProcessingTextureIsReady(set.shadowsHighlightsBlur)
+      || !previewProcessingTextureIsReady(set.shadowsHighlightsBlurSpare) )
     {
         return failClosed();
     }
@@ -3026,11 +3036,17 @@ bool gpuPreviewProcessingUpdateShadowsHighlightsBlurTexture(
     // memory, and context loss already routes through aboutToBeDestroyed ->
     // cleanupGLResources, which destroys this texture so the next call is an allocation
     // upload again (drained and checked below).
+    // PLAYBACK-GL-PRESENT-BACKLOG-2 (row X1, F-A1): F-c1 moved the wait into this upload rather
+    // than removing it. With swap interval 0 the previous paint may still be queued on the GPU,
+    // and writing the texture it samples makes the driver wait for it here. So the steady upload
+    // writes the spare (the texture the last paint did not sample), then swaps the pair so the
+    // fresh one is bound. The allocation upload below still fills shadowsHighlightsBlur itself.
     if ( !allocatedThisCall )
     {
         const double steadyUploadStartMs = spanMs();
-        set.shadowsHighlightsBlur->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packed.constData());
+        set.shadowsHighlightsBlurSpare->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packed.constData());
         if ( setupTiming ) setupTiming->blur_upload_ms += spanMs() - steadyUploadStartMs;
+        std::swap(set.shadowsHighlightsBlur, set.shadowsHighlightsBlurSpare);
         set.shadowsHighlightsBlurReady = true;
         return true;
     }

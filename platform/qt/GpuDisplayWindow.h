@@ -251,6 +251,10 @@ private:
     // call that produced them).
     GpuDisplayViewport::PresentationOptions m_reconPresentationOptions;
     QOpenGLTexture *m_texture;
+    // PLAYBACK-GL-PRESENT-BACKLOG-2 (row X2a): the recon route's ping-pong partner of m_texture
+    // (same size and format). Each recon submit swaps the two, so the CUDA-GL write lands in
+    // the texture the previous paint did not sample. Null on the QImage route.
+    QOpenGLTexture *m_textureSpare;
     QOpenGLTexture *m_gpuReconSourceTexture;
     QImage m_pendingImage;
     int m_pendingTextureWidth;
