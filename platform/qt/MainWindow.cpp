@@ -11536,6 +11536,7 @@ void MainWindow::initGui( void )
         pScaleFactorSub->addAction( ui->actionPlaybackScale8 );
         m_pPlaybackQualityToolButtonMenu->addMenu( pScaleFactorSub );
         m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackShowQualityIndicator );
+        m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackVSync );
         QMenu *pAutoTargetSub = new QMenu( tr( "Auto Target FPS" ),
                                            m_pPlaybackQualityToolButtonMenu );
         pAutoTargetSub->addAction( ui->actionPlaybackAutoTarget24 );
@@ -20827,6 +20828,8 @@ void MainWindow::initPlaybackQualityFromSettings( void )
         ui->actionPlaybackAutoTarget60->setChecked( rawTargetFps == 60 );
     if ( ui->actionPlaybackShowQualityIndicator )
         ui->actionPlaybackShowQualityIndicator->setChecked( indicatorVisible );
+    if ( ui->actionPlaybackVSync )
+        ui->actionPlaybackVSync->setChecked( playbackVSyncFromSettings() );
     updatePhase3PlaybackQualityUi();
 
     if ( envQualityMode >= 0 )
@@ -21976,6 +21979,13 @@ void MainWindow::on_actionPlaybackShowQualityIndicator_triggered()
     const bool checked = ui->actionPlaybackShowQualityIndicator
                        && ui->actionPlaybackShowQualityIndicator->isChecked();
     setPlaybackQualityIndicatorVisible( checked, /*persist*/true );
+}
+
+// PLAYBACK-VSYNC-DEFAULT-1: persisted only. Every playback GL surface is created once per
+// process, so the new interval applies from the next app start.
+void MainWindow::on_actionPlaybackVSync_triggered()
+{
+    playbackVSyncWriteToSettings( ui->actionPlaybackVSync->isChecked() );
 }
 
 void MainWindow::on_actionPlaybackAutoTarget24_triggered()

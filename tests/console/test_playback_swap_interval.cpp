@@ -1,6 +1,7 @@
-// PLAYBACK-VSYNC-DEFAULT-1: MLVAPP_SWAP_INTERVAL parses to 0 or 1 and defaults to the
-// shipping interval 0, and every playback GL surface requests it (the four call sites are
-// GUI/GL code not linked into console_tests, so they are pinned as source text).
+// PLAYBACK-VSYNC-DEFAULT-1: the persisted VSync setting defaults to on (interval 1),
+// MLVAPP_SWAP_INTERVAL 0|1 overrides it, and every playback GL surface requests the result
+// (the four call sites are GUI/GL code not linked into console_tests, so they are pinned as
+// source text).
 #include "../common/minitest.h"
 #include "../common/repo_paths.h"
 
@@ -8,8 +9,12 @@
 #include "../../platform/qt/PlaybackSwapInterval.h"
 
 #include <QFile>
+#include <QSettings>
 #include <QString>
 #include <QTextStream>
+#include <QVariant>
+
+#include <memory>
 
 namespace
 {
@@ -26,32 +31,61 @@ QString readRepoFile(const QString & relativePath)
 
 } // namespace
 
-TEST(PlaybackSwapInterval, UnsetDefaultsToZero)
+TEST(PlaybackSwapInterval, UnsetEnvIsNoOverride)
 {
-    ASSERT_EQ(0, playbackSwapIntervalFromEnvValue(QByteArray()));
-    ASSERT_EQ(0, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("")));
+    ASSERT_EQ(-1, playbackSwapIntervalFromEnvValue(QByteArray()));
+    ASSERT_EQ(-1, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("")));
 }
 
 TEST(PlaybackSwapInterval, ZeroAndOneParse)
 {
     ASSERT_EQ(0, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("0")));
+    ASSERT_EQ(0, playbackSwapIntervalFromEnvValue(QByteArrayLiteral(" 0 ")));
     ASSERT_EQ(1, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("1")));
     ASSERT_EQ(1, playbackSwapIntervalFromEnvValue(QByteArrayLiteral(" 1 ")));
 }
 
-TEST(PlaybackSwapInterval, AnythingElseKeepsTheShippingZero)
+TEST(PlaybackSwapInterval, AnythingElseIsNoOverride)
 {
-    ASSERT_EQ(0, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("2")));
-    ASSERT_EQ(0, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("-1")));
-    ASSERT_EQ(0, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("on")));
-    ASSERT_EQ(0, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("true")));
+    ASSERT_EQ(-1, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("2")));
+    ASSERT_EQ(-1, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("-1")));
+    ASSERT_EQ(-1, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("on")));
+    ASSERT_EQ(-1, playbackSwapIntervalFromEnvValue(QByteArrayLiteral("true")));
 }
 
-TEST(PlaybackSwapInterval, ProcessDefaultIsZeroWhenTheEnvIsUnset)
+TEST(PlaybackSwapInterval, EnvOverridesTheSetting)
 {
-    // Nothing else in console_tests reads it, so this is the first (cached) read.
+    ASSERT_EQ(0, playbackSwapIntervalResolve(playbackSwapIntervalFromEnvValue("0"), true));
+    ASSERT_EQ(1, playbackSwapIntervalResolve(playbackSwapIntervalFromEnvValue("1"), false));
+    ASSERT_EQ(1, playbackSwapIntervalResolve(playbackSwapIntervalFromEnvValue(""), true));
+    ASSERT_EQ(0, playbackSwapIntervalResolve(playbackSwapIntervalFromEnvValue(""), false));
+    ASSERT_EQ(1, playbackSwapIntervalResolve(playbackSwapIntervalFromEnvValue("on"), true));
+}
+
+TEST(PlaybackSwapInterval, DefaultIsOneWithNoEnvAndNoSettingAndTheSettingPersists)
+{
+    std::unique_ptr<QSettings> store = automation_settings::openAppSettings();
+    const QVariant saved = store->value(PlaybackSwapIntervalSettings::kKeyVSync());
+    store->remove(PlaybackSwapIntervalSettings::kKeyVSync());
+    store->sync();
+
+    // Nothing else in console_tests reads it, so this is the first (cached) env read.
     qunsetenv("MLVAPP_SWAP_INTERVAL");
+    ASSERT_TRUE(playbackVSyncFromSettings());
+    ASSERT_EQ(1, playbackSwapInterval());
+
+    playbackVSyncWriteToSettings(false);
+    ASSERT_FALSE(automation_settings::openAppSettings()->value(
+        PlaybackSwapIntervalSettings::kKeyVSync(), true).toBool());
+    ASSERT_FALSE(playbackVSyncFromSettings());
     ASSERT_EQ(0, playbackSwapInterval());
+
+    playbackVSyncWriteToSettings(true);
+    ASSERT_EQ(1, playbackSwapInterval());
+
+    if ( saved.isValid() ) store->setValue(PlaybackSwapIntervalSettings::kKeyVSync(), saved);
+    else store->remove(PlaybackSwapIntervalSettings::kKeyVSync());
+    store->sync();
 }
 
 TEST(PlaybackSwapInterval, MissingWglEntryPointReadsMinusOne)

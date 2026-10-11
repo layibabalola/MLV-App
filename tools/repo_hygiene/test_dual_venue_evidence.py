@@ -465,7 +465,7 @@ class GeneratorByteIdentityAndVariantTests(unittest.TestCase):
 
     def test_a_swap_interval_reaches_the_apps_env_only_when_asked(self) -> None:
         """PLAYBACK-VSYNC-DEFAULT-1: -SwapInterval 0|1 adds MLVAPP_SWAP_INTERVAL to the app's env list, for a look leg and the default job alike;
-        without it the job sets nothing (the app keeps its default 0)."""
+        without it the job sets nothing (the app keeps its default 1)."""
         plain = self.generate(GENERATOR, "plain.job.ps1", []).read_text(encoding="utf-8")
         self.assertNotIn("MLVAPP_SWAP_INTERVAL", plain)
         for interval in ("0", "1"):

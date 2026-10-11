@@ -7,22 +7,57 @@
 #ifndef PLAYBACKSWAPINTERVAL_H
 #define PLAYBACKSWAPINTERVAL_H
 
+#include "AutomationSettings.h"
+
 #include <QByteArray>
 #include <QtGlobal>
 
-/*! \brief MLVAPP_SWAP_INTERVAL: "1" requests vsync (swap interval 1) on every playback GL
- *  surface; "0", unset or any other value keeps the shipping interval 0. A measurement
- *  switch for the vsync A/B, not a user setting. */
-inline int playbackSwapIntervalFromEnvValue(const QByteArray &value)
+/*! \brief The persisted "VSync (prevent tearing)" playback setting. On (swap interval 1) by
+ *  default: at interval 0 the overlay-promoted playback surface tore on every present, windowed
+ *  and fullscreen, and interval 1 cost nothing measurable (PLAYBACK-VSYNC-DEFAULT-1 r1/r1b). */
+namespace PlaybackSwapIntervalSettings
 {
-    return value.trimmed() == "1" ? 1 : 0;
+    inline constexpr const char * kKeyVSync() { return "Playback/VSync"; }
+    inline constexpr bool kDefaultVSync() { return true; }
 }
 
-/*! \brief The interval to request, read once per process. */
+/*! \brief MLVAPP_SWAP_INTERVAL, the measurement override for the vsync A/B: "0" or "1" wins
+ *  over the setting; unset or any other value is -1, no override. */
+inline int playbackSwapIntervalFromEnvValue(const QByteArray &value)
+{
+    const QByteArray trimmed = value.trimmed();
+    if ( trimmed == "1" ) return 1;
+    if ( trimmed == "0" ) return 0;
+    return -1;
+}
+
+/*! \brief The env override when there is one, else the setting. */
+inline int playbackSwapIntervalResolve(int envOverride, bool vsyncSetting)
+{
+    if ( envOverride >= 0 ) return envOverride;
+    return vsyncSetting ? 1 : 0;
+}
+
+inline bool playbackVSyncFromSettings()
+{
+    auto setStore = automation_settings::openAppSettings(); QSettings &set = *setStore;
+    return set.value( PlaybackSwapIntervalSettings::kKeyVSync(),
+                      PlaybackSwapIntervalSettings::kDefaultVSync() ).toBool();
+}
+
+inline void playbackVSyncWriteToSettings( bool vsync )
+{
+    auto setStore = automation_settings::openAppSettings(); QSettings &set = *setStore;
+    set.setValue( PlaybackSwapIntervalSettings::kKeyVSync(), vsync );
+}
+
+/*! \brief The interval a NEW playback GL surface requests. The env is read once per process;
+ *  the setting is read on every call. Every surface is created once per process, so a changed
+ *  setting takes effect at the next app start. */
 inline int playbackSwapInterval()
 {
-    static const int interval = playbackSwapIntervalFromEnvValue(qgetenv("MLVAPP_SWAP_INTERVAL"));
-    return interval;
+    static const int envOverride = playbackSwapIntervalFromEnvValue(qgetenv("MLVAPP_SWAP_INTERVAL"));
+    return playbackSwapIntervalResolve(envOverride, playbackVSyncFromSettings());
 }
 
 /*! \brief The swap interval the driver holds for the CURRENT context and drawable, from
