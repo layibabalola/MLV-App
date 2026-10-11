@@ -173,12 +173,15 @@ def load_sliders(path, side):
     return doc
 
 
-def load_side(frames_dir, listed_path, side):
+def load_side(frames_dir, listed_path, side, strict_sidecars=False):
     try:
         staged = mcs.StagedFrames(Path(frames_dir), mcs.load_listing(listed_path))
-        frames = mcs.load_staged_frames(staged)
+        frames = mcs.load_staged_frames(staged, strict=strict_sidecars)
     except mcs.FrameConfinementError as exc:
         raise Refusal(EXIT_NOT_LISTED, str(exc)) from exc
+    except mcs.SidecarMalformed as exc:
+        raise Refusal(EXIT_INPUT_INVALID, f"WARMCOOL_SIDECAR_MALFORMED {staged.dir / exc.name} ({exc}): a capture with a sidecar that cannot "
+                                          "be read is not measured as if the remaining tiles were all of it. Nothing is printed.") from exc
     if not frames:
         raise Refusal(EXIT_INPUT_INVALID, f"PAIR_INPUT_INVALID the {side} side has no saved (saved=true) frame")
     return staged, frames
@@ -198,6 +201,20 @@ def read_rgb(staged, sidecar, side):
 def luma_of(arr):
     a = arr.astype(np.float64)
     return 0.299 * a[:, :, 0] + 0.587 * a[:, :, 1] + 0.114 * a[:, :, 2]
+
+
+def refuse_empty_tile(arr, index, token):
+    """A zero-width or zero-height tile has no pixel to measure: luma_of(arr).max(axis=1) raises on width 0, and height 0 leaves a NaN lean."""
+    if arr.shape[0] == 0 or arr.shape[1] == 0:
+        raise Refusal(EXIT_INPUT_INVALID, f"{token} {index} {arr.shape[1]}x{arr.shape[0]}: a tile with no pixels has no lean to measure. Nothing is written.")
+
+
+def finite_json(doc, token):
+    """json.dumps that never writes NaN or Infinity as a number: a non-finite measurement is a refusal, not a figure."""
+    try:
+        return json.dumps(doc, indent=2, allow_nan=False)
+    except ValueError as exc:
+        raise Refusal(EXIT_INPUT_INVALID, f"{token} a measurement is not a finite number ({exc}). Nothing is written.") from exc
 
 
 def side_metrics(arr, keep, sidecar):
@@ -266,10 +283,11 @@ def refuse_if_incomplete(out, recover):
     if not marker.exists():
         return False
     if recover:
-        # FLAVOR-DIFF-RECOVER-RECORD-GUARD-1: a pair record names the sheet by hash, so a directory that holds one is never recovered (nothing is moved).
-        records = sorted(p.name for p in out.glob("flavor-pair-*.json") if p.is_file())
+        # FLAVOR-DIFF-RECOVER-RECORD-GUARD-1 / FLAVOR-TRIO-RECOVERY-PROTECT-1: a pair OR trio record names its outputs (the pair's sheet by hash), so a directory
+        # that holds either is never recovered (nothing is moved).
+        records = sorted(p.name for pattern in ("flavor-pair-*.json", "flavor-trio-*.json") for p in out.glob(pattern) if p.is_file())
         if records:
-            raise Refusal(EXIT_OUTPUT_EXISTS, f"PAIR_RECORD_EXISTS {records[0]} is already in {out}: its sheet is named by hash, so --recover-incomplete "
+            raise Refusal(EXIT_OUTPUT_EXISTS, f"PAIR_RECORD_EXISTS {records[0]} is already in {out}: its outputs are named by that record, so --recover-incomplete "
                                               "will not move anything here; compose into a new directory")
         return True
     try:
@@ -284,7 +302,7 @@ def refuse_if_incomplete(out, recover):
 
 
 def quarantine_incomplete(out):
-    """Move the dead attempt's marker and unrecorded outputs into incomplete-<utc>/ beside them. Moves only; a pair record is never touched."""
+    """Move the dead attempt's marker and unrecorded outputs into incomplete-<utc>/ beside them. Moves only; a pair or trio record is never touched."""
     dest = out / ("incomplete-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
     dest.mkdir()
     for path in sorted(out.iterdir()):
@@ -869,6 +887,7 @@ def compose_regrade(args):
     tiles, panels, full = [], [], {}
     for index in indices:
         c = read_rgb(staged, by[index], "Cinematic")
+        refuse_empty_tile(c, index, "REGRADE_TILE_EMPTY")
         arr = {"cinematic": c, **{v: regrade(c, tables[v]) for v in versions}}
         keep = ~(luma_of(c).max(axis=1) <= LETTERBOX_MAX_LUMA)
         if not keep.any():
@@ -968,12 +987,13 @@ def compose_regrade(args):
         doc["metricDefinitions"]["dLean"] = "lean(v(C)) - lean(C), lean = " + WARMCOOL_DEFINITION + " (the warmcool metric)"
     if expected is not None:
         doc["tableBinding"] = {"table": versions[-1], "expectedSha256": expected, "bound": True}
+    metrics_bytes = finite_json(doc, "REGRADE_NOT_FINITE").encode("utf-8")
     out.mkdir(parents=True, exist_ok=True)
     write_new(out / sheet_name, png_bytes(sheet))
     for index in indices:
         for v in versions:
             write_new(out / f"regrade-{v}-{index:02d}.png", png_bytes(Image.fromarray(full[index][v])))
-    write_new(out / REGRADE_METRICS_NAME, json.dumps(doc, indent=2).encode("utf-8"))
+    write_new(out / REGRADE_METRICS_NAME, metrics_bytes)
     v3_tail = (f" dSv3={means['dS']['v3']:.3f} ratioV3OverV2={'None' if ratio3 is None else f'{ratio3:.3f}'}" if with_v3 else "")
     print(f"LOOK_FLAVOR_REGRADE_OK sheet={out / sheet_name} tiles={len(tiles)} valid={str(valid).lower()} "
           f"dSv1={means['dS']['v1']:.3f} dSv2={means['dS']['v2']:.3f} ratio={'None' if ratio is None else f'{ratio:.3f}'}{v3_tail}"
@@ -1024,6 +1044,8 @@ WHY
 METRIC
     lean = mean over pixels of ((R + G) / 2 - B), code values normalized to [0, 1] (8-bit / 255, table / 65535).
     Positive = amber (warm), negative = blue (cool), exactly 0 on any neutral grey. A grade's lean is lean(graded) - lean(ungraded).
+    This is NOT the probe scripts' warmCool = R - B in code values: the lean averages R and G against B and divides by the full scale, so a
+    pure R - B offset of 2 codes is a lean of 1.5 / 255, not 2. Compare the two only after converting.
 
 INPUT
     --table NAME=PATH     repeatable: 4 x 65536 uint16 little-endian, Y R G B (the regrade mode's tables)
@@ -1036,7 +1058,10 @@ OUTPUT (stdout, JSON; nothing is written)
     and per tile and as a mean over tiles: the capture's own lean, the lean of the capture re-graded through each table (as the regrade
                   mode re-grades), and dLean = the re-graded lean minus the capture's. Letterbox rows are excluded, as everywhere here.
 
-REFUSALS: 12, 14 as above, and 19 REGRADE_TABLE_INVALID (a table is missing, unreadable or not 4 x 65536 uint16).
+REFUSALS: 12, 14 as above, and 19 REGRADE_TABLE_INVALID (a table is missing, unreadable or not 4 x 65536 uint16). Exit 14 also names two
+    capture refusals, each with nothing printed: `WARMCOOL_TILE_EMPTY <index> <w>x<h>` (a staged tile with no pixels) and
+    `WARMCOOL_SIDECAR_MALFORMED <path>` (a sidecar that is unreadable, not JSON or not a JSON object; the contact-sheet tool warns and skips
+    such a sidecar, but a measurement over the rest of a capture would pass for the whole one). A sidecar that says saved=false is still skipped.
 
 GUARD (LOOK-ASSIST-FILM-FLAVOR-3)
     --max-abs-lean X      after printing the JSON, exit 20 WARMCOOL_BOUND_EXCEEDED (one stderr line per breach:
@@ -1075,11 +1100,12 @@ def compose_warmcool(named, frames_dir, listed):
     }
     if frames_dir is None:
         return doc
-    staged, frames = load_side(frames_dir, listed, "capture")
+    staged, frames = load_side(frames_dir, listed, "capture", strict_sidecars=True)
     hist = np.zeros(256, dtype=np.float64)
     tiles = []
     for sidecar in sorted(frames, key=lambda f: f.get("index")):
         arr = read_rgb(staged, sidecar, "capture")
+        refuse_empty_tile(arr, sidecar.get("index"), "WARMCOOL_TILE_EMPTY")
         keep = ~(luma_of(arr).max(axis=1) <= LETTERBOX_MAX_LUMA)
         if not keep.any():
             keep = np.ones_like(keep)
@@ -1135,7 +1161,7 @@ def warmcool_main(argv):
         p.error("--table names must be unique")
     try:
         doc = compose_warmcool(named, args.frames, args.listed)
-        print(json.dumps(doc, indent=2))
+        print(finite_json(doc, "WARMCOOL_NOT_FINITE"))
         if args.max_abs_lean is None:
             return 0
         breaches = warmcool_breaches(doc, args.max_abs_lean)
