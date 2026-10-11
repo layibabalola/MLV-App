@@ -71,7 +71,12 @@ COMPOSER = ROOT / "tools" / "profiling" / "make-contact-sheet.py"
 # tick-error and catch branches. A reorder edits baseline lines IN PLACE, which no bracketed region can express (the baseline line would have to stay verbatim outside it),
 # so the pin is that card's own generator commit (fc12fe8c: master e72dcdb6 plus the reorder and nothing else). That commit already carries every bracketed family, so the
 # baseline counts below equal the pinned counts (they were 0 against a29a1ee4). The reorder is pinned by its own tests (test_playback_attr_3_cuda_behaviour.py), not by byte identity.
-BASELINE_COMMIT = "fc12fe8c63f78e5436c11902b3aa0140e271320d"
+# CI-FLAKE-ATTR3-ROOT-GUARD-BEFORE-LOCK-READ-1 r2 moves it again, on purpose: that card MOVES the job's Assert-UnderMlvTmp definition and its Root/Work/Pub check from after the
+# session-lock refusal (exit 30) to right after $Pub is named, before the first trace line, the display wake and the lock probe, so an outside -AgentRoot is refused (exit 1)
+# whatever the host's console-lock state. A move edits baseline lines IN PLACE, which no bracketed region can express, so the pin is that card's own generator commit
+# (cb795f9e: fork/master 6723cd5b plus the move and its comment, nothing else). It already carries every bracketed family, so the baseline counts below are unchanged. The move is
+# pinned by its own test (test_the_root_guard_refuses_an_outside_root_before_the_session_lock_probe in test_playback_attr_3_cuda_behaviour.py), not by byte identity.
+BASELINE_COMMIT = "cb795f9e69dea722996cb366096aa44f4344cc67"
 
 PWSH = shutil.which("pwsh")
 requires_windows_pwsh = unittest.skipIf(PWSH is None or sys.platform != "win32", "needs pwsh on Windows")
