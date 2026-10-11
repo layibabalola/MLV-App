@@ -1035,7 +1035,7 @@ $Work = Join-Path '__SCRATCH_ROOT__' $JobId
 $Pub = Join-Path $Root "outbox\$JobId.artifacts"
 # ATTR3-ROOT-GUARD-BEFORE-LOCK-READ-1: every job-owned path guard runs and refuses (throw, exit 1) BEFORE
 # any host-state read. This job's first host-state read is Start-AttrCudaDisplayWake's session-lock probe
-# (Get-AttrCudaSessionLocked, below); when that probe answered locked or unknown the leg exited 30
+# (the console-lock read, below); when that probe answered locked or unknown the leg exited 30
 # (SESSION_LOCKED_OWNER_ONLY) and even created $Root\outbox for the refusal, for a $Root the guard would
 # have refused -- so the verdict for an outside root depended on the machine's session state (hosted
 # runner: test_the_default_agent_root_guard_still_refuses_a_root_outside_mlvtmp read 30, not 1).
