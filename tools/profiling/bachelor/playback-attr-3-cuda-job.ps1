@@ -1038,6 +1038,24 @@ $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $JobId = "playback-attr-3-cuda-$($SourceCommit.Substring(0,12))-$ClipId-$Stamp"
 $Work = Join-Path '__SCRATCH_ROOT__' $JobId
 $Pub = Join-Path $Root "outbox\$JobId.artifacts"
+# ATTR3-ROOT-GUARD-BEFORE-LOCK-READ-1: every job-owned path guard runs and refuses (throw, exit 1) BEFORE
+# any host-state read. This job's first host-state read is Start-AttrCudaDisplayWake's session-lock probe
+# (the console-lock read, below); when that probe answered locked or unknown the leg exited 30
+# (SESSION_LOCKED_OWNER_ONLY) and even created $Root\outbox for the refusal, for a $Root the guard would
+# have refused -- so the verdict for an outside root depended on the machine's session state (hosted
+# runner: test_the_default_agent_root_guard_still_refuses_a_root_outside_mlvtmp read 30, not 1).
+# A valid root is unaffected: the lock probe and its exit 30 are unchanged, just reached after this.
+function Assert-UnderMlvTmp([string]$Path, [string]$Label) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full -ne '__SCRATCH_ROOT__' -and $full -notlike '__SCRATCH_ROOT__\*') {
+        throw "job-owned path '$Label' resolves outside __SCRATCH_ROOT__: $full"
+    }
+}
+foreach ($check in @(
+    @{ path = $Root; label = 'Root' },
+    @{ path = $Work; label = 'Work' },
+    @{ path = $Pub; label = 'Pub' }
+)) { Assert-UnderMlvTmp $check.path $check.label }
 # BACHELOR-OWNER-CLIP-STAGE-STALL-1: every pre-launch step appends a timestamped line here as it
 # starts and ends, flushed immediately, so a job the agent kills at its cap (which returns NO
 # stdout) still leaves the last step it reached. Fetch it with attr3-trace-fetch-job.ps1.
@@ -1191,17 +1209,9 @@ $displayWake['keepAliveSetupError'] = $displayWakeKeepAlive.setupError
 # Mirrors tools/profiling/bachelor/playback-attr-3-cuda-assemble.ps1's $Scratch
 # pattern. $Work is created here (not later) precisely so the scratch dir it hosts is
 # never wiped out from under a live $env:TEMP by a later "recreate $Work" step.
-function Assert-UnderMlvTmp([string]$Path, [string]$Label) {
-    $full = [IO.Path]::GetFullPath($Path)
-    if ($full -ne '__SCRATCH_ROOT__' -and $full -notlike '__SCRATCH_ROOT__\*') {
-        throw "job-owned path '$Label' resolves outside __SCRATCH_ROOT__: $full"
-    }
-}
-foreach ($check in @(
-    @{ path = $Root; label = 'Root' },
-    @{ path = $Work; label = 'Work' },
-    @{ path = $Pub; label = 'Pub' }
-)) { Assert-UnderMlvTmp $check.path $check.label }
+# ATTR3-ROOT-GUARD-BEFORE-LOCK-READ-1: Assert-UnderMlvTmp on Root/Work/Pub now runs right after
+# $Pub is named, before the first trace line, the display wake and the session-lock probe (see the
+# guard where $Pub is defined above); it used to sit here, after the lock refusal's exit 30.
 
 # OWNER-FOOTAGE-NO-HARDLINK-1: an earlier run of this job that was killed before its `finally` leaves
 # view entries (symbolic links or copies) under $Work\owner-clip. Each is removed first, through the
